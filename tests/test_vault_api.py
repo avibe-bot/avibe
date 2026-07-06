@@ -286,6 +286,8 @@ def test_update_secret_metadata_preserves_grants_and_internal_policy(monkeypatch
 def test_update_secret_metadata_expires_grants_when_fetch_policy_changes(monkeypatch, avault_p2):
     monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda *args, **kwargs: None)
     monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
 
     with api._vault_engine().begin() as conn:
         vault_service.create_secret(
@@ -319,6 +321,30 @@ def test_update_secret_metadata_expires_grants_when_fetch_policy_changes(monkeyp
         assert grant_row["status"] == "expired"
         events = conn.execute(select(vault_audit.c.event, vault_audit.c.grant_id)).all()
         assert ("grant-expired-policy-changed", grant["id"]) in events
+    agent_release.assert_called_once_with(grant_id=grant["id"])
+
+
+def test_update_secret_metadata_repairs_invalid_stored_fetch_policy(monkeypatch):
+    monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda *args, **kwargs: None)
+    monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="FETCH_REPAIR", sealed=_sealed("fetch-repair"))
+        conn.execute(
+            vault_secrets.update()
+            .where(vault_secrets.c.name == "FETCH_REPAIR")
+            .values(policy=json.dumps({"allowed_hosts": ["api.github.com"], "auth": {"type": "header", "name": "Host"}}))
+        )
+
+    updated = api.update_vault_secret(
+        "FETCH_REPAIR",
+        {"policy": {"allowed_hosts": ["api.github.com"], "auth": {"type": "header", "name": "X-Api-Key"}}},
+    )
+
+    assert updated["ok"] is True
+    assert updated["secret"]["policy"] == {
+        "allowed_hosts": ["api.github.com"],
+        "auth": {"type": "header", "name": "X-Api-Key"},
+    }
 
 
 def test_update_secret_metadata_rejects_unusable_fetch_auth_names(monkeypatch):

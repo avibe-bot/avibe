@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import select
 
 from storage import vault_service
 from storage.models import vault_audit, vault_grants, vault_requests
@@ -270,6 +271,39 @@ def test_edit_preserves_untouched_tag_classes(capfd):
     assert code == 0
     payload = json.loads(capfd.readouterr().out)
     assert payload["secret"]["tags"] == ["prod", "skill:github-review"]
+
+
+def test_edit_policy_releases_resident_grant(capfd, monkeypatch):
+    from vibe import api
+
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="EDIT_POLICY_GRANT",
+            protection="protected",
+            sealed=_sealed("edit-policy-grant"),
+            policy={"allowed_hosts": ["old.example.com"], "auth": {"type": "bearer"}},
+        )
+        req = vault_service.create_access_request(
+            conn,
+            "EDIT_POLICY_GRANT",
+            purpose="fetch",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1", "mode": "fetch"},
+        )
+        grant = _grant_from_request(conn, req, session_id="ses_1")
+
+    code = cli.cmd_vault_edit(_ns(name="EDIT_POLICY_GRANT", allow_host=["api.github.com"], fetch_auth="bearer"))
+
+    assert code == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["secret"]["policy"] == {"allowed_hosts": ["api.github.com"], "auth": {"type": "bearer"}}
+    agent_release.assert_called_once_with(grant_id=grant["id"])
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_grants.c.status).where(vault_service.vault_grants.c.id == grant["id"])).scalar_one()
+    assert status == "expired"
 
 
 def test_edit_metadata_json_rejects_secret_material(capfd):

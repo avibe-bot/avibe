@@ -1650,13 +1650,15 @@ def update_vault_secret(name: str, payload: dict) -> dict:
     if not kwargs:
         raise VaultApiError("no metadata fields were provided", code="missing_metadata", status=409)
     engine = _vault_engine()
+    release_scopes: list[dict[str, str]] = []
     try:
         with engine.begin() as conn:
-            meta = vault_service.update_secret_metadata(conn, secret_name, **kwargs)
+            meta = vault_service.update_secret_metadata(conn, secret_name, release_scopes=release_scopes, **kwargs)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
+    release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or secret_name)
     return {"ok": True, "secret": meta}
 

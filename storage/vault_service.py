@@ -486,6 +486,24 @@ def _normalize_fetch_policy(policy: Any, *, field: str = "policy", allowed_extra
     return normalized_policy
 
 
+def _stored_fetch_policy_visible_snapshot(policy: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort comparable view of persisted fetch policy.
+
+    Older or hand-edited rows may contain auth names that the current write path
+    rejects. Do not normalize the old value here; edits must still be able to
+    replace an unsafe legacy policy with a valid one.
+    """
+
+    snapshot: dict[str, Any] = {}
+    allowed_hosts = policy.get("allowed_hosts")
+    if allowed_hosts:
+        snapshot["allowed_hosts"] = allowed_hosts
+    auth = policy.get("auth")
+    if auth is not None:
+        snapshot["auth"] = auth
+    return snapshot
+
+
 def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     """Return non-secret creation hints for a provision request.
 
@@ -1417,6 +1435,7 @@ def update_secret_metadata(
     tags: Any = _UNSET,
     policy: Any = _UNSET,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    release_scopes: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Update value-free metadata only.
 
@@ -1465,18 +1484,17 @@ def update_secret_metadata(
             for key, value in existing_policy.items()
             if key not in PROVISION_SPEC_ALLOWED_POLICY_KEYS
         }
-        existing_visible_policy = _normalize_fetch_policy(
-            existing_policy,
-            field="policy",
-            allowed_extra_keys=internal_policy_keys,
-        )
+        existing_visible_policy = _stored_fetch_policy_visible_snapshot(existing_policy)
         normalized_policy = _normalize_fetch_policy(policy, field="policy", allowed_extra_keys=internal_policy_keys)
         next_policy = {**preserved_policy, **normalized_policy}
         values["policy"] = json.dumps(next_policy) if next_policy else None
         fields.append("policy")
         if normalized_policy != existing_visible_policy:
+            grant_rows = active_grant_rows_for_secret(conn, secret_name)
             _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-policy-changed")
-            _expire_active_grants_for_secret(conn, secret_name, cache=cache, reason="grant-expired-policy-changed")
+            _expire_grant_rows(conn, grant_rows, cache=cache, reason="grant-expired-policy-changed")
+            if release_scopes is not None:
+                release_scopes.extend(agent_release_scopes_after_rows(conn, grant_rows, cache=cache))
 
     if not values:
         return _meta_payload(row)

@@ -5116,18 +5116,22 @@ def _vault_edit_payload_from_args(args, *, current: dict, help_command: str) -> 
 
 def cmd_vault_edit(args):
     from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault edit --help"
     try:
         engine = _open_vault_engine()
+        release_scopes: list[dict[str, str]] = []
         with engine.begin() as conn:
             current = vault_service.get_secret_meta(conn, args.name)
             payload = _vault_edit_payload_from_args(args, current=current, help_command=help_command)
             secret = vault_service.update_secret_metadata(
                 conn,
                 args.name,
+                release_scopes=release_scopes,
                 **{key: payload[key] for key in ("description", "tags", "policy") if key in payload},
             )
+        api.release_vault_agent_scopes(release_scopes, reason="vault_edit")
         _publish_cli_vaults_updated(scope="secret", secret_name=secret.get("name") or args.name)
         _print_cli_payload("vault_secret", secret=secret)
         return 0
