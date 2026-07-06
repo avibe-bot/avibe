@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
+import { ConfirmDialog } from '../ui/confirm-dialog';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
@@ -27,7 +28,7 @@ const proxyHosts = (s: VaultSecret): string[] => {
   return Array.isArray(hosts) ? hosts : [];
 };
 
-const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => void }> = ({ secret: s, onDelete }) => {
+const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (secret: VaultSecret) => void }> = ({ secret: s, onDelete }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
@@ -81,7 +82,7 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
       </div>
       <div className="ml-auto">
-        <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>
+        <Button variant="ghost" size="icon" onClick={() => onDelete(s)} aria-label={t('vaults.delete')}>
           <Trash2 className="size-4" />
         </Button>
       </div>
@@ -639,14 +640,19 @@ export const VaultsPage: React.FC = () => {
     }
   }, [api, showAudit]);
 
-  const onDelete = async (name: string) => {
-    if (!window.confirm(t('vaults.deleteConfirm', { name }))) return;
+  const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
+  const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
+  const confirmDelete = async () => {
+    const secret = deleteTarget;
+    if (!secret) return;
     try {
-      await api.deleteVaultSecret(name);
-      showToast(t('vaults.deleted', { name }), 'success');
+      await api.deleteVaultSecret(secret.name);
+      showToast(t('vaults.deleted', { name: secret.name }), 'success');
       refresh();
     } catch (err: unknown) {
       setError(messageFromError(err));
+    } finally {
+      setDeleteTarget(null);
     }
   };
 
@@ -783,6 +789,31 @@ export const VaultsPage: React.FC = () => {
           refresh();
         }}
       />
+      <ConfirmDialog
+        open={deleteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        destructive
+        title={t('vaults.deleteDialog.title', { name: deleteTarget?.name ?? '' })}
+        description={t('vaults.deleteDialog.description')}
+        confirmLabel={t('common.delete')}
+        holdSeconds={deleteTarget?.kind === 'keypair' ? 5 : 0}
+        onConfirm={confirmDelete}
+      >
+        {deleteTarget?.kind === 'keypair' ? (
+          <div className="flex flex-col gap-2 rounded-[10px] border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
+            <span className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <span>{t('vaults.deleteDialog.keypairIrreversible')}</span>
+            </span>
+            <span className="flex items-start gap-2">
+              <Wallet className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <span>{t('vaults.deleteDialog.keypairFunds')}</span>
+            </span>
+          </div>
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 };
