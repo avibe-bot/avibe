@@ -1,7 +1,7 @@
-import { KeyRound } from 'lucide-react';
+import { KeyRound, Pencil } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { VaultRequest, VaultRequestSpec } from '@/context/ApiContext';
+import type { VaultRequest, VaultRequestSpec, VaultSecret } from '@/context/ApiContext';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { VaultSecretForm } from './vault-secret-form';
 
@@ -21,12 +21,16 @@ export const VaultSecretDialog: React.FC<{
   name?: string;
   /** A pending provision request; spec / default protection / id are derived from it. */
   request?: VaultRequest | null;
+  /** An existing secret to edit (value-free metadata); mutually exclusive with create/provide. */
+  editSecret?: VaultSecret | null;
   /** Rendered in place of the form (loading / ambiguous-provision notices from callers). */
   notice?: React.ReactNode;
   onCancel?: () => void;
   cancelLabel?: string;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
-}> = ({ open, onOpenChange, name, request, notice, onCancel, cancelLabel, onCreated }) => {
+  /** Called after a successful metadata edit (edit mode only). */
+  onSaved?: (name: string) => void;
+}> = ({ open, onOpenChange, name, request, editSecret, notice, onCancel, cancelLabel, onCreated, onSaved }) => {
   const { t } = useTranslation();
   const card = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
   const requestSpec = (card?.spec ?? null) as VaultRequestSpec | null;
@@ -34,8 +38,10 @@ export const VaultSecretDialog: React.FC<{
     card?.default_protection === 'standard' || card?.default_protection === 'protected' ? card.default_protection : undefined;
   const fixedName = name ?? request?.secret_name ?? undefined;
   const isProvide = Boolean(fixedName);
-  const title = isProvide ? t('vaults.request.title') : t('vaults.dialog.title');
-  const subtitle = isProvide ? t('vaults.request.help') : t('vaults.dialog.subtitle');
+  const isEdit = Boolean(editSecret);
+  const title = isEdit ? t('vaults.edit.title') : isProvide ? t('vaults.request.title') : t('vaults.dialog.title');
+  const subtitle = isEdit ? t('vaults.edit.subtitle') : isProvide ? t('vaults.request.help') : t('vaults.dialog.subtitle');
+  const HeaderIcon = isEdit ? Pencil : KeyRound;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -44,7 +50,7 @@ export const VaultSecretDialog: React.FC<{
         <DialogTitle className="sr-only">{title}</DialogTitle>
         <div className="flex items-start gap-3 pr-6">
           <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
-            <KeyRound className="size-5" />
+            <HeaderIcon className="size-5" />
           </span>
           <div className="flex flex-col gap-0.5">
             <span className="text-[15px] font-semibold text-foreground">{title}</span>
@@ -54,12 +60,14 @@ export const VaultSecretDialog: React.FC<{
         {notice ?? (
           <VaultSecretForm
             fixedName={fixedName}
+            editSecret={editSecret}
             provisionRequestId={request?.id ?? null}
             requestSpec={requestSpec}
             defaultProtection={defaultProtection}
             onCancel={onCancel ?? (() => onOpenChange(false))}
             cancelLabel={cancelLabel}
             onCreated={onCreated}
+            onSaved={onSaved}
             treatExistingAsFulfilled={isProvide}
           />
         )}

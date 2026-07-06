@@ -2244,6 +2244,14 @@
     },
     "deleted": "Deleted {{name}}",
     "created": "Saved {{name}}",
+    "saved": "Updated {{name}}",
+    "editSecret": "Edit info",
+    "rowActions": "More actions",
+    "edit": {
+      "title": "Edit info",
+      "subtitle": "Info edits keep grants; fetch policy changes require new approval",
+      "lockedHint": "Name, kind and protection can't be changed"
+    },
     "protectedUnlock": {
       "checking": "Checking your protected vault…",
       "unlocked": "Protected vault unlocked for this session",
@@ -2373,7 +2381,8 @@
         "fileTooLarge": "Choose a file up to {{size}}.",
         "fileReadFailed": "Couldn't read that file.",
         "secretExists": "A secret with this name already exists.",
-        "secretNameCaseConflict": "A secret already uses this name with different letter casing."
+        "secretNameCaseConflict": "A secret already uses this name with different letter casing.",
+        "updateFailed": "Save failed, please try again."
       }
     },
     "requests": {
