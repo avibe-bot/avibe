@@ -31,6 +31,31 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+def _signing_public_meta() -> dict:
+    return {
+        "signing_public_key": {
+            "curve": "secp256k1",
+            "public_key": "02" + ("01" * 32),
+        }
+    }
+
+
+def _valid_recoverable_signature() -> dict:
+    return {"signature": "ab" * 64, "recovery_id": 0}
+
+
+def _create_protected_keypair(conn, name: str = "ETH_KEY") -> None:
+    vs.create_secret(
+        conn,
+        name=name,
+        sealed=_sealed("sign"),
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=_signing_public_meta(),
+    )
+
+
 def _callback_status(conn, request_id: str):
     return conn.execute(
         select(vault_requests.c.callback_status).where(vault_requests.c.id == request_id)
@@ -111,6 +136,63 @@ def test_expiry_arms_callback(vault):
         assert _callback_status(conn, req["id"]) == "pending"
         plan = vs.resolve_request_callback(_row(conn, req["id"]))
         assert plan is not None and "expired" in plan.message.lower()
+
+
+def test_protected_browser_sign_approval_arms_callback(vault):
+    with vault.begin() as conn:
+        _create_protected_keypair(conn)
+        req = vs.create_sign_request(
+            conn,
+            "ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            requester={"session_id": "ses_sign", "source": "agent-cli"},
+            delivery={"session_id": "ses_sign", "command": "sign:ecdsa-secp256k1-recoverable"},
+        )
+
+        vs.complete_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            signature=_valid_recoverable_signature(),
+            browser_signed=True,
+        )
+
+        row = _row(conn, req["id"])
+        assert row["callback_status"] == "pending"
+        plan = vs.resolve_request_callback(row)
+        assert plan is not None
+        assert plan.session_id == "ses_sign"
+        assert plan.message.strip()
+        assert "vault await" in plan.message
+        assert vs.request_callback_ready(conn, row) is True
+
+
+def test_failed_sign_request_arms_callback(vault):
+    with vault.begin() as conn:
+        _create_protected_keypair(conn)
+        req = vs.create_sign_request(
+            conn,
+            "ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            requester={"session_id": "ses_sign", "source": "agent-cli"},
+            delivery={"session_id": "ses_sign"},
+        )
+        vs.claim_sign_request(conn, req["id"], name="ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+
+        vs.fail_sign_request(conn, req["id"], reason="browser_signature_failed")
+
+        row = _row(conn, req["id"])
+        assert row["callback_status"] == "pending"
+        plan = vs.resolve_request_callback(row)
+        assert plan is not None
+        assert plan.session_id == "ses_sign"
+        assert plan.message.strip()
+        assert "signing error" in plan.message.lower()
+        assert vs.request_callback_ready(conn, row) is True
 
 
 # --- skip conditions ------------------------------------------------------------------------
@@ -418,3 +500,65 @@ def test_enqueue_session_callback_uses_callback_source(monkeypatch):
     # Nothing to send → no enqueue.
     assert st.enqueue_session_callback(_Store(), session_id="", message="x", source_actor="a") is None
     assert st.enqueue_session_callback(_Store(), session_id="ses", message="   ", source_actor="a") is None
+
+
+def test_vault_callback_sweep_enqueues_protected_sign_callback(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from core import scheduled_tasks as st
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    engine = create_sqlite_engine()
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        _create_protected_keypair(conn)
+        req = vs.create_sign_request(
+            conn,
+            "ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            requester={"session_id": "ses_sign", "source": "agent-cli"},
+            delivery={"session_id": "ses_sign"},
+        )
+        vs.complete_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            signature=_valid_recoverable_signature(),
+            browser_signed=True,
+        )
+
+    class _Key:
+        def to_key(self) -> str:
+            return "avibe::scope::ses_sign"
+
+    target = SimpleNamespace(
+        session_key=_Key(),
+        agent_name="codex",
+        agent_id="aid",
+        agent_backend="codex",
+        model=None,
+        reasoning_effort=None,
+    )
+    monkeypatch.setattr(st, "resolve_session_id_target", lambda session_id: target)
+    request_store = st.TaskExecutionStore(tmp_path / "task_requests")
+    service = st.ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=st.ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_vault_callbacks())
+
+    with engine.connect() as conn:
+        assert _callback_status(conn, req["id"]) == "sent"
+    [callback_run] = request_store.list_pending()
+    assert callback_run.session_id == "ses_sign"
+    assert callback_run.session_policy == "existing"
+    assert callback_run.source_kind == "callback"
+    assert callback_run.source_actor == f"vault:{req['id']}"
+    assert callback_run.message
+    assert "vault await" in callback_run.message
