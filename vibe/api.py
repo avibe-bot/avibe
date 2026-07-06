@@ -2686,6 +2686,7 @@ def vault_sign(payload: dict) -> dict:
     engine = _vault_engine()
     protected_response: dict | None = None
     protected_event: dict | None = None
+    approval_required_request: dict | None = None
     try:
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
@@ -2754,9 +2755,11 @@ def vault_sign(payload: dict) -> dict:
                         name,
                         digest=digest,
                         scheme=scheme,
-                        requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
-                        delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                        requester=_vault_requester_payload(payload),
+                        delivery=_vault_delivery_payload(payload),
+                        expires_at=_expires_at_from_ttl(payload),
                     )
+                    approval_required_request = request
                     protected_event = {
                         "scope": "request",
                         "request_id": request.get("id"),
@@ -2778,6 +2781,8 @@ def vault_sign(payload: dict) -> dict:
     if protected_response is not None:
         if protected_event is not None:
             _publish_vaults_updated(**protected_event)
+        if approval_required_request is not None:
+            _notify_vault_request_created(approval_required_request)
         return protected_response
 
     def _fail_claimed_request(reason: str) -> None:

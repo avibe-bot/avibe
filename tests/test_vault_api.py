@@ -1330,8 +1330,10 @@ def test_vault_sign_standard_key_without_request_signs_headlessly(monkeypatch):
 
 def test_vault_sign_standard_always_ask_without_request_requires_approval(monkeypatch):
     sign = Mock(return_value={"signature": "ab" * 64, "recovery_id": 1})
+    notify = Mock()
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    monkeypatch.setattr(api, "_notify_vault_request_created", notify)
     api.create_vault_secret(
         {
             "name": "ETH_KEY",
@@ -1347,21 +1349,29 @@ def test_vault_sign_standard_always_ask_without_request_requires_approval(monkey
             "name": "ETH_KEY",
             "digest": "00" * 32,
             "scheme": "ecdsa-secp256k1-recoverable",
-            "requester": {"source": "test", "session_id": "ses_1"},
+            "session_id": "ses_1",
+            "skill": "wallet-sign",
         }
     )
 
     assert result["ok"] is False
     assert result["code"] == "approval_required"
-    assert result["request"]["secret_name"] == "ETH_KEY"
-    assert result["request"]["status"] == "pending"
-    assert result["request"]["card"]["protection"] == "standard"
+    request = result["request"]
+    assert request["secret_name"] == "ETH_KEY"
+    assert request["status"] == "pending"
+    assert request["requester"]["session_id"] == "ses_1"
+    assert request["requester"]["skill"] == "wallet-sign"
+    assert request["delivery"]["session_id"] == "ses_1"
+    assert request["delivery"]["skill"] == "wallet-sign"
+    assert request["card"]["protection"] == "standard"
     assert "signature" not in result
     sign.assert_not_called()
+    notify.assert_called_once_with(request)
     with api._vault_engine().connect() as conn:
         [row] = list(conn.execute(vault_requests.select()).mappings())
-        assert row["id"] == result["request"]["id"]
+        assert row["id"] == request["id"]
         assert row["callback_status"] is None
+        assert vault_service._request_session_id(dict(row)) == "ses_1"
 
 
 def test_agent_sign_claims_request_before_avault_sign(monkeypatch):
