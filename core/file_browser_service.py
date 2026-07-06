@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, BinaryIO, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ _RENAME_NOREPLACE_FALLBACK_WARNED = False
 _WRITE_LOCKS_MUTEX = threading.Lock()
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
 _WRITE_TEMP_PREFIX = ".avibe-write-"
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 class FileBrowserError(Exception):
@@ -659,9 +660,124 @@ def _validate_new_name(new_name: str) -> str:
     if not isinstance(new_name, str) or not new_name.strip():
         raise FileBrowserError("invalid_name", "New name is required", 400)
     name = new_name.strip()
-    if name in {".", ".."} or "/" in name or "\\" in name or Path(name).name != name:
+    if "\x00" in name or name in {".", ".."} or "/" in name or "\\" in name or Path(name).name != name:
         raise FileBrowserError("invalid_name", "New name must not contain path separators", 400)
     return name
+
+
+def _resolve_upload_directory(raw_dir: str) -> Path:
+    try:
+        resolve_safe_path(raw_dir)
+        expanded = _expanded_absolute_path(raw_dir)
+    except FileBrowserError as exc:
+        raise NotFoundError("Destination directory not found") from exc
+
+    if expanded.parent == expanded:
+        directory = expanded
+    else:
+        if expanded.name in {"", ".", ".."} or _raw_final_component(raw_dir) in {".", ".."}:
+            raise NotFoundError("Destination directory not found")
+        try:
+            parent = expanded.parent.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise NotFoundError("Destination directory not found") from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise FileBrowserError("fs_error", str(exc), 400) from exc
+        directory = parent / expanded.name
+
+    try:
+        stat_result = directory.lstat()
+    except FileNotFoundError as exc:
+        raise NotFoundError("Destination directory not found") from exc
+    except PermissionError as exc:
+        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+    except OSError as exc:
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+    if not stat.S_ISDIR(stat_result.st_mode):
+        raise FileBrowserError("not_dir", "Destination is not a directory", 400)
+    return directory
+
+
+def _validate_upload_target(target: Path, *, overwrite: bool) -> int:
+    try:
+        stat_result = target.lstat()
+    except FileNotFoundError:
+        return 0o644
+    except PermissionError as exc:
+        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+    except OSError as exc:
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+    if not overwrite or not stat.S_ISREG(stat_result.st_mode):
+        raise ConflictError("exists", "Destination already exists")
+    return stat.S_IMODE(stat_result.st_mode)
+
+
+def upload_file(
+    raw_dir: str,
+    source: BinaryIO,
+    *,
+    filename: str | None = None,
+    name: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    directory = _resolve_upload_directory(raw_dir)
+    target_name = _validate_new_name(name if name is not None and name.strip() else (filename or ""))
+    target = directory / target_name
+    _validate_upload_target(target, overwrite=overwrite)
+
+    def _upload() -> dict[str, Any]:
+        with _write_lock_for(target):
+            current_mode = _validate_upload_target(target, overwrite=overwrite)
+            fd = -1
+            temp_name = ""
+            size = 0
+            try:
+                fd, temp_name = tempfile.mkstemp(prefix=_WRITE_TEMP_PREFIX, suffix=".tmp", dir=directory)
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, current_mode)
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
+                    while True:
+                        chunk = source.read(_UPLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        if not isinstance(chunk, bytes):
+                            chunk = bytes(chunk)
+                        if size + len(chunk) > MAX_FILE_BYTES:
+                            raise FileBrowserError("too_large", "File is too large", 413)
+                        handle.write(chunk)
+                        size += len(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if overwrite:
+                    os.replace(temp_name, target)
+                else:
+                    _rename_no_replace(Path(temp_name), target)
+                temp_name = ""
+                _fsync_dir(directory)
+                stat_result = target.stat()
+                return {
+                    "name": target.name,
+                    "path": str(target),
+                    "size": stat_result.st_size,
+                    "mtime": _mtime_seconds(stat_result),
+                }
+            except FileExistsError as exc:
+                raise ConflictError("exists", "Destination already exists") from exc
+            except PermissionError as exc:
+                raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+            except OSError as exc:
+                raise FileBrowserError("fs_error", str(exc), 400) from exc
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                if temp_name:
+                    try:
+                        os.unlink(temp_name)
+                    except FileNotFoundError:
+                        pass
+
+    return _run_mutation("upload", target, _upload, overwrite=overwrite)
 
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:

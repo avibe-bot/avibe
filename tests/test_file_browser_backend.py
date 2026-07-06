@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import io
 import logging
 import os
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from vibe import ui_server
 from core import file_browser_service as fs
 from core.file_browser_service import FileBrowserError
 from tests.ui_server_test_helpers import csrf_headers
@@ -533,6 +535,114 @@ def test_write_serializes_expected_mtime_check_and_replace(tmp_path, monkeypatch
     assert len(results) == 1
     assert len(replace_calls) == 1
     assert path.read_text(encoding="utf-8") == "first"
+
+
+def test_upload_file_happy_path_and_name_override(tmp_path):
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"hello"), filename="ignored.txt", name="saved.bin")
+
+    uploaded = tmp_path / "saved.bin"
+    assert result["name"] == "saved.bin"
+    assert result["path"] == str(uploaded)
+    assert result["size"] == 5
+    assert result["mtime"] == fs._mtime_seconds(uploaded.stat())
+    assert uploaded.read_bytes() == b"hello"
+
+
+def test_upload_file_conflict_without_overwrite_and_replaces_with_overwrite(tmp_path):
+    target = tmp_path / "report.bin"
+    target.write_bytes(b"old")
+    target.chmod(0o744)
+
+    with pytest.raises(FileBrowserError) as exists:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"new"), filename="report.bin")
+    assert exists.value.code == "exists"
+    assert target.read_bytes() == b"old"
+
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"new"), filename="report.bin", overwrite=True)
+
+    assert result["name"] == "report.bin"
+    assert result["size"] == 3
+    assert target.read_bytes() == b"new"
+    assert target.stat().st_mode & 0o777 == 0o744
+
+
+def test_upload_file_size_cap_cleans_temp_and_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"12345"), filename="large.bin")
+
+    assert exc.value.code == "too_large"
+    assert exc.value.status_code == 413
+    assert not (tmp_path / "large.bin").exists()
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    ["../escape.txt", "nested/file.txt", "nested\\file.txt", ".", "..", "", "nul\x00byte.txt"],
+)
+def test_upload_file_rejects_invalid_names(tmp_path, bad_name):
+    with pytest.raises(FileBrowserError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"x"), filename=bad_name)
+
+    assert exc.value.code == "invalid_name"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_upload_file_rejects_bad_destination_dir(tmp_path):
+    missing = tmp_path / "missing"
+    with pytest.raises(FileBrowserError) as missing_exc:
+        fs.upload_file(str(missing), io.BytesIO(b"x"), filename="upload.bin")
+    assert missing_exc.value.code == "not_found"
+
+    destination_file = tmp_path / "not-a-dir"
+    destination_file.write_text("x", encoding="utf-8")
+    with pytest.raises(FileBrowserError) as file_exc:
+        fs.upload_file(str(destination_file), io.BytesIO(b"x"), filename="upload.bin")
+    assert file_exc.value.code == "not_dir"
+
+
+def test_upload_file_refuses_symlinked_dir_and_target_symlink(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link-dir"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+
+    with pytest.raises(FileBrowserError) as dir_exc:
+        fs.upload_file(str(link_dir), io.BytesIO(b"x"), filename="upload.bin")
+    assert dir_exc.value.code == "not_dir"
+    assert not (real_dir / "upload.bin").exists()
+
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"target")
+    link = tmp_path / "link.bin"
+    link.symlink_to(target)
+
+    with pytest.raises(FileBrowserError) as target_exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"new"), filename="link.bin", overwrite=True)
+    assert target_exc.value.code == "exists"
+    assert link.is_symlink()
+    assert target.read_bytes() == b"target"
+
+
+def test_upload_file_read_failure_leaves_no_partial_file(tmp_path):
+    class FailingStream:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read(self, _size: int) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"partial"
+            raise OSError("read failed")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.upload_file(str(tmp_path), FailingStream(), filename="partial.bin")
+
+    assert exc.value.code == "fs_error"
+    assert not (tmp_path / "partial.bin").exists()
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
 
 
 def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
@@ -1152,6 +1262,77 @@ def test_http_routes_return_contract_and_headers(tmp_path):
     download_response = client.get(f"/api/files/content?path={file_path}&download=1")
     assert download_response.headers["Content-Disposition"].startswith("attachment;")
 
+    upload_response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path), "name": "uploaded.bin"},
+        files={"file": ("browser-name.bin", b"upload", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+    assert upload_response.status_code == 200
+    upload_body = upload_response.get_json()
+    assert set(upload_body) == {"name", "path", "size", "mtime"}
+    assert upload_body["name"] == "uploaded.bin"
+    assert upload_body["size"] == 6
+    assert (tmp_path / "uploaded.bin").read_bytes() == b"upload"
+
+
+def test_http_upload_maps_too_large_and_leaves_no_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": {"code": "too_large", "message": "File is too large"},
+    }
+    assert not (tmp_path / "large.bin").exists()
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+def test_http_upload_rejects_oversized_content_length_before_parsing(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(ui_server, "_FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES", 0)
+
+    def boom_upload(*_args, **_kwargs):
+        raise AssertionError("oversized upload should be rejected before form parsing")
+
+    monkeypatch.setattr(fs, "upload_file", boom_upload)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["error"]["code"] == "too_large"
+    assert not (tmp_path / "large.bin").exists()
+
+
+def test_http_upload_missing_file_part_returns_structured_error(tmp_path):
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "ok": False,
+        "error": {"code": "invalid_name", "message": "File is required"},
+    }
+
 
 def test_http_routes_map_structured_errors_and_enforce_csrf(tmp_path):
     client = app.test_client()
@@ -1165,6 +1346,15 @@ def test_http_routes_map_structured_errors_and_enforce_csrf(tmp_path):
     write_path = tmp_path / "new.txt"
     blocked = client.put("/api/files/write", json={"path": str(write_path), "content": "x"})
     assert blocked.status_code == 403
+
+    upload_path = tmp_path / "blocked-upload.bin"
+    blocked_upload = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("blocked-upload.bin", b"x", "application/octet-stream")},
+    )
+    assert blocked_upload.status_code == 403
+    assert not upload_path.exists()
 
     ok = client.put(
         "/api/files/write",

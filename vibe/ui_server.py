@@ -28,6 +28,8 @@ import psutil
 from aiohttp import ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
 
@@ -5807,6 +5809,26 @@ def _file_browser_error_response(exc: Exception):
     return jsonify({"ok": False, "error": {"code": "internal_error", "message": "Internal server error"}}), 500
 
 
+_FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+_FILE_UPLOAD_FIELD_MAX_BYTES = 4096
+
+
+def _validate_file_upload_content_length(headers: Any, max_file_bytes: int) -> None:
+    from core.file_browser_service import FileBrowserError
+
+    raw_length = headers.get("content-length")
+    if raw_length is None:
+        raise FileBrowserError("fs_error", "Content-Length is required", 400)
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError) as exc:
+        raise FileBrowserError("fs_error", "Invalid Content-Length", 400) from exc
+    if length < 0:
+        raise FileBrowserError("fs_error", "Invalid Content-Length", 400)
+    if length > max_file_bytes + _FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES:
+        raise FileBrowserError("too_large", "File is too large", 413)
+
+
 async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
     return await app.dispatch_native_request(starlette_request, handler)
 
@@ -5885,6 +5907,44 @@ async def files_write(starlette_request: FastAPIRequest):
                     expected_mtime=payload.get("expected_mtime"),
                     create_only=_parse_explicit_bool(payload.get("create_only")),
                 )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/upload", include_in_schema=False)
+async def files_upload(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            _validate_file_upload_content_length(starlette_request.headers, file_browser_service.MAX_FILE_BYTES)
+            async with starlette_request.form(
+                max_files=1,
+                max_fields=3,
+                max_part_size=_FILE_UPLOAD_FIELD_MAX_BYTES,
+            ) as form:
+                upload = form.get("file")
+                if not isinstance(upload, StarletteUploadFile):
+                    raise file_browser_service.FileBrowserError("invalid_name", "File is required", 400)
+                name_value = form.get("name")
+                dir_value = form.get("dir")
+                await upload.seek(0)
+                return jsonify(
+                    await asyncio.to_thread(
+                        file_browser_service.upload_file,
+                        str(dir_value or ""),
+                        upload.file,
+                        filename=upload.filename,
+                        name=name_value if isinstance(name_value, str) else None,
+                        overwrite=_parse_explicit_bool(form.get("overwrite")),
+                    )
+                )
+        except StarletteHTTPException as exc:
+            return _file_browser_error_response(
+                file_browser_service.FileBrowserError("fs_error", str(exc.detail), 400)
             )
         except Exception as exc:
             return _file_browser_error_response(exc)
