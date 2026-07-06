@@ -2339,6 +2339,8 @@
       "standardProtection": "标准",
       "protectedHelp": "用之前要你在浏览器里批准（Face ID / 密码）——AI 不能私自使用。就算电脑被偷也打不开。",
       "standardHelp": "AI 可以自己使用。适合 API key 和大多数密钥。",
+      "alwaysAskSign": "每次签名都要我确认",
+      "alwaysAskSignHelp": "标准档密钥默认可以自己签名。贵重密钥可以打开它——每次签名都要你在浏览器里亲自批准。",
       "protectedCreatePending": "当前构建尚不支持受保护的 Web 创建。需要 Agent 自动取用的密钥请选标准。",
       "save": "保存",
       "createSecret": "创建密钥",

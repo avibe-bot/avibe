@@ -2340,6 +2340,8 @@
       "standardProtection": "Standard",
       "protectedHelp": "You approve it in your browser before the agent can use it (Face ID / password). Safe even if this computer is stolen; the agent can't use it on its own.",
       "standardHelp": "The agent can use it on its own. Best for API keys and most secrets.",
+      "alwaysAskSign": "Ask me before every signature",
+      "alwaysAskSignHelp": "Standard keys can sign on their own. For a high-value key, turn this on so every signature needs your approval in the browser.",
       "protectedCreatePending": "Protected web create is not available in this build yet. Choose Standard only for secrets the agent may need to use on its own.",
       "save": "Save",
       "createSecret": "Create secret",

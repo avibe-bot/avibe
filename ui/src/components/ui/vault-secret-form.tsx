@@ -33,6 +33,7 @@ import { Button } from './button';
 import { Input } from './input';
 import { SegmentedRadio } from './segmented';
 import { SigningAddressList } from './signing-address-list';
+import { Switch } from './switch';
 import { TagInput } from './tag-input';
 import { Textarea } from './textarea';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
@@ -157,6 +158,9 @@ export const VaultSecretForm: React.FC<{
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
+  // Standard signing keys sign headlessly; this opt-in writes `policy.always_ask` to force
+  // per-use browser approval instead. Only meaningful for a standard keypair (see onSubmit).
+  const [alwaysAsk, setAlwaysAsk] = useState(false);
   const [showValue, setShowValue] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [checkingAvault, setCheckingAvault] = useState(true);
@@ -384,12 +388,13 @@ export const VaultSecretForm: React.FC<{
     setSubmitting(true);
     setError(null);
     try {
-      // `policy.always_ask` is intentionally not exposed in the product UI (design:
-      // vaults-grant-delivery-refactor.md §1 item 6, §11). It remains a backend policy
-      // capability, so any value already stored on a secret is preserved; the form never
-      // sets or clears it.
+      // `policy.always_ask` is exposed only for a standard signing key (keypair), where the
+      // agent can otherwise sign headlessly — the toggle forces per-use browser approval for
+      // every signature. Protected keys already always approve and static secrets don't sign,
+      // so the form never sets it for them.
       const policy: Record<string, unknown> = {};
       if (allowHosts.length) policy.allowed_hosts = allowHosts;
+      if (isKeypair && protection === 'standard' && alwaysAsk) policy.always_ask = true;
       if (fetchAuthMode === 'header') {
         policy.auth = { type: 'header', name: normalizedFetchAuthName };
       } else if (fetchAuthMode === 'query') {
@@ -690,6 +695,25 @@ export const VaultSecretForm: React.FC<{
     </div>
   );
 
+  // Always-ask opt-in — only for a standard signing key, which otherwise signs headlessly.
+  // Writing `policy.always_ask` forces per-use browser approval for every signature; protected
+  // keys already always approve, so it isn't shown for them.
+  const signApprovalToggle =
+    isKeypair && protection === 'standard' ? (
+      <div className="flex items-start gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
+          <span className="text-[11.5px] leading-snug text-muted-foreground">{t('vaults.dialog.alwaysAskSignHelp')}</span>
+        </div>
+        <Switch
+          checked={alwaysAsk}
+          onCheckedChange={setAlwaysAsk}
+          disabled={submitting}
+          label={t('vaults.dialog.alwaysAskSign')}
+        />
+      </div>
+    ) : null;
+
   // Protected setup/unlock gating step + avault availability notices, shared by both modes.
   const gatingNotices = (
     <>
@@ -964,6 +988,8 @@ export const VaultSecretForm: React.FC<{
 
       {/* Protection */}
       {protectionCards}
+
+      {signApprovalToggle}
 
       {/* Advanced — collapsible proxy policy, shared with provide mode. */}
       {advancedSection}
