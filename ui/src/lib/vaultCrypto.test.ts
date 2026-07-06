@@ -393,6 +393,7 @@ describe('vaultCrypto protected hierarchy', () => {
     const released = await releaseProtectedDek(sealed, vmk, avaultPublicKey, recordContext, context);
 
     expect(dek).toHaveLength(32);
+    expect(protectedRecordAadHex(recordContext)).toBe('4f50454e41495f4150495f4b45596d616368696e652d61657367636d2d763101');
     expect(protectedRecordAadHex(recordContext)).not.toBe(protectedRecordAadHex({ name: 'OTHER_SIGNING_KEY' }));
     expect(released.scheme).toBe(BLIND_BOX_SCHEME);
     expect(base64ToBytes(released.enc)).toHaveLength(32);
@@ -514,6 +515,7 @@ describe('protected record storage composition', () => {
     const sealed = await sealProtected(new TextEncoder().encode('sk-secret-value'), vmk, context);
 
     const envelope = packProtectedRecord(sealed, wrapMeta);
+    expect(JSON.parse(envelope.wrap_meta).scheme).toBe(WRAP_SCHEME);
     const restored = unpackProtectedRecord(envelope);
     const vmkAgain = await unwrapVmk(restored.vmkWrapMeta, 'vault-password');
     const opened = await openProtected(restored.sealed, vmkAgain, context);
