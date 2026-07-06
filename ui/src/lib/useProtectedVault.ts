@@ -86,6 +86,16 @@ export function vaultUnlocked(): boolean {
   return sessionVault.vmk != null;
 }
 
+/**
+ * True when the in-memory VMK is a fresh, uncommitted first-time setup — NOT a proven unlock of
+ * the server's established vault. In the first-init collision path (another tab established the
+ * real vault after this tab set up but before it saved a secret) a fresh-setup VMK is a loser key
+ * that must not be treated as authorization to act on a real protected secret.
+ */
+export function vaultFreshSetup(): boolean {
+  return sessionVault.freshSetup;
+}
+
 function vaultStatusNow(): ProtectedVaultStatus {
   if (sessionVault.vmk) return 'unlocked';
   return sessionVault.wrapMeta ? 'locked' : 'needs-setup';

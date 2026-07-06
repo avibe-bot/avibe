@@ -13,7 +13,7 @@ import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { VaultProtectedUnlock } from '../ui/vault-protected-unlock';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
-import { useProtectedVault } from '../../lib/useProtectedVault';
+import { useProtectedVault, vaultFreshSetup } from '../../lib/useProtectedVault';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
@@ -681,10 +681,16 @@ export const VaultsPage: React.FC = () => {
   // Deleting a protected secret requires the user present at an unlocked vault (a passkey/password
   // ceremony) — discover the current lock state when the delete dialog opens for one.
   useEffect(() => {
-    if (deleteTarget?.protection === 'protected') void protectedVault.refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh is stable; re-run only on target change
+    if (deleteTarget?.protection !== 'protected') return;
+    // A freshly set-up, uncommitted local VMK isn't a proven unlock of this secret's real vault
+    // (first-init collision) — drop it and rediscover the server vault so the user must unlock the
+    // actual one; otherwise just discover the current lock state.
+    if (vaultFreshSetup()) void protectedVault.discardAndRefresh();
+    else void protectedVault.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- vault callbacks are stable; re-run only on target change
   }, [deleteTarget]);
-  const deleteNeedsUnlock = deleteTarget?.protection === 'protected' && protectedVault.status !== 'unlocked';
+  const deleteNeedsUnlock =
+    deleteTarget?.protection === 'protected' && (protectedVault.status !== 'unlocked' || vaultFreshSetup());
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const onEdit = (secret: VaultSecret) => setEditTarget(secret);
   const confirmDelete = async () => {
