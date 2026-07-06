@@ -629,6 +629,7 @@
     "editor": {
       "label": "Editor",
       "desc": "A fast code editor for files on this machine.",
+      "tagline": "A fast code editor, in your browser.",
       "explorer": "Explorer",
       "noFolder": "No folder opened",
       "welcomeSub": "A code editor for files on this machine · VS Code engine",
@@ -649,6 +650,7 @@
       "openInWindow": "Open in editor window",
       "saveBeforePopOut": "Save before opening in a window",
       "confirmDiscardClose": "Discard unsaved changes and close this window?",
+      "confirmDiscardSwitch": "Discard unsaved changes?",
       "selectAll": "Select all",
       "copyAll": "Copy all",
       "untitled": "Untitled-{{n}}",

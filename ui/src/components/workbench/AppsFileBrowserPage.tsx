@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Braces,
@@ -128,6 +129,7 @@ function relFolder(rel: string | undefined): string {
 export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({ windowed = false }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
+  const routerNavigate = useNavigate();
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -264,9 +266,24 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     if (query.trim()) runSearch(query);
   }, [cwd, navigate, query, runSearch]);
 
+  // Open an editable text/code file in the Editor: desktop opens a resizable Editor window; phone —
+  // which has no window layer — navigates to the full-page editor route. The launch file rides in
+  // router state, mirroring the window's `params`. Re-checks the breakpoint (like onNewFile) so it
+  // routes correctly regardless of where it's called from.
+  const openInEditor = useCallback(
+    (path: string, filename: string, mtime: number | null) => {
+      if (window.matchMedia('(min-width: 768px)').matches) {
+        wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
+      } else {
+        routerNavigate('/apps/editor', { state: { path, filename, mtime } });
+      }
+    },
+    [wm, routerNavigate],
+  );
+
   // Open: dir → navigate (and leave search); image / PDF / Office / Markdown → the standalone Preview
   // window (desktop) or the in-page overlay (mobile, which has no window layer); editable text/code
-  // file (within the size cap) → Editor window; anything else → download.
+  // file (within the size cap) → Editor (desktop window / mobile route); anything else → download.
   const openItem = async (item: RowItem) => {
     if (item.entry.kind === 'dir') {
       setQuery('');
@@ -281,23 +298,20 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       else setPreview({ path: item.full, name: item.entry.name });
       return;
     }
-    // Mobile has no editor window layer (windows are md+), so a non-previewable file just downloads.
-    if (!desktop) {
-      downloadFile(item.full);
-      return;
-    }
-    // Desktop: fetch CURRENT metadata (content-sniffs `text`) and decide by CONTENT, not just the
-    // extension — so an extensionless TEXT file opens in the editor while a binary file downloads.
+    // Fetch CURRENT metadata (content-sniffs `text`) and decide by CONTENT, not just the extension —
+    // so an extensionless TEXT file opens in the editor while a true binary downloads. downloadFile
+    // uses an anchor (not a popup), so it survives this awaited recheck without losing the tap's user
+    // activation on Safari/iOS.
     try {
       const m = await fileMeta(item.full);
       if (isEditableMeta(m)) {
-        wm.openApp('editor', { title: item.entry.name, params: { path: item.full, filename: item.entry.name, mtime: m.mtime } });
+        openInEditor(item.full, item.entry.name, m.mtime);
       } else {
         downloadFile(item.full);
       }
     } catch {
       if (isEditableFile(item.entry)) {
-        wm.openApp('editor', { title: item.entry.name, params: { path: item.full, filename: item.entry.name, mtime: item.entry.mtime } });
+        openInEditor(item.full, item.entry.name, item.entry.mtime);
       } else {
         downloadFile(item.full);
       }

@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Code2, Eye, Loader2, PanelRightOpen, Save } from 'lucide-react';
+import { Code2, Eye, FolderOpen, Loader2, PanelRightOpen, Save } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useTheme } from '../../context/ThemeContext';
@@ -86,6 +86,12 @@ export const FileEditorPane: React.FC<{
   onPopOut?: (live: { mtime: number | null }) => void;
   /** The owning window id, when this editor lives in a window — enables the unsaved-close guard. */
   windowId?: string;
+  /**
+   * When provided, the header shows an "open file" button (the mobile single-file editor's way to
+   * open/switch files — desktop uses the IDE explorer instead). No-op in `chromeless` mode, which has
+   * no header.
+   */
+  onOpenFile?: () => void;
   /** Report dirty state up (used by the Editor IDE to aggregate one close guard over its tabs). */
   onDirtyChange?: (dirty: boolean) => void;
   /**
@@ -111,7 +117,7 @@ export const FileEditorPane: React.FC<{
    * window-level ⌘S itself — scoped by this flag so only the foreground tab saves.
    */
   saveHotkey?: boolean;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -237,6 +243,19 @@ export const FileEditorPane: React.FC<{
     <div className="flex h-full min-h-0 flex-col">
       {!chromeless && (
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+          {onOpenFile && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0 text-muted"
+              aria-label={t('apps.editor.browseFiles')}
+              title={t('apps.editor.browseFiles')}
+              onClick={onOpenFile}
+            >
+              <FolderOpen className="size-3.5" />
+            </Button>
+          )}
           <span className="flex-1 truncate font-mono text-[12px] text-foreground">{filename}</span>
           {dirty && <span className="size-1.5 shrink-0 rounded-full bg-mint" title={t('apps.fileBrowser.unsaved')} />}
           {onPopOut && (

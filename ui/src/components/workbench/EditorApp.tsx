@@ -585,7 +585,11 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}
                             reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
                             reloadNonce={tab.reload}
-                            saveHotkey={active === tab.id && wm.focusedId === windowId}
+                            // The active tab owns preview-mode ⌘S. In a window, only while that window
+                            // is frontmost; on the full-page /apps/editor mount (no windowId, so no
+                            // window can be "focused") the page is always the foreground, so treat it
+                            // as focused — otherwise ⌘S would be dead while previewing there.
+                            saveHotkey={active === tab.id && (!windowId || wm.focusedId === windowId)}
                           />
                         </Suspense>
                       )}

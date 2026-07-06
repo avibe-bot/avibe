@@ -629,6 +629,7 @@
     "editor": {
       "label": "编辑器",
       "desc": "本机文件的快速代码编辑器。",
+      "tagline": "在浏览器里编辑代码文件。",
       "explorer": "资源管理器",
       "noFolder": "未打开文件夹",
       "welcomeSub": "本机文件的代码编辑器 · VS Code 内核",
@@ -649,6 +650,7 @@
       "openInWindow": "在编辑器窗口中打开",
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
+      "confirmDiscardSwitch": "放弃未保存的更改？",
       "selectAll": "全选",
       "copyAll": "全部复制",
       "untitled": "未命名-{{n}}",

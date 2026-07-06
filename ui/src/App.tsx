@@ -47,6 +47,9 @@ const AppsFileBrowserPage = lazy(() =>
 const AppsTerminalPage = lazy(() =>
   import('./components/workbench/AppsTerminalPage').then((m) => ({ default: m.AppsTerminalPage })),
 );
+const AppsEditorPage = lazy(() =>
+  import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
+);
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
@@ -339,6 +342,14 @@ function AppRoutes() {
           element={
             <Suspense fallback={<AppsRouteFallback />}>
               <AppsTerminalPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/apps/editor"
+          element={
+            <Suspense fallback={<AppsRouteFallback />}>
+              <AppsEditorPage />
             </Suspense>
           }
         />
