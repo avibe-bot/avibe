@@ -6141,14 +6141,33 @@ def cmd_vault_sign(args):
                     code="unsupported_signer_kind",
                     help_command=help_command,
                 )
-            request = vault_service.create_sign_request(
-                conn,
-                name,
-                digest=digest,
-                scheme=scheme,
-                requester=_vault_cli_requester(args),
-                delivery=_vault_cli_delivery(args, mode="sign"),
+            needs_approval = vault_service.sign_needs_approval(conn, name)
+            if needs_approval:
+                request = vault_service.create_sign_request(
+                    conn,
+                    name,
+                    digest=digest,
+                    scheme=scheme,
+                    requester=_vault_cli_requester(args),
+                    delivery=_vault_cli_delivery(args, mode="sign"),
+                )
+        if not needs_approval:
+            result = api.vault_sign(
+                {
+                    "name": name,
+                    "digest": digest,
+                    "scheme": scheme,
+                    "requester": _vault_cli_requester(args),
+                }
             )
+            _print_cli_payload(
+                "vault_signature",
+                name=name,
+                scheme=scheme,
+                digest=digest,
+                signature=result.get("signature"),
+            )
+            return 0
         _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
             "vault_sign_request",
@@ -10236,11 +10255,12 @@ def build_parser():
 
     vault_sign_parser = vault_subparsers.add_parser(
         "sign",
-        help="Request one approved signature from a keypair secret",
+        help="Sign a digest with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Create a pending per-use signing request for a local keypair. "
-            "Standard keys sign via avault; protected keys sign in the browser. "
-            "'vibe vault await <request-id>' returns only the resulting public signature."
+            "Sign a 32-byte digest with a local keypair. Standard keys sign immediately via "
+            "avault and return the public signature inline. Protected keys — and standard keys "
+            "marked always-ask — instead create a pending per-use request you approve in the "
+            "browser; then 'vibe vault await <request-id>' returns the public signature."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault sign --help",

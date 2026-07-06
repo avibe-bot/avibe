@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Upload,
   X,
   type LucideIcon,
 } from 'lucide-react';
@@ -37,16 +38,19 @@ import {
   downloadFile,
   fileBrowserErrorMessage,
   fileMeta,
+  FilesApiError,
   isPlainEntryName,
   joinPath,
   listDir,
   makeDir,
+  MAX_UPLOAD_BYTES,
   movePath,
   parentDir,
   pathCrumbs,
   renamePath,
   searchNames,
   systemFavorites,
+  uploadFile,
   writeFile,
   type Favorite,
   type FsEntry,
@@ -119,6 +123,10 @@ function relFolder(rel: string | undefined): string {
   if (!rel || !rel.includes('/')) return '';
   return rel.slice(0, rel.lastIndexOf('/'));
 }
+
+// Upload parallelism cap: a big multi-select / drop uploads at most this many files at once so a
+// large batch doesn't flood the endpoint (mirrors the chat composer's bounded upload pool).
+const UPLOAD_CONCURRENCY = 3;
 
 // Whole-machine Finder: favorites/projects rail + a Name/Size/Modified list + a toolbar (breadcrumb,
 // search, New File/Folder) + a status bar. Right-click a row for Open/Download/Rename/Delete, or
@@ -463,6 +471,139 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     },
   });
 
+  // ---- Upload (toolbar button + OS drag-drop) --------------------------------------------------
+  // Files land in the folder that was current when the upload STARTED (`dest`), uploaded with a
+  // bounded worker pool. Progress + per-file failures surface in the toolbar/status bar and the
+  // existing error strip; a name clash (409) prompts per file to replace.
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const [fileDragOver, setFileDragOver] = useState(false);
+  // refreshAll re-lists whatever folder is current WHEN IT FIRES, so an upload that finishes after
+  // the user navigated away refreshes their new folder instead of yanking them back to `dest`.
+  const refreshAllRef = useRef(refreshAll);
+  useEffect(() => {
+    refreshAllRef.current = refreshAll;
+  }, [refreshAll]);
+
+  const uploadFiles = useCallback(
+    async (files: File[], preErrors: string[] = []) => {
+      const dest = cwd;
+      const failures = [...preErrors];
+      const valid: File[] = [];
+      for (const f of files) {
+        // Reject oversize files client-side (same code the backend returns) before spending a request.
+        if (f.size > MAX_UPLOAD_BYTES) {
+          failures.push(t('apps.fileBrowser.uploadError', { name: f.name, message: t('apps.fileBrowser.errors.too_large') }));
+        } else {
+          valid.push(f);
+        }
+      }
+      if (!dest || valid.length === 0) {
+        setError(failures.length ? failures.join(' · ') : null);
+        return;
+      }
+      setError(null);
+      const total = valid.length;
+      let done = 0;
+      setUploadProgress({ done, total });
+      const queue = [...valid];
+      const uploadOne = async (file: File) => {
+        try {
+          await uploadFile(dest, file);
+          refreshAllRef.current();
+        } catch (e) {
+          if (e instanceof FilesApiError && e.code === 'exists') {
+            // Name clash: ask (the codebase's window.confirm pattern) and retry with overwrite on yes.
+            if (window.confirm(t('apps.fileBrowser.uploadReplace', { name: file.name }))) {
+              try {
+                await uploadFile(dest, file, { overwrite: true });
+                refreshAllRef.current();
+              } catch (e2) {
+                failures.push(t('apps.fileBrowser.uploadError', { name: file.name, message: fileBrowserErrorMessage(e2, t, t('apps.fileBrowser.errors.uploadFailed')) }));
+              }
+            }
+            // Declined → skip this file silently.
+          } else {
+            failures.push(t('apps.fileBrowser.uploadError', { name: file.name, message: fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.uploadFailed')) }));
+          }
+        } finally {
+          done += 1;
+          setUploadProgress({ done, total });
+        }
+      };
+      const worker = async () => {
+        let file = queue.shift();
+        while (file) {
+          await uploadOne(file);
+          file = queue.shift();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, queue.length) }, worker));
+      setUploadProgress(null);
+      setError(failures.length ? failures.join(' · ') : null);
+    },
+    [cwd, t],
+  );
+
+  const onUploadPick = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files?.length) void uploadFiles(Array.from(e.target.files));
+      e.target.value = ''; // reset so re-picking the same file fires onChange again
+    },
+    [uploadFiles],
+  );
+
+  // Distinguish an OS file drag (exposes a 'Files' type) from the internal row-move drag (which sets
+  // dragRef and carries 'text/plain') so external upload and internal move never trigger each other.
+  const isExternalFileDrag = useCallback((e: React.DragEvent) => !dragRef.current && e.dataTransfer.types.includes('Files'), []);
+  const onListingDragOver = useCallback(
+    (e: React.DragEvent) => {
+      if (!isExternalFileDrag(e)) return;
+      // Always suppress the browser's default "open the dropped file" navigation over the listing.
+      e.preventDefault();
+      // While an upload is in flight (or before a folder loads) the drop zone is inert, mirroring the
+      // disabled Upload button, so a second batch can't clobber the first's progress/error state.
+      const busy = !cwd || uploadProgress !== null;
+      e.dataTransfer.dropEffect = busy ? 'none' : 'copy';
+      setFileDragOver(!busy);
+    },
+    [cwd, uploadProgress, isExternalFileDrag],
+  );
+  const onListingDragLeave = useCallback((e: React.DragEvent) => {
+    // Ignore leaves into descendants (row → row); only clear when the pointer leaves the listing.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setFileDragOver(false);
+  }, []);
+  const onListingDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!isExternalFileDrag(e)) return;
+      e.preventDefault();
+      setFileDragOver(false);
+      if (!cwd || uploadProgress !== null) return; // inert while busy (see onListingDragOver)
+      // Read files + detect folders synchronously — the DataTransfer/entry APIs are only valid during
+      // the drop event, not in the async upload that follows.
+      const items = Array.from(e.dataTransfer.items ?? []);
+      const files: File[] = [];
+      let hasDir = false;
+      if (items.length > 0 && items.some((it) => typeof it.webkitGetAsEntry === 'function')) {
+        for (const it of items) {
+          if (it.kind !== 'file') continue;
+          const entry = it.webkitGetAsEntry?.();
+          if (entry?.isDirectory) {
+            hasDir = true; // no recursive folder upload in v1
+            continue;
+          }
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      } else {
+        for (const f of Array.from(e.dataTransfer.files ?? [])) files.push(f);
+      }
+      void uploadFiles(files, hasDir ? [t('apps.fileBrowser.uploadNoFolders')] : []);
+    },
+    [cwd, uploadProgress, isExternalFileDrag, uploadFiles, t],
+  );
+
   const projectFavs = useMemo(
     () => (projects || []).filter((p) => !!p.folder_path).map((p) => ({ label: p.display_name, path: p.folder_path as string })),
     [projects],
@@ -551,6 +692,17 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={() => startNewEntry('folder')}>
             <FolderPlus className="size-3.5" /> {t('apps.fileBrowser.newFolder')}
           </Button>
+          <input ref={uploadInputRef} type="file" multiple className="hidden" onChange={onUploadPick} />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]"
+            disabled={!cwd || uploadProgress !== null}
+            onClick={() => uploadInputRef.current?.click()}
+          >
+            {uploadProgress ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />} {t('apps.fileBrowser.upload')}
+          </Button>
         </div>
 
         {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
@@ -593,8 +745,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             ))}
           </aside>
 
-          {/* Listing: Name / Size / Modified */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          {/* Listing: Name / Size / Modified. An OS file drag drops here to upload into the current
+              folder; the internal row-move drag (dragRef) is filtered out by isExternalFileDrag. */}
+          <div
+            className="relative flex min-w-0 flex-1 flex-col"
+            onDragOver={onListingDragOver}
+            onDragLeave={onListingDragLeave}
+            onDrop={onListingDrop}
+          >
             <div className="flex items-center border-b border-border px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
               <button type="button" onClick={() => cycleSort('name')} className={clsx('flex min-w-0 flex-1 items-center gap-1 text-left transition hover:text-foreground', sort?.col === 'name' && 'text-foreground')}>
                 <span className="truncate">{t('apps.fileBrowser.colName')}</span>
@@ -717,6 +875,13 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 );
               })}
             </div>
+            {fileDragOver && (
+              <div className="pointer-events-none absolute inset-1.5 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-cyan bg-cyan-soft/70">
+                <span className="rounded-md bg-surface px-3 py-1.5 text-[12.5px] font-medium text-foreground shadow-sm">
+                  {t('apps.fileBrowser.dropHint')}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -726,6 +891,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} className="size-3" />
             {t('apps.fileBrowser.showHidden')}
           </label>
+          {uploadProgress && (
+            <span className="flex items-center gap-1.5 text-cyan">
+              <Loader2 className="size-3 animate-spin" />
+              {t('apps.fileBrowser.uploading', { done: uploadProgress.done, total: uploadProgress.total })}
+            </span>
+          )}
           <span className="ml-auto flex min-w-0 items-center gap-2 font-mono">
             {selectedEntry && (
               <span className="truncate text-foreground/80">

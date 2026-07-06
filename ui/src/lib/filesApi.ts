@@ -238,6 +238,29 @@ export async function makeDir(path: string): Promise<{ ok: true }> {
   );
 }
 
+// The backend's per-file upload cap (core/file_browser_service.py MAX_FILE_BYTES). Mirrored here so
+// the UI can reject an oversized file before spending a request; the server enforces it regardless.
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+export type UploadResult = { name: string; path: string; size: number; mtime: number };
+
+// Upload one file into `dir` (an absolute destination directory) as multipart/form-data. Rides the
+// same apiFetch credentials + CSRF handling as the sibling mutations; we deliberately do NOT set
+// Content-Type so the browser adds the multipart boundary itself. The binary part's filename is the
+// target name unless `opts.name` overrides it. `overwrite` (default false) lets a caller replace an
+// existing file after the backend reports errors.exists (409).
+export async function uploadFile(
+  dir: string,
+  file: File,
+  opts: { name?: string; overwrite?: boolean } = {},
+): Promise<UploadResult> {
+  const form = new FormData();
+  form.append('dir', dir);
+  form.append('file', file, opts.name || file.name);
+  if (opts.overwrite) form.append('overwrite', 'true');
+  return parse<UploadResult>(await apiFetch('/api/files/upload', { method: 'POST', body: form }));
+}
+
 export async function deletePath(path: string, recursive = false): Promise<{ ok: true }> {
   return parse(
     await apiFetch('/api/files/delete', {

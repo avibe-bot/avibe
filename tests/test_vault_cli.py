@@ -305,10 +305,12 @@ def test_access_request_cli_accepts_protected_static_request(capfd):
     assert payload["request"]["card"]["protection"] == "protected"
 
 
-def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch):
+def test_sign_cli_standard_key_returns_inline_signature_without_request(capfd, monkeypatch):
     from vibe import api
 
-    monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "ab" * 64, "recovery_id": 1}))
+    signature = {"signature": "ab" * 64, "recovery_id": 1}
+    sign = Mock(return_value=signature)
+    monkeypatch.setattr(api, "avault_sign", sign)
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
@@ -319,7 +321,42 @@ def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch)
         )
 
     assert cli.cmd_vault_sign(_ns(name="ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0
-    request_id = json.loads(capfd.readouterr().out)["request_id"]
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_signature"
+    assert payload["name"] == "ETH_KEY"
+    assert payload["scheme"] == "ecdsa-secp256k1-recoverable"
+    assert payload["digest"] == "00" * 32
+    assert payload["signature"] == signature
+    sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
+    with cli._open_vault_engine().connect() as conn:
+        assert list(conn.execute(vault_requests.select()).mappings()) == []
+
+
+def test_sign_request_and_await_cli_reads_approved_signature_for_always_ask_standard_key(capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "ab" * 64, "recovery_id": 1}))
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+            policy={"always_ask": True},
+        )
+
+    assert cli.cmd_vault_sign(_ns(name="ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0
+    request_payload = json.loads(capfd.readouterr().out)
+    assert request_payload["kind"] == "vault_sign_request"
+    assert "signature" not in request_payload
+    request_id = request_payload["request_id"]
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(vault_requests.select().where(vault_requests.c.id == request_id)).mappings().one()
+        assert row["status"] == "pending"
+        assert row["callback_status"] is None
+
     api.vault_sign(
         {
             "name": "ETH_KEY",

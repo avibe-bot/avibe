@@ -2686,6 +2686,7 @@ def vault_sign(payload: dict) -> dict:
     engine = _vault_engine()
     protected_response: dict | None = None
     protected_event: dict | None = None
+    approval_required_request: dict | None = None
     try:
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
@@ -2747,7 +2748,27 @@ def vault_sign(payload: dict) -> dict:
                 request_id = str(payload.get("request_id") or "")
                 if request_id:
                     vault_service.claim_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
-                key_envelope = vault_service.get_key_envelope(conn, name)
+                    key_envelope = vault_service.get_key_envelope(conn, name)
+                elif vault_service.sign_needs_approval(conn, name):
+                    request = vault_service.create_sign_request(
+                        conn,
+                        name,
+                        digest=digest,
+                        scheme=scheme,
+                        requester=_vault_requester_payload(payload),
+                        delivery=_vault_delivery_payload(payload),
+                        expires_at=_expires_at_from_ttl(payload),
+                    )
+                    approval_required_request = request
+                    protected_event = {
+                        "scope": "request",
+                        "request_id": request.get("id"),
+                        "request_status": request.get("status"),
+                        "secret_name": request.get("secret_name"),
+                    }
+                    protected_response = {"ok": False, "code": "approval_required", "request": request}
+                else:
+                    key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
@@ -2760,6 +2781,8 @@ def vault_sign(payload: dict) -> dict:
     if protected_response is not None:
         if protected_event is not None:
             _publish_vaults_updated(**protected_event)
+        if approval_required_request is not None:
+            _notify_vault_request_created(approval_required_request)
         return protected_response
 
     def _fail_claimed_request(reason: str) -> None:

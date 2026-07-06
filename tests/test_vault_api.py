@@ -1299,9 +1299,79 @@ def test_agent_sign_request_approved_via_avault_sign(monkeypatch):
     sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
     with api._vault_engine().connect() as conn:
         audit_row = conn.execute(
-            select(vault_audit.c.delivery).where(vault_audit.c.request_id == requested["request"]["id"], vault_audit.c.event == "signed")
+            select(vault_audit.c.delivery).where(
+                vault_audit.c.request_id == requested["request"]["id"],
+                vault_audit.c.event == "signed",
+            )
         ).scalar_one()
     assert json.loads(audit_row)["browser_signed"] is False
+
+
+def test_vault_sign_standard_key_without_request_signs_headlessly(monkeypatch):
+    signature = {"signature": "ab" * 64, "recovery_id": 1}
+    sign = Mock(return_value=signature)
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    result = api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    assert result == {"ok": True, "signature": signature}
+    sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
+    assert api.get_vault_requests()["requests"] == []
+
+
+def test_vault_sign_standard_always_ask_without_request_requires_approval(monkeypatch):
+    sign = Mock(return_value={"signature": "ab" * 64, "recovery_id": 1})
+    notify = Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    monkeypatch.setattr(api, "_notify_vault_request_created", notify)
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "policy": {"always_ask": True},
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    result = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": "00" * 32,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "session_id": "ses_1",
+            "skill": "wallet-sign",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "approval_required"
+    request = result["request"]
+    assert request["secret_name"] == "ETH_KEY"
+    assert request["status"] == "pending"
+    assert request["requester"]["session_id"] == "ses_1"
+    assert request["requester"]["skill"] == "wallet-sign"
+    assert request["delivery"]["session_id"] == "ses_1"
+    assert request["delivery"]["skill"] == "wallet-sign"
+    assert request["card"]["protection"] == "standard"
+    assert "signature" not in result
+    sign.assert_not_called()
+    notify.assert_called_once_with(request)
+    with api._vault_engine().connect() as conn:
+        [row] = list(conn.execute(vault_requests.select()).mappings())
+        assert row["id"] == request["id"]
+        assert row["callback_status"] is None
+        assert vault_service._request_session_id(dict(row)) == "ses_1"
 
 
 def test_agent_sign_claims_request_before_avault_sign(monkeypatch):
