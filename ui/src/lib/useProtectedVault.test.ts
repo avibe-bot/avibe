@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { readPasskeyPrfResult } from './useProtectedVault';
+import { bytesToBase64 } from './vaultCrypto';
+import { passkeyCreationOptions, passkeyPrfAssertionOptions, readPasskeyPrfResult } from './useProtectedVault';
 
 function passkeyCredential(first?: ArrayBuffer | ArrayBufferView | number[]): PublicKeyCredential {
   return {
@@ -13,6 +14,45 @@ function passkeyCredential(first?: ArrayBuffer | ArrayBufferView | number[]): Pu
 }
 
 describe('protected vault WebAuthn PRF result handling', () => {
+  it('creates passkeys as required resident credentials', () => {
+    const options = passkeyCreationOptions('alex-app.avibe.bot');
+
+    expect(options.rp.id).toBe('alex-app.avibe.bot');
+    expect(options.authenticatorSelection).toEqual({ residentKey: 'required', userVerification: 'required' });
+    expect(options.extensions).toEqual({ prf: {} });
+  });
+
+  it('uses simple PRF eval with allowCredentials for credential-bound unlock', () => {
+    const prfSalt = new Uint8Array(32).fill(0x11);
+    const credentialId = new Uint8Array([1, 2, 3, 4]);
+    const options = passkeyPrfAssertionOptions(
+      [{ credentialId: bytesToBase64(credentialId), prfSalt }],
+      'alex-app.avibe.bot',
+    );
+    const prf = (options.extensions as { prf: { eval: { first: ArrayBuffer }; evalByCredential?: unknown } }).prf;
+
+    expect(options.rpId).toBe('alex-app.avibe.bot');
+    expect(options.userVerification).toBe('required');
+    expect(options.allowCredentials).toHaveLength(1);
+    expect(new Uint8Array(options.allowCredentials?.[0]?.id as ArrayBuffer)).toEqual(credentialId);
+    expect(new Uint8Array(prf.eval.first)).toEqual(prfSalt);
+    expect(prf.evalByCredential).toBeUndefined();
+  });
+
+  it('rejects multiple passkey entries instead of falling back to evalByCredential', () => {
+    const prfSalt = new Uint8Array(32).fill(0x11);
+
+    expect(() =>
+      passkeyPrfAssertionOptions(
+        [
+          { credentialId: bytesToBase64(new Uint8Array([1])), prfSalt },
+          { credentialId: bytesToBase64(new Uint8Array([2])), prfSalt },
+        ],
+        'alex-app.avibe.bot',
+      ),
+    ).toThrow(/passkey-multiple-not-supported/);
+  });
+
   it('copies the PRF output before handing it to the VMK wrap chain', () => {
     const source = new Uint8Array(32).fill(0x22);
     const backing = source.buffer as ArrayBuffer;

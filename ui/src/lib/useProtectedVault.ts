@@ -84,11 +84,6 @@ function randomChallenge(): ArrayBuffer {
   return bufferSource(crypto.getRandomValues(new Uint8Array(32)));
 }
 
-/** WebAuthn `prf.evalByCredential` keys are base64url-encoded credential ids. */
-function base64ToBase64Url(b64: string): string {
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
 /** Strip a stored record's DEK fields back to the bare VMK wrap_meta ({v, copies, scheme?}). */
 function baseVmkWrapMeta(wrapMeta: string): string {
   const parsed = JSON.parse(wrapMeta) as Record<string, unknown>;
@@ -124,32 +119,55 @@ export function readPasskeyPrfResult(credential: PublicKeyCredential | null): Ui
   return prfOutput;
 }
 
-type PasskeyEntry = { credentialId?: string; prfSalt: Uint8Array };
+export type PasskeyEntry = { credentialId?: string; prfSalt: Uint8Array };
+
+function singlePasskeyEntry(entries: PasskeyEntry[]): PasskeyEntry {
+  if (entries.length === 0) throw new Error('passkey-not-configured');
+  if (entries.length > 1) throw new Error('passkey-multiple-not-supported');
+  return entries[0];
+}
+
+export function passkeyCreationOptions(rpId: string): PublicKeyCredentialCreationOptions {
+  return {
+    rp: { name: WEBAUTHN_RP_NAME, id: rpId },
+    user: { id: bufferSource(WEBAUTHN_USER_HANDLE), name: 'avibe-vault', displayName: WEBAUTHN_RP_NAME },
+    challenge: randomChallenge(),
+    pubKeyCredParams: [
+      { type: 'public-key', alg: -7 },
+      { type: 'public-key', alg: -257 },
+    ],
+    authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+    extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
+  };
+}
+
+export function passkeyPrfAssertionOptions(entries: PasskeyEntry[], rpId: string): PublicKeyCredentialRequestOptions {
+  const entry = singlePasskeyEntry(entries);
+  const options: PublicKeyCredentialRequestOptions = {
+    challenge: randomChallenge(),
+    rpId,
+    userVerification: 'required',
+    extensions: webAuthnPrfExtensionInput(entry.prfSalt) as AuthenticationExtensionsClientInputs,
+  };
+  if (entry.credentialId) {
+    options.allowCredentials = [
+      {
+        type: 'public-key' as const,
+        id: bufferSource(base64ToBytes(entry.credentialId)),
+      },
+    ];
+  }
+  return options;
+}
 
 /**
- * Assert one of the vault's passkeys and extract its PRF output. Uses
- * `evalByCredential` so each credential is evaluated with its own stored salt, then
- * returns the salt of whichever credential actually responded.
+ * Assert the vault passkey and extract its PRF output. Keep the assertion on the
+ * simple `prf.eval` path: iOS 1Password currently fails on `evalByCredential`,
+ * while `allowCredentials + prf.eval` preserves the exact credential binding.
  */
 async function assertPasskeyPrf(entries: PasskeyEntry[]): Promise<{ prfOutput: Uint8Array; prfSalt: Uint8Array }> {
-  const withId = entries.filter((entry) => entry.credentialId);
-  const evalByCredential: Record<string, { first: ArrayBuffer }> = {};
-  for (const entry of withId) {
-    evalByCredential[base64ToBase64Url(entry.credentialId as string)] = { first: bufferSource(entry.prfSalt) };
-  }
-  const extensions = (withId.length > 0
-    ? { prf: { evalByCredential } }
-    : webAuthnPrfExtensionInput(entries[0].prfSalt)) as AuthenticationExtensionsClientInputs;
   const assertion = (await navigator.credentials.get({
-    publicKey: {
-      challenge: randomChallenge(),
-      allowCredentials: withId.map((entry) => ({
-        type: 'public-key' as const,
-        id: bufferSource(base64ToBytes(entry.credentialId as string)),
-      })),
-      userVerification: 'required',
-      extensions,
-    },
+    publicKey: passkeyPrfAssertionOptions(entries, window.location.hostname),
   })) as PublicKeyCredential | null;
   if (!assertion) throw new Error('passkey-cancelled');
   const prfOutput = readPasskeyPrfResult(assertion);
@@ -161,17 +179,7 @@ async function assertPasskeyPrf(entries: PasskeyEntry[]): Promise<{ prfOutput: U
 /** Create a resident passkey, then assert it once to extract the PRF output. */
 async function setupPasskeyFactor(prfSalt: Uint8Array): Promise<{ prfOutput: Uint8Array; credentialId: string }> {
   const created = (await navigator.credentials.create({
-    publicKey: {
-      rp: { name: WEBAUTHN_RP_NAME, id: window.location.hostname },
-      user: { id: bufferSource(WEBAUTHN_USER_HANDLE), name: 'avibe-vault', displayName: WEBAUTHN_RP_NAME },
-      challenge: randomChallenge(),
-      pubKeyCredParams: [
-        { type: 'public-key', alg: -7 },
-        { type: 'public-key', alg: -257 },
-      ],
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
-      extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
-    },
+    publicKey: passkeyCreationOptions(window.location.hostname),
   })) as PublicKeyCredential | null;
   if (!created) throw new Error('passkey-cancelled');
   const credentialId = bytesToBase64(toUint8(created.rawId));
