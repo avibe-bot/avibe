@@ -310,6 +310,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("`vibe show path --session-id sesk8m4q2p7x`", prompt)
         self.assertIn("Make the page work reasonably on mobile", prompt)
         self.assertIn("managed React/Vite apps", prompt)
+        self.assertIn("Tailwind CSS v4 utility classes are built in", prompt)
+        self.assertIn('must keep `@import "tailwindcss";` at the top', prompt)
         self.assertNotIn("Ready to visualize", prompt)
         self.assertIn("@/components/ui/progress", prompt)
         self.assertNotIn("Excalidraw-style static SVG/PNG diagrams", prompt)

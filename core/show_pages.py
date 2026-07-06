@@ -944,7 +944,9 @@ export default function App() {
 
 
 def _default_styles_css() -> str:
-    return """:root {
+    return """@import "tailwindcss";
+
+:root {
   color-scheme: light;
 }
 

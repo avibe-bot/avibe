@@ -259,6 +259,8 @@ def test_private_show_page_materializes_workspace_before_runtime_proxy(monkeypat
     assert response.status_code == 200
     assert b"Runtime Page" in response.content
     assert (page_dir / "src" / "App.tsx").exists()
+    styles_css = (page_dir / "src" / "styles.css").read_text(encoding="utf-8")
+    assert styles_css.startswith('@import "tailwindcss";'), styles_css[:60]
     assert manager.calls[0][1] == "/sessions/ses123/app/"
 
 
