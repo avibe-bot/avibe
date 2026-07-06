@@ -368,6 +368,51 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
     assert "sk-" not in json.dumps(payload)
 
 
+def test_rm_refuses_protected_secret_and_leaves_it(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_RM", protection="protected", sealed=_sealed("protected-rm"))
+
+    code = cli.cmd_vault_rm(_ns(name="PROTECTED_RM"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    payload = json.loads(captured.err)
+    assert payload["code"] == "protected_delete_forbidden"
+    assert payload["help_command"] == "vibe vault rm --help"
+    cli.cmd_vault_list(_ns())
+    listed = json.loads(capfd.readouterr().out)["secrets"]
+    assert [secret["name"] for secret in listed] == ["PROTECTED_RM"]
+    assert listed[0]["protection"] == "protected"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "PROTECTED_RM")["protection"] == "protected"
+
+
+def test_rm_standard_secret_still_deletes(capfd):
+    _create_standard_secret("STANDARD_RM")
+
+    code = cli.cmd_vault_rm(_ns(name="STANDARD_RM"))
+    captured = capfd.readouterr()
+
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload["kind"] == "vault_secret"
+    assert payload["removed"] is True
+    assert payload["name"] == "STANDARD_RM"
+    with cli._open_vault_engine().connect() as conn:
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "STANDARD_RM")
+
+
+def test_rm_missing_secret_still_reports_not_found(capfd):
+    code = cli.cmd_vault_rm(_ns(name="MISSING_RM"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    payload = json.loads(captured.err)
+    assert payload["code"] == "secret_not_found"
+    assert payload["help_command"] == "vibe vault rm --help"
+
+
 def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))

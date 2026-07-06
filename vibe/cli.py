@@ -4957,6 +4957,14 @@ def cmd_vault_rm(args):
         engine = _open_vault_engine()
         release_scopes: list[dict[str, str]] = []
         with engine.begin() as conn:
+            meta = vault_service.get_secret_meta(conn, args.name)
+            if meta.get("protection") == "protected":
+                raise TaskCliError(
+                    f"'{args.name}' is a protected secret — delete it in the browser (Vaults), where it's "
+                    f"confirmed with your passkey. The CLI can't delete protected secrets.",
+                    code="protected_delete_forbidden",
+                    help_command=help_command,
+                )
             grant_rows = vault_service.active_grant_rows_for_secret(conn, args.name)
             vault_service.delete_secret(conn, args.name)
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
