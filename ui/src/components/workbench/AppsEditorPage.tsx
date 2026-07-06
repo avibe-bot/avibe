@@ -33,17 +33,26 @@ function readLaunch(state: unknown): LaunchFile | null {
   };
 }
 
-// Live desktop/phone flag, re-evaluated on resize/rotate so crossing the breakpoint re-picks the
-// right surface (mirrors ThemeContext's system-theme media subscription).
-function useDesktop(): boolean {
-  const [desktop, setDesktop] = useState(() => window.matchMedia(DESKTOP_QUERY).matches);
+// Pick the surface ONCE at mount, deliberately NOT reactive: swapping between the mobile pane and the
+// desktop IDE on a mid-edit resize/rotate would unmount whichever holds the buffer and silently drop
+// unsaved edits. A phone that rotates keeps the surface it opened with.
+function useDesktopAtMount(): boolean {
+  return useState(() => window.matchMedia(DESKTOP_QUERY).matches)[0];
+}
+
+// Warn before a hard unload (refresh / tab close / leaving the SPA) while there are unsaved edits.
+// SPA in-app navigation does NOT fire this — that's handled separately (mobile: the NavGuard on the
+// tab bar; both surfaces: the editor's own guarded controls).
+function useUnloadWarning(active: boolean): void {
   useEffect(() => {
-    const mq = window.matchMedia(DESKTOP_QUERY);
-    const onChange = () => setDesktop(mq.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
-  return desktop;
+    if (!active) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [active]);
 }
 
 const PaneLoading: React.FC = () => {
@@ -54,7 +63,7 @@ const PaneLoading: React.FC = () => {
 export const AppsEditorPage: React.FC = () => {
   const { t } = useTranslation();
   const location = useLocation();
-  const desktop = useDesktop();
+  const desktop = useDesktopAtMount();
   // Re-read whenever the router state changes (each navigation carries a fresh state object) so
   // opening another file while already on this route swaps the launch target.
   const launch = useMemo(() => readLaunch(location.state), [location.state]);
@@ -65,26 +74,34 @@ export const AppsEditorPage: React.FC = () => {
         <h1 className="text-[18px] font-semibold text-foreground">{t('apps.editor.label')}</h1>
         <p className="text-[12px] text-muted">{t('apps.editor.tagline')}</p>
       </div>
-      {desktop ? (
-        // Full Editor IDE, forced dark like its Dock window (data-theme re-cascades the dark token
-        // set to this subtree). No windowId: the window-only niceties (title, close guard, ⌘O/⌘N)
-        // stay inert, but open/edit/save all work full-page.
-        <div data-theme="dark" className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
-          <Suspense fallback={<PaneLoading />}>
-            <EditorApp params={launch ? { path: launch.path, filename: launch.filename, mtime: launch.mtime } : undefined} />
-          </Suspense>
-        </div>
-      ) : (
-        <MobileEditor launch={launch} />
-      )}
+      {desktop ? <DesktopEditor launch={launch} /> : <MobileEditor launch={launch} />}
+    </div>
+  );
+};
+
+// Desktop / tablet: the full Editor IDE, forced dark like its Dock window (data-theme re-cascades the
+// dark token set to this subtree). No windowId, so the window-only niceties (title, close guard,
+// ⌘O/⌘N) stay inert; open/edit/save all work full-page. `useWindowCloseGuard` is a no-op without a
+// window, so a page-level unload warning covers a dirty refresh/close here.
+const DesktopEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
+  const [dirty, setDirty] = useState(false);
+  useUnloadWarning(dirty);
+  return (
+    <div data-theme="dark" className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
+      <Suspense fallback={<PaneLoading />}>
+        <EditorApp
+          onDirtyChange={setDirty}
+          params={launch ? { path: launch.path, filename: launch.filename, mtime: launch.mtime } : undefined}
+        />
+      </Suspense>
     </div>
   );
 };
 
 // Phone single-file editor: one file at a time (no activity bar / explorer). FileEditorPane already
 // renders the filename + dirty dot + Save header and the Monaco touch accessory bar; opening/switching
-// a file reuses the File Browser (the mobile file-picking surface), which owns the editable-vs-download
-// decision. The name-only launch has no live cursor/search — that richness stays on the desktop IDE.
+// a file reuses the File Browser (the mobile file-picking surface, which owns the editable-vs-download
+// decision). The name-only launch has no live cursor/search — that richness stays on the desktop IDE.
 const MobileEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -108,27 +125,23 @@ const MobileEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
     navigate('/apps/files');
   };
 
-  // Guard leaving with unsaved edits. The NavGuard covers in-app mobile tab-bar navigation (whose
-  // NavLinks bypass `beforeunload`); the `beforeunload` handler covers a hard unload (refresh /
-  // close / leaving the SPA). The header's open button is separately guarded in openAnother.
+  // Guard leaving with unsaved edits: the NavGuard confirms in-app mobile tab-bar navigation (whose
+  // NavLinks bypass `beforeunload`); useUnloadWarning covers a hard unload. The header open button is
+  // separately guarded in openAnother.
   useEffect(() => {
     setGuard(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
     return () => setGuard(null);
   }, [dirty, setGuard, t]);
-  useEffect(() => {
-    if (!dirty) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [dirty]);
+  useUnloadWarning(dirty);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface">
       {file ? (
+        // Key by path so switching to a different file remounts the pane and reads it fresh —
+        // FileEditorPane treats a live path change as a rename and skips the reread otherwise, which
+        // would show the previous file's buffer under the new name.
         <FileEditorPane
+          key={file.path}
           path={file.path}
           filename={file.filename}
           mtime={file.mtime}

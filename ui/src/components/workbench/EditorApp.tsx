@@ -81,7 +81,13 @@ function languageLabel(filename: string | undefined): string | undefined {
 // fully integrated here. Files opens a file via openApp('editor', { params: { path } }). Open
 // Folder / Save use the in-window FilePicker (browsing the real filesystem), and New File opens an
 // untitled buffer that picks its location only on first save.
-export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
+export const EditorApp: React.FC<{
+  windowId?: string;
+  params?: Record<string, unknown>;
+  /** Report whether ANY open tab has unsaved edits — the full-page route uses it for an unload guard
+   *  (the window mount relies on useWindowCloseGuard instead). */
+  onDirtyChange?: (dirty: boolean) => void;
+}> = ({ windowId, params, onDirtyChange }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const [root, setRoot] = useState<string | null>(null);
@@ -284,6 +290,11 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
 
   const anyDirty = Object.values(dirty).some(Boolean);
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
+  // Surface aggregate dirty state to a non-window host (the full-page /apps/editor route), which has
+  // no window close guard and registers a page-level unload warning instead.
+  useEffect(() => {
+    onDirtyChange?.(anyDirty);
+  }, [anyDirty, onDirtyChange]);
 
   // Reflect the active file in the window title, so the Dock + titlebar identify which file this
   // editor window holds (important when several editor windows are open). Clears to the app title
