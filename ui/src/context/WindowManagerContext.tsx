@@ -66,6 +66,12 @@ export interface WindowManagerValue {
    * titles). Read on save; the value comes back through the window's params on the next restore.
    */
   setStateProvider: (id: string, getState: (() => unknown) | null) => void;
+  /**
+   * Mark a window as closing (its exit animation has started but it's still mounted until
+   * animationEnd calls close()). Excludes it from the persisted snapshot so a reload during the
+   * ~300ms close animation doesn't write back — and resurrect — a window the user just closed.
+   */
+  markClosing: (id: string) => void;
   /** Run a window's close guard (confirm if it has a message); true = may close. */
   confirmClose: (id: string) => boolean;
 }
@@ -117,6 +123,9 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   // Per-window state providers: a body registers a getter returning its JSON-able snapshot
   // (Editor tabs, Terminal tab titles), read when the layout is saved. Same ref pattern.
   const stateProviders = useRef(new Map<string, () => unknown>());
+  // Windows whose close exit animation has started but which are still mounted (removed only at
+  // animationEnd). Excluded from the snapshot so a reload mid-animation doesn't re-persist them.
+  const closingIds = useRef(new Set<string>());
 
   const setCloseGuard = useCallback((id: string, getMessage: (() => string | null) | null) => {
     if (getMessage) closeGuards.current.set(id, getMessage);
@@ -128,23 +137,29 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
     else stateProviders.current.delete(id);
   }, []);
 
+  const markClosing = useCallback((id: string) => {
+    closingIds.current.add(id);
+  }, []);
+
   // Snapshot every window plus its body's state (from its provider). A provider that throws
   // contributes no appState rather than failing the whole save. Drop the injected restore payload
   // from params so a re-save keeps only original launch params (no nested stale snapshots).
   const buildSnapshot = useCallback((): PersistedWindow[] =>
-    windowsRef.current.map((w) => {
-      let appState: unknown;
-      try {
-        appState = stateProviders.current.get(w.id)?.();
-      } catch {
-        appState = undefined;
-      }
-      // A restored window's lazy body may not have mounted + registered its provider yet. Until it
-      // does, carry the payload it was restored WITH (still in params) so a save during that gap
-      // doesn't drop the very state we're persisting for.
-      if (appState === undefined) appState = w.params?.[WINDOW_RESTORE_PARAM];
-      return { ...w, params: stripRestoreParam(w.params), appState };
-    }), []);
+    windowsRef.current
+      .filter((w) => !closingIds.current.has(w.id))
+      .map((w) => {
+        let appState: unknown;
+        try {
+          appState = stateProviders.current.get(w.id)?.();
+        } catch {
+          appState = undefined;
+        }
+        // A restored window's lazy body may not have mounted + registered its provider yet. Until
+        // it does, carry the payload it was restored WITH (still in params) so a save during that
+        // gap doesn't drop the very state we're persisting for.
+        if (appState === undefined) appState = w.params?.[WINDOW_RESTORE_PARAM];
+        return { ...w, params: stripRestoreParam(w.params), appState };
+      }), []);
 
   // Debounced persistence: coalesce bursts of geometry/z/open-close changes into one write.
   const saveTimer = useRef<number | null>(null);
@@ -215,6 +230,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   const close = useCallback((id: string) => {
     closeGuards.current.delete(id);
     stateProviders.current.delete(id);
+    closingIds.current.delete(id);
     setWindows((prev) => prev.filter((w) => w.id !== id));
   }, []);
 
@@ -296,9 +312,10 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       setTitle,
       setCloseGuard,
       setStateProvider,
+      markClosing,
       confirmClose,
     }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setCloseGuard, setStateProvider, confirmClose],
+    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setCloseGuard, setStateProvider, markClosing, confirmClose],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;

@@ -24,6 +24,11 @@ export const WORKBENCH_WINDOWS_STORAGE_KEY = 'avibe.workbench.windows.v1';
 // to re-open their tabs; apps without persisted state ignore it.
 export const WINDOW_RESTORE_PARAM = '__avibeRestoredState';
 
+// Sanity caps against a corrupt/oversized stored value — well above any real workbench, but bounded
+// so one bad localStorage entry can't spawn thousands of windows / tabs / shells and freeze the UI.
+export const MAX_RESTORED_WINDOWS = 40;
+export const MAX_RESTORED_TABS = 50;
+
 // One window as persisted. Mirrors the rehydratable subset of WindowInstance, plus the body's
 // own snapshot in `appState`. This is the on-disk schema — keep it explicit and stable; change
 // the storage-key version if it changes incompatibly.
@@ -107,7 +112,8 @@ export function parseWorkbenchWindows(raw: string | null | undefined): WindowIns
   }
   if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.windows)) return [];
   const windows: WindowInstance[] = [];
-  for (const entry of parsed.windows) {
+  // Bound the scan + output so a corrupt/oversized array can't build thousands of windows.
+  for (const entry of parsed.windows.slice(0, MAX_RESTORED_WINDOWS)) {
     const w = toRuntimeWindow(entry);
     if (w) windows.push(w);
   }

@@ -7,7 +7,7 @@ import { useApi } from '../../context/ApiContext';
 import { useWindowState } from '../../context/WindowManagerContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { acquireTerminalSlot, releaseTerminalSlot } from '../../lib/terminalSlots';
-import { WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
+import { MAX_RESTORED_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
 import type { TerminalStatus } from './TerminalView';
 
 // Lazy so xterm.js stays out of the main bundle until a terminal opens.
@@ -67,7 +67,8 @@ export const TerminalTabs: React.FC<{ windowed?: boolean; windowId?: string; par
   const [tabs, setTabs] = useState<Tab[]>(() => {
     const restore = windowed ? (params?.[WINDOW_RESTORE_PARAM] as TerminalRestore | undefined) : undefined;
     if (restore && Array.isArray(restore.tabs) && restore.tabs.length > 0) {
-      return restore.tabs.map((rt) => ({
+      // Cap before acquiring slots so a corrupt/oversized array can't open a flood of shells.
+      return restore.tabs.slice(0, MAX_RESTORED_TABS).map((rt) => ({
         key: ++tabSeq.current,
         slot: acquireTerminalSlot(),
         title: typeof rt?.title === 'string' ? rt.title : undefined,

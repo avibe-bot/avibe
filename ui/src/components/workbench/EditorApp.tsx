@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager, useWindowState } from '../../context/WindowManagerContext';
-import { WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
+import { MAX_RESTORED_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
 import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
@@ -43,7 +43,8 @@ function sanitizeEditorRestore(value: unknown): EditorRestore | null {
   const v = value as { root?: unknown; tabs?: unknown; activePath?: unknown };
   const root = typeof v.root === 'string' ? v.root : v.root === null ? null : undefined;
   if (root === undefined) return null; // root must be a string path or null
-  const tabs = (Array.isArray(v.tabs) ? v.tabs : []).flatMap((t): EditorRestore['tabs'] => {
+  // Cap before the flatMap so a corrupt/oversized array can't drive an unbounded fileMeta fan-out.
+  const tabs = (Array.isArray(v.tabs) ? v.tabs : []).slice(0, MAX_RESTORED_TABS).flatMap((t): EditorRestore['tabs'] => {
     if (!t || typeof t !== 'object') return [];
     const tb = t as { path?: unknown; name?: unknown; kind?: unknown };
     if (typeof tb.path !== 'string' || typeof tb.name !== 'string') return [];

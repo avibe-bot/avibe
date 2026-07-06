@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_RESTORED_WINDOWS,
   WINDOW_RESTORE_PARAM,
   parseWorkbenchWindows,
   serializeWorkbenchWindows,
@@ -78,6 +79,11 @@ describe('workbench window persistence — corrupt / old data is ignored', () =>
     });
     const result = parseWorkbenchWindows(raw);
     expect(result.map((w) => w.id)).toEqual(['win-2']);
+  });
+
+  it('caps the number of restored windows against a corrupt/oversized array', () => {
+    const windows = Array.from({ length: MAX_RESTORED_WINDOWS + 25 }, (_, i) => persisted({ id: `win-${i}`, appId: 'files' }));
+    expect(parseWorkbenchWindows(serializeWorkbenchWindows(windows))).toHaveLength(MAX_RESTORED_WINDOWS);
   });
 
   it('rejects inherited Object keys as appIds (own registry keys only)', () => {

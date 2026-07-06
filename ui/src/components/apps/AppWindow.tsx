@@ -130,7 +130,12 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       Glyph: X,
       // A dirty editor body can veto the close (confirm) before the exit animation.
       onClick: () => {
-        if (wm.confirmClose(win.id)) setExitKind((k) => k ?? 'close');
+        // Mark closing so a reload during the ~300ms exit animation doesn't re-persist (and
+        // resurrect) this window — it's removed from manager state only at animationEnd.
+        if (wm.confirmClose(win.id)) {
+          wm.markClosing(win.id);
+          setExitKind((k) => k ?? 'close');
+        }
       },
       label: t('common.close'),
     },
