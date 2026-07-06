@@ -304,13 +304,21 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           // Rebuild in one update to preserve tab order + fresh mtimes; then re-select the saved
           // active tab (falling back to the last if it was among the dropped/vanished files).
           const rebuilt: Tab[] = alive.map((m) => ({ id: `t${++tabSeq.current}`, path: m.info.path, name: m.info.name, mtime: m.mtime, kind: m.info.kind }));
-          // Clear the pending flag inside the same update that publishes the restored tabs, so the
-          // provider begins reporting real state exactly when it goes live — no clobber window.
-          setTabs(() => {
+          // The editor is interactive during the await (root is already set), so the user may have
+          // opened / created a tab meanwhile. Merge — restored tabs first, then any tab they opened
+          // that a restored one doesn't already cover (dedup saved files by path; untitled buffers
+          // have no path, so they always survive) — instead of replacing and discarding their work.
+          // Clear the pending flag inside the same update so the provider reports real state exactly
+          // when it goes live — no clobber window.
+          setTabs((current) => {
             restorePendingRef.current = false;
-            return rebuilt;
+            const restoredPaths = new Set(rebuilt.map((tb) => tb.path));
+            const userOpened = current.filter((tb) => tb.path == null || !restoredPaths.has(tb.path));
+            return [...rebuilt, ...userOpened];
           });
-          setActive((rebuilt.find((tb) => tb.path === restore.activePath) ?? rebuilt[rebuilt.length - 1]).id);
+          // Re-select the saved active tab, but only if the user hasn't focused a tab of their own
+          // during the restore — never yank focus away from a tab they just opened.
+          setActive((cur) => cur ?? (rebuilt.find((tb) => tb.path === restore.activePath) ?? rebuilt[rebuilt.length - 1]).id);
         })();
       }
       return;

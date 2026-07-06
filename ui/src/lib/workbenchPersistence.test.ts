@@ -80,6 +80,14 @@ describe('workbench window persistence — corrupt / old data is ignored', () =>
     expect(result.map((w) => w.id)).toEqual(['win-2']);
   });
 
+  it('rejects inherited Object keys as appIds (own registry keys only)', () => {
+    // A corrupt/hostile blob must not sneak "toString" / "__proto__" through an `in` check —
+    // APP_REGISTRY[thatKey] would resolve to a non-app value and crash the window layer.
+    for (const appId of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+      expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ appId })] }))).toEqual([]);
+    }
+  });
+
   it('drops entries with malformed bounds or missing fields', () => {
     const raw = JSON.stringify({
       version: 1,

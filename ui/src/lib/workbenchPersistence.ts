@@ -65,7 +65,9 @@ function toRuntimeWindow(v: unknown): WindowInstance | null {
   if (!isPlainObject(v)) return null;
   const { id, appId, title, params, bounds, z, minimized, maximized, restoreBounds, appState } = v;
   if (typeof id !== 'string') return null;
-  if (typeof appId !== 'string' || !(appId in APP_REGISTRY)) return null;
+  // OWN keys only: `in` would accept inherited object keys ("toString", "__proto__") from a corrupt
+  // blob, and APP_REGISTRY[thatKey] would then resolve to a non-app value that crashes the layer.
+  if (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(APP_REGISTRY, appId)) return null;
   if (!isBounds(bounds) || !isFiniteNumber(z) || typeof minimized !== 'boolean' || typeof maximized !== 'boolean') {
     return null;
   }
