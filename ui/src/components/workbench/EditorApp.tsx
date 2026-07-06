@@ -3,7 +3,8 @@ import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FileText, FolderOpen, Git
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
+import { useWindowCloseGuard, useWindowManager, useWindowState } from '../../context/WindowManagerContext';
+import { WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
 import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
@@ -21,6 +22,16 @@ const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ defa
 // `kind` defaults to 'edit' (a Monaco buffer). A 'preview' tab renders the read-only FilePreview
 // kernel instead — for a raster image / PDF / Office doc, which have no editable text form.
 type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number; kind?: 'edit' | 'preview' };
+
+// The Editor's persisted snapshot (via useWindowState): the explorer root plus every SAVED tab
+// (untitled buffers are dropped — no on-disk file to re-read). Restored by re-reading each file
+// from disk for a fresh mtime, so unsaved buffer text / dirty state is deliberately NOT persisted
+// (the close-guard already covers loss-of-work at close time).
+type EditorRestore = {
+  root: string | null;
+  tabs: { path: string; name: string; kind?: 'edit' | 'preview' }[];
+  activePath: string | null;
+};
 
 // A pending file dialog, rendered as the in-window FilePicker overlay.
 type PickerState = {
@@ -100,6 +111,10 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const tabSeq = useRef(0);
   const untitledSeq = useRef(0);
   const revealSeq = useRef(0);
+  // True while an async session restore is re-reading files from disk: `tabs` is still empty then,
+  // so the persistence provider must NOT report that transient empty set (a save landing in the gap
+  // would clobber the stored tabs). Cleared as the restored tabs become live — see the mount effect.
+  const restorePendingRef = useRef(false);
   const treeRefreshSeq = useRef(0);
   // Latest tabs + dirty for async callbacks (reloadTabs) so a reload landing after an in-flight
   // replace never acts on a stale snapshot and clobbers a buffer the user just edited.
@@ -262,6 +277,44 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // "New File" launched us with a target dir — root the explorer there and start a fresh untitled
   // buffer (its first save lands in that dir).
   useEffect(() => {
+    // Restore a persisted session (explorer root + saved tabs) when this window was rehydrated on
+    // reload — re-reading each file from disk for a fresh mtime, dropping any that vanished. Takes
+    // precedence over the launch-file path below; the persisted state fully describes what to open.
+    const restore = params?.[WINDOW_RESTORE_PARAM] as EditorRestore | undefined;
+    if (restore && (restore.root != null || (Array.isArray(restore.tabs) && restore.tabs.length > 0))) {
+      if (restore.root != null) setRoot(restore.root);
+      const infos = Array.isArray(restore.tabs) ? restore.tabs : [];
+      if (infos.length > 0) {
+        restorePendingRef.current = true;
+        void (async () => {
+          const metas = await Promise.all(
+            infos.map(async (info) => {
+              try {
+                return { info, mtime: (await fileMeta(info.path)).mtime, ok: true };
+              } catch {
+                return { info, mtime: null as number | null, ok: false };
+              }
+            }),
+          );
+          const alive = metas.filter((m) => m.ok);
+          if (alive.length === 0) {
+            restorePendingRef.current = false; // every file vanished — the live empty tab set is now correct
+            return; // leave the (already restored) folder open
+          }
+          // Rebuild in one update to preserve tab order + fresh mtimes; then re-select the saved
+          // active tab (falling back to the last if it was among the dropped/vanished files).
+          const rebuilt: Tab[] = alive.map((m) => ({ id: `t${++tabSeq.current}`, path: m.info.path, name: m.info.name, mtime: m.mtime, kind: m.info.kind }));
+          // Clear the pending flag inside the same update that publishes the restored tabs, so the
+          // provider begins reporting real state exactly when it goes live — no clobber window.
+          setTabs(() => {
+            restorePendingRef.current = false;
+            return rebuilt;
+          });
+          setActive((rebuilt.find((tb) => tb.path === restore.activePath) ?? rebuilt[rebuilt.length - 1]).id);
+        })();
+      }
+      return;
+    }
     const p = typeof params?.path === 'string' ? params.path : null;
     if (p) {
       const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
@@ -279,6 +332,20 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
 
   const anyDirty = Object.values(dirty).some(Boolean);
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
+
+  // Contribute the explorer root + open SAVED tabs (and which is active) to the persisted layout,
+  // so a reload re-opens the same folder + files. Untitled buffers have no path, so they're excluded.
+  // While an async restore is still in flight, return undefined so buildSnapshot keeps the payload
+  // this window was restored WITH, instead of persisting the transient empty tab set.
+  useWindowState(windowId, (): EditorRestore | undefined =>
+    restorePendingRef.current
+      ? undefined
+      : {
+          root,
+          tabs: tabs.filter((tb) => tb.path != null).map((tb) => ({ path: tb.path as string, name: tb.name, kind: tb.kind })),
+          activePath: tabs.find((tb) => tb.id === active)?.path ?? null,
+        },
+  );
 
   // Reflect the active file in the window title, so the Dock + titlebar identify which file this
   // editor window holds (important when several editor windows are open). Clears to the app title

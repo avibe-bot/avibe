@@ -67,11 +67,12 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     accent: '--mint',
     defaultSize: { width: 820, height: 540 },
     lockTheme: 'dark',
-    Component: () => (
+    Component: ({ windowId, params }) => (
       <Suspense fallback={<Loading />}>
         {/* Each windowed terminal takes a bounded, reused session slot internally so
-            it gets its own backend session without leaking ids (see AppsTerminalPage). */}
-        <TerminalBody windowed />
+            it gets its own backend session without leaking ids (see AppsTerminalPage).
+            windowId + params thread through so the tab layout persists across reloads. */}
+        <TerminalBody windowed windowId={windowId} params={params} />
       </Suspense>
     ),
   },

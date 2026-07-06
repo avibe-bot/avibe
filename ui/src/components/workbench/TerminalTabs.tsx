@@ -4,8 +4,10 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
+import { useWindowState } from '../../context/WindowManagerContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { acquireTerminalSlot, releaseTerminalSlot } from '../../lib/terminalSlots';
+import { WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
 import type { TerminalStatus } from './TerminalView';
 
 // Lazy so xterm.js stays out of the main bundle until a terminal opens.
@@ -31,6 +33,12 @@ function getSessionId(identity: string | null, key?: string): string {
 
 type Tab = { key: number; slot: number | null; title?: string };
 
+// The Terminal's persisted snapshot (via useWindowState): just the tab count + any custom titles.
+// Windowed terminal sessions are ephemeral by design (slot-based ids, DELETEd on pagehide), so we
+// deliberately do NOT persist/reattach session ids — restore re-opens the same number of tabs with
+// their names, over fresh shells.
+type TerminalRestore = { tabs: { title?: string }[] };
+
 // DELETE a slot-backed terminal session, then release its slot ONLY on a confirmed teardown
 // (HTTP ok or 404). If the delete failed (expired auth, CSRF/origin rejection, network error, 5xx)
 // the tmux session may still be alive, so the slot stays reserved — otherwise the next tab could
@@ -49,12 +57,24 @@ function deleteTerminalSession(sid: string, slot: number, keepalive = false): vo
 //   - windowed: every tab is an ephemeral, slot-bounded session, disposed on close.
 //   - route (non-windowed): the FIRST tab keeps the persistent localStorage session (so it
 //     reconnects across reloads); extra tabs are slot-bounded like the windowed ones.
-export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
+export const TerminalTabs: React.FC<{ windowed?: boolean; windowId?: string; params?: Record<string, unknown> }> = ({ windowed = false, windowId, params }) => {
   const { t } = useTranslation();
   const { getAuthSession } = useApi();
   const [identity, setIdentity] = useState<string | null | undefined>(undefined); // undefined = resolving
   const tabSeq = useRef(0);
-  const [tabs, setTabs] = useState<Tab[]>(() => [{ key: ++tabSeq.current, slot: windowed ? acquireTerminalSlot() : null }]);
+  // Restore the tab layout (count + custom titles) on reload for a windowed terminal, over fresh
+  // slots/shells — the ephemeral session ids are never persisted (a deliberate security property).
+  const [tabs, setTabs] = useState<Tab[]>(() => {
+    const restore = windowed ? (params?.[WINDOW_RESTORE_PARAM] as TerminalRestore | undefined) : undefined;
+    if (restore && Array.isArray(restore.tabs) && restore.tabs.length > 0) {
+      return restore.tabs.map((rt) => ({
+        key: ++tabSeq.current,
+        slot: acquireTerminalSlot(),
+        title: typeof rt?.title === 'string' ? rt.title : undefined,
+      }));
+    }
+    return [{ key: ++tabSeq.current, slot: windowed ? acquireTerminalSlot() : null }];
+  });
   const [active, setActive] = useState<number>(() => tabs[0]?.key ?? 0);
   // Whether sessions actually persist (tmux available) — reported by TerminalView's ready frame.
   // Drives the tab-bar badge so it never falsely promises persistence for a plain-shell fallback.
@@ -73,6 +93,10 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
       return null;
     });
   };
+
+  // Contribute the tab layout (count + custom titles) to the persisted window layout. No-ops for the
+  // non-windowed route terminal (windowId undefined), which keeps its own persistent session id.
+  useWindowState(windowId, (): TerminalRestore => ({ tabs: tabs.map((tb) => ({ title: tb.title })) }));
 
   useEffect(() => {
     let cancelled = false;

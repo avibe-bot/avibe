@@ -5,13 +5,14 @@ import { TerminalTabs } from './TerminalTabs';
 // The Terminal app. `windowed` fills its AppWindow body; the route adds the page header.
 // The multi-tab UI + per-tab session/slot lifecycle lives in the reusable TerminalTabs
 // (so the editor's integrated terminal can mount the same thing later). Design: `iwYIX`.
-export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
+// windowId + params thread through for windowed mounts so the tab layout persists across reloads.
+export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string; params?: Record<string, unknown> }> = ({ windowed = false, windowId, params }) => {
   const { t } = useTranslation();
 
   if (windowed) {
     return (
       <div className="h-full w-full overflow-hidden bg-surface">
-        <TerminalTabs windowed />
+        <TerminalTabs windowed windowId={windowId} params={params} />
       </div>
     );
   }

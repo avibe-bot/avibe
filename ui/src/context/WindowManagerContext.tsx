@@ -1,6 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { APP_REGISTRY, type AppId } from '../apps/registry';
+import {
+  WINDOW_RESTORE_PARAM,
+  loadWorkbenchWindows,
+  saveWorkbenchWindows,
+  stripRestoreParam,
+  type PersistedWindow,
+} from '../lib/workbenchPersistence';
 
 // One open app window. Bounds are in CSS px relative to the window LAYER (the
 // workbench main area, right of the sidebar). z drives stacking + focus order.
@@ -53,6 +60,12 @@ export interface WindowManagerValue {
    * The getter returns a confirm message when closing would lose work, else null.
    */
   setCloseGuard: (id: string, getMessage: (() => string | null) | null) => void;
+  /**
+   * Register (or clear, by passing null) a provider a window body uses to contribute its own
+   * JSON-able state to the persisted layout (e.g. the Editor's open tabs, the Terminal's tab
+   * titles). Read on save; the value comes back through the window's params on the next restore.
+   */
+  setStateProvider: (id: string, getState: (() => unknown) | null) => void;
   /** Run a window's close guard (confirm if it has a message); true = may close. */
   confirmClose: (id: string) => boolean;
 }
@@ -65,19 +78,90 @@ const CASCADE_STEP = 32;
 const CASCADE_WRAP = 6;
 
 export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [windows, setWindows] = useState<WindowInstance[]>([]);
   const idSeq = useRef(0);
   const zSeq = useRef(0);
   const openCount = useRef(0);
+  // Persistence is desktop-only: the window layer is `hidden md:block` and mobile opens apps
+  // full-screen (never via openApp), so restoring windows there would mount invisible bodies and
+  // saving [] would clobber a desktop layout. Resolve the breakpoint once at mount.
+  const isDesktop = useRef<boolean | null>(null);
+  if (isDesktop.current === null) {
+    isDesktop.current =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(min-width: 768px)').matches
+        : false;
+  }
+
+  // Restore the persisted layout once, in the lazy initializer, so `windows` never starts empty
+  // on desktop (which would let the first debounced save wipe the stored layout before restore).
+  // Seed the id/z sequences past the restored maxima so new windows don't collide or open behind.
+  const [windows, setWindows] = useState<WindowInstance[]>(() => {
+    const restored = isDesktop.current ? loadWorkbenchWindows() : [];
+    for (const w of restored) {
+      const n = Number.parseInt(w.id.replace(/^win-/, ''), 10);
+      if (Number.isFinite(n)) idSeq.current = Math.max(idSeq.current, n);
+      zSeq.current = Math.max(zSeq.current, w.z);
+    }
+    openCount.current = restored.length;
+    return restored;
+  });
+
+  // Latest windows for the debounced/pagehide save closures (which fire after render).
+  const windowsRef = useRef(windows);
+  windowsRef.current = windows;
+
   // Per-window close guards: a body (e.g. a dirty editor) registers a getter that
   // returns a confirm message when closing would lose work. Held in a ref so it
   // never triggers re-renders.
   const closeGuards = useRef(new Map<string, () => string | null>());
+  // Per-window state providers: a body registers a getter returning its JSON-able snapshot
+  // (Editor tabs, Terminal tab titles), read when the layout is saved. Same ref pattern.
+  const stateProviders = useRef(new Map<string, () => unknown>());
 
   const setCloseGuard = useCallback((id: string, getMessage: (() => string | null) | null) => {
     if (getMessage) closeGuards.current.set(id, getMessage);
     else closeGuards.current.delete(id);
   }, []);
+
+  const setStateProvider = useCallback((id: string, getState: (() => unknown) | null) => {
+    if (getState) stateProviders.current.set(id, getState);
+    else stateProviders.current.delete(id);
+  }, []);
+
+  // Snapshot every window plus its body's state (from its provider). A provider that throws
+  // contributes no appState rather than failing the whole save. Drop the injected restore payload
+  // from params so a re-save keeps only original launch params (no nested stale snapshots).
+  const buildSnapshot = useCallback((): PersistedWindow[] =>
+    windowsRef.current.map((w) => {
+      let appState: unknown;
+      try {
+        appState = stateProviders.current.get(w.id)?.();
+      } catch {
+        appState = undefined;
+      }
+      // A restored window's lazy body may not have mounted + registered its provider yet. Until it
+      // does, carry the payload it was restored WITH (still in params) so a save during that gap
+      // doesn't drop the very state we're persisting for.
+      if (appState === undefined) appState = w.params?.[WINDOW_RESTORE_PARAM];
+      return { ...w, params: stripRestoreParam(w.params), appState };
+    }), []);
+
+  // Debounced persistence: coalesce bursts of geometry/z/open-close changes into one write.
+  const saveTimer = useRef<number | null>(null);
+  const flushSave = useCallback(() => {
+    if (saveTimer.current !== null) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    saveWorkbenchWindows(buildSnapshot());
+  }, [buildSnapshot]);
+  const scheduleSave = useCallback(() => {
+    if (saveTimer.current !== null) clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      saveWorkbenchWindows(buildSnapshot());
+    }, 400);
+  }, [buildSnapshot]);
 
   const confirmClose = useCallback((id: string): boolean => {
     const message = closeGuards.current.get(id)?.();
@@ -128,6 +212,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const close = useCallback((id: string) => {
     closeGuards.current.delete(id);
+    stateProviders.current.delete(id);
     setWindows((prev) => prev.filter((w) => w.id !== id));
   }, []);
 
@@ -170,6 +255,25 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
     });
   }, []);
 
+  // Persist on any window-list change (open/close, geometry, z, min/max, title). Body-only state
+  // (Editor tabs, Terminal titles) that doesn't touch the window list is captured by the same
+  // provider read on the next save this triggers, and — authoritatively — by the pagehide flush.
+  useEffect(() => {
+    if (!isDesktop.current) return;
+    scheduleSave();
+  }, [windows, scheduleSave]);
+
+  // A reload fires pagehide (not React unmount): flush a final synchronous snapshot so the very
+  // latest body state (a just-renamed terminal tab, a just-opened editor file) is captured.
+  useEffect(() => {
+    if (!isDesktop.current) return;
+    window.addEventListener('pagehide', flushSave);
+    return () => {
+      window.removeEventListener('pagehide', flushSave);
+      if (saveTimer.current !== null) clearTimeout(saveTimer.current);
+    };
+  }, [flushSave]);
+
   const focusedId = useMemo(() => {
     const visible = windows.filter((w) => !w.minimized);
     if (visible.length === 0) return null;
@@ -189,9 +293,10 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       setBounds,
       setTitle,
       setCloseGuard,
+      setStateProvider,
       confirmClose,
     }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setCloseGuard, confirmClose],
+    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setCloseGuard, setStateProvider, confirmClose],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;
@@ -215,4 +320,19 @@ export function useWindowCloseGuard(windowId: string | undefined, message: strin
     setCloseGuard(windowId, () => messageRef.current);
     return () => setCloseGuard(windowId, null);
   }, [windowId, setCloseGuard]);
+}
+
+// A window body calls this to contribute its own JSON-able state to the persisted layout, so a
+// reload can restore it (Editor open tabs, Terminal tab titles). `getState` may be a fresh closure
+// each render — it's held in a ref and read lazily at save time, so it always sees current state
+// without re-registering. No-ops for a non-windowed (full-page) mount, where windowId is undefined.
+export function useWindowState(windowId: string | undefined, getState: () => unknown): void {
+  const { setStateProvider } = useWindowManager();
+  const getStateRef = useRef(getState);
+  getStateRef.current = getState;
+  useEffect(() => {
+    if (!windowId) return;
+    setStateProvider(windowId, () => getStateRef.current());
+    return () => setStateProvider(windowId, null);
+  }, [windowId, setStateProvider]);
 }
