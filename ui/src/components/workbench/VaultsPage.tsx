@@ -8,8 +8,11 @@ import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
+import { VaultLockIndicator } from '../ui/vault-lock-indicator';
+import { VaultProtectedUnlock } from '../ui/vault-protected-unlock';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
+import { useProtectedVault } from '../../lib/useProtectedVault';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
@@ -640,7 +643,15 @@ export const VaultsPage: React.FC = () => {
     }
   }, [api, showAudit]);
 
+  const protectedVault = useProtectedVault();
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
+  // Deleting a protected secret requires the user present at an unlocked vault (a passkey/password
+  // ceremony) — discover the current lock state when the delete dialog opens for one.
+  useEffect(() => {
+    if (deleteTarget?.protection === 'protected') void protectedVault.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh is stable; re-run only on target change
+  }, [deleteTarget]);
+  const deleteNeedsUnlock = deleteTarget?.protection === 'protected' && protectedVault.status !== 'unlocked';
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const confirmDelete = async () => {
     const secret = deleteTarget;
@@ -679,6 +690,7 @@ export const VaultsPage: React.FC = () => {
         subtitle={t('vaults.subtitle')}
         actions={
           <>
+            <VaultLockIndicator />
             <Button variant={showAudit ? 'secondary' : 'ghost'} size="icon" onClick={toggleAudit} aria-label={t('vaults.history')}>
               <History className="size-4" />
             </Button>
@@ -799,6 +811,7 @@ export const VaultsPage: React.FC = () => {
         description={t('vaults.deleteDialog.description')}
         confirmLabel={t('common.delete')}
         holdSeconds={deleteTarget?.kind === 'keypair' ? 5 : 0}
+        confirmDisabled={deleteNeedsUnlock}
         onConfirm={confirmDelete}
       >
         {deleteTarget?.kind === 'keypair' ? (
@@ -811,6 +824,12 @@ export const VaultsPage: React.FC = () => {
               <Wallet className="mt-0.5 size-4 shrink-0 text-destructive" />
               <span>{t('vaults.deleteDialog.keypairFunds')}</span>
             </span>
+          </div>
+        ) : null}
+        {deleteNeedsUnlock ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-[12.5px] leading-snug text-muted-foreground">{t('vaults.deleteDialog.protectedUnlockNote')}</p>
+            <VaultProtectedUnlock vault={protectedVault} secretName={deleteTarget?.name} />
           </div>
         ) : null}
       </ConfirmDialog>

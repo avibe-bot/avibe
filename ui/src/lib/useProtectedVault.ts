@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 
 import { useApi } from '@/context/ApiContext';
 import {
@@ -54,6 +54,75 @@ const sessionVault: { vmk: Uint8Array | null; wrapMeta: string | null; freshSetu
   wrapMeta: null,
   freshSetup: false,
 };
+
+/**
+ * Auto-lock. The plaintext VMK is zeroed this long after it was unlocked (the timer is
+ * refreshed on every use), shrinking the window it sits in browser memory from "until reload"
+ * to a few idle minutes. A manual "Lock now" or a full page reload also clears it.
+ */
+const VAULT_AUTO_LOCK_MS = 10 * 60 * 1000;
+let vaultLockExpiresAt: number | null = null;
+let vaultAutoLockTimer: ReturnType<typeof setTimeout> | null = null;
+const vaultLockListeners = new Set<() => void>();
+
+function notifyVaultLockChange(): void {
+  for (const listener of [...vaultLockListeners]) listener();
+}
+
+/** Subscribe to VMK unlock/auto-lock/lock transitions (module-global). Returns an unsubscribe. */
+export function subscribeVaultLock(listener: () => void): () => void {
+  vaultLockListeners.add(listener);
+  return () => {
+    vaultLockListeners.delete(listener);
+  };
+}
+
+/** Wall-clock ms when the VMK auto-locks, or null while locked. */
+export function vaultUnlockExpiresAt(): number | null {
+  return sessionVault.vmk ? vaultLockExpiresAt : null;
+}
+
+export function vaultUnlocked(): boolean {
+  return sessionVault.vmk != null;
+}
+
+function vaultStatusNow(): ProtectedVaultStatus {
+  if (sessionVault.vmk) return 'unlocked';
+  return sessionVault.wrapMeta ? 'locked' : 'needs-setup';
+}
+
+/** Zero the VMK and cancel the pending auto-lock. Does not notify — callers decide. */
+function clearVmk(): void {
+  sessionVault.vmk?.fill(0);
+  sessionVault.vmk = null;
+  vaultLockExpiresAt = null;
+  if (vaultAutoLockTimer) {
+    clearTimeout(vaultAutoLockTimer);
+    vaultAutoLockTimer = null;
+  }
+}
+
+/** Lock the vault now: zero the VMK, drop an uncommitted fresh-setup VMK, notify subscribers. */
+function lockVault(): void {
+  const wasFreshSetup = sessionVault.freshSetup;
+  clearVmk();
+  if (wasFreshSetup) {
+    // An uncommitted fresh VMK (set up but no protected secret saved yet) — discard it so a
+    // later unlock can't seal under a stale local VMK that skips the atomic init guard.
+    sessionVault.wrapMeta = null;
+    sessionVault.freshSetup = false;
+  }
+  notifyVaultLockChange();
+}
+
+/** (Re)start the auto-lock countdown; call on unlock and on every VMK use. Notifies subscribers. */
+function armVaultAutoLock(): void {
+  if (!sessionVault.vmk) return;
+  vaultLockExpiresAt = Date.now() + VAULT_AUTO_LOCK_MS;
+  if (vaultAutoLockTimer) clearTimeout(vaultAutoLockTimer);
+  vaultAutoLockTimer = setTimeout(lockVault, VAULT_AUTO_LOCK_MS);
+  notifyVaultLockChange();
+}
 
 const WEBAUTHN_RP_NAME = 'Avibe Vault';
 const WEBAUTHN_USER_HANDLE = new TextEncoder().encode('avibe-vault');
@@ -192,6 +261,17 @@ export function useProtectedVault() {
   const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.vmk ? 'unlocked' : 'checking');
   const [error, setError] = useState<string | null>(null);
 
+  // Re-sync this instance when the module VMK locks/unlocks elsewhere — notably when the
+  // auto-lock timer fires while this component is mounted, or another instance unlocks. Don't
+  // clobber the async discovery states ('checking'/'error').
+  useEffect(
+    () =>
+      subscribeVaultLock(() => {
+        setStatus((prev) => (prev === 'checking' || prev === 'error' ? prev : vaultStatusNow()));
+      }),
+    [],
+  );
+
   const refresh = useCallback(async () => {
     if (sessionVault.vmk) {
       setStatus('unlocked');
@@ -222,6 +302,7 @@ export function useProtectedVault() {
     sessionVault.vmk = vmk;
     sessionVault.wrapMeta = wrapMeta;
     sessionVault.freshSetup = freshSetup;
+    armVaultAutoLock();
     setStatus('unlocked');
     setError(null);
   };
@@ -266,6 +347,7 @@ export function useProtectedVault() {
     async (name: string, value: Uint8Array | string): Promise<{ envelope: ProtectedRecordEnvelope; establishingVmk: boolean }> => {
       const { vmk, wrapMeta, freshSetup } = sessionVault;
       if (!vmk || !wrapMeta) throw new Error('vault-locked');
+      armVaultAutoLock();
       const valueBytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
       const sealed = await sealProtected(valueBytes, vmk, { name });
       // `establishingVmk` lets the create transaction enforce the atomic single-init
@@ -291,6 +373,7 @@ export function useProtectedVault() {
     async (material: ProtectedUnlockMaterial, digest: string, scheme: SignatureScheme): Promise<SignatureResult> => {
       const { vmk } = sessionVault;
       if (!vmk) throw new Error('vault-locked');
+      armVaultAutoLock();
       const { sealed } = unpackProtectedRecord(material.envelope);
       return signProtectedDigest(sealed, vmk, { name: material.name }, digest, scheme);
     },
@@ -311,6 +394,7 @@ export function useProtectedVault() {
     ): Promise<BlindBox> => {
       const { vmk } = sessionVault;
       if (!vmk) throw new Error('vault-locked');
+      armVaultAutoLock();
       const { sealed } = unpackProtectedRecord(material.envelope);
       return releaseProtectedDek(sealed, vmk, publicKey, { name: material.name }, context);
     },
@@ -318,27 +402,18 @@ export function useProtectedVault() {
   );
 
   const lock = useCallback(() => {
-    sessionVault.vmk?.fill(0);
-    sessionVault.vmk = null;
-    if (sessionVault.freshSetup) {
-      // An uncommitted fresh VMK (set up but no protected secret saved yet) — discard it
-      // so a later unlock can't seal under a stale local VMK that skips the init guard.
-      sessionVault.wrapMeta = null;
-      sessionVault.freshSetup = false;
-      setStatus('needs-setup');
-    } else {
-      setStatus(sessionVault.wrapMeta ? 'locked' : 'needs-setup');
-    }
+    lockVault();
+    setStatus(vaultStatusNow());
   }, []);
 
   const discardAndRefresh = useCallback(async () => {
     // After an init collision (another tab established the vault first), drop the
     // rejected local VMK and reload the server's real wrap_meta so the user unlocks the
     // established vault instead of resealing under the loser VMK.
-    sessionVault.vmk?.fill(0);
-    sessionVault.vmk = null;
+    clearVmk();
     sessionVault.wrapMeta = null;
     sessionVault.freshSetup = false;
+    notifyVaultLockChange();
     await refresh();
   }, [refresh]);
 
@@ -378,4 +453,28 @@ export function useProtectedVault() {
   }, []);
 
   return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, signProtectedRequest, releaseProtectedDelivery, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword, passkeyUsableHere };
+}
+
+/**
+ * Reactive VMK lock state for a lightweight status/countdown UI. Subscribes to the
+ * module-global auto-lock so an indicator can show the time left before the vault
+ * auto-locks and offer an immediate "Lock now", without taking the full
+ * {@link useProtectedVault} surface.
+ */
+export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNow: () => void } {
+  const [, forceRender] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => subscribeVaultLock(forceRender), []);
+
+  const unlocked = vaultUnlocked();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!unlocked) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [unlocked]);
+
+  const expiresAt = vaultUnlockExpiresAt();
+  const remainingMs = expiresAt ? Math.max(0, expiresAt - now) : 0;
+  return { unlocked, remainingMs, lockNow: lockVault };
 }

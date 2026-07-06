@@ -22,6 +22,9 @@ export interface ConfirmDialogProps {
    * irreversible action.
    */
   holdSeconds?: number;
+  /** External gate: keep the confirm button disabled while true (independent of the hold
+   *  countdown) — e.g. while a required unlock ceremony is still pending. */
+  confirmDisabled?: boolean;
   /** Runs on confirm; while it's pending a spinner shows and the dialog can't be dismissed. */
   onConfirm: () => void | Promise<void>;
 }
@@ -41,6 +44,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   cancelLabel,
   destructive = false,
   holdSeconds = 0,
+  confirmDisabled = false,
   onConfirm,
 }) => {
   const { t } = useTranslation();
@@ -70,7 +74,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   const confirmText = confirmLabel ?? t('common.confirm');
 
   const handleConfirm = async () => {
-    if (locked || busy) return;
+    if (locked || busy || confirmDisabled) return;
     setBusy(true);
     try {
       await onConfirm();
@@ -100,7 +104,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <Button
             variant={destructive ? 'destructive' : 'default'}
             onClick={handleConfirm}
-            disabled={locked || busy}
+            disabled={locked || busy || confirmDisabled}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : null}
             {locked ? `${confirmText} (${displayRemaining})` : confirmText}
