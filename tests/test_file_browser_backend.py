@@ -567,15 +567,48 @@ def test_upload_file_conflict_without_overwrite_and_replaces_with_overwrite(tmp_
 
 
 def test_upload_new_file_does_not_bypass_restrictive_umask(tmp_path):
-    old_umask = os.umask(0o077)
+    old_umask = os.umask(0o022)
     try:
-        result = fs.upload_file(str(tmp_path), io.BytesIO(b"private"), filename="private.bin")
+        shared = fs.upload_file(str(tmp_path), io.BytesIO(b"shared"), filename="shared.bin")
     finally:
         os.umask(old_umask)
 
-    uploaded = Path(result["path"])
-    assert uploaded.read_bytes() == b"private"
-    assert uploaded.stat().st_mode & 0o077 == 0
+    shared_upload = Path(shared["path"])
+    assert shared_upload.read_bytes() == b"shared"
+    assert shared_upload.stat().st_mode & 0o777 == 0o644
+
+    old_umask = os.umask(0o077)
+    try:
+        private = fs.upload_file(str(tmp_path), io.BytesIO(b"private"), filename="private.bin")
+    finally:
+        os.umask(old_umask)
+
+    private_upload = Path(private["path"])
+    assert private_upload.read_bytes() == b"private"
+    assert private_upload.stat().st_mode & 0o777 == 0o600
+
+
+def test_upload_uses_stable_directory_after_validation(tmp_path, monkeypatch):
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    attacker_dir = tmp_path / "attacker"
+    attacker_dir.mkdir()
+    moved_upload_dir = tmp_path / "uploads-original"
+    real_open_directory = fs._open_stable_upload_directory
+
+    def open_then_swap(directory: Path) -> int:
+        fd = real_open_directory(directory)
+        upload_dir.rename(moved_upload_dir)
+        upload_dir.symlink_to(attacker_dir, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(fs, "_open_stable_upload_directory", open_then_swap)
+
+    result = fs.upload_file(str(upload_dir), io.BytesIO(b"safe"), filename="safe.bin")
+
+    assert result["path"] == str(upload_dir / "safe.bin")
+    assert (moved_upload_dir / "safe.bin").read_bytes() == b"safe"
+    assert not (attacker_dir / "safe.bin").exists()
 
 
 def test_upload_file_size_cap_cleans_temp_and_target(tmp_path, monkeypatch):

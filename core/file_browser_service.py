@@ -698,9 +698,48 @@ def _resolve_upload_directory(raw_dir: str) -> Path:
     return directory
 
 
-def _validate_upload_target(target: Path, *, overwrite: bool) -> int | None:
+def _open_stable_upload_directory(directory: Path) -> int:
     try:
-        stat_result = target.lstat()
+        expected = directory.lstat()
+    except FileNotFoundError as exc:
+        raise NotFoundError("Destination directory not found") from exc
+    except PermissionError as exc:
+        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+    except OSError as exc:
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+    if not stat.S_ISDIR(expected.st_mode):
+        raise FileBrowserError("not_dir", "Destination is not a directory", 400)
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    try:
+        fd = os.open(directory, flags)
+        current = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
+        ):
+            raise FileBrowserError("not_dir", "Destination is not a directory", 400)
+        return fd
+    except PermissionError as exc:
+        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise FileBrowserError("not_dir", "Destination is not a directory", 400) from exc
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise
+
+
+def _validate_upload_target_at(dir_fd: int, target_name: str, *, overwrite: bool) -> int | None:
+    try:
+        stat_result = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
     except PermissionError as exc:
@@ -710,6 +749,52 @@ def _validate_upload_target(target: Path, *, overwrite: bool) -> int | None:
     if not overwrite or not stat.S_ISREG(stat_result.st_mode):
         raise ConflictError("exists", "Destination already exists")
     return stat.S_IMODE(stat_result.st_mode)
+
+
+def _create_upload_temp_at(dir_fd: int) -> tuple[int, str]:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for _ in range(100):
+        temp_name = f"{_WRITE_TEMP_PREFIX}{uuid.uuid4().hex}.tmp"
+        try:
+            return os.open(temp_name, flags, 0o666, dir_fd=dir_fd), temp_name
+        except FileExistsError:
+            continue
+        except PermissionError as exc:
+            raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+        except OSError as exc:
+            raise FileBrowserError("fs_error", str(exc), 400) from exc
+    raise FileBrowserError("fs_error", "Could not reserve upload temp file", 400)
+
+
+def _publish_upload_temp_at(dir_fd: int, temp_name: str, target_name: str, *, overwrite: bool) -> None:
+    if overwrite:
+        os.replace(temp_name, target_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return
+    try:
+        os.link(temp_name, target_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise ConflictError("exists", "Destination already exists") from exc
+    _unlink_upload_temp_after_link(dir_fd, temp_name, target_name)
+
+
+def _unlink_upload_temp_after_link(dir_fd: int, temp_name: str, target_name: str) -> None:
+    try:
+        os.unlink(temp_name, dir_fd=dir_fd)
+    except OSError:
+        _remove_created_upload_link_at(dir_fd, temp_name, target_name)
+        raise
+
+
+def _remove_created_upload_link_at(dir_fd: int, temp_name: str, target_name: str) -> None:
+    try:
+        temp_stat = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        target_stat = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
+        if (temp_stat.st_dev, temp_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino):
+            os.unlink(target_name, dir_fd=dir_fd)
+    except OSError:
+        logger.debug("Failed to remove rollback upload hard link after temp unlink failure", exc_info=True)
 
 
 def upload_file(
@@ -723,61 +808,65 @@ def upload_file(
     directory = _resolve_upload_directory(raw_dir)
     target_name = _validate_new_name(name if name is not None and name.strip() else (filename or ""))
     target = directory / target_name
-    _validate_upload_target(target, overwrite=overwrite)
+    dir_fd = _open_stable_upload_directory(directory)
+    try:
+        _validate_upload_target_at(dir_fd, target_name, overwrite=overwrite)
 
-    def _upload() -> dict[str, Any]:
-        with _write_lock_for(target):
-            current_mode = _validate_upload_target(target, overwrite=overwrite)
-            fd = -1
-            temp_name = ""
-            size = 0
-            try:
-                fd, temp_name = tempfile.mkstemp(prefix=_WRITE_TEMP_PREFIX, suffix=".tmp", dir=directory)
-                if current_mode is not None and hasattr(os, "fchmod"):
-                    os.fchmod(fd, current_mode)
-                with os.fdopen(fd, "wb") as handle:
-                    fd = -1
-                    while True:
-                        chunk = source.read(_UPLOAD_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        if not isinstance(chunk, bytes):
-                            chunk = bytes(chunk)
-                        if size + len(chunk) > MAX_FILE_BYTES:
-                            raise FileBrowserError("too_large", "File is too large", 413)
-                        handle.write(chunk)
-                        size += len(chunk)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                if overwrite:
-                    os.replace(temp_name, target)
-                else:
-                    _rename_no_replace(Path(temp_name), target)
+        def _upload() -> dict[str, Any]:
+            with _write_lock_for(target):
+                current_mode = _validate_upload_target_at(dir_fd, target_name, overwrite=overwrite)
+                fd = -1
                 temp_name = ""
-                _fsync_dir(directory)
-                stat_result = target.stat()
-                return {
-                    "name": target.name,
-                    "path": str(target),
-                    "size": stat_result.st_size,
-                    "mtime": _mtime_seconds(stat_result),
-                }
-            except FileExistsError as exc:
-                raise ConflictError("exists", "Destination already exists") from exc
-            except PermissionError as exc:
-                raise FileBrowserError("fs_error", "Permission denied", 400) from exc
-            except OSError as exc:
-                raise FileBrowserError("fs_error", str(exc), 400) from exc
-            finally:
-                if fd >= 0:
-                    os.close(fd)
-                if temp_name:
+                size = 0
+                try:
+                    fd, temp_name = _create_upload_temp_at(dir_fd)
+                    if current_mode is not None and hasattr(os, "fchmod"):
+                        os.fchmod(fd, current_mode)
+                    with os.fdopen(fd, "wb") as handle:
+                        fd = -1
+                        while True:
+                            chunk = source.read(_UPLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            if not isinstance(chunk, bytes):
+                                chunk = bytes(chunk)
+                            if size + len(chunk) > MAX_FILE_BYTES:
+                                raise FileBrowserError("too_large", "File is too large", 413)
+                            handle.write(chunk)
+                            size += len(chunk)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    _publish_upload_temp_at(dir_fd, temp_name, target_name, overwrite=overwrite)
+                    temp_name = ""
                     try:
-                        os.unlink(temp_name)
-                    except FileNotFoundError:
+                        os.fsync(dir_fd)
+                    except OSError:
                         pass
+                    stat_result = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
+                    return {
+                        "name": target.name,
+                        "path": str(target),
+                        "size": stat_result.st_size,
+                        "mtime": _mtime_seconds(stat_result),
+                    }
+                except FileExistsError as exc:
+                    raise ConflictError("exists", "Destination already exists") from exc
+                except PermissionError as exc:
+                    raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+                except OSError as exc:
+                    raise FileBrowserError("fs_error", str(exc), 400) from exc
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+                    if temp_name:
+                        try:
+                            os.unlink(temp_name, dir_fd=dir_fd)
+                        except FileNotFoundError:
+                            pass
 
-    return _run_mutation("upload", target, _upload, overwrite=overwrite)
+        return _run_mutation("upload", target, _upload, overwrite=overwrite)
+    finally:
+        os.close(dir_fd)
 
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
