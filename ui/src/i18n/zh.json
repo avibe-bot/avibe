@@ -846,6 +846,7 @@
     "projectRename": "重命名",
     "projectSettings": "设置项目",
     "projectEditAgents": "编辑 AGENTS.md",
+    "projectOpenInEditor": "用编辑器打开",
     "projectArchive": "归档",
     "projectArchiveConfirm": "确定归档项目「{{name}}」?会话历史会保留,侧栏不再显示。",
     "projectRenamePlaceholder": "新名字",

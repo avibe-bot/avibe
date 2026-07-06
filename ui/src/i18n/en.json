@@ -846,6 +846,7 @@
     "projectRename": "Rename",
     "projectSettings": "Project settings",
     "projectEditAgents": "Edit AGENTS.md",
+    "projectOpenInEditor": "Open in Editor",
     "projectArchive": "Archive",
     "projectArchiveConfirm": "Archive project \"{{name}}\"? Session history is preserved; it just stops showing in the sidebar.",
     "projectRenamePlaceholder": "New name",

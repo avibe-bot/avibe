@@ -273,7 +273,12 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     if (dir) {
       setRoot(dir);
       newFile();
+      return;
     }
+    // "Open in Editor" from a project (sidebar): root the explorer at the folder with NO tab open —
+    // just the file tree + the select-a-file hint, no untitled buffer.
+    const rootDir = typeof params?.rootDir === 'string' ? params.rootDir : null;
+    if (rootDir) setRoot(rootDir);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
