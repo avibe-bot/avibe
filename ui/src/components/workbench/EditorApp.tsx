@@ -33,6 +33,26 @@ type EditorRestore = {
   activePath: string | null;
 };
 
+// Validate a persisted editor snapshot before applying it — the WindowManager stores app state
+// opaquely, so a corrupt/hostile localStorage value could carry a non-string root (which would
+// crash root.split(...) in the explorer) or malformed tab entries. Returns a sanitized value with
+// bad tab entries dropped, or null when the shape is unusable (then the window falls back to its
+// normal launch params).
+function sanitizeEditorRestore(value: unknown): EditorRestore | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as { root?: unknown; tabs?: unknown; activePath?: unknown };
+  const root = typeof v.root === 'string' ? v.root : v.root === null ? null : undefined;
+  if (root === undefined) return null; // root must be a string path or null
+  const tabs = (Array.isArray(v.tabs) ? v.tabs : []).flatMap((t): EditorRestore['tabs'] => {
+    if (!t || typeof t !== 'object') return [];
+    const tb = t as { path?: unknown; name?: unknown; kind?: unknown };
+    if (typeof tb.path !== 'string' || typeof tb.name !== 'string') return [];
+    const kind = tb.kind === 'preview' ? 'preview' : tb.kind === 'edit' ? 'edit' : undefined;
+    return [{ path: tb.path, name: tb.name, kind }];
+  });
+  return { root, tabs, activePath: typeof v.activePath === 'string' ? v.activePath : null };
+}
+
 // A pending file dialog, rendered as the in-window FilePicker overlay.
 type PickerState = {
   mode: FilePickerMode;
@@ -280,10 +300,10 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     // Restore a persisted session (explorer root + saved tabs) when this window was rehydrated on
     // reload — re-reading each file from disk for a fresh mtime, dropping any that vanished. Takes
     // precedence over the launch-file path below; the persisted state fully describes what to open.
-    const restore = params?.[WINDOW_RESTORE_PARAM] as EditorRestore | undefined;
-    if (restore && (restore.root != null || (Array.isArray(restore.tabs) && restore.tabs.length > 0))) {
+    const restore = sanitizeEditorRestore(params?.[WINDOW_RESTORE_PARAM]);
+    if (restore && (restore.root != null || restore.tabs.length > 0)) {
       if (restore.root != null) setRoot(restore.root);
-      const infos = Array.isArray(restore.tabs) ? restore.tabs : [];
+      const infos = restore.tabs;
       if (infos.length > 0) {
         restorePendingRef.current = true;
         void (async () => {
@@ -316,9 +336,16 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
             const userOpened = current.filter((tb) => tb.path == null || !restoredPaths.has(tb.path));
             return [...rebuilt, ...userOpened];
           });
-          // Re-select the saved active tab, but only if the user hasn't focused a tab of their own
-          // during the restore — never yank focus away from a tab they just opened.
-          setActive((cur) => cur ?? (rebuilt.find((tb) => tb.path === restore.activePath) ?? rebuilt[rebuilt.length - 1]).id);
+          // Re-select the right tab. Keep the user's focused tab if it survived the merge (an
+          // untitled buffer, or a file not in the restored set); if it was a saved file the restore
+          // deduped away, follow it to the rebuilt tab by path so focus lands on a real tab (not the
+          // now-removed id); otherwise select the persisted active tab (fallback last).
+          setActive((cur) => {
+            const curTab = tabsRef.current.find((tb) => tb.id === cur);
+            if (curTab && (curTab.path == null || !rebuilt.some((tb) => tb.path === curTab.path))) return curTab.id;
+            const followed = curTab?.path != null ? rebuilt.find((tb) => tb.path === curTab.path) : undefined;
+            return (followed ?? rebuilt.find((tb) => tb.path === restore.activePath) ?? rebuilt[rebuilt.length - 1]).id;
+          });
         })();
       }
       return;

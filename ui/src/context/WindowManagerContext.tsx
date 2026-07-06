@@ -77,26 +77,26 @@ const DEFAULT_SIZE = { width: 760, height: 520 };
 const CASCADE_STEP = 32;
 const CASCADE_WRAP = 6;
 
+// Persistence is desktop-only: the window layer is `hidden md:block` and windowed apps open only
+// from the desktop-only launcher/Dock, so restoring windows below md would mount invisible bodies
+// and a `[]` save from a phone would clobber a real desktop layout. Read live (not frozen at mount)
+// so a desktop tab that starts narrow and is widened still restores/saves once it crosses md.
+function isDesktopViewport(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(min-width: 768px)').matches
+    : false;
+}
+
 export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const idSeq = useRef(0);
   const zSeq = useRef(0);
   const openCount = useRef(0);
-  // Persistence is desktop-only: the window layer is `hidden md:block` and mobile opens apps
-  // full-screen (never via openApp), so restoring windows there would mount invisible bodies and
-  // saving [] would clobber a desktop layout. Resolve the breakpoint once at mount.
-  const isDesktop = useRef<boolean | null>(null);
-  if (isDesktop.current === null) {
-    isDesktop.current =
-      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-        ? window.matchMedia('(min-width: 768px)').matches
-        : false;
-  }
 
   // Restore the persisted layout once, in the lazy initializer, so `windows` never starts empty
   // on desktop (which would let the first debounced save wipe the stored layout before restore).
   // Seed the id/z sequences past the restored maxima so new windows don't collide or open behind.
   const [windows, setWindows] = useState<WindowInstance[]>(() => {
-    const restored = isDesktop.current ? loadWorkbenchWindows() : [];
+    const restored = isDesktopViewport() ? loadWorkbenchWindows() : [];
     for (const w of restored) {
       const n = Number.parseInt(w.id.replace(/^win-/, ''), 10);
       if (Number.isFinite(n)) idSeq.current = Math.max(idSeq.current, n);
@@ -153,9 +153,11 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
+    if (!isDesktopViewport()) return; // never persist (incl. clobber with []) from a non-desktop viewport
     saveWorkbenchWindows(buildSnapshot());
   }, [buildSnapshot]);
   const scheduleSave = useCallback(() => {
+    if (!isDesktopViewport()) return;
     if (saveTimer.current !== null) clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null;
@@ -258,15 +260,15 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   // Persist on any window-list change (open/close, geometry, z, min/max, title). Body-only state
   // (Editor tabs, Terminal titles) that doesn't touch the window list is captured by the same
   // provider read on the next save this triggers, and — authoritatively — by the pagehide flush.
+  // scheduleSave itself no-ops below md, so this stays inert until the viewport is desktop-sized.
   useEffect(() => {
-    if (!isDesktop.current) return;
     scheduleSave();
   }, [windows, scheduleSave]);
 
   // A reload fires pagehide (not React unmount): flush a final synchronous snapshot so the very
   // latest body state (a just-renamed terminal tab, a just-opened editor file) is captured.
+  // flushSave no-ops below md, so no phone/narrow viewport ever writes.
   useEffect(() => {
-    if (!isDesktop.current) return;
     window.addEventListener('pagehide', flushSave);
     return () => {
       window.removeEventListener('pagehide', flushSave);
