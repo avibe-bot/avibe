@@ -221,9 +221,11 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
         />
       </div>
 
-      {/* Mobile accessory bar — Monaco has no touch affordances, so phones get the
-          symbol keys + select/copy helpers, the same pattern as TerminalView. */}
-      <div className="flex items-center gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 md:hidden">
+      {/* Touch accessory bar — Monaco has no touch affordances, so coarse-pointer devices get the
+          symbol keys + select/copy helpers. Keyed off pointer type rather than the md: viewport
+          breakpoint so tablets keep it and desktops (a hardware keyboard already has these keys)
+          don't — the same rule TerminalView's key bar uses (PR #796). */}
+      <div className="hidden items-center gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 pointer-coarse:flex">
         {!readOnly &&
           SYMBOL_KEYS.map((key) => (
             <button key={key} type="button" onClick={() => insert(key)} className={accessoryBtn}>

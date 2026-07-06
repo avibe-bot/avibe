@@ -34,6 +34,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
 import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
+import { NavGuardProvider } from './context/NavGuardContext';
 import { AgentationToggle } from './components/AgentationToggle';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -46,6 +47,9 @@ const AppsFileBrowserPage = lazy(() =>
 );
 const AppsTerminalPage = lazy(() =>
   import('./components/workbench/AppsTerminalPage').then((m) => ({ default: m.AppsTerminalPage })),
+);
+const AppsEditorPage = lazy(() =>
+  import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
 );
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { applyAppTitle } from './lib/documentTitle';
@@ -342,6 +346,14 @@ function AppRoutes() {
             </Suspense>
           }
         />
+        <Route
+          path="/apps/editor"
+          element={
+            <Suspense fallback={<AppsRouteFallback />}>
+              <AppsEditorPage />
+            </Suspense>
+          }
+        />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
 
         {/* Control Panel mode — existing pages moved under /admin/* */}
@@ -410,10 +422,12 @@ function App() {
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
-                  <BrowserRouter>
-                    <AppRoutes />
-                  </BrowserRouter>
-                  <AgentationToggle />
+                  <NavGuardProvider>
+                    <BrowserRouter>
+                      <AppRoutes />
+                    </BrowserRouter>
+                    <AgentationToggle />
+                  </NavGuardProvider>
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>

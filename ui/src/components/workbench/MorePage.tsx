@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, FolderTree, Link as LinkIcon, LogOut, SlidersHorizontal, SquareTerminal } from 'lucide-react';
+import { ArrowRight, CodeXml, FolderTree, Link as LinkIcon, LogOut, SlidersHorizontal, SquareTerminal } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -96,6 +96,19 @@ export const MorePage: React.FC = () => {
           <span className="min-w-0 flex-1">
             <span className="block text-[15px] font-semibold">{t('apps.terminal.label')}</span>
             <span className="block truncate text-[11.5px] text-muted">{t('apps.terminal.desc')}</span>
+          </span>
+          <ArrowRight className="size-[18px] shrink-0 text-muted" />
+        </Link>
+        <Link
+          to="/apps/editor"
+          className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3.5 transition hover:bg-foreground/[0.04]"
+        >
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-violet/[0.12]">
+            <CodeXml className="size-[18px] text-violet" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-semibold">{t('apps.editor.label')}</span>
+            <span className="block truncate text-[11.5px] text-muted">{t('apps.editor.desc')}</span>
           </span>
           <ArrowRight className="size-[18px] shrink-0 text-muted" />
         </Link>

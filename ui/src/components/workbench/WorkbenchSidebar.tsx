@@ -8,6 +8,7 @@ import {
   Bot,
   ChevronDown,
   ChevronRight,
+  CodeXml,
   Ellipsis,
   FileText,
   Folder,
@@ -29,6 +30,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWindowManager } from '../../context/WindowManagerContext';
 import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -436,6 +438,7 @@ const ProjectRow: React.FC<{
   onArchiveSession,
 }) => {
   const { t } = useTranslation();
+  const wm = useWindowManager();
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(project.display_name);
@@ -562,6 +565,21 @@ const ProjectRow: React.FC<{
                   >
                     <FileText className="size-3 text-muted" />
                     {t('workbench.projectEditAgents')}
+                  </button>
+                )}
+                {project.folder_path && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      // Open the Editor rooted at the project folder, no file tab open (rootDir sets
+                      // the explorer root only). Desktop-only surface, so the floating window is right.
+                      wm.openApp('editor', { title: project.display_name, params: { rootDir: project.folder_path } });
+                    }}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+                  >
+                    <CodeXml className="size-3 text-muted" />
+                    {t('workbench.projectOpenInEditor')}
                   </button>
                 )}
                 <button
