@@ -13,6 +13,7 @@
 // WINDOW_RESTORE_PARAM, so this layer never has to know what any app stores.
 
 import { APP_REGISTRY } from '../apps/registry';
+import { MIN_H, MIN_W } from './windowBounds';
 import type { WindowBounds, WindowInstance } from '../context/WindowManagerContext';
 
 // Bump the version suffix to invalidate an incompatible on-disk shape — a stored value under
@@ -28,6 +29,13 @@ export const WINDOW_RESTORE_PARAM = '__avibeRestoredState';
 // so one bad localStorage entry can't spawn thousands of windows / tabs / shells and freeze the UI.
 export const MAX_RESTORED_WINDOWS = 40;
 export const MAX_RESTORED_TABS = 50;
+// Terminals are backend-bounded (the terminal service admits only ~8 sessions by default), so a
+// restored terminal window uses a tighter cap than the editor — restoring more would just flood the
+// backend with shells it can't admit.
+export const MAX_RESTORED_TERMINAL_TABS = 8;
+// Largest dimension we accept from storage. Well beyond any real display, but bounded so a corrupt
+// entry can't rehydrate an absurdly sized window.
+const MAX_DIM = 100_000;
 
 // One window as persisted. Mirrors the rehydratable subset of WindowInstance, plus the body's
 // own snapshot in `appState`. This is the on-disk schema — keep it explicit and stable; change
@@ -57,7 +65,12 @@ function isFiniteNumber(v: unknown): v is number {
 function isBounds(v: unknown): v is WindowBounds {
   if (!v || typeof v !== 'object') return false;
   const b = v as Record<string, unknown>;
-  return isFiniteNumber(b.x) && isFiniteNumber(b.y) && isFiniteNumber(b.width) && isFiniteNumber(b.height);
+  if (!isFiniteNumber(b.x) || !isFiniteNumber(b.y) || !isFiniteNumber(b.width) || !isFiniteNumber(b.height)) return false;
+  // Sizes must be within the range real drag/resize can produce (>= the enforced minimum, not
+  // absurdly large). Rejects a corrupt entry that would rehydrate a zero/negative/enormous — i.e.
+  // invisible or unrecoverable — window. Origin (x/y) may be off-screen; the layer re-clamp on
+  // mount pulls the titlebar back into reach, so it needs no bound here.
+  return b.width >= MIN_W && b.width <= MAX_DIM && b.height >= MIN_H && b.height <= MAX_DIM;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -69,7 +82,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 function toRuntimeWindow(v: unknown): WindowInstance | null {
   if (!isPlainObject(v)) return null;
   const { id, appId, title, params, bounds, z, minimized, maximized, restoreBounds, appState } = v;
-  if (typeof id !== 'string') return null;
+  // Ids are only ever minted as `win-<number>` (see openApp). Enforce that shape so a corrupt id —
+  // e.g. one containing a quote — can't later break `[data-window-id="…"]` selector queries (the
+  // Dock focuses a window that way).
+  if (typeof id !== 'string' || !/^win-\d+$/.test(id)) return null;
   // OWN keys only: `in` would accept inherited object keys ("toString", "__proto__") from a corrupt
   // blob, and APP_REGISTRY[thatKey] would then resolve to a non-app value that crashes the layer.
   if (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(APP_REGISTRY, appId)) return null;

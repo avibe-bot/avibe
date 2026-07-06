@@ -9,7 +9,7 @@ import {
   type PersistedWindow,
 } from './workbenchPersistence';
 
-const bounds = { x: 10, y: 20, width: 300, height: 200 };
+const bounds = { x: 120, y: 80, width: 760, height: 520 };
 
 function persisted(overrides: Partial<PersistedWindow> = {}): PersistedWindow {
   return {
@@ -84,6 +84,26 @@ describe('workbench window persistence — corrupt / old data is ignored', () =>
   it('caps the number of restored windows against a corrupt/oversized array', () => {
     const windows = Array.from({ length: MAX_RESTORED_WINDOWS + 25 }, (_, i) => persisted({ id: `win-${i}`, appId: 'files' }));
     expect(parseWorkbenchWindows(serializeWorkbenchWindows(windows))).toHaveLength(MAX_RESTORED_WINDOWS);
+  });
+
+  it('rejects ids that are not the generated win-<number> shape', () => {
+    // A corrupt id with selector syntax would break `[data-window-id="…"]` queries in the Dock.
+    for (const id of ['win-1"]', 'evil', 'win-', 'win-1a', '__proto__']) {
+      expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ id })] }))).toEqual([]);
+    }
+  });
+
+  it('rejects nonsensical bounds (zero / negative / enormous) while keeping sane ones', () => {
+    const bad = [
+      { x: 0, y: 0, width: 0, height: 400 },
+      { x: 0, y: 0, width: -800, height: 400 },
+      { x: 0, y: 0, width: 500, height: 10 }, // below MIN_H
+      { x: 0, y: 0, width: 1e9, height: 400 },
+    ];
+    for (const b of bad) {
+      expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ bounds: b })] }))).toEqual([]);
+    }
+    expect(parseWorkbenchWindows(serializeWorkbenchWindows([persisted()]))).toHaveLength(1);
   });
 
   it('rejects inherited Object keys as appIds (own registry keys only)', () => {
