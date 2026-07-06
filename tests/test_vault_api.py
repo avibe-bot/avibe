@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from storage import vault_service
-from storage.models import vault_requests, vault_secrets
+from storage.models import vault_audit, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from vibe import api
 
@@ -1297,6 +1297,11 @@ def test_agent_sign_request_approved_via_avault_sign(monkeypatch):
     assert completed["request"]["delivery"]["signature"] == {"signature": "ab" * 64, "recovery_id": 1}
     assert api.get_vault_request(requested["request"]["id"])["result"]["signature"] == {"signature": "ab" * 64, "recovery_id": 1}
     sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
+    with api._vault_engine().connect() as conn:
+        audit_row = conn.execute(
+            select(vault_audit.c.delivery).where(vault_audit.c.request_id == requested["request"]["id"], vault_audit.c.event == "signed")
+        ).scalar_one()
+    assert json.loads(audit_row)["browser_signed"] is False
 
 
 def test_agent_sign_claims_request_before_avault_sign(monkeypatch):
@@ -2731,6 +2736,11 @@ def test_protected_sign_completion_requires_matching_request(monkeypatch):
     )
     assert result["ok"] is True
     assert result["request"]["status"] == "approved"
+    with api._vault_engine().connect() as conn:
+        audit_row = conn.execute(
+            select(vault_audit.c.delivery).where(vault_audit.c.request_id == request_id, vault_audit.c.event == "signed")
+        ).scalar_one()
+    assert json.loads(audit_row)["browser_signed"] is True
 
 
 def test_protected_sign_completion_rejects_malformed_browser_signature(monkeypatch):
@@ -2790,7 +2800,7 @@ def test_protected_sign_completion_rejects_signature_extra_fields(monkeypatch):
                 "digest": digest,
                 "scheme": "ecdsa-secp256k1-recoverable",
                 "request_id": pending["request"]["id"],
-                "signature": {**signature, "private_key": "raw", "dek": "raw"},
+                "signature": {**signature, "browser_signed": True, "private_key": "raw", "dek": "raw"},
             }
         )
 

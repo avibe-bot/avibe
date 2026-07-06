@@ -266,7 +266,7 @@ export const VaultApprovalCard: React.FC<{
         const material = card?.secret_unlock_material;
         if (!material) throw new Error(t('vaults.approval.errors.missingMaterial'));
         const sig = await vault.signProtectedRequest(material, digest, scheme as SignatureScheme);
-        const signature: Record<string, unknown> = { signature: sig.signature, browser_signed: true };
+        const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
         failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme, signature }));
       } else {

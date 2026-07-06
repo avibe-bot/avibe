@@ -2734,6 +2734,7 @@ def vault_sign(payload: dict) -> dict:
                         scheme=scheme,
                         signature=signature,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                        browser_signed=True,
                     )
                     protected_event = {
                         "scope": "request",

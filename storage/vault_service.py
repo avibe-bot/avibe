@@ -2145,6 +2145,7 @@ def complete_sign_request(
     scheme: str,
     signature: dict[str, Any],
     requester: Any = None,
+    browser_signed: bool = False,
 ) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
@@ -2175,7 +2176,7 @@ def complete_sign_request(
         conn,
         name,
         requester=requester,
-        delivery={"scheme": scheme, "digest": digest, "browser_signed": bool(signature.get("browser_signed"))},
+        delivery={"scheme": scheme, "digest": digest, "browser_signed": bool(browser_signed)},
         request_id=request_id,
     )
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
