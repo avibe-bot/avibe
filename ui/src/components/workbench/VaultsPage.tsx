@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -8,6 +8,7 @@ import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { VaultProtectedUnlock } from '../ui/vault-protected-unlock';
 import { cn } from '../../lib/utils';
@@ -31,8 +32,9 @@ const proxyHosts = (s: VaultSecret): string[] => {
   return Array.isArray(hosts) ? hosts : [];
 };
 
-const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (secret: VaultSecret) => void }> = ({ secret: s, onDelete }) => {
+const SecretRow: React.FC<{ secret: VaultSecret; onEdit: (secret: VaultSecret) => void; onDelete: (secret: VaultSecret) => void }> = ({ secret: s, onEdit, onDelete }) => {
   const { t } = useTranslation();
+  const [menuOpen, setMenuOpen] = useState(false);
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
   // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
@@ -85,9 +87,39 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (secret: VaultSecret)
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
       </div>
       <div className="ml-auto">
-        <Button variant="ghost" size="icon" onClick={() => onDelete(s)} aria-label={t('vaults.delete')}>
-          <Trash2 className="size-4" />
-        </Button>
+        <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label={t('vaults.rowActions')} aria-haspopup="menu">
+              <MoreHorizontal className="size-4" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-44 p-1" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                onEdit(s);
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+            >
+              <Pencil className="size-4 text-muted" />
+              {t('vaults.editSecret')}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                onDelete(s);
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
+            >
+              <Trash2 className="size-4" />
+              {t('vaults.delete')}
+            </button>
+          </PopoverContent>
+        </Popover>
       </div>
     </div>
   );
@@ -645,6 +677,7 @@ export const VaultsPage: React.FC = () => {
 
   const protectedVault = useProtectedVault();
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
+  const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
   // Deleting a protected secret requires the user present at an unlocked vault (a passkey/password
   // ceremony) — discover the current lock state when the delete dialog opens for one.
   useEffect(() => {
@@ -653,6 +686,7 @@ export const VaultsPage: React.FC = () => {
   }, [deleteTarget]);
   const deleteNeedsUnlock = deleteTarget?.protection === 'protected' && protectedVault.status !== 'unlocked';
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
+  const onEdit = (secret: VaultSecret) => setEditTarget(secret);
   const confirmDelete = async () => {
     const secret = deleteTarget;
     if (!secret) return;
@@ -767,7 +801,7 @@ export const VaultsPage: React.FC = () => {
       ) : (
         <div className="flex flex-col gap-2">
           {visibleSecrets.map((s) => (
-            <SecretRow key={s.name} secret={s} onDelete={onDelete} />
+            <SecretRow key={s.name} secret={s} onEdit={onEdit} onDelete={onDelete} />
           ))}
         </div>
       )}
@@ -798,6 +832,20 @@ export const VaultsPage: React.FC = () => {
           if (reason === 'already_exists') return;
           setAdding(false);
           showToast(t('vaults.created', { name }), 'success');
+          refresh();
+        }}
+      />
+      <VaultSecretDialog
+        open={editTarget != null}
+        editSecret={editTarget}
+        onOpenChange={(o) => {
+          if (!o) setEditTarget(null);
+        }}
+        onCancel={() => setEditTarget(null)}
+        onCreated={() => setEditTarget(null)}
+        onSaved={(name) => {
+          setEditTarget(null);
+          showToast(t('vaults.saved', { name }), 'success');
           refresh();
         }}
       />

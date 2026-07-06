@@ -164,6 +164,18 @@ export type VaultCreatePayload = {
   establishing_vmk?: boolean;
 };
 
+/**
+ * Value-free metadata edit (`PATCH /api/vault/secrets/<name>`). At least one field must be
+ * present. `description: null`/blank clears it; `tags: []` clears all tags; `policy` replaces
+ * the visible fetch policy (allowed_hosts + auth) while the backend preserves internal keys
+ * such as `always_ask`. Name / kind / protection / value are never editable through this path.
+ */
+export type VaultMetadataUpdatePayload = {
+  description?: string | null;
+  tags?: string[];
+  policy?: Record<string, unknown>;
+};
+
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
@@ -374,6 +386,7 @@ export type ApiContextType = {
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
@@ -1773,12 +1786,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return payloadJson;
   };
 
-  const patchJson = async (path: string, payload: any) => {
-    const { payloadJson } = await requestJson(path, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+  const patchJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
+    const { payloadJson } = await requestJson(
+      path,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+      path,
+      opts,
+    );
     return payloadJson;
   };
 
@@ -2163,6 +2181,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     deriveSigningAddresses: (publicKey) =>
       postJson('/api/vault/signing-addresses', { public_key: publicKey }, { handleError: false }),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
+    updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),

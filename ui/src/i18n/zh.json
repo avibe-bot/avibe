@@ -1800,6 +1800,7 @@
     "noConfig": "未配置模型或系统提示词",
     "empty": "还没有 Agent。先创建一个,再开始对话。",
     "noSearchMatch": "没有匹配的 Agent。",
+    "selectPrompt": "选择一个 Agent 查看配置。",
     "makeDefault": "设为默认",
     "deleteConfirm": "确认删除 Agent \"{{name}}\"？此操作不可撤销。",
     "deleteInUse": "Agent \"{{name}}\" 正被一个或多个频道使用,无法删除。",
@@ -2249,6 +2250,14 @@
       "lockNow": "立即锁定",
       "autoLockHint": "闲置 10 分钟后自动锁定——密钥会从浏览器内存中抹除。点「立即锁定」可马上抹除。"
     },
+    "saved": "已更新 {{name}}",
+    "editSecret": "编辑信息",
+    "rowActions": "更多操作",
+    "edit": {
+      "title": "编辑信息",
+      "subtitle": "普通信息不影响授权;Fetch 策略变化会重新审批",
+      "lockedHint": "名称、类型、保护级别不可修改"
+    },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",
       "unlocked": "保护层已在本会话解锁",
@@ -2378,7 +2387,8 @@
         "fileTooLarge": "请选择不超过 {{size}} 的文件。",
         "fileReadFailed": "读取文件失败。",
         "secretExists": "同名密钥已存在。",
-        "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。"
+        "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。",
+        "updateFailed": "保存失败,请重试。"
       }
     },
     "requests": {
