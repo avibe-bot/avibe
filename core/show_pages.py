@@ -945,6 +945,7 @@ export default function App() {
 
 def _default_styles_css() -> str:
     return """@import "tailwindcss";
+@import "@avibe/show-ui/theme.css";
 
 :root {
   color-scheme: light;
