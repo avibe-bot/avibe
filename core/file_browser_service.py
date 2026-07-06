@@ -698,11 +698,11 @@ def _resolve_upload_directory(raw_dir: str) -> Path:
     return directory
 
 
-def _validate_upload_target(target: Path, *, overwrite: bool) -> int:
+def _validate_upload_target(target: Path, *, overwrite: bool) -> int | None:
     try:
         stat_result = target.lstat()
     except FileNotFoundError:
-        return 0o644
+        return None
     except PermissionError as exc:
         raise FileBrowserError("fs_error", "Permission denied", 400) from exc
     except OSError as exc:
@@ -733,7 +733,7 @@ def upload_file(
             size = 0
             try:
                 fd, temp_name = tempfile.mkstemp(prefix=_WRITE_TEMP_PREFIX, suffix=".tmp", dir=directory)
-                if hasattr(os, "fchmod"):
+                if current_mode is not None and hasattr(os, "fchmod"):
                     os.fchmod(fd, current_mode)
                 with os.fdopen(fd, "wb") as handle:
                     fd = -1

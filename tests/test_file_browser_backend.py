@@ -566,6 +566,18 @@ def test_upload_file_conflict_without_overwrite_and_replaces_with_overwrite(tmp_
     assert target.stat().st_mode & 0o777 == 0o744
 
 
+def test_upload_new_file_does_not_bypass_restrictive_umask(tmp_path):
+    old_umask = os.umask(0o077)
+    try:
+        result = fs.upload_file(str(tmp_path), io.BytesIO(b"private"), filename="private.bin")
+    finally:
+        os.umask(old_umask)
+
+    uploaded = Path(result["path"])
+    assert uploaded.read_bytes() == b"private"
+    assert uploaded.stat().st_mode & 0o077 == 0
+
+
 def test_upload_file_size_cap_cleans_temp_and_target(tmp_path, monkeypatch):
     monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
 
@@ -1318,6 +1330,31 @@ def test_http_upload_rejects_oversized_content_length_before_parsing(tmp_path, m
     assert not (tmp_path / "large.bin").exists()
 
 
+def test_http_upload_allows_missing_content_length():
+    ui_server._validate_file_upload_content_length({}, 4)
+
+
+def test_http_upload_parser_caps_file_part_before_service(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+
+    def boom_upload(*_args, **_kwargs):
+        raise AssertionError("oversized multipart file should be rejected before service write")
+
+    monkeypatch.setattr(fs, "upload_file", boom_upload)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["error"]["code"] == "too_large"
+    assert not (tmp_path / "large.bin").exists()
+
+
 def test_http_upload_missing_file_part_returns_structured_error(tmp_path):
     client = app.test_client()
 
@@ -1332,6 +1369,23 @@ def test_http_upload_missing_file_part_returns_structured_error(tmp_path):
         "ok": False,
         "error": {"code": "invalid_name", "message": "File is required"},
     }
+
+
+def test_http_upload_overwrite_string_true_replaces_target(tmp_path):
+    target = tmp_path / "replace.bin"
+    target.write_bytes(b"old")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path), "overwrite": "true"},
+        files={"file": ("replace.bin", b"new", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["name"] == "replace.bin"
+    assert target.read_bytes() == b"new"
 
 
 def test_http_routes_map_structured_errors_and_enforce_csrf(tmp_path):

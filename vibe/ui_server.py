@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import hmac
 import html
+import inspect
 import ipaddress
 import json
 import logging
@@ -30,6 +31,7 @@ from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
 
@@ -5818,7 +5820,7 @@ def _validate_file_upload_content_length(headers: Any, max_file_bytes: int) -> N
 
     raw_length = headers.get("content-length")
     if raw_length is None:
-        raise FileBrowserError("fs_error", "Content-Length is required", 400)
+        return
     try:
         length = int(raw_length)
     except (TypeError, ValueError) as exc:
@@ -5827,6 +5829,54 @@ def _validate_file_upload_content_length(headers: Any, max_file_bytes: int) -> N
         raise FileBrowserError("fs_error", "Invalid Content-Length", 400)
     if length > max_file_bytes + _FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES:
         raise FileBrowserError("too_large", "File is too large", 413)
+
+
+class _FileUploadMultiPartParser(MultiPartParser):
+    def __init__(
+        self,
+        *args: Any,
+        max_file_bytes: int,
+        max_field_bytes: int,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._max_file_bytes = max_file_bytes
+        self._max_field_bytes = max_field_bytes
+        self._current_file_bytes = 0
+
+    def on_part_begin(self) -> None:
+        self._current_file_bytes = 0
+        super().on_part_begin()
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        chunk_len = end - start
+        if self._current_part.file is None:
+            if len(self._current_part.data) + chunk_len > self._max_field_bytes:
+                raise MultiPartException("Form field is too large.")
+        else:
+            self._current_file_bytes += chunk_len
+            if self._current_file_bytes > self._max_file_bytes:
+                raise MultiPartException("File is too large.")
+        super().on_part_data(data, start, end)
+
+
+async def _parse_file_upload_form(starlette_request: FastAPIRequest, *, max_file_bytes: int):
+    content_type = starlette_request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "multipart/form-data":
+        from core.file_browser_service import FileBrowserError
+
+        raise FileBrowserError("invalid_name", "File is required", 400)
+    parser_kwargs: dict[str, Any] = {"max_files": 1, "max_fields": 3}
+    if "max_part_size" in inspect.signature(MultiPartParser).parameters:
+        parser_kwargs["max_part_size"] = _FILE_UPLOAD_FIELD_MAX_BYTES
+    parser = _FileUploadMultiPartParser(
+        starlette_request.headers,
+        starlette_request.stream(),
+        max_file_bytes=max_file_bytes,
+        max_field_bytes=_FILE_UPLOAD_FIELD_MAX_BYTES,
+        **parser_kwargs,
+    )
+    return await parser.parse()
 
 
 async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
@@ -5921,11 +5971,8 @@ async def files_upload(starlette_request: FastAPIRequest):
 
         try:
             _validate_file_upload_content_length(starlette_request.headers, file_browser_service.MAX_FILE_BYTES)
-            async with starlette_request.form(
-                max_files=1,
-                max_fields=3,
-                max_part_size=_FILE_UPLOAD_FIELD_MAX_BYTES,
-            ) as form:
+            form = await _parse_file_upload_form(starlette_request, max_file_bytes=file_browser_service.MAX_FILE_BYTES)
+            try:
                 upload = form.get("file")
                 if not isinstance(upload, StarletteUploadFile):
                     raise file_browser_service.FileBrowserError("invalid_name", "File is required", 400)
@@ -5942,6 +5989,15 @@ async def files_upload(starlette_request: FastAPIRequest):
                         overwrite=_parse_explicit_bool(form.get("overwrite")),
                     )
                 )
+            finally:
+                await form.close()
+        except MultiPartException as exc:
+            message = str(exc)
+            if "too large" in message.lower():
+                return _file_browser_error_response(
+                    file_browser_service.FileBrowserError("too_large", "File is too large", 413)
+                )
+            return _file_browser_error_response(file_browser_service.FileBrowserError("fs_error", message, 400))
         except StarletteHTTPException as exc:
             return _file_browser_error_response(
                 file_browser_service.FileBrowserError("fs_error", str(exc.detail), 400)
