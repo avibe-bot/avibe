@@ -1461,6 +1461,34 @@ def _reject_plaintext_value_fields(payload: object) -> None:
             _reject_plaintext_value_fields(item)
 
 
+_VAULT_METADATA_ALLOWED_FIELDS = {"description", "tags", "policy"}
+_VAULT_METADATA_SECRET_FIELDS = {
+    "value",
+    "sealed",
+    "envelope",
+    "blind_box",
+    "ciphertext",
+    "nonce",
+    "wrap_meta",
+    "private_key",
+    "secret",
+}
+
+
+def _reject_vault_metadata_secret_fields(payload: object, *, path: str = "payload") -> None:
+    if isinstance(payload, dict):
+        for key, item in payload.items():
+            if str(key) in _VAULT_METADATA_SECRET_FIELDS:
+                raise VaultApiError(
+                    f"{path}.{key} is not allowed in vault metadata updates",
+                    code="secret_material_rejected",
+                )
+            _reject_vault_metadata_secret_fields(item, path=f"{path}.{key}")
+    elif isinstance(payload, list):
+        for index, item in enumerate(payload):
+            _reject_vault_metadata_secret_fields(item, path=f"{path}[{index}]")
+
+
 def _sealed_from_payload(payload: dict):
     from storage.vault_crypto import Sealed
 
@@ -1599,6 +1627,39 @@ def create_vault_secret(payload: dict) -> dict:
         request_id=str(payload.get("provision_request_id") or "") or None,
         request_status="fulfilled" if payload.get("provision_request_id") else None,
     )
+    return {"ok": True, "secret": meta}
+
+
+def update_vault_secret(name: str, payload: dict) -> dict:
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    _reject_vault_metadata_secret_fields(payload)
+    secret_name = str(name or "").strip()
+    if not vault_crypto.is_valid_secret_name(secret_name):
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+    extra_fields = set(payload) - _VAULT_METADATA_ALLOWED_FIELDS
+    if extra_fields:
+        raise VaultApiError(
+            f"unsupported vault metadata fields: {', '.join(sorted(extra_fields))}",
+            code="invalid_metadata",
+            status=409,
+        )
+    kwargs = {field: payload[field] for field in _VAULT_METADATA_ALLOWED_FIELDS if field in payload}
+    if not kwargs:
+        raise VaultApiError("no metadata fields were provided", code="missing_metadata", status=409)
+    engine = _vault_engine()
+    release_scopes: list[dict[str, str]] = []
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.update_secret_metadata(conn, secret_name, release_scopes=release_scopes, **kwargs)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
+    release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
+    _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or secret_name)
     return {"ok": True, "secret": meta}
 
 

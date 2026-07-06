@@ -4972,6 +4972,183 @@ def cmd_vault_rm(args):
         return 1
 
 
+def _split_vault_metadata_values(values: list[str] | None) -> list[str]:
+    out: list[str] = []
+    for raw in values or []:
+        for item in str(raw).split(","):
+            item = item.strip()
+            if item:
+                out.append(item)
+    return out
+
+
+_VAULT_EDIT_ALLOWED_FIELDS = {"description", "tags", "policy"}
+_VAULT_EDIT_SECRET_FIELDS = {
+    "value",
+    "sealed",
+    "envelope",
+    "blind_box",
+    "ciphertext",
+    "nonce",
+    "wrap_meta",
+    "private_key",
+    "secret",
+}
+
+
+def _reject_vault_edit_secret_fields(value: object, *, path: str = "metadata") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in _VAULT_EDIT_SECRET_FIELDS:
+                raise TaskCliError(f"{path}.{key} is not allowed in vault metadata", code="secret_material_rejected")
+            _reject_vault_edit_secret_fields(item, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_vault_edit_secret_fields(item, path=f"{path}[{index}]")
+
+
+def _vault_edit_payload_from_args(args, *, current: dict, help_command: str) -> dict:
+    metadata_json = getattr(args, "metadata_json", None)
+    flag_fields = [
+        getattr(args, "description", None) is not None,
+        bool(getattr(args, "clear_description", False)),
+        bool(getattr(args, "tag", None)),
+        bool(getattr(args, "skill", None)),
+        bool(getattr(args, "clear_tags", False)),
+        bool(getattr(args, "allow_host", None)),
+        bool(getattr(args, "clear_allowed_hosts", False)),
+        getattr(args, "fetch_auth", None) is not None,
+        bool(getattr(args, "clear_fetch_auth", False)),
+        getattr(args, "auth_name", None) is not None,
+    ]
+    if metadata_json and any(flag_fields):
+        raise TaskCliError("use --metadata-json or field flags, not both", code="invalid_metadata", help_command=help_command)
+    if metadata_json:
+        try:
+            payload = json.loads(str(metadata_json))
+        except ValueError as exc:
+            raise TaskCliError(f"invalid metadata JSON: {exc}", code="invalid_metadata", help_command=help_command) from exc
+        if not isinstance(payload, dict):
+            raise TaskCliError("metadata JSON must be an object", code="invalid_metadata", help_command=help_command)
+        try:
+            _reject_vault_edit_secret_fields(payload)
+        except TaskCliError as exc:
+            exc.help_command = help_command
+            raise
+        extra_fields = set(payload) - _VAULT_EDIT_ALLOWED_FIELDS
+        if extra_fields:
+            raise TaskCliError(
+                f"unsupported vault metadata fields: {', '.join(sorted(extra_fields))}",
+                code="invalid_metadata",
+                help_command=help_command,
+            )
+        return payload
+
+    payload: dict[str, object] = {}
+    if getattr(args, "description", None) is not None and getattr(args, "clear_description", False):
+        raise TaskCliError("use --description or --clear-description, not both", code="invalid_metadata", help_command=help_command)
+    if getattr(args, "description", None) is not None:
+        payload["description"] = str(args.description)
+    elif getattr(args, "clear_description", False):
+        payload["description"] = None
+
+    if getattr(args, "clear_tags", False) and (getattr(args, "tag", None) or getattr(args, "skill", None)):
+        raise TaskCliError("use --clear-tags or --tag/--skill, not both", code="invalid_metadata", help_command=help_command)
+    if getattr(args, "clear_tags", False):
+        payload["tags"] = []
+    elif getattr(args, "tag", None) or getattr(args, "skill", None):
+        current_tags = [str(tag) for tag in current.get("tags") or [] if isinstance(tag, str) and tag]
+        current_plain_tags = [tag for tag in current_tags if not tag.startswith("skill:")]
+        current_skill_tags = [tag for tag in current_tags if tag.startswith("skill:")]
+        tags = _split_vault_metadata_values(getattr(args, "tag", None)) if getattr(args, "tag", None) else current_plain_tags
+        skill_tags = (
+            [
+                skill if skill.startswith("skill:") else f"skill:{skill}"
+                for skill in _split_vault_metadata_values(getattr(args, "skill", None))
+            ]
+            if getattr(args, "skill", None)
+            else current_skill_tags
+        )
+        tags.extend(skill_tags)
+        payload["tags"] = tags
+
+    policy_requested = any(
+        [
+            getattr(args, "allow_host", None),
+            getattr(args, "clear_allowed_hosts", False),
+            getattr(args, "fetch_auth", None) is not None,
+            getattr(args, "clear_fetch_auth", False),
+            getattr(args, "auth_name", None) is not None,
+        ]
+    )
+    if policy_requested:
+        if getattr(args, "clear_allowed_hosts", False) and getattr(args, "allow_host", None):
+            raise TaskCliError("use --clear-allowed-hosts or --allow-host, not both", code="invalid_metadata", help_command=help_command)
+        if getattr(args, "clear_fetch_auth", False) and getattr(args, "fetch_auth", None) is not None:
+            raise TaskCliError("use --clear-fetch-auth or --fetch-auth, not both", code="invalid_metadata", help_command=help_command)
+        if getattr(args, "auth_name", None) is not None and getattr(args, "fetch_auth", None) not in {"header", "query"}:
+            raise TaskCliError("--auth-name requires --fetch-auth header or --fetch-auth query", code="invalid_metadata", help_command=help_command)
+        current_policy = current.get("policy") if isinstance(current.get("policy"), dict) else {}
+        policy: dict[str, object] = {}
+        if getattr(args, "clear_allowed_hosts", False):
+            policy["allowed_hosts"] = []
+        elif getattr(args, "allow_host", None):
+            policy["allowed_hosts"] = _split_vault_metadata_values(getattr(args, "allow_host", None))
+        elif current_policy.get("allowed_hosts") is not None:
+            policy["allowed_hosts"] = current_policy.get("allowed_hosts")
+
+        if not getattr(args, "clear_fetch_auth", False):
+            auth_type = getattr(args, "fetch_auth", None)
+            if auth_type is None:
+                current_auth = current_policy.get("auth") if isinstance(current_policy.get("auth"), dict) else None
+                if current_auth:
+                    policy["auth"] = current_auth
+            elif auth_type == "bearer":
+                policy["auth"] = {"type": "bearer"}
+            else:
+                policy["auth"] = {"type": auth_type, "name": str(getattr(args, "auth_name", "") or "").strip()}
+        payload["policy"] = policy
+
+    if not payload:
+        raise TaskCliError("no metadata fields were provided", code="missing_metadata", help_command=help_command)
+    return payload
+
+
+def cmd_vault_edit(args):
+    from storage import vault_service
+    from vibe import api
+
+    help_command = "vibe vault edit --help"
+    try:
+        engine = _open_vault_engine()
+        release_scopes: list[dict[str, str]] = []
+        with engine.begin() as conn:
+            current = vault_service.get_secret_meta(conn, args.name)
+            payload = _vault_edit_payload_from_args(args, current=current, help_command=help_command)
+            secret = vault_service.update_secret_metadata(
+                conn,
+                args.name,
+                release_scopes=release_scopes,
+                **{key: payload[key] for key in ("description", "tags", "policy") if key in payload},
+            )
+        api.release_vault_agent_scopes(release_scopes, reason="vault_edit")
+        _publish_cli_vaults_updated(scope="secret", secret_name=secret.get("name") or args.name)
+        _print_cli_payload("vault_secret", secret=secret)
+        return 0
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.VaultServiceError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_metadata", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def cmd_vault_access(args):
     from storage import vault_crypto, vault_service
 
@@ -10149,7 +10326,7 @@ def build_parser():
     )
     vault_subparsers = vault_parser.add_subparsers(
         dest="vault_command",
-        metavar="{list,discover,rm,run,fetch,access,sign,await,request,export,inject,key}",
+        metavar="{list,discover,edit,rm,run,fetch,access,sign,await,request,export,inject,key}",
     )
     vault_subparsers.required = True
 
@@ -10184,6 +10361,36 @@ def build_parser():
     )
     vault_rm_parser.add_argument("name", help="Secret name to delete")
     _add_json_noop(vault_rm_parser)
+
+    vault_edit_parser = vault_subparsers.add_parser(
+        "edit",
+        help="Edit value-free secret metadata",
+        description=(
+            "Edit Vault metadata only: description, tags/skill tags, and brokered-fetch policy. "
+            "This command never accepts or changes secret values, key material, kind, protection tier, or name."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  vibe vault edit OPENAI_API_KEY --description 'OpenAI production key' --tag prod --skill support\n"
+            "  vibe vault edit GITHUB_TOKEN --allow-host api.github.com --fetch-auth bearer\n"
+            "  vibe vault edit GITHUB_TOKEN --metadata-json '{\"tags\":[\"prod\"],\"policy\":{\"allowed_hosts\":[\"api.github.com\"]}}'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault edit --help",
+    )
+    vault_edit_parser.add_argument("name", help="Secret name to edit")
+    vault_edit_parser.add_argument("--description", help="Replace the description")
+    vault_edit_parser.add_argument("--clear-description", action="store_true", help="Clear the description")
+    vault_edit_parser.add_argument("--tag", action="append", metavar="TAG[,TAG2]", help="Replace normal tags. Repeatable; comma-separated values allowed.")
+    vault_edit_parser.add_argument("--skill", action="append", metavar="SKILL[,SKILL2]", help="Replace skill tags using skill:<name>. Repeatable.")
+    vault_edit_parser.add_argument("--clear-tags", action="store_true", help="Clear all normal and skill tags")
+    vault_edit_parser.add_argument("--allow-host", action="append", metavar="HOST[,HOST2]", help="Replace allowed fetch hosts. Repeatable; comma-separated values allowed.")
+    vault_edit_parser.add_argument("--clear-allowed-hosts", action="store_true", help="Clear allowed fetch hosts")
+    vault_edit_parser.add_argument("--fetch-auth", choices=["bearer", "header", "query"], help="Set the fetch credential injection mode")
+    vault_edit_parser.add_argument("--auth-name", help="Header or query parameter name for --fetch-auth header/query")
+    vault_edit_parser.add_argument("--clear-fetch-auth", action="store_true", help="Clear explicit fetch auth policy")
+    vault_edit_parser.add_argument("--metadata-json", help="Inline JSON object with description, tags, and/or policy")
+    _add_json_noop(vault_edit_parser)
 
     vault_run_parser = vault_subparsers.add_parser(
         "run",
@@ -11117,6 +11324,8 @@ def main():
             sys.exit(cmd_vault_list(args))
         if args.vault_command == "discover":
             sys.exit(cmd_vault_discover(args))
+        if args.vault_command == "edit":
+            sys.exit(cmd_vault_edit(args))
         if args.vault_command == "rm":
             sys.exit(cmd_vault_rm(args))
         if args.vault_command == "run":

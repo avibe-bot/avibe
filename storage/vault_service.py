@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -73,6 +74,10 @@ PROVISION_SPEC_ALLOWED_KEYS = {
 }
 PROVISION_SPEC_ALLOWED_POLICY_KEYS = {"allowed_hosts", "auth"}
 PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
+FETCH_AUTH_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+FETCH_AUTH_QUERY_NAME_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+FORBIDDEN_FETCH_AUTH_HEADER_NAMES = frozenset({"host"})
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -433,6 +438,72 @@ def _optional_string(value: Any, *, field: str) -> str | None:
     return stripped or None
 
 
+def _validate_fetch_auth_name(auth_type: str, auth_name: str, *, field: str) -> None:
+    if auth_type == "header":
+        if auth_name.strip().lower() in FORBIDDEN_FETCH_AUTH_HEADER_NAMES:
+            raise VaultServiceError(f"{field} cannot be {auth_name!r}")
+        if not FETCH_AUTH_HEADER_NAME_RE.fullmatch(auth_name):
+            raise VaultServiceError(f"{field} must be a valid HTTP header name")
+    elif auth_type == "query" and not FETCH_AUTH_QUERY_NAME_RE.fullmatch(auth_name):
+        raise VaultServiceError(f"{field} must be a valid query parameter name")
+
+
+def _normalize_fetch_policy(policy: Any, *, field: str = "policy", allowed_extra_keys: set[str] | None = None) -> dict[str, Any]:
+    if policy is None:
+        return {}
+    if not isinstance(policy, dict):
+        raise VaultServiceError(f"{field} must be an object")
+    extra_policy_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS - (allowed_extra_keys or set())
+    if extra_policy_keys:
+        raise VaultServiceError(f"unsupported {field} fields: {', '.join(sorted(extra_policy_keys))}")
+    normalized_policy: dict[str, Any] = {}
+    allowed_hosts = _allowed_host_list(policy.get("allowed_hosts"), field=f"{field}.allowed_hosts") if "allowed_hosts" in policy else []
+    if allowed_hosts:
+        normalized_policy["allowed_hosts"] = allowed_hosts
+    auth = policy.get("auth")
+    if auth is not None:
+        if not isinstance(auth, dict):
+            raise VaultServiceError(f"{field}.auth must be an object")
+        extra_auth_keys = set(auth) - PROVISION_SPEC_ALLOWED_AUTH_KEYS
+        if extra_auth_keys:
+            raise VaultServiceError(f"unsupported {field}.auth fields: {', '.join(sorted(extra_auth_keys))}")
+        raw_auth_type = auth.get("type") or "bearer"
+        if not isinstance(raw_auth_type, str):
+            raise VaultServiceError(f"{field}.auth.type must be a string")
+        auth_type = raw_auth_type.strip().lower()
+        if auth_type not in {"bearer", "header", "query"}:
+            raise VaultServiceError(f"{field}.auth.type must be bearer, header, or query")
+        normalized_auth: dict[str, Any] = {"type": auth_type}
+        auth_name = _optional_string(auth.get("name"), field=f"{field}.auth.name") if "name" in auth else None
+        if auth_type in {"header", "query"}:
+            if not auth_name:
+                raise VaultServiceError(f"{field}.auth.name is required for header/query auth")
+            _validate_fetch_auth_name(auth_type, auth_name, field=f"{field}.auth.name")
+            normalized_auth["name"] = auth_name
+        elif auth_name:
+            normalized_auth["name"] = auth_name
+        normalized_policy["auth"] = normalized_auth
+    return normalized_policy
+
+
+def _stored_fetch_policy_visible_snapshot(policy: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort comparable view of persisted fetch policy.
+
+    Older or hand-edited rows may contain auth names that the current write path
+    rejects. Do not normalize the old value here; edits must still be able to
+    replace an unsafe legacy policy with a valid one.
+    """
+
+    snapshot: dict[str, Any] = {}
+    allowed_hosts = policy.get("allowed_hosts")
+    if allowed_hosts:
+        snapshot["allowed_hosts"] = allowed_hosts
+    auth = policy.get("auth")
+    if auth is not None:
+        snapshot["auth"] = auth
+    return snapshot
+
+
 def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     """Return non-secret creation hints for a provision request.
 
@@ -476,39 +547,8 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
     tags = _normalize_tags(tags)
 
-    policy = spec.get("policy")
-    if policy is not None:
-        if not isinstance(policy, dict):
-            raise VaultServiceError("spec.policy must be an object")
-        extra_policy_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
-        if extra_policy_keys:
-            raise VaultServiceError(f"unsupported spec.policy fields: {', '.join(sorted(extra_policy_keys))}")
-        normalized_policy: dict[str, Any] = {}
-        allowed_hosts = _allowed_host_list(policy.get("allowed_hosts"), field="spec.policy.allowed_hosts") if "allowed_hosts" in policy else []
-        if allowed_hosts:
-            normalized_policy["allowed_hosts"] = allowed_hosts
-        auth = policy.get("auth")
-        if auth is not None:
-            if not isinstance(auth, dict):
-                raise VaultServiceError("spec.policy.auth must be an object")
-            extra_auth_keys = set(auth) - PROVISION_SPEC_ALLOWED_AUTH_KEYS
-            if extra_auth_keys:
-                raise VaultServiceError(f"unsupported spec.policy.auth fields: {', '.join(sorted(extra_auth_keys))}")
-            raw_auth_type = auth.get("type") or "bearer"
-            if not isinstance(raw_auth_type, str):
-                raise VaultServiceError("spec.policy.auth.type must be a string")
-            auth_type = raw_auth_type.strip().lower()
-            if auth_type not in {"bearer", "header", "query"}:
-                raise VaultServiceError("spec.policy.auth.type must be bearer, header, or query")
-            normalized_auth: dict[str, Any] = {"type": auth_type}
-            auth_name = _optional_string(auth.get("name"), field="spec.policy.auth.name") if "name" in auth else None
-            if auth_type in {"header", "query"}:
-                if not auth_name:
-                    raise VaultServiceError("spec.policy.auth.name is required for header/query auth")
-                normalized_auth["name"] = auth_name
-            elif auth_name:
-                normalized_auth["name"] = auth_name
-            normalized_policy["auth"] = normalized_auth
+    if "policy" in spec:
+        normalized_policy = _normalize_fetch_policy(spec.get("policy"), field="spec.policy")
         if normalized_policy:
             normalized["policy"] = normalized_policy
 
@@ -1404,6 +1444,83 @@ def update_secret_tags(conn: Connection, secret_name: str, tags: list[str]) -> d
     )
     audit(conn, "tags-updated", secret_name=secret_name, delivery={"tags": normalized})
     return _meta_payload(dict(row) | {"tags": json.dumps(normalized) if normalized else None})
+
+
+def update_secret_metadata(
+    conn: Connection,
+    secret_name: str,
+    *,
+    description: Any = _UNSET,
+    tags: Any = _UNSET,
+    policy: Any = _UNSET,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    release_scopes: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Update value-free metadata only.
+
+    Tags and display metadata deliberately do not expire active grants: grants are
+    scoped to a frozen secret set, not to selectors. Fetch policy is an
+    authorization boundary, so policy changes expire relevant requests/grants.
+    """
+
+    row = _require_row(conn, secret_name)
+    values: dict[str, Any] = {}
+    fields: list[str] = []
+
+    if description is not _UNSET:
+        public_meta = _public_meta(row.get("public_meta"))
+        normalized_description = _optional_string(description, field="description")
+        if normalized_description:
+            public_meta["description"] = normalized_description
+        else:
+            public_meta.pop("description", None)
+        values["public_meta"] = json.dumps(public_meta) if public_meta else None
+        fields.append("description")
+
+    if tags is not _UNSET:
+        normalized_tags = _normalize_tags(_string_list(tags, field="tags"))
+        values["tags"] = json.dumps(normalized_tags) if normalized_tags else None
+        fields.append("tags")
+
+    if policy is not _UNSET:
+        if policy is None:
+            policy = {}
+        if not isinstance(policy, dict):
+            raise VaultServiceError("policy must be an object")
+        existing_policy = _secret_policy(row)
+        internal_policy_keys = set(existing_policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        incoming_internal_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        unsupported_internal_keys = incoming_internal_keys - internal_policy_keys
+        if unsupported_internal_keys:
+            raise VaultServiceError(f"unsupported policy fields: {', '.join(sorted(unsupported_internal_keys))}")
+        changed_internal_keys = [key for key in sorted(incoming_internal_keys) if policy.get(key) != existing_policy.get(key)]
+        if changed_internal_keys:
+            raise VaultServiceError(f"policy.{changed_internal_keys[0]} is read-only")
+        # Preserve internal policy keys such as always_ask; metadata editing owns
+        # only the user-visible fetch policy fields.
+        preserved_policy = {
+            key: value
+            for key, value in existing_policy.items()
+            if key not in PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        }
+        existing_visible_policy = _stored_fetch_policy_visible_snapshot(existing_policy)
+        normalized_policy = _normalize_fetch_policy(policy, field="policy", allowed_extra_keys=internal_policy_keys)
+        next_policy = {**preserved_policy, **normalized_policy}
+        values["policy"] = json.dumps(next_policy) if next_policy else None
+        fields.append("policy")
+        if normalized_policy != existing_visible_policy:
+            grant_rows = active_grant_rows_for_secret(conn, secret_name)
+            _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-policy-changed")
+            _expire_grant_rows(conn, grant_rows, cache=cache, reason="grant-expired-policy-changed")
+            if release_scopes is not None:
+                release_scopes.extend(agent_release_scopes_after_rows(conn, grant_rows, cache=cache))
+
+    if not values:
+        return _meta_payload(row)
+
+    conn.execute(vault_secrets.update().where(vault_secrets.c.name == secret_name).values(**values))
+    audit(conn, "metadata-updated", secret_name=secret_name, delivery={"fields": fields})
+    return _meta_payload(_require_row(conn, secret_name))
 
 
 def update_secret_classification(

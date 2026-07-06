@@ -3139,6 +3139,16 @@ def vault_secrets_post():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/secrets/<name>", methods=["PATCH"])
+def vault_secret_patch(name):
+    from vibe import api
+
+    try:
+        return jsonify(api.update_vault_secret(name, request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/secrets/<name>", methods=["DELETE"])
 def vault_secret_delete(name):
     from vibe import api
