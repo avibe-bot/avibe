@@ -283,9 +283,11 @@ export const TerminalView: React.FC<{
       )}
 
       {status !== 'disabled' && (
-        // The accessory key bar shows on desktop too (design iwYIX): quick esc/tab/ctrl/arrows
-        // without leaving the window. On phones it's essential (soft keyboards lack these keys).
-        <div className="flex gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5">
+        // Accessory key bar for touch devices only — soft keyboards lack esc/tab/ctrl/arrows.
+        // Hidden when the primary pointer is fine (desktop, incl. touchscreen laptops): a
+        // hardware keyboard already has these keys and the bar just costs a row. Keyed off
+        // pointer type rather than the md: viewport breakpoint so tablets keep it.
+        <div className="hidden gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 pointer-coarse:flex">
           {KEYS.map((k) => (
             <button
               key={k.labelKey}
