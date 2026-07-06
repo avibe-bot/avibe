@@ -291,22 +291,31 @@ def _current_origin() -> str:
     netloc = parsed.netloc
 
     config = _load_remote_access_config()
+    trusted_forwarded_origin = _trusted_forwarded_origin(default_scheme=scheme)
+    if trusted_forwarded_origin and _trusted_public_origin_local_request(config):
+        return trusted_forwarded_origin
+
     if config is not None and _is_remote_access_request(config):
         public_origin = _remote_access_public_origin(config)
         if public_origin:
             return public_origin
 
-    trusted_forwarded_host = _trusted_forwarded_host()
-    if trusted_forwarded_host is None:
+    if trusted_forwarded_origin is None:
         return f"{scheme}://{netloc}"
 
+    return trusted_forwarded_origin
+
+
+def _trusted_forwarded_origin(*, default_scheme: str | None = None) -> str | None:
+    trusted_forwarded_host = _trusted_forwarded_host()
+    if trusted_forwarded_host is None:
+        return None
     forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
-
+    if forwarded_proto not in {"http", "https"}:
+        forwarded_proto = (default_scheme or "").lower()
     if forwarded_proto in {"http", "https"}:
-        scheme = forwarded_proto
-    netloc = trusted_forwarded_host
-
-    return f"{scheme}://{netloc}"
+        return f"{forwarded_proto}://{trusted_forwarded_host}"
+    return None
 
 
 def _effective_request_host() -> str:
@@ -450,15 +459,16 @@ def _trusted_public_origin_entry_matches(
     host: str,
     port: int | None,
 ) -> bool:
-    parsed = urlparse(value)
     try:
+        parsed = urlparse(value)
         explicit_port = parsed.port
+        hostname = parsed.hostname
     except ValueError:
         logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PUBLIC_ORIGINS_ENV, value)
         return False
     if (
         parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.hostname
+        or not hostname
         or parsed.username
         or parsed.password
         or parsed.query
@@ -467,7 +477,7 @@ def _trusted_public_origin_entry_matches(
     ):
         logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PUBLIC_ORIGINS_ENV, value)
         return False
-    entry_host = _normalized_host(parsed.hostname)
+    entry_host = _normalized_host(hostname)
     if entry_host != host:
         return False
     entry_scheme = parsed.scheme.lower()
@@ -494,7 +504,7 @@ def _trusted_public_origin_allowed_for_peer(
     peer_address: ipaddress._BaseAddress | None,
 ) -> bool:
     if config is None:
-        return False
+        return True
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     if not getattr(cloud, "enabled", False):
         return True
