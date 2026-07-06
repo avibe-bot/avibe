@@ -31,6 +31,7 @@
     "edit": "Edit",
     "configure": "Configure",
     "cancel": "Cancel",
+    "confirm": "Confirm",
     "clear": "Clear",
     "retry": "Retry",
     "loading": "Loading...",
@@ -2235,7 +2236,12 @@
       }
     },
     "delete": "Delete",
-    "deleteConfirm": "Delete secret \"{{name}}\"? Agents will no longer be able to use it.",
+    "deleteDialog": {
+      "title": "Delete \"{{name}}\"?",
+      "description": "Agents will no longer be able to use this secret.",
+      "keypairIrreversible": "This is a signing key — deleting it permanently destroys the private key. There is no backup and it cannot be recovered.",
+      "keypairFunds": "If this key's address holds any funds, move them out first, or they will be lost for good."
+    },
     "deleted": "Deleted {{name}}",
     "created": "Saved {{name}}",
     "protectedUnlock": {

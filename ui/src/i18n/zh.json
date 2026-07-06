@@ -31,6 +31,7 @@
     "edit": "编辑",
     "configure": "配置",
     "cancel": "取消",
+    "confirm": "确定",
     "clear": "清除",
     "retry": "重试",
     "loading": "加载中...",
@@ -2234,7 +2235,12 @@
       }
     },
     "delete": "删除",
-    "deleteConfirm": "删除密钥「{{name}}」？Agent 将无法再使用它。",
+    "deleteDialog": {
+      "title": "删除「{{name}}」？",
+      "description": "Agent 将无法再使用这条密钥。",
+      "keypairIrreversible": "这是一把签名密钥——删除会永久销毁私钥,没有备份,无法恢复。",
+      "keypairFunds": "如果这把密钥的地址里还有资金,请先转出,否则将永久丢失。"
+    },
     "deleted": "已删除 {{name}}",
     "created": "已保存 {{name}}",
     "protectedUnlock": {
