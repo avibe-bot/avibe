@@ -1197,6 +1197,25 @@ def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
     )
 
 
+def sign_headless_allowed(row: dict[str, Any]) -> bool:
+    """A standard local keypair with no ``always_ask`` policy signs per-use without approval.
+
+    Mirrors the standard *access* headless fast path (``protection == "standard"`` and not
+    always_ask). Protected keys always sign in the browser under approval; a standard key
+    whose policy sets ``always_ask`` is opted back into per-use approval (the reserved toggle).
+    """
+    if row.get("kind") != "keypair" or (row.get("signer_kind") or "local") != "local":
+        return False
+    if row.get("protection") != "standard":
+        return False
+    return not _secret_always_ask(row)
+
+
+def sign_needs_approval(conn: Connection, name: str) -> bool:
+    """True when `vibe vault sign` must create a pending approval request for `name`."""
+    return not sign_headless_allowed(_require_row(conn, name))
+
+
 def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
     if not _secret_agent_per_use_signable(row):
         raise InvalidRequestError(f"{name} is not per-use signable")

@@ -2747,7 +2747,25 @@ def vault_sign(payload: dict) -> dict:
                 request_id = str(payload.get("request_id") or "")
                 if request_id:
                     vault_service.claim_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
-                key_envelope = vault_service.get_key_envelope(conn, name)
+                    key_envelope = vault_service.get_key_envelope(conn, name)
+                elif vault_service.sign_needs_approval(conn, name):
+                    request = vault_service.create_sign_request(
+                        conn,
+                        name,
+                        digest=digest,
+                        scheme=scheme,
+                        requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                        delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                    )
+                    protected_event = {
+                        "scope": "request",
+                        "request_id": request.get("id"),
+                        "request_status": request.get("status"),
+                        "secret_name": request.get("secret_name"),
+                    }
+                    protected_response = {"ok": False, "code": "approval_required", "request": request}
+                else:
+                    key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
