@@ -30,7 +30,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, previewOverlayKind, previewWindowKind } from '../../lib/filePreview';
 import {
   contentUrl,
   deletePath,
@@ -291,11 +291,17 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       return;
     }
     const desktop = window.matchMedia('(min-width: 768px)').matches;
-    if (previewWindowKind(item.entry)) {
-      // Desktop opens a real, resizable Preview window (a dedicated app); mobile has no window layer,
-      // so it falls back to the in-page overlay so the file can still be viewed.
-      if (desktop) wm.openApp('preview', { title: item.entry.name, params: { path: item.full, name: item.entry.name } });
-      else setPreview({ path: item.full, name: item.entry.name });
+    if (desktop) {
+      // Desktop: image / PDF / Office / Markdown open the dedicated, resizable Preview window.
+      if (previewWindowKind(item.entry)) {
+        wm.openApp('preview', { title: item.entry.name, params: { path: item.full, name: item.entry.name } });
+        return;
+      }
+    } else if (previewOverlayKind(item.entry)) {
+      // Mobile has no window layer: only NON-editable rich files (image / PDF / Office) open the
+      // in-page overlay. Markdown/SVG are previewable too but ALSO editable, so they fall through to
+      // the editor below (it has its own Source⇄Preview toggle) instead of a read-only overlay.
+      setPreview({ path: item.full, name: item.entry.name });
       return;
     }
     // Fetch CURRENT metadata (content-sniffs `text`) and decide by CONTENT, not just the extension —

@@ -34,6 +34,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
 import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
+import { NavGuardProvider } from './context/NavGuardContext';
 import { AgentationToggle } from './components/AgentationToggle';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -421,10 +422,12 @@ function App() {
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
-                  <BrowserRouter>
-                    <AppRoutes />
-                  </BrowserRouter>
-                  <AgentationToggle />
+                  <NavGuardProvider>
+                    <BrowserRouter>
+                      <AppRoutes />
+                    </BrowserRouter>
+                    <AgentationToggle />
+                  </NavGuardProvider>
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>

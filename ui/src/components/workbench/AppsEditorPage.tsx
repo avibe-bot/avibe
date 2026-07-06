@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { CodeXml, FolderOpen } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { useNavGuard } from '../../context/NavGuardContext';
 import { FileEditorPane } from './FileEditorPane';
 
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). On desktop it
@@ -87,6 +88,7 @@ export const AppsEditorPage: React.FC = () => {
 const MobileEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { setGuard } = useNavGuard();
   const [file, setFile] = useState<LaunchFile | null>(launch);
   const [dirty, setDirty] = useState(false);
 
@@ -106,9 +108,13 @@ const MobileEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
     navigate('/apps/files');
   };
 
-  // Guard a hard unload (refresh / close / navigating out of the SPA) while there are unsaved edits.
-  // In-app tab-bar navigation can't be blocked here (BrowserRouter has no navigation blocker); the
-  // header's open button is the guarded in-app switch path.
+  // Guard leaving with unsaved edits. The NavGuard covers in-app mobile tab-bar navigation (whose
+  // NavLinks bypass `beforeunload`); the `beforeunload` handler covers a hard unload (refresh /
+  // close / leaving the SPA). The header's open button is separately guarded in openAnother.
+  useEffect(() => {
+    setGuard(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
+    return () => setGuard(null);
+  }, [dirty, setGuard, t]);
   useEffect(() => {
     if (!dirty) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
