@@ -1387,7 +1387,15 @@ def test_agent_sign_request_accepts_protected_browser_signature(monkeypatch):
     sign.assert_not_called()
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "PROTECTED_ETH_KEY")
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == requested["request"]["id"])).mappings().one()
     assert meta["use_count"] == 1
+    assert row["callback_status"] == "pending"
+    plan = vault_service.resolve_request_callback(dict(row))
+    assert plan is not None
+    assert plan.session_id == "ses_1"
+    assert plan.message.strip()
+    with api._vault_engine().connect() as conn:
+        assert vault_service.request_callback_ready(conn, dict(row)) is True
 
 
 def test_agent_sign_marks_claimed_request_failed_when_signature_validation_rejects(monkeypatch):
