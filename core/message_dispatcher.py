@@ -1824,7 +1824,14 @@ class ConsolidatedMessageDispatcher:
             callback = f"quick_reply:{btn.text}"
             row.append(InlineButton(text=btn.text, callback_data=callback))
 
-        rows = [[button] for button in row] if self._capabilities(context).quick_reply_single_column else [row]
+        caps = self._capabilities(context)
+        if caps.quick_reply_single_column:
+            rows = [[button] for button in row]
+        elif caps.quick_reply_max_per_row and caps.quick_reply_max_per_row > 0:
+            per_row = caps.quick_reply_max_per_row
+            rows = [row[i : i + per_row] for i in range(0, len(row), per_row)]
+        else:
+            rows = [row]
         return InlineKeyboard(buttons=rows)
 
     async def _send_result_inline(

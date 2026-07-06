@@ -534,7 +534,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [("C1", "Done.", "markdown")],
         )
 
-    async def test_lark_quick_reply_buttons_use_vertical_layout(self):
+    async def test_lark_quick_reply_buttons_use_horizontal_layout(self):
         controller = _StubController("lark")
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(user_id="U1", channel_id="C1", platform="lark")
@@ -547,7 +547,9 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(controller.im_client.sent_button_messages), 1)
         keyboard = controller.im_client.sent_button_messages[0][3]
-        self.assertEqual([[button.text for button in row] for row in keyboard.buttons], [["继续"], ["提交PR"]])
+        # Lark quick replies are now multi-column (cap 3/row), so two buttons
+        # share a single row instead of stacking vertically.
+        self.assertEqual([[button.text for button in row] for row in keyboard.buttons], [["继续", "提交PR"]])
 
     async def test_markdown_link_style_quick_reply_dispatches_label_callbacks(self):
         controller = _StubController("slack")

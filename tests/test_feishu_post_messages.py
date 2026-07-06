@@ -218,5 +218,70 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.on_message_callback.await_args.args[1], "scheduled follow-up context")
 
 
+class FeishuCardLayoutTests(unittest.TestCase):
+    def _make_bot(self) -> FeishuBot:
+        return FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
+
+    def test_multi_button_row_uses_flow_column_set(self):
+        bot = self._make_bot()
+        card = json.loads(
+            bot._build_card_json(
+                "pick one",
+                [
+                    [
+                        {"text": "A", "callback_data": "quick_reply:A"},
+                        {"text": "B", "callback_data": "quick_reply:B"},
+                    ]
+                ],
+            )
+        )
+
+        column_set = card["body"]["elements"][1]
+        self.assertEqual(column_set["tag"], "column_set")
+        # ``flow`` lets a full row wrap to the next line on narrow screens, and
+        # ``auto`` widths size each column to its button so wrapping works.
+        self.assertEqual(column_set["flex_mode"], "flow")
+        self.assertEqual([c["width"] for c in column_set["columns"]], ["auto", "auto"])
+        self.assertNotIn("weight", column_set["columns"][0])
+
+    def test_single_button_row_fills_width(self):
+        bot = self._make_bot()
+        card = json.loads(
+            bot._build_card_json(
+                "confirm",
+                [[{"text": "OK", "callback_data": "quick_reply:OK"}]],
+            )
+        )
+
+        button = card["body"]["elements"][1]
+        self.assertEqual(button["tag"], "button")
+        self.assertEqual(button["width"], "fill")
+
+    def test_chunked_remainder_single_button_stays_in_flow_column_set(self):
+        # 4 buttons chunk to rows of [3, 1]; the trailing lone button must render
+        # as a flow column_set (auto width, left-aligned), not a full-width
+        # ``fill`` button that would clash with the row of three above it.
+        bot = self._make_bot()
+        card = json.loads(
+            bot._build_card_json(
+                "pick",
+                [
+                    [
+                        {"text": "A", "callback_data": "quick_reply:A"},
+                        {"text": "B", "callback_data": "quick_reply:B"},
+                        {"text": "C", "callback_data": "quick_reply:C"},
+                    ],
+                    [{"text": "D", "callback_data": "quick_reply:D"}],
+                ],
+            )
+        )
+
+        rows = card["body"]["elements"][1:]
+        self.assertEqual([e["tag"] for e in rows], ["column_set", "column_set"])
+        self.assertEqual(len(rows[1]["columns"]), 1)
+        self.assertEqual(rows[1]["columns"][0]["width"], "auto")
+        self.assertEqual(rows[1]["flex_mode"], "flow")
+
+
 if __name__ == "__main__":
     unittest.main()

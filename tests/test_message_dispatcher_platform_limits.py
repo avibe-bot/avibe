@@ -164,5 +164,31 @@ class MessageDispatcherPlatformLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(chunk.encode("utf-8")) <= 1900 for chunk in chunks))
 
 
+class _Btn:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class QuickReplyKeyboardLayoutTests(unittest.TestCase):
+    def _rows(self, platform: str, count: int):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController(platform))
+        context = MessageContext(user_id="u", channel_id="c", platform=platform)
+        buttons = [_Btn(f"b{i}") for i in range(count)]
+        keyboard = dispatcher._build_quick_reply_keyboard(context, buttons)
+        return [[b.text for b in row] for row in keyboard.buttons]
+
+    def test_lark_chunks_three_per_row(self):
+        # Lark caps at 3/row so wide-screen rows don't compress + truncate.
+        self.assertEqual(self._rows("lark", 5), [["b0", "b1", "b2"], ["b3", "b4"]])
+        self.assertEqual(self._rows("lark", 3), [["b0", "b1", "b2"]])
+
+    def test_telegram_stays_single_column(self):
+        self.assertEqual(self._rows("telegram", 3), [["b0"], ["b1"], ["b2"]])
+
+    def test_slack_keeps_single_row(self):
+        # No per-row cap and not single-column: all buttons stay on one row.
+        self.assertEqual(self._rows("slack", 3), [["b0", "b1", "b2"]])
+
+
 if __name__ == "__main__":
     unittest.main()
