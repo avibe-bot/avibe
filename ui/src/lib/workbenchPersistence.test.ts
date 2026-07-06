@@ -93,6 +93,19 @@ describe('workbench window persistence — corrupt / old data is ignored', () =>
     }
   });
 
+  it('rejects ids whose numeric suffix is not a safe integer', () => {
+    expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ id: 'win-9007199254740992' })] }))).toEqual([]);
+  });
+
+  it('drops duplicate ids so restored windows never collide on key / guard maps', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      windows: [persisted({ id: 'win-1', appId: 'files' }), persisted({ id: 'win-1', appId: 'editor' }), persisted({ id: 'win-2', appId: 'terminal' })],
+    });
+    // First win-1 wins; the duplicate is dropped; win-2 is kept.
+    expect(parseWorkbenchWindows(raw).map((w) => `${w.id}:${w.appId}`)).toEqual(['win-1:files', 'win-2:terminal']);
+  });
+
   it('rejects nonsensical bounds (zero / negative / enormous) while keeping sane ones', () => {
     const bad = [
       { x: 0, y: 0, width: 0, height: 400 },

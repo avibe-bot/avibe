@@ -82,10 +82,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 function toRuntimeWindow(v: unknown): WindowInstance | null {
   if (!isPlainObject(v)) return null;
   const { id, appId, title, params, bounds, z, minimized, maximized, restoreBounds, appState } = v;
-  // Ids are only ever minted as `win-<number>` (see openApp). Enforce that shape so a corrupt id —
-  // e.g. one containing a quote — can't later break `[data-window-id="…"]` selector queries (the
-  // Dock focuses a window that way).
-  if (typeof id !== 'string' || !/^win-\d+$/.test(id)) return null;
+  // Ids are only ever minted as `win-<number>` (see openApp). Enforce that shape AND a safe-integer
+  // suffix so a corrupt id can't break `[data-window-id="…"]` selector queries (the Dock focuses a
+  // window that way) or poison the id sequence new windows increment from (an unsafe integer would
+  // let ++idSeq collide with a restored id).
+  if (typeof id !== 'string' || !/^win-\d+$/.test(id) || !Number.isSafeInteger(Number(id.slice(4)))) return null;
   // OWN keys only: `in` would accept inherited object keys ("toString", "__proto__") from a corrupt
   // blob, and APP_REGISTRY[thatKey] would then resolve to a non-app value that crashes the layer.
   if (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(APP_REGISTRY, appId)) return null;
@@ -128,10 +129,15 @@ export function parseWorkbenchWindows(raw: string | null | undefined): WindowIns
   }
   if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.windows)) return [];
   const windows: WindowInstance[] = [];
-  // Bound the scan + output so a corrupt/oversized array can't build thousands of windows.
+  const seenIds = new Set<string>();
+  // Bound the scan + output so a corrupt/oversized array can't build thousands of windows, and drop
+  // duplicate ids — two `win-1` entries would collide React keys and the per-id guard/state maps.
   for (const entry of parsed.windows.slice(0, MAX_RESTORED_WINDOWS)) {
     const w = toRuntimeWindow(entry);
-    if (w) windows.push(w);
+    if (w && !seenIds.has(w.id)) {
+      seenIds.add(w.id);
+      windows.push(w);
+    }
   }
   return windows;
 }

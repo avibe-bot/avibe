@@ -97,19 +97,30 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   const idSeq = useRef(0);
   const zSeq = useRef(0);
   const openCount = useRef(0);
+  // Whether the persisted layout has been restored yet — set the first time we're on desktop, so a
+  // desktop-at-mount restore and a restore-after-widen never both fire.
+  const restoredRef = useRef(false);
 
-  // Restore the persisted layout once, in the lazy initializer, so `windows` never starts empty
-  // on desktop (which would let the first debounced save wipe the stored layout before restore).
-  // Seed the id/z sequences past the restored maxima so new windows don't collide or open behind.
-  const [windows, setWindows] = useState<WindowInstance[]>(() => {
-    const restored = isDesktopViewport() ? loadWorkbenchWindows() : [];
+  // Load the persisted layout and seed the id/z/open sequences past the restored maxima (idempotent)
+  // so new windows don't collide with, or open behind, restored ones.
+  const loadAndSeed = (): WindowInstance[] => {
+    const restored = loadWorkbenchWindows();
     for (const w of restored) {
-      const n = Number.parseInt(w.id.replace(/^win-/, ''), 10);
+      const n = Number.parseInt(w.id.slice(4), 10); // strip the validated "win-" prefix
       if (Number.isFinite(n)) idSeq.current = Math.max(idSeq.current, n);
       zSeq.current = Math.max(zSeq.current, w.z);
     }
-    openCount.current = restored.length;
+    openCount.current = Math.max(openCount.current, restored.length);
     return restored;
+  };
+
+  // Restore in the lazy initializer when the shell mounts at desktop width, so `windows` never
+  // starts empty there (which would let the first debounced save wipe the stored layout). A shell
+  // that mounts narrow restores later, on crossing the breakpoint (see the effect below).
+  const [windows, setWindows] = useState<WindowInstance[]>(() => {
+    if (!isDesktopViewport()) return [];
+    restoredRef.current = true;
+    return loadAndSeed();
   });
 
   // Latest windows for the debounced/pagehide save closures (which fire after render).
@@ -271,6 +282,26 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       if (!w || w.title === title) return prev;
       return prev.map((x) => (x.id === id ? { ...x, title } : x));
     });
+  }, []);
+
+  // If the shell mounted below md (initializer skipped restore), restore the saved layout the first
+  // time the viewport crosses to desktop — BEFORE the now-enabled saves could persist an empty list
+  // over it. The window list is still empty while narrow (windowed apps open only from the
+  // desktop-only launcher), so replacing it here can't discard anything the user opened.
+  useEffect(() => {
+    if (restoredRef.current) return;
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(min-width: 768px)');
+    const restoreOnce = () => {
+      if (restoredRef.current || !mql.matches) return;
+      restoredRef.current = true;
+      const restored = loadAndSeed();
+      setWindows((cur) => (cur.length ? cur : restored));
+    };
+    restoreOnce(); // may have crossed to desktop between the initial render and this effect
+    mql.addEventListener('change', restoreOnce);
+    return () => mql.removeEventListener('change', restoreOnce);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Persist on any window-list change (open/close, geometry, z, min/max, title). Body-only state
