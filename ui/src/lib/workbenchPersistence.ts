@@ -62,6 +62,15 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }
 
+// The id suffix and z-index are seeded into the idSeq/zSeq counters that new windows increment from.
+// A restored value must be a non-negative integer with headroom below the safe-integer ceiling, so
+// those counters can keep incrementing precisely — a value at/near MAX_SAFE_INTEGER would let the
+// next ++ round to a duplicate. Headroom is far larger than any session's window/focus count.
+const MAX_SAFE_SEQ = Number.MAX_SAFE_INTEGER - 1_000_000;
+function isSaneSeq(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= MAX_SAFE_SEQ;
+}
+
 function isBounds(v: unknown): v is WindowBounds {
   if (!v || typeof v !== 'object') return false;
   const b = v as Record<string, unknown>;
@@ -82,15 +91,17 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 function toRuntimeWindow(v: unknown): WindowInstance | null {
   if (!isPlainObject(v)) return null;
   const { id, appId, title, params, bounds, z, minimized, maximized, restoreBounds, appState } = v;
-  // Ids are only ever minted as `win-<number>` (see openApp). Enforce that shape AND a safe-integer
+  // Ids are only ever minted as `win-<number>` (see openApp). Enforce that shape AND a sane-sequence
   // suffix so a corrupt id can't break `[data-window-id="…"]` selector queries (the Dock focuses a
-  // window that way) or poison the id sequence new windows increment from (an unsafe integer would
-  // let ++idSeq collide with a restored id).
-  if (typeof id !== 'string' || !/^win-\d+$/.test(id) || !Number.isSafeInteger(Number(id.slice(4)))) return null;
+  // window that way) or poison the id sequence new windows increment from (a value at/beyond the
+  // safe-integer ceiling would let ++idSeq collide with a restored id).
+  if (typeof id !== 'string' || !/^win-\d+$/.test(id) || !isSaneSeq(Number(id.slice(4)))) return null;
   // OWN keys only: `in` would accept inherited object keys ("toString", "__proto__") from a corrupt
   // blob, and APP_REGISTRY[thatKey] would then resolve to a non-app value that crashes the layer.
   if (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(APP_REGISTRY, appId)) return null;
-  if (!isBounds(bounds) || !isFiniteNumber(z) || typeof minimized !== 'boolean' || typeof maximized !== 'boolean') {
+  // z seeds the focus counter — same sane-sequence bound as the id, so ++zSeq stays precise (a huge
+  // z would make newly focused windows share a z and fail to come to the front).
+  if (!isBounds(bounds) || !isSaneSeq(z) || typeof minimized !== 'boolean' || typeof maximized !== 'boolean') {
     return null;
   }
   if (restoreBounds !== undefined && !isBounds(restoreBounds)) return null;

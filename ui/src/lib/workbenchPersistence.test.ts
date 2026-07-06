@@ -93,8 +93,17 @@ describe('workbench window persistence — corrupt / old data is ignored', () =>
     }
   });
 
-  it('rejects ids whose numeric suffix is not a safe integer', () => {
+  it('rejects id suffixes that are unsafe or lack increment headroom', () => {
+    // Beyond MAX_SAFE_INTEGER, and exactly at it (no headroom for ++idSeq) — both dropped.
     expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ id: 'win-9007199254740992' })] }))).toEqual([]);
+    expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ id: 'win-9007199254740991' })] }))).toEqual([]);
+  });
+
+  it('rejects unsafe / non-integer z values (they seed the focus counter)', () => {
+    for (const z of [Number.MAX_SAFE_INTEGER, 1.5, -1, Number.NaN]) {
+      expect(parseWorkbenchWindows(JSON.stringify({ version: 1, windows: [persisted({ z })] }))).toEqual([]);
+    }
+    expect(parseWorkbenchWindows(serializeWorkbenchWindows([persisted({ z: 7 })]))).toHaveLength(1);
   });
 
   it('drops duplicate ids so restored windows never collide on key / guard maps', () => {

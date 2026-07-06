@@ -311,20 +311,24 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           const metas = await Promise.all(
             infos.map(async (info) => {
               try {
-                return { info, mtime: (await fileMeta(info.path)).mtime, ok: true };
+                return { info, meta: await fileMeta(info.path), ok: true as const };
               } catch {
-                return { info, mtime: null as number | null, ok: false };
+                return { info, meta: null, ok: false as const };
               }
             }),
           );
-          const alive = metas.filter((m) => m.ok);
+          // Keep only tabs whose file still exists AND still passes the same gate the normal open path
+          // applies — an 'edit' tab whose file became a directory / symlink / binary / oversized file
+          // is dropped rather than restored as a tab that only errors on read or fails on save.
+          // 'preview' tabs keep their lenient handling (FilePreview classifies + degrades on its own).
+          const alive = metas.filter((m) => m.ok && m.meta != null && (m.info.kind === 'preview' || isEditableMeta(m.meta)));
           if (alive.length === 0) {
-            restorePendingRef.current = false; // every file vanished — the live empty tab set is now correct
+            restorePendingRef.current = false; // nothing restorable — the live empty tab set is now correct
             return; // leave the (already restored) folder open
           }
           // Rebuild in one update to preserve tab order + fresh mtimes; then re-select the saved
           // active tab (falling back to the last if it was among the dropped/vanished files).
-          const rebuilt: Tab[] = alive.map((m) => ({ id: `t${++tabSeq.current}`, path: m.info.path, name: m.info.name, mtime: m.mtime, kind: m.info.kind }));
+          const rebuilt: Tab[] = alive.map((m) => ({ id: `t${++tabSeq.current}`, path: m.info.path, name: m.info.name, mtime: m.meta!.mtime, kind: m.info.kind }));
           // The editor is interactive during the await (root is already set), so the user may have
           // opened / created a tab meanwhile. Merge — restored tabs first, then any tab they opened
           // that a restored one doesn't already cover (dedup saved files by path; untitled buffers
