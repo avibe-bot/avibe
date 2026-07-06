@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import io
 import logging
 import os
 import sys
@@ -10,8 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from vibe import ui_server
 from core import file_browser_service as fs
-from core.file_browser_service import FileBrowserError
+from core.file_browser_service import ConflictError, FileBrowserError
 from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
 
@@ -533,6 +535,217 @@ def test_write_serializes_expected_mtime_check_and_replace(tmp_path, monkeypatch
     assert len(results) == 1
     assert len(replace_calls) == 1
     assert path.read_text(encoding="utf-8") == "first"
+
+
+def test_upload_file_happy_path_and_name_override(tmp_path):
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"hello"), filename="ignored.txt", name="saved.bin")
+
+    uploaded = tmp_path / "saved.bin"
+    assert result["name"] == "saved.bin"
+    assert result["path"] == str(uploaded)
+    assert result["size"] == 5
+    assert result["mtime"] == fs._mtime_seconds(uploaded.stat())
+    assert uploaded.read_bytes() == b"hello"
+
+
+def test_upload_file_conflict_without_overwrite_and_replaces_with_overwrite(tmp_path):
+    target = tmp_path / "report.bin"
+    target.write_bytes(b"old")
+    target.chmod(0o744)
+
+    with pytest.raises(FileBrowserError) as exists:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"new"), filename="report.bin")
+    assert exists.value.code == "exists"
+    assert target.read_bytes() == b"old"
+
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"new"), filename="report.bin", overwrite=True)
+
+    assert result["name"] == "report.bin"
+    assert result["size"] == 3
+    assert target.read_bytes() == b"new"
+    assert target.stat().st_mode & 0o777 == 0o744
+
+
+def test_upload_new_file_does_not_bypass_restrictive_umask(tmp_path):
+    old_umask = os.umask(0o022)
+    try:
+        shared = fs.upload_file(str(tmp_path), io.BytesIO(b"shared"), filename="shared.bin")
+    finally:
+        os.umask(old_umask)
+
+    shared_upload = Path(shared["path"])
+    assert shared_upload.read_bytes() == b"shared"
+    assert shared_upload.stat().st_mode & 0o777 == 0o644
+
+    old_umask = os.umask(0o077)
+    try:
+        private = fs.upload_file(str(tmp_path), io.BytesIO(b"private"), filename="private.bin")
+    finally:
+        os.umask(old_umask)
+
+    private_upload = Path(private["path"])
+    assert private_upload.read_bytes() == b"private"
+    assert private_upload.stat().st_mode & 0o777 == 0o600
+
+
+def test_upload_uses_stable_directory_after_validation(tmp_path, monkeypatch):
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    attacker_dir = tmp_path / "attacker"
+    attacker_dir.mkdir()
+    moved_upload_dir = tmp_path / "uploads-original"
+    real_open_directory = fs._open_stable_upload_directory
+
+    def open_then_swap(directory: Path) -> int:
+        fd = real_open_directory(directory)
+        upload_dir.rename(moved_upload_dir)
+        upload_dir.symlink_to(attacker_dir, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(fs, "_open_stable_upload_directory", open_then_swap)
+
+    result = fs.upload_file(str(upload_dir), io.BytesIO(b"safe"), filename="safe.bin")
+
+    assert result["path"] == str(upload_dir / "safe.bin")
+    assert (moved_upload_dir / "safe.bin").read_bytes() == b"safe"
+    assert not (attacker_dir / "safe.bin").exists()
+
+
+def test_upload_create_only_falls_back_when_hard_links_unsupported(tmp_path, monkeypatch):
+    # FAT/exFAT/SMB-style filesystems refuse os.link; create-only publish must degrade to
+    # the guarded replace instead of failing the upload outright.
+    def refuse_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    monkeypatch.setattr(fs.os, "link", refuse_link)
+
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"payload"), filename="fallback.bin")
+    uploaded = tmp_path / "fallback.bin"
+    assert result["path"] == str(uploaded)
+    assert uploaded.read_bytes() == b"payload"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+    # The fallback still refuses to replace an existing target (create-only contract).
+    with pytest.raises(ConflictError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"other"), filename="fallback.bin")
+    assert exc.value.code == "exists"
+    assert uploaded.read_bytes() == b"payload"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires POSIX non-root permissions")
+def test_upload_permission_denied_maps_to_403(tmp_path):
+    read_only = tmp_path / "readonly"
+    read_only.mkdir()
+    read_only.chmod(0o555)
+    try:
+        with pytest.raises(FileBrowserError) as exc:
+            fs.upload_file(str(read_only), io.BytesIO(b"x"), filename="denied.bin")
+        assert exc.value.code == "permission_denied"
+        assert exc.value.status_code == 403
+        assert list(read_only.iterdir()) == []
+    finally:
+        read_only.chmod(0o755)
+
+
+def test_upload_works_without_directory_fd(tmp_path, monkeypatch):
+    # Platforms that cannot open a directory fd (native Windows) degrade to path-based
+    # operation; the upload and its create-only contract must still work there.
+    monkeypatch.setattr(fs, "_open_stable_upload_directory", lambda directory: None)
+
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"portable"), filename="nofd.bin")
+    uploaded = tmp_path / "nofd.bin"
+    assert result["path"] == str(uploaded)
+    assert uploaded.read_bytes() == b"portable"
+    assert result["mtime"] == fs._mtime_seconds(uploaded.stat())
+
+    with pytest.raises(ConflictError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"clash"), filename="nofd.bin")
+    assert exc.value.code == "exists"
+
+    replaced = fs.upload_file(str(tmp_path), io.BytesIO(b"replaced"), filename="nofd.bin", overwrite=True)
+    assert replaced["size"] == len(b"replaced")
+    assert uploaded.read_bytes() == b"replaced"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+def test_upload_file_size_cap_cleans_temp_and_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"12345"), filename="large.bin")
+
+    assert exc.value.code == "too_large"
+    assert exc.value.status_code == 413
+    assert not (tmp_path / "large.bin").exists()
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    ["../escape.txt", "nested/file.txt", "nested\\file.txt", ".", "..", "", "nul\x00byte.txt"],
+)
+def test_upload_file_rejects_invalid_names(tmp_path, bad_name):
+    with pytest.raises(FileBrowserError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"x"), filename=bad_name)
+
+    assert exc.value.code == "invalid_name"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_upload_file_rejects_bad_destination_dir(tmp_path):
+    missing = tmp_path / "missing"
+    with pytest.raises(FileBrowserError) as missing_exc:
+        fs.upload_file(str(missing), io.BytesIO(b"x"), filename="upload.bin")
+    assert missing_exc.value.code == "not_found"
+
+    destination_file = tmp_path / "not-a-dir"
+    destination_file.write_text("x", encoding="utf-8")
+    with pytest.raises(FileBrowserError) as file_exc:
+        fs.upload_file(str(destination_file), io.BytesIO(b"x"), filename="upload.bin")
+    assert file_exc.value.code == "not_dir"
+
+
+def test_upload_file_refuses_symlinked_dir_and_target_symlink(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link-dir"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+
+    with pytest.raises(FileBrowserError) as dir_exc:
+        fs.upload_file(str(link_dir), io.BytesIO(b"x"), filename="upload.bin")
+    assert dir_exc.value.code == "not_dir"
+    assert not (real_dir / "upload.bin").exists()
+
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"target")
+    link = tmp_path / "link.bin"
+    link.symlink_to(target)
+
+    with pytest.raises(FileBrowserError) as target_exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"new"), filename="link.bin", overwrite=True)
+    assert target_exc.value.code == "exists"
+    assert link.is_symlink()
+    assert target.read_bytes() == b"target"
+
+
+def test_upload_file_read_failure_leaves_no_partial_file(tmp_path):
+    class FailingStream:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read(self, _size: int) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"partial"
+            raise OSError("read failed")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.upload_file(str(tmp_path), FailingStream(), filename="partial.bin")
+
+    assert exc.value.code == "fs_error"
+    assert not (tmp_path / "partial.bin").exists()
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
 
 
 def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
@@ -1152,6 +1365,119 @@ def test_http_routes_return_contract_and_headers(tmp_path):
     download_response = client.get(f"/api/files/content?path={file_path}&download=1")
     assert download_response.headers["Content-Disposition"].startswith("attachment;")
 
+    upload_response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path), "name": "uploaded.bin"},
+        files={"file": ("browser-name.bin", b"upload", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+    assert upload_response.status_code == 200
+    upload_body = upload_response.get_json()
+    assert set(upload_body) == {"name", "path", "size", "mtime"}
+    assert upload_body["name"] == "uploaded.bin"
+    assert upload_body["size"] == 6
+    assert (tmp_path / "uploaded.bin").read_bytes() == b"upload"
+
+
+def test_http_upload_maps_too_large_and_leaves_no_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": {"code": "too_large", "message": "File is too large"},
+    }
+    assert not (tmp_path / "large.bin").exists()
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+def test_http_upload_rejects_oversized_content_length_before_parsing(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(ui_server, "_FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES", 0)
+
+    def boom_upload(*_args, **_kwargs):
+        raise AssertionError("oversized upload should be rejected before form parsing")
+
+    monkeypatch.setattr(fs, "upload_file", boom_upload)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["error"]["code"] == "too_large"
+    assert not (tmp_path / "large.bin").exists()
+
+
+def test_http_upload_allows_missing_content_length():
+    ui_server._validate_file_upload_content_length({}, 4)
+
+
+def test_http_upload_parser_caps_file_part_before_service(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_FILE_BYTES", 4)
+
+    def boom_upload(*_args, **_kwargs):
+        raise AssertionError("oversized multipart file should be rejected before service write")
+
+    monkeypatch.setattr(fs, "upload_file", boom_upload)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["error"]["code"] == "too_large"
+    assert not (tmp_path / "large.bin").exists()
+
+
+def test_http_upload_missing_file_part_returns_structured_error(tmp_path):
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "ok": False,
+        "error": {"code": "invalid_name", "message": "File is required"},
+    }
+
+
+def test_http_upload_overwrite_string_true_replaces_target(tmp_path):
+    target = tmp_path / "replace.bin"
+    target.write_bytes(b"old")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path), "overwrite": "true"},
+        files={"file": ("replace.bin", b"new", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["name"] == "replace.bin"
+    assert target.read_bytes() == b"new"
+
 
 def test_http_routes_map_structured_errors_and_enforce_csrf(tmp_path):
     client = app.test_client()
@@ -1165,6 +1491,15 @@ def test_http_routes_map_structured_errors_and_enforce_csrf(tmp_path):
     write_path = tmp_path / "new.txt"
     blocked = client.put("/api/files/write", json={"path": str(write_path), "content": "x"})
     assert blocked.status_code == 403
+
+    upload_path = tmp_path / "blocked-upload.bin"
+    blocked_upload = client.post(
+        "/api/files/upload",
+        data={"dir": str(tmp_path)},
+        files={"file": ("blocked-upload.bin", b"x", "application/octet-stream")},
+    )
+    assert blocked_upload.status_code == 403
+    assert not upload_path.exists()
 
     ok = client.put(
         "/api/files/write",
