@@ -7,6 +7,7 @@ import {
   EyeOff,
   FileText,
   Loader2,
+  Lock,
   RefreshCw,
   Server,
   ShieldCheck,
@@ -16,9 +17,10 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError, useApi, type DependencyItem, type SigningAddresses, type VaultRequestSpec } from '@/context/ApiContext';
+import { ApiError, useApi, type DependencyItem, type SigningAddresses, type VaultRequestSpec, type VaultSecret } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 import { mergeTags, normalizeTagOrSkillEntry, partitionTags, toSkillTag } from '@/lib/vaultTags';
+import { buildMetadataPatch } from '@/lib/vaultPolicy';
 import {
   generateSigningKey,
   importSigningKey,
@@ -114,6 +116,10 @@ export const VaultSecretForm: React.FC<{
   provisionRequestId?: string | null;
   requestSpec?: VaultRequestSpec | null;
   treatExistingAsFulfilled?: boolean;
+  /** When set, the form is in value-free edit mode for this existing secret. */
+  editSecret?: VaultSecret | null;
+  /** Called after a successful metadata edit (edit mode only). */
+  onSaved?: (name: string) => void;
 }> = ({
   fixedName,
   onCancel,
@@ -124,6 +130,8 @@ export const VaultSecretForm: React.FC<{
   provisionRequestId,
   requestSpec,
   treatExistingAsFulfilled = false,
+  editSecret,
+  onSaved,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -240,11 +248,29 @@ export const VaultSecretForm: React.FC<{
     if (requestSpec.policy) setAdvancedOpen(true);
   }, [requestSpec]);
 
+  // Edit mode: seed editable metadata from the existing secret. Name / kind / protection are
+  // shown read-only (not seeded into editable controls); the value is never loaded; always_ask
+  // is neither seeded nor emitted — the backend preserves it (storage.update_secret_metadata).
+  useEffect(() => {
+    if (!editSecret) return;
+    setKind(editSecret.kind === 'keypair' ? 'keypair' : 'static');
+    setProtection(editSecret.protection === 'protected' ? 'protected' : 'standard');
+    const parts = partitionTags(editSecret.tags);
+    setTags(mergeTags(parts.tags, parts.skills));
+    setDescription(editSecret.description ?? '');
+    const pol = (editSecret.policy ?? {}) as { allowed_hosts?: string[]; auth?: { type?: FetchAuthMode; name?: string } };
+    setAllowHosts(Array.isArray(pol.allowed_hosts) ? pol.allowed_hosts : []);
+    setFetchAuthMode(pol.auth?.type ?? 'bearer');
+    setFetchAuthName(pol.auth?.name ?? '');
+    setAdvancedOpen(Boolean(pol.allowed_hosts?.length || pol.auth));
+  }, [editSecret]);
+
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
+  const isEdit = Boolean(editSecret);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -298,10 +324,11 @@ export const VaultSecretForm: React.FC<{
 
   const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isKeypair ? signingKey != null : staticValueReady;
-  const canSubmit =
-    Boolean(secretName && valueReady) &&
-    !submitting &&
-    ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
+  const canSubmit = isEdit
+    ? !submitting
+    : Boolean(secretName && valueReady) &&
+      !submitting &&
+      ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const handleExistingSecret = () => {
     if (treatExistingAsFulfilled) {
@@ -388,6 +415,19 @@ export const VaultSecretForm: React.FC<{
     setSubmitting(true);
     setError(null);
     try {
+      if (isEdit && editSecret) {
+        // Value-free metadata edit: the shared validation above already ran; PATCH
+        // description / tags / policy. Only the visible fetch policy (allowed_hosts + auth) is
+        // sent; the backend preserves internal keys such as always_ask.
+        const patch = buildMetadataPatch({ description, tags, allowHosts, fetchAuthMode, fetchAuthName });
+        const result = await api.updateVaultSecret(editSecret.name, patch, { handleError: false });
+        if (!result.ok) {
+          setError(result.message || t('vaults.dialog.errors.updateFailed'));
+          return;
+        }
+        onSaved?.(editSecret.name);
+        return;
+      }
       // `policy.always_ask` is exposed only for a standard signing key (keypair), where the
       // agent can otherwise sign headlessly — the toggle forces per-use browser approval for
       // every signature. Protected keys already always approve and static secrets don't sign,
@@ -775,6 +815,61 @@ export const VaultSecretForm: React.FC<{
       )}
     </div>
   );
+
+  // ---- Edit mode — value-free metadata edit of an existing secret --------------------
+  // Name / kind / protection / value are immutable and shown read-only; only description, tags
+  // (incl. `skill:` tags) and — for a static secret — the fetch proxy policy are editable.
+  if (isEdit && editSecret) {
+    return (
+      <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
+        <div className="flex items-center gap-3 rounded-xl border border-border bg-surface-2 p-3.5">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/10 text-muted">
+            <Lock className="size-4" />
+          </span>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <span className="truncate font-mono text-[15px] font-semibold text-foreground">{editSecret.name}</span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge variant="secondary">{isKeypair ? t('vaults.dialog.kindKeypair') : t('vaults.dialog.kindStatic')}</Badge>
+              <Badge variant={protection === 'protected' ? 'warning' : 'secondary'}>
+                {protection === 'protected' ? t('vaults.protected') : t('vaults.standard')}
+              </Badge>
+            </div>
+          </div>
+        </div>
+        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Lock className="size-3 shrink-0" />
+          {t('vaults.edit.lockedHint')}
+        </p>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
+          <Input
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder={t('vaults.dialog.descriptionPlaceholder')}
+          />
+        </label>
+
+        {tagsField}
+
+        {!isKeypair && advancedSection}
+
+        {error && (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>
+        )}
+
+        <div className="mt-1 flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+            {cancelLabel ?? t('vaults.dialog.cancel')}
+          </Button>
+          <Button type="submit" disabled={!canSubmit}>
+            {submitting && <Loader2 className="size-4 animate-spin" />}
+            {t('vaults.dialog.save')}
+          </Button>
+        </div>
+      </form>
+    );
+  }
 
   // ---- Provision ($NAME) mode — design.pen `F4N19` (SecureInputCard) ------------------
   // A provision fulfils a specific value the agent asked for, so kind stays fixed to static.

@@ -2243,6 +2243,14 @@
     },
     "deleted": "已删除 {{name}}",
     "created": "已保存 {{name}}",
+    "saved": "已更新 {{name}}",
+    "editSecret": "编辑信息",
+    "rowActions": "更多操作",
+    "edit": {
+      "title": "编辑信息",
+      "subtitle": "只改元数据,不影响已发出的授权",
+      "lockedHint": "名称、类型、保护级别不可修改"
+    },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",
       "unlocked": "保护层已在本会话解锁",
@@ -2372,7 +2380,8 @@
         "fileTooLarge": "请选择不超过 {{size}} 的文件。",
         "fileReadFailed": "读取文件失败。",
         "secretExists": "同名密钥已存在。",
-        "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。"
+        "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。",
+        "updateFailed": "保存失败,请重试。"
       }
     },
     "requests": {
