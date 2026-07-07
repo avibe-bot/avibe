@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { bytesToBase64 } from './vaultCrypto';
-import { passkeyCreationOptions, passkeyPrfAssertionOptions, readPasskeyPrfResult } from './useProtectedVault';
+import { passkeyAssertionOptionsFromServer, passkeyCreationOptions, passkeyPrfAssertionOptions, readPasskeyPrfResult } from './useProtectedVault';
 
 function passkeyCredential(first?: ArrayBuffer | ArrayBufferView | number[]): PublicKeyCredential {
   return {
@@ -51,6 +51,37 @@ describe('protected vault WebAuthn PRF result handling', () => {
         'alex-app.avibe.bot',
       ),
     ).toThrow(/passkey-multiple-not-supported/);
+  });
+
+  it('builds delete assertion options from the server challenge without leaking factor ids to WebAuthn', () => {
+    const challenge = new Uint8Array(32).fill(0x44);
+    const credentialId = new Uint8Array([5, 6, 7, 8]);
+    const options = passkeyAssertionOptionsFromServer({
+      challenge: bytesToBase64(challenge),
+      rpId: 'alex-app.avibe.bot',
+      userVerification: 'required',
+      allowCredentials: [
+        {
+          type: 'public-key',
+          id: bytesToBase64(credentialId),
+          factor_id: 'vaf_test',
+          transports: ['internal'],
+        },
+      ],
+    });
+
+    expect(new Uint8Array(options.challenge as ArrayBuffer)).toEqual(challenge);
+    expect(options.rpId).toBe('alex-app.avibe.bot');
+    expect(options.userVerification).toBe('required');
+    expect(options.allowCredentials).toEqual([
+      {
+        type: 'public-key',
+        id: options.allowCredentials?.[0]?.id,
+        transports: ['internal'],
+      },
+    ]);
+    expect(new Uint8Array(options.allowCredentials?.[0]?.id as ArrayBuffer)).toEqual(credentialId);
+    expect('factor_id' in (options.allowCredentials?.[0] as Record<string, unknown>)).toBe(false);
   });
 
   it('copies the PRF output before handing it to the VMK wrap chain', () => {

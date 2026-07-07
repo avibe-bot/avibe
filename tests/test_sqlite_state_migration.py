@@ -17,7 +17,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260705_0028"
+HEAD_REVISION = "20260707_0029"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -50,6 +50,8 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "agent_events" in tables
         assert "media_objects" in tables
         assert "web_push_subscriptions" in tables
+        assert "vault_auth_factors" in tables
+        assert "vault_operation_challenges" in tables
         agent_event_indexes = {
             row[1]
             for row in conn.execute(
@@ -78,6 +80,18 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
                 "select name from sqlite_master where type = 'trigger' and tbl_name = 'vault_requests'",
             )
         }
+        vault_auth_factor_indexes = {
+            row[1]
+            for row in conn.execute(
+                "select seq, name from pragma_index_list('vault_auth_factors')",
+            )
+        }
+        vault_challenge_indexes = {
+            row[1]
+            for row in conn.execute(
+                "select seq, name from pragma_index_list('vault_operation_challenges')",
+            )
+        }
         assert "ix_messages_session_created_id" in message_indexes
         assert "ix_messages_session_type_created_id" in message_indexes
         assert "ix_messages_platform_session_created_id" in message_indexes
@@ -90,6 +104,9 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
         assert "uq_vault_secrets_name_folded" in vault_secret_indexes
         assert "lower(name)" in _index_sql(conn, "uq_vault_secrets_name_folded").lower()
+        assert "ix_vault_auth_factors_kind_rp" in vault_auth_factor_indexes
+        assert "ix_vault_operation_challenges_lookup" in vault_challenge_indexes
+        assert "ix_vault_operation_challenges_consumed" in vault_challenge_indexes
         assert "trg_vault_requests_pending_provision_name_case_insert" in vault_request_triggers
         assert "trg_vault_requests_pending_provision_name_case_update" in vault_request_triggers
         agent_session_indexes = {

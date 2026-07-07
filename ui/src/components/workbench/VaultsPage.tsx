@@ -10,11 +10,10 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultLockIndicator } from '../ui/vault-lock-indicator';
-import { VaultProtectedUnlock } from '../ui/vault-protected-unlock';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
-import { useProtectedVault, vaultFreshSetup, vaultUnlocked } from '../../lib/useProtectedVault';
-import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
+import { useProtectedVault } from '../../lib/useProtectedVault';
+import { ApiError, useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
 import { SigningAddressList } from '../ui/signing-address-list';
@@ -26,6 +25,15 @@ const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 
 const messageFromError = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const deleteMessageFromError = (err: unknown, t: TFunction) => {
+  const code = err instanceof ApiError ? err.code : err instanceof Error ? err.message : String(err);
+  if (code === 'protected_authz_setup_required') return t('vaults.deleteDialog.authzSetupRequired');
+  if (code === 'invalid_protected_authz') return t('vaults.deleteDialog.authzInvalid');
+  if (code === 'protected_auth_required') return t('vaults.deleteDialog.authzRequired');
+  if (code === 'webauthn_origin_unsupported') return t('vaults.deleteDialog.authzUnavailable');
+  if (code === 'passkey-cancelled') return t('vaults.protectedUnlock.errors.cancelled');
+  return messageFromError(err);
+};
 /** All allowed proxy-fetch hosts on a secret (for the `proxy · <host> +N` badge). */
 const proxyHosts = (s: VaultSecret): string[] => {
   const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
@@ -678,37 +686,19 @@ export const VaultsPage: React.FC = () => {
   const protectedVault = useProtectedVault();
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
   const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
-  // Deleting a protected secret requires the user present at an unlocked vault (a passkey
-  // ceremony) — discover the current lock state when the delete dialog opens for one.
-  useEffect(() => {
-    if (deleteTarget?.protection !== 'protected') return;
-    // A freshly set-up, uncommitted local VMK isn't a proven unlock of this secret's real vault
-    // (first-init collision) — drop it and rediscover the server vault so the user must unlock the
-    // actual one; otherwise just discover the current lock state.
-    if (vaultFreshSetup()) void protectedVault.discardAndRefresh();
-    else void protectedVault.refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- vault callbacks are stable; re-run only on target change
-  }, [deleteTarget]);
-  // Gate on the wall-clock lock state (vaultUnlocked), not the hook's cached status — a delayed
-  // auto-lock timer (tab resumed after the deadline) can leave status stale-'unlocked', which must
-  // NOT enable a protected delete without a fresh unlock.
-  const deleteNeedsUnlock =
-    deleteTarget?.protection === 'protected' && (!vaultUnlocked() || vaultFreshSetup());
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const onEdit = (secret: VaultSecret) => setEditTarget(secret);
   const confirmDelete = async () => {
     const secret = deleteTarget;
     if (!secret) return;
-    // Belt-and-suspenders at the mutation point: a protected secret must have a committed,
-    // wall-clock-valid unlock right now — closes the delayed-auto-lock resume window where the
-    // button could momentarily be stale-enabled.
-    if (secret.protection === 'protected' && (!vaultUnlocked() || vaultFreshSetup())) return;
     try {
-      await api.deleteVaultSecret(secret.name);
+      setError(null);
+      const authz = secret.protection === 'protected' ? await protectedVault.authorizeProtectedDelete(secret.name) : undefined;
+      await api.deleteVaultSecret(secret.name, authz);
       showToast(t('vaults.deleted', { name: secret.name }), 'success');
       refresh();
     } catch (err: unknown) {
-      setError(messageFromError(err));
+      setError(deleteMessageFromError(err, t));
     } finally {
       setDeleteTarget(null);
     }
@@ -872,7 +862,6 @@ export const VaultsPage: React.FC = () => {
         description={t('vaults.deleteDialog.description')}
         confirmLabel={t('common.delete')}
         holdSeconds={deleteTarget?.kind === 'keypair' ? 5 : 0}
-        confirmDisabled={deleteNeedsUnlock}
         onConfirm={confirmDelete}
       >
         {deleteTarget?.kind === 'keypair' ? (
@@ -887,10 +876,12 @@ export const VaultsPage: React.FC = () => {
             </span>
           </div>
         ) : null}
-        {deleteNeedsUnlock ? (
-          <div className="flex flex-col gap-2">
-            <p className="text-[12.5px] leading-snug text-muted-foreground">{t('vaults.deleteDialog.protectedUnlockNote')}</p>
-            <VaultProtectedUnlock vault={protectedVault} secretName={deleteTarget?.name} />
+        {deleteTarget?.protection === 'protected' ? (
+          <div className="flex flex-col gap-2 rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
+            <span className="flex items-start gap-2">
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-warning" />
+              <span>{t('vaults.deleteDialog.protectedPasskeyNote')}</span>
+            </span>
           </div>
         ) : null}
       </ConfirmDialog>

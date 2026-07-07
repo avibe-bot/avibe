@@ -594,6 +594,45 @@ vault_grants = Table(
     Index("ix_vault_grants_session_purpose", "session_id", "purpose"),
 )
 
+vault_auth_factors = Table(
+    "vault_auth_factors",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("kind", String, nullable=False),
+    Column("label", Text, nullable=True),
+    Column("rp_id", String, nullable=False),
+    Column("credential_id", Text, nullable=False),
+    Column("public_key", Text, nullable=False),
+    Column("alg", Integer, nullable=False),
+    Column("sign_count", Integer, nullable=False, server_default=text("0")),
+    Column("transports", Text, nullable=True),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("last_used_at", String, nullable=True),
+    Column("disabled_at", String, nullable=True),
+    UniqueConstraint("credential_id", name="uq_vault_auth_factors_credential_id"),
+    Index("ix_vault_auth_factors_kind_rp", "kind", "rp_id", "disabled_at"),
+)
+
+vault_operation_challenges = Table(
+    "vault_operation_challenges",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("operation", String, nullable=False),
+    Column("secret_name", String, nullable=True),
+    Column("secret_id", String, nullable=True),
+    Column("secret_updated_at", String, nullable=True),
+    Column("challenge_hash", String, nullable=False),
+    Column("rp_id", String, nullable=False),
+    Column("origin", Text, nullable=False),
+    Column("expires_at", String, nullable=False),
+    Column("consumed_at", String, nullable=True),
+    Column("factor_id", String, nullable=True),
+    Column("created_at", String, nullable=False),
+    Index("ix_vault_operation_challenges_lookup", "operation", "secret_name", "expires_at"),
+    Index("ix_vault_operation_challenges_consumed", "consumed_at", "expires_at"),
+)
+
 # Append-only audit log. Secret VALUES never appear here — only names, requesters,
 # and delivery summaries.
 vault_audit = Table(

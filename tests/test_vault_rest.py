@@ -4,6 +4,7 @@ import json
 
 from unittest.mock import Mock
 
+from storage import vault_service
 from storage.vault_crypto import Sealed
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api
@@ -75,6 +76,25 @@ def test_rest_list_invalid_tag_returns_vault_error():
 
     assert response.status_code == 409
     assert response.get_json()["code"] == "invalid_request"
+
+
+def test_rest_delete_protected_without_assertion_is_rejected(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_HTTP_DELETE",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    client = app.test_client()
+
+    response = client.delete("/api/vault/secrets/PROTECTED_HTTP_DELETE", headers=csrf_headers(client))
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "protected_auth_required"
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "PROTECTED_HTTP_DELETE")["protection"] == "protected"
 
 
 def test_rest_create_rejects_plaintext_value_in_mixed_payloads(monkeypatch):

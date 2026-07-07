@@ -40,6 +40,12 @@ HEAD_TABLES = INITIAL_TABLES | {
     "show_session_events",
     "media_objects",
     "web_push_subscriptions",
+    "vault_secrets",
+    "vault_requests",
+    "vault_grants",
+    "vault_audit",
+    "vault_auth_factors",
+    "vault_operation_challenges",
 }
 PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
@@ -88,6 +94,10 @@ HEAD_REQUIRED_COLUMNS = {
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
     "web_push_subscriptions": {"device_id"},
+    "vault_requests": {"callback_status"},
+    "vault_grants": {"agent_ready", "agent_ready_at"},
+    "vault_auth_factors": {"credential_id", "public_key", "alg", "sign_count"},
+    "vault_operation_challenges": {"challenge_hash", "rp_id", "origin", "expires_at", "consumed_at"},
 }
 UNRELEASED_OLD_INITIAL_TABLES = [
     "session_messages",
@@ -606,6 +616,23 @@ def _ensure_agent_events_indexes(conn: sqlite3.Connection, tables: set[str]) -> 
     )
 
 
+def _ensure_vault_authz_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
+    if "vault_auth_factors" in tables:
+        conn.execute(
+            "create index if not exists ix_vault_auth_factors_kind_rp "
+            "on vault_auth_factors (kind, rp_id, disabled_at)"
+        )
+    if "vault_operation_challenges" in tables:
+        conn.execute(
+            "create index if not exists ix_vault_operation_challenges_lookup "
+            "on vault_operation_challenges (operation, secret_name, expires_at)"
+        )
+        conn.execute(
+            "create index if not exists ix_vault_operation_challenges_consumed "
+            "on vault_operation_challenges (consumed_at, expires_at)"
+        )
+
+
 def _delete_historical_message_tool_calls(conn: sqlite3.Connection, tables: set[str]) -> None:
     if "messages" not in tables:
         return
@@ -633,6 +660,7 @@ def _ensure_head_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
         _ensure_new_background_indexes(conn)
     _ensure_messages_query_indexes(conn, tables)
     _ensure_agent_events_indexes(conn, tables)
+    _ensure_vault_authz_indexes(conn, tables)
 
 
 def _missing_head_schema_description(conn: sqlite3.Connection, tables: set[str]) -> str:

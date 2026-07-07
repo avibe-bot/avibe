@@ -18,6 +18,7 @@ from sqlalchemy import select
 from storage import vault_service
 from storage.models import vault_audit, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
+from tests.vault_webauthn_helpers import WebAuthnTestCredential
 from vibe import api
 
 
@@ -69,6 +70,29 @@ def _assert_no_unlock_material(payload: object) -> None:
     assert "unlock_material" not in encoded
     assert "ct-protected" not in encoded
     assert "wm-protected" not in encoded
+
+
+def _register_webauthn_factor(credential: WebAuthnTestCredential | None = None) -> tuple[WebAuthnTestCredential, dict]:
+    credential = credential or WebAuthnTestCredential()
+    options = api.create_vault_authz_webauthn_options(origin=credential.origin)
+    result = api.register_vault_authz_webauthn_factor(
+        credential.registration_payload(
+            challenge_id=options["challenge_id"],
+            challenge_b64=options["webauthn"]["challenge"],
+        ),
+        origin=credential.origin,
+    )
+    return credential, result["factor"]
+
+
+def _delete_authz_for_secret(credential: WebAuthnTestCredential, factor: dict, name: str, *, sign_count: int = 2) -> dict:
+    challenge = api.create_vault_delete_challenge(name, origin=credential.origin)
+    return credential.assertion_authz(
+        challenge_id=challenge["challenge_id"],
+        factor_id=factor["id"],
+        challenge_b64=challenge["webauthn"]["challenge"],
+        sign_count=sign_count,
+    )
 
 
 @pytest.fixture
@@ -834,6 +858,37 @@ def test_delete_missing_is_404():
         api.delete_vault_secret("NOPE")
     assert exc.value.code == "secret_not_found"
     assert exc.value.status == 404
+
+
+def test_delete_protected_secret_without_assertion_is_rejected(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {"name": "PROTECTED_DELETE", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.delete_vault_secret("PROTECTED_DELETE")
+
+    assert exc.value.code == "protected_auth_required"
+    assert exc.value.status == 409
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "PROTECTED_DELETE")["protection"] == "protected"
+
+
+def test_delete_protected_secret_with_valid_assertion_deletes(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {"name": "PROTECTED_DELETE", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
+    )
+    credential, factor = _register_webauthn_factor()
+    authz = _delete_authz_for_secret(credential, factor, "PROTECTED_DELETE")
+
+    removed = api.delete_vault_secret("PROTECTED_DELETE", authz=authz)
+
+    assert removed == {"ok": True, "removed": True, "name": "PROTECTED_DELETE"}
+    with api._vault_engine().connect() as conn:
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "PROTECTED_DELETE")
 
 
 def test_audit_lists_events_without_values(monkeypatch):
@@ -2353,8 +2408,10 @@ def test_delete_protected_secret_releases_agent_scope(monkeypatch):
             delivery={"session_id": "ses_1"},
         )
         grant = _grant_from_request(conn, req, session_id="ses_1")
+    credential, factor = _register_webauthn_factor()
+    authz = _delete_authz_for_secret(credential, factor, "GRANT_KEY")
 
-    removed = api.delete_vault_secret("GRANT_KEY")
+    removed = api.delete_vault_secret("GRANT_KEY", authz=authz)
 
     assert removed["removed"] is True
     agent_release.assert_called_once_with(grant_id=grant["id"])

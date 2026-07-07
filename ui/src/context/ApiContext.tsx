@@ -142,6 +142,61 @@ export type VaultVmkResult = {
   wrap_meta: string | null;
 };
 
+export type VaultWebAuthnCredentialDescriptor = {
+  type: 'public-key';
+  id: string;
+  factor_id?: string;
+  transports?: AuthenticatorTransport[];
+};
+
+export type VaultWebAuthnRegistrationOptions = {
+  ok: boolean;
+  challenge_id: string;
+  expires_at: string;
+  rp_id: string;
+  origin: string;
+  webauthn: {
+    rp: { name: string; id: string };
+    user: { id: string; name: string; displayName: string };
+    challenge: string;
+    pubKeyCredParams: PublicKeyCredentialParameters[];
+    authenticatorSelection: AuthenticatorSelectionCriteria;
+    extensions?: AuthenticationExtensionsClientInputs;
+  };
+  code?: string;
+  message?: string;
+};
+
+export type VaultWebAuthnSerializedCredential = {
+  id: string;
+  rawId: string;
+  type: string;
+  response: Record<string, unknown>;
+};
+
+export type VaultDeleteAuthz = {
+  kind: 'webauthn';
+  challenge_id: string;
+  factor_id: string;
+  assertion: VaultWebAuthnSerializedCredential;
+};
+
+export type VaultDeleteChallengeResult = {
+  ok: boolean;
+  challenge_id: string;
+  expires_at: string;
+  operation: 'delete_secret';
+  secret_name: string;
+  webauthn: {
+    challenge: string;
+    rpId: string;
+    userVerification: UserVerificationRequirement;
+    allowCredentials: VaultWebAuthnCredentialDescriptor[];
+  };
+  code?: string;
+  message?: string;
+};
+
 export type VaultCreatePayload = {
   name: string;
   protection?: 'standard' | 'protected';
@@ -385,9 +440,16 @@ export type ApiContextType = {
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
+  createVaultAuthzWebAuthnOptions: () => Promise<VaultWebAuthnRegistrationOptions>;
+  registerVaultAuthzWebAuthnFactor: (payload: {
+    challenge_id: string;
+    credential: VaultWebAuthnSerializedCredential;
+    label?: string;
+  }) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
-  deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
+  createVaultDeleteChallenge: (name: string, opts?: { handleError?: boolean }) => Promise<VaultDeleteChallengeResult>;
+  deleteVaultSecret: (name: string, authz?: VaultDeleteAuthz) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
     opts?: { handleError?: boolean },
@@ -2180,9 +2242,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     deriveSigningAddresses: (publicKey) =>
       postJson('/api/vault/signing-addresses', { public_key: publicKey }, { handleError: false }),
+    createVaultAuthzWebAuthnOptions: () => postJson('/api/vault/authz/factors/webauthn/options', {}),
+    registerVaultAuthzWebAuthnFactor: (payload) => postJson('/api/vault/authz/factors/webauthn', payload),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
-    deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
+    createVaultDeleteChallenge: (name, opts) =>
+      postJson(`/api/vault/secrets/${encodeURIComponent(name)}/delete-challenge`, {}, opts),
+    deleteVaultSecret: (name, authz) =>
+      deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`, authz ? { authz } : undefined),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
     getVaultProvisionRequestById: (requestId, opts) =>

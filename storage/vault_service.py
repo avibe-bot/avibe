@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import threading
 import uuid
 from dataclasses import dataclass
@@ -28,8 +29,15 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
-from storage import vault_crypto
-from storage.models import vault_audit, vault_grants, vault_requests, vault_secrets
+from storage import vault_crypto, vault_webauthn
+from storage.models import (
+    vault_audit,
+    vault_auth_factors,
+    vault_grants,
+    vault_operation_challenges,
+    vault_requests,
+    vault_secrets,
+)
 from storage.vault_addresses import derive_addresses
 from storage.vault_crypto import Sealed
 
@@ -38,6 +46,7 @@ logger = logging.getLogger(__name__)
 SKILL_TAG_PREFIX = "skill:"
 DEFAULT_ENV_GRANT_TTL_SECONDS = 300
 DEFAULT_TAG_GRANT_TTL_SECONDS = 900
+DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS = 120
 DEFAULT_GRANT_TTL_SECONDS = {
     "env": DEFAULT_ENV_GRANT_TTL_SECONDS,
     "tag": DEFAULT_TAG_GRANT_TTL_SECONDS,
@@ -117,6 +126,16 @@ class CardHydrationPolicy:
     include_protected_unlock_material: bool
 
 
+@dataclass(frozen=True)
+class ProtectedOperationAuthz:
+    operation: str
+    secret_name: str
+    secret_id: str
+    secret_updated_at: str | None
+    challenge_id: str
+    factor_id: str
+
+
 class VaultServiceError(Exception):
     """Base class for vault data-layer errors."""
 
@@ -173,6 +192,22 @@ class NotGrantableError(VaultServiceError):
 
 
 class VaultAlreadyInitializedError(VaultServiceError):
+    pass
+
+
+class SecretNotProtectedError(VaultServiceError):
+    pass
+
+
+class ProtectedAuthRequiredError(VaultServiceError):
+    pass
+
+
+class ProtectedAuthzSetupRequiredError(VaultServiceError):
+    pass
+
+
+class InvalidProtectedAuthzError(VaultServiceError):
     pass
 
 
@@ -1298,6 +1333,328 @@ def _require_row(conn: Connection, name: str) -> dict[str, Any]:
     return dict(row)
 
 
+def _new_challenge() -> tuple[str, str]:
+    challenge = secrets.token_bytes(32)
+    return vault_webauthn.b64encode(challenge), vault_webauthn.challenge_hash(challenge)
+
+
+def _challenge_expiry(ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+
+
+def _stored_json_list(raw: str | None) -> list[str]:
+    value = _loads(raw)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item]
+
+
+def _factor_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "kind": row.get("kind"),
+        "label": row.get("label"),
+        "rp_id": row.get("rp_id"),
+        "credential_id": row.get("credential_id"),
+        "alg": row.get("alg"),
+        "transports": _stored_json_list(row.get("transports")),
+        "created_at": row.get("created_at"),
+        "last_used_at": row.get("last_used_at"),
+    }
+
+
+def _usable_webauthn_factor_rows(conn: Connection, *, rp_id: str) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in conn.execute(
+            select(vault_auth_factors).where(
+                vault_auth_factors.c.kind == "webauthn",
+                vault_auth_factors.c.rp_id == rp_id,
+                vault_auth_factors.c.disabled_at.is_(None),
+            )
+        ).mappings()
+    ]
+
+
+def list_webauthn_auth_factors(conn: Connection, *, rp_id: str | None = None) -> list[dict[str, Any]]:
+    stmt = select(vault_auth_factors).where(
+        vault_auth_factors.c.kind == "webauthn",
+        vault_auth_factors.c.disabled_at.is_(None),
+    )
+    if rp_id:
+        stmt = stmt.where(vault_auth_factors.c.rp_id == rp_id)
+    return [_factor_payload(dict(row)) for row in conn.execute(stmt).mappings()]
+
+
+def _challenge_row(conn: Connection, challenge_id: str, *, operation: str) -> dict[str, Any]:
+    row = conn.execute(
+        select(vault_operation_challenges).where(
+            vault_operation_challenges.c.id == challenge_id,
+            vault_operation_challenges.c.operation == operation,
+        )
+    ).mappings().first()
+    if row is None:
+        raise InvalidProtectedAuthzError("protected operation challenge was not found")
+    return dict(row)
+
+
+def _reject_unusable_challenge(row: dict[str, Any]) -> None:
+    if row.get("consumed_at"):
+        raise InvalidProtectedAuthzError("protected operation challenge was already used")
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    if expires_at is None or expires_at <= datetime.now(timezone.utc):
+        raise InvalidProtectedAuthzError("protected operation challenge expired")
+
+
+def _consume_challenge(conn: Connection, challenge_id: str, *, factor_id: str) -> None:
+    result = conn.execute(
+        vault_operation_challenges.update()
+        .where(vault_operation_challenges.c.id == challenge_id, vault_operation_challenges.c.consumed_at.is_(None))
+        .values(consumed_at=_now(), factor_id=factor_id)
+    )
+    if result.rowcount != 1:
+        raise InvalidProtectedAuthzError("protected operation challenge was already used")
+
+
+def create_webauthn_registration_options(
+    conn: Connection,
+    *,
+    rp_id: str,
+    origin: str,
+    ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS,
+) -> dict[str, Any]:
+    challenge, challenge_digest = _new_challenge()
+    challenge_id = _id("vop")
+    expires_at = _challenge_expiry(ttl_seconds)
+    now = _now()
+    conn.execute(
+        vault_operation_challenges.insert().values(
+            id=challenge_id,
+            operation="register_webauthn_factor",
+            secret_name=None,
+            secret_id=None,
+            secret_updated_at=None,
+            challenge_hash=challenge_digest,
+            rp_id=rp_id,
+            origin=origin,
+            expires_at=expires_at,
+            created_at=now,
+        )
+    )
+    return {
+        "ok": True,
+        "challenge_id": challenge_id,
+        "expires_at": expires_at,
+        "rp_id": rp_id,
+        "origin": origin,
+        "webauthn": {
+            "rp": {"name": "Avibe Vault", "id": rp_id},
+            "user": {
+                "id": vault_webauthn.b64encode(b"avibe-vault"),
+                "name": "avibe-vault",
+                "displayName": "Avibe Vault",
+            },
+            "challenge": challenge,
+            "pubKeyCredParams": [
+                {"type": "public-key", "alg": vault_webauthn.ALG_ES256},
+                {"type": "public-key", "alg": vault_webauthn.ALG_RS256},
+            ],
+            "authenticatorSelection": {"residentKey": "required", "userVerification": "required"},
+            "extensions": {"prf": {}},
+        },
+    }
+
+
+def register_webauthn_factor(
+    conn: Connection,
+    payload: dict[str, Any],
+    *,
+    rp_id: str,
+    origin: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise InvalidProtectedAuthzError("WebAuthn factor registration payload must be an object")
+    challenge_id = str(payload.get("challenge_id") or "").strip()
+    if not challenge_id:
+        raise InvalidProtectedAuthzError("WebAuthn factor registration challenge_id is required")
+    challenge = _challenge_row(conn, challenge_id, operation="register_webauthn_factor")
+    _reject_unusable_challenge(challenge)
+    if challenge.get("rp_id") != rp_id or challenge.get("origin") != origin:
+        raise InvalidProtectedAuthzError("WebAuthn factor registration origin mismatch")
+    credential = payload.get("credential")
+    if not isinstance(credential, dict):
+        raise InvalidProtectedAuthzError("WebAuthn factor registration credential is required")
+    try:
+        registration = vault_webauthn.verify_registration(
+            credential,
+            expected_challenge_hash=str(challenge["challenge_hash"]),
+            expected_origin=origin,
+            rp_id=rp_id,
+        )
+    except vault_webauthn.WebAuthnVerificationError as exc:
+        raise InvalidProtectedAuthzError(str(exc)) from exc
+    response = credential.get("response") if isinstance(credential.get("response"), dict) else {}
+    transports = _string_list(response.get("transports"), field="transports") if "transports" in response else []
+    label = _optional_string(payload.get("label"), field="label") if "label" in payload else None
+    factor_id = _id("vaf")
+    now = _now()
+    try:
+        conn.execute(
+            vault_auth_factors.insert().values(
+                id=factor_id,
+                kind="webauthn",
+                label=label,
+                rp_id=rp_id,
+                credential_id=registration.credential_id,
+                public_key=registration.public_key,
+                alg=registration.alg,
+                sign_count=registration.sign_count,
+                transports=json.dumps(transports) if transports else None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    except IntegrityError as exc:
+        raise InvalidProtectedAuthzError("WebAuthn credential is already registered") from exc
+    _consume_challenge(conn, challenge_id, factor_id=factor_id)
+    audit(conn, "auth-factor-registered", delivery={"factor_id": factor_id, "kind": "webauthn", "rp_id": rp_id})
+    row = conn.execute(select(vault_auth_factors).where(vault_auth_factors.c.id == factor_id)).mappings().one()
+    return {"ok": True, "factor": _factor_payload(dict(row))}
+
+
+def create_delete_challenge(
+    conn: Connection,
+    name: str,
+    *,
+    rp_id: str,
+    origin: str,
+    ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS,
+) -> dict[str, Any]:
+    row = _require_row(conn, name)
+    if row.get("protection") != "protected":
+        raise SecretNotProtectedError(name)
+    factors = _usable_webauthn_factor_rows(conn, rp_id=rp_id)
+    if not factors:
+        raise ProtectedAuthzSetupRequiredError("protected delete requires a registered passkey authorization factor")
+    challenge, challenge_digest = _new_challenge()
+    challenge_id = _id("vop")
+    expires_at = _challenge_expiry(ttl_seconds)
+    conn.execute(
+        vault_operation_challenges.insert().values(
+            id=challenge_id,
+            operation="delete_secret",
+            secret_name=name,
+            secret_id=row.get("id"),
+            secret_updated_at=row.get("updated_at"),
+            challenge_hash=challenge_digest,
+            rp_id=rp_id,
+            origin=origin,
+            expires_at=expires_at,
+            created_at=_now(),
+        )
+    )
+    audit(
+        conn,
+        "delete-challenge-issued",
+        secret_name=name,
+        delivery={"challenge_id": challenge_id, "rp_id": rp_id},
+    )
+    allow_credentials = []
+    for factor in factors:
+        credential: dict[str, Any] = {
+            "type": "public-key",
+            "id": factor["credential_id"],
+            "factor_id": factor["id"],
+        }
+        transports = _stored_json_list(factor.get("transports"))
+        if transports:
+            credential["transports"] = transports
+        allow_credentials.append(credential)
+    return {
+        "ok": True,
+        "challenge_id": challenge_id,
+        "expires_at": expires_at,
+        "operation": "delete_secret",
+        "secret_name": name,
+        "webauthn": {
+            "challenge": challenge,
+            "rpId": rp_id,
+            "userVerification": "required",
+            "allowCredentials": allow_credentials,
+        },
+    }
+
+
+def verify_delete_secret_authz(conn: Connection, name: str, payload: dict[str, Any] | None) -> ProtectedOperationAuthz:
+    if not isinstance(payload, dict):
+        raise ProtectedAuthRequiredError("protected delete requires WebAuthn authorization")
+    if payload.get("kind") != "webauthn":
+        raise InvalidProtectedAuthzError("protected delete requires WebAuthn authorization")
+    challenge_id = str(payload.get("challenge_id") or "").strip()
+    factor_id = str(payload.get("factor_id") or "").strip()
+    if not challenge_id or not factor_id:
+        raise InvalidProtectedAuthzError("protected delete authorization is incomplete")
+    challenge = _challenge_row(conn, challenge_id, operation="delete_secret")
+    _reject_unusable_challenge(challenge)
+    row = _require_row(conn, name)
+    if row.get("protection") != "protected":
+        raise SecretNotProtectedError(name)
+    if (
+        challenge.get("secret_name") != name
+        or challenge.get("secret_id") != row.get("id")
+        or challenge.get("secret_updated_at") != row.get("updated_at")
+    ):
+        raise InvalidProtectedAuthzError("protected delete challenge does not match the current secret row")
+    factor = conn.execute(
+        select(vault_auth_factors).where(
+            vault_auth_factors.c.id == factor_id,
+            vault_auth_factors.c.kind == "webauthn",
+            vault_auth_factors.c.disabled_at.is_(None),
+        )
+    ).mappings().first()
+    if factor is None:
+        raise InvalidProtectedAuthzError("protected delete authorization factor was not found")
+    factor = dict(factor)
+    if factor.get("rp_id") != challenge.get("rp_id"):
+        raise InvalidProtectedAuthzError("protected delete authorization factor RP mismatch")
+    assertion = payload.get("assertion")
+    try:
+        result = vault_webauthn.verify_assertion(
+            assertion if isinstance(assertion, dict) else {},
+            credential_id=str(factor["credential_id"]),
+            public_key=str(factor["public_key"]),
+            alg=int(factor["alg"]),
+            stored_sign_count=int(factor.get("sign_count") or 0),
+            expected_challenge_hash=str(challenge["challenge_hash"]),
+            expected_origin=str(challenge["origin"]),
+            rp_id=str(challenge["rp_id"]),
+        )
+    except vault_webauthn.WebAuthnVerificationError as exc:
+        raise InvalidProtectedAuthzError(str(exc)) from exc
+    now = _now()
+    next_sign_count = max(int(factor.get("sign_count") or 0), result.sign_count)
+    conn.execute(
+        vault_auth_factors.update()
+        .where(vault_auth_factors.c.id == factor_id)
+        .values(sign_count=next_sign_count, last_used_at=now, updated_at=now)
+    )
+    _consume_challenge(conn, challenge_id, factor_id=factor_id)
+    audit(
+        conn,
+        "delete-authorized",
+        secret_name=name,
+        delivery={"challenge_id": challenge_id, "factor_id": factor_id},
+    )
+    return ProtectedOperationAuthz(
+        operation="delete_secret",
+        secret_name=name,
+        secret_id=str(row["id"]),
+        secret_updated_at=row.get("updated_at"),
+        challenge_id=challenge_id,
+        factor_id=factor_id,
+    )
+
+
 def fulfill_pending_provision_requests_for_secret(
     conn: Connection,
     name: str,
@@ -1733,10 +2090,32 @@ def rotate_secret(
     return _meta_payload(_require_row(conn, name))
 
 
-def delete_secret(conn: Connection, name: str, *, cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE) -> None:
+def _reject_missing_protected_delete_authz(row: dict[str, Any], authz: ProtectedOperationAuthz | None) -> None:
+    if row.get("protection") != "protected":
+        return
+    if authz is None:
+        raise ProtectedAuthRequiredError("protected delete requires verified authorization")
+    if (
+        authz.operation != "delete_secret"
+        or authz.secret_name != row.get("name")
+        or authz.secret_id != row.get("id")
+        or authz.secret_updated_at != row.get("updated_at")
+    ):
+        raise InvalidProtectedAuthzError("protected delete authorization does not match the current secret row")
+
+
+def delete_secret(
+    conn: Connection,
+    name: str,
+    *,
+    protected_authz: ProtectedOperationAuthz | None = None,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> None:
     row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
     if row is None:
         raise SecretNotFoundError(name)
+    row = dict(row)
+    _reject_missing_protected_delete_authz(row, protected_authz)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))

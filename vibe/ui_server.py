@@ -3082,6 +3082,15 @@ def _vault_error_response(exc):
     return jsonify({"ok": False, "code": "vault_error", "message": str(exc)}), 400
 
 
+def _webauthn_request_origin() -> str:
+    origin = request.headers.get("Origin")
+    if origin:
+        return origin
+    scheme = request.headers.get("X-Forwarded-Proto") or request.scheme
+    host = request.headers.get("X-Forwarded-Host") or request.host
+    return f"{scheme}://{host}"
+
+
 @app.route("/api/vault/secrets", methods=["GET"])
 def vault_secrets_get():
     from vibe import api
@@ -3137,6 +3146,26 @@ def vault_vmk_get():
     return jsonify(api.get_vault_vmk())
 
 
+@app.route("/api/vault/authz/factors/webauthn/options", methods=["POST"])
+def vault_authz_webauthn_options_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_authz_webauthn_options(origin=_webauthn_request_origin()))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/authz/factors/webauthn", methods=["POST"])
+def vault_authz_webauthn_register_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.register_vault_authz_webauthn_factor(request.json or {}, origin=_webauthn_request_origin()))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/signing-addresses", methods=["POST"])
 def vault_signing_addresses_post():
     from vibe import api
@@ -3167,12 +3196,24 @@ def vault_secret_patch(name):
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/secrets/<name>/delete-challenge", methods=["POST"])
+def vault_secret_delete_challenge(name):
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_delete_challenge(name, origin=_webauthn_request_origin()))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/secrets/<name>", methods=["DELETE"])
 def vault_secret_delete(name):
     from vibe import api
 
     try:
-        return jsonify(api.delete_vault_secret(name))
+        payload = request.json or {}
+        authz = payload.get("authz") if isinstance(payload, dict) else None
+        return jsonify(api.delete_vault_secret(name, authz=authz))
     except ValueError as exc:
         return _vault_error_response(exc)
 
