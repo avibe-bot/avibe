@@ -802,11 +802,26 @@ def test_create_protected_stores_browser_envelope_without_avault(monkeypatch):
 
     seal = Mock(return_value=_sealed("should-not-use"))
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    passkey_wrap_meta = {
+        "v": 1,
+        "copies": [
+            {
+                "kind": "passkey",
+                "credential_id": "cred-1",
+                "kdf": "webauthn-prf-hkdf-sha256",
+                "prf_salt": "salt",
+                "nonce": "copy-nonce",
+                "wrapped": "wrapped-vmk",
+            }
+        ],
+        "wrapped_dek": "dek",
+        "dek_nonce": "dek-nonce",
+    }
     created = api.create_vault_secret(
         {
             "name": "PROTECTED_KEY",
             "protection": "protected",
-            "sealed": {"ciphertext": "browser-ct", "nonce": "browser-n", "wrap_meta": {"v": 1, "wrapped_dek": "dek"}},
+            "sealed": {"ciphertext": "browser-ct", "nonce": "browser-n", "wrap_meta": passkey_wrap_meta},
             "public_meta": {"factor_hint": "passkey-first"},
         }
     )
@@ -815,7 +830,7 @@ def test_create_protected_stores_browser_envelope_without_avault(monkeypatch):
     with api._vault_engine().connect() as conn:
         row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == "PROTECTED_KEY")).mappings().one()
     assert row["ciphertext"] == "browser-ct"
-    assert json.loads(row["wrap_meta"]) == {"v": 1, "wrapped_dek": "dek"}
+    assert json.loads(row["wrap_meta"]) == passkey_wrap_meta
 
 
 def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
