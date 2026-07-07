@@ -193,6 +193,22 @@ def test_rest_security_headers_delegate_webauthn_to_sandbox_only():
     assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
 
 
+def test_spa_document_security_headers_delegate_webauthn_to_sandbox_only():
+    client = app.test_client()
+
+    response = client.request("HEAD", "/vaults", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    permissions = response.headers["Permissions-Policy"]
+    assert 'publickey-credentials-get=("https://sandbox.avibe.bot")' in permissions
+    assert 'publickey-credentials-create=("https://sandbox.avibe.bot")' in permissions
+    assert 'clipboard-write=(self "https://sandbox.avibe.bot")' in permissions
+    assert "publickey-credentials-get=(self" not in permissions
+    assert "publickey-credentials-create=(self" not in permissions
+    assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
+
+
 def test_rest_vault_authz_options_use_sandbox_rp_origin():
     client = app.test_client()
 
