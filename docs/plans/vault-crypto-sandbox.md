@@ -150,13 +150,27 @@ user vault contents. The remaining trust question is whether the central site ca
 serve malicious sandbox JavaScript. That is handled by the local-anchored
 integrity model below.
 
-### Rejected: B. per-user local sandbox through a tunnel subdomain
+**Decision (2026-07-07): A chosen over per-user (B), on scale cost.** Per-user was
+re-evaluated and *can* technically deliver a stable per-user RP plus locally-served
+sandbox code (which would remove the central-serve trust question and the hash pin
+entirely — a genuine plus). It was rejected because it is an **O(2×users)**
+Cloudflare hostname footprint: it halves whatever per-user ceiling applies — notably
+the **1,000 routes/account Cloudflare Tunnel cap** — and doubles per-user hostname
+cost (Cloudflare-for-SaaS custom hostnames are 100 free, then ~$0.10/hostname/mo),
+whereas central is **O(1)** — one hostname, forever, free. The central-serve trust
+is accepted and bounded by the local-anchored integrity model below. Possible future
+refinement: ship central by default and let self-hosters point the parent at their
+own sandbox origin.
 
-A per-user sandbox subdomain adds a second tunnel route, certificate, lifecycle,
-and control-plane resource for every user. It also weakens the stable-RP benefit:
-when the parent is opened at localhost, the sandbox is now a remote per-user
-tunnel origin with reachability and RP ownership questions. It is more ops cost
-for only a partial improvement over today's host-fragile model.
+### Rejected: B. per-user sandbox (e.g. `<user>-sandbox.avibe.bot`)
+
+A single-label sibling host such as `<user>-sandbox.avibe.bot` is covered by the
+existing `*.avibe.bot` wildcard cert and needs only one extra tunnel **ingress rule**
+plus a DNS record per user (NOT a second tunnel) — and it isolates correctly from the
+main app (a sibling host is not a registrable suffix of `<user>.avibe.bot`). It even
+gives a stable per-user RP (the iframe src is a constant per-user host regardless of
+localhost/tunnel access). The blocker is **scale cost**, not feasibility: O(2×users)
+hostnames vs central's O(1) (see the Decision note above).
 
 ### Rejected: same host, different port
 
@@ -953,10 +967,24 @@ static hosting dependency.
 
 ### Phase 0: design acceptance and support matrix
 
+**Browser-feasibility spike — DONE (2026-07-07, real iOS device).** The iframe
+architecture is viable on iOS Safari with a **setup-vs-ops split**:
+- same-origin WebAuthn-PRF works on iOS (iCloud Keychain / 1Password);
+- cross-origin iframe **`create()` is BLOCKED by Safari** ("origin of the document
+  is not the same as its ancestors") for any isolated RP → **passkey SETUP must run
+  top-level** (popup or full-page redirect) on the sandbox origin;
+- cross-origin iframe **`get()` + PRF works** → **daily ops (unlock / sign /
+  releaseDEK / delete-authz) run in the cross-origin iframe**.
+This setup-in-top-level + ops-in-iframe split is intrinsic to real isolation on
+Safari (only the insecure apex-RP option avoids it); it is the standard iframe-
+sandbox pattern and is no longer an open architectural risk.
+
 - Confirm the exact parent origins Avibe will support.
-- Verify cross-origin WebAuthn `get()` and `create()` in target desktop and
-  mobile browsers, including Safari/iOS and common passkey providers.
-- Decide the exact top-level sandbox-window fallback UX.
+- ~~Verify cross-origin `get()`/`create()` on Safari/iOS~~ — **done (above)**;
+  still worth a wider provider/browser matrix pass before GA.
+- Decide the exact top-level sandbox **setup** UX (popup vs full-page redirect;
+  redirect is smoother on mobile / dodges popup blockers). This is the primary
+  setup path now, not a fallback.
 - Decide whether direct protected plaintext display/copy is in scope for the
   first sandbox release or whether first release only supports create, sign, and
   DEK release.
