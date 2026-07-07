@@ -179,6 +179,36 @@ def test_rest_agent_pubkey_route(monkeypatch):
     assert response.get_json() == {"ok": True, "public_key": "pk", "fingerprint": "fp"}
 
 
+def test_rest_security_headers_delegate_webauthn_to_sandbox_only():
+    client = app.test_client()
+
+    response = client.get("/api/csrf-token")
+
+    permissions = response.headers["Permissions-Policy"]
+    assert 'publickey-credentials-get=("https://sandbox.avibe.bot")' in permissions
+    assert 'publickey-credentials-create=("https://sandbox.avibe.bot")' in permissions
+    assert 'clipboard-write=(self "https://sandbox.avibe.bot")' in permissions
+    assert "publickey-credentials-get=(self" not in permissions
+    assert "publickey-credentials-create=(self" not in permissions
+    assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
+
+
+def test_rest_vault_authz_options_use_sandbox_rp_origin():
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/authz/factors/webauthn/options",
+        json={},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["rp_id"] == "sandbox.avibe.bot"
+    assert payload["origin"] == "https://sandbox.avibe.bot"
+    assert payload["webauthn"]["rp"]["id"] == "sandbox.avibe.bot"
+
+
 def test_rest_requests_and_grants_routes(monkeypatch):
     _mock_avault_p2(monkeypatch)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))

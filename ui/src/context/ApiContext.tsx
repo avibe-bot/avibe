@@ -130,6 +130,37 @@ export type VaultAccessFulfillmentPayload = {
   deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
 };
 
+export type VaultSandboxRootMetadataResult = {
+  ok: boolean;
+  root_metadata: {
+    daemon: {
+      verificationKeys: Array<{ alg: 'ed25519'; keyId: string; publicKey: string }>;
+    };
+  };
+  code?: string;
+  message?: string;
+};
+
+export type VaultAgentBindingResult = {
+  ok: boolean;
+  agent_pubkey: { public_key: string; fingerprint: string };
+  binding: {
+    challengeId: string;
+    requestId: string;
+    grantId: string;
+    agent: {
+      publicKey: { public_key: string; fingerprint?: string };
+      fingerprint: string;
+    };
+    context: Record<string, unknown>;
+    expiresAt: string;
+    signature: { alg: 'ed25519'; keyId: string; value: string };
+  };
+  approval: { nonce: string; expires_at_unix: number };
+  code?: string;
+  message?: string;
+};
+
 type VaultSealedEnvelope = {
   ciphertext: string;
   nonce: string;
@@ -456,6 +487,13 @@ export type ApiContextType = {
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
+  getVaultSandboxRootMetadata: () => Promise<VaultSandboxRootMetadataResult>;
+  createVaultAgentBinding: (payload: {
+    request_id: string;
+    grant_id: string;
+    name: string;
+    ttl_seconds?: number;
+  }) => Promise<VaultAgentBindingResult>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultAuthzWebAuthnOptions: () => Promise<VaultWebAuthnRegistrationOptions>;
   registerVaultAuthzWebAuthnFactor: (
@@ -2255,6 +2293,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listVaultSecrets: () => getCachedJson('/api/vault/secrets', 1500),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
+    getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),
+    createVaultAgentBinding: (payload) =>
+      postJson('/api/vault/agent-binding', payload, { handleError: false }),
     deriveSigningAddresses: (publicKey) =>
       postJson('/api/vault/signing-addresses', { public_key: publicKey }, { handleError: false }),
     createVaultAuthzWebAuthnOptions: () => postJson('/api/vault/authz/factors/webauthn/options', {}),

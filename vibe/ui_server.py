@@ -124,6 +124,12 @@ TRACEBACK_EXCEPTION_PATTERN = re.compile(
 )
 CSRF_COOKIE_NAME = "vibe_csrf_token"
 CSRF_HEADER_NAME = "X-Vibe-CSRF-Token"
+VAULT_SANDBOX_ORIGIN = "https://sandbox.avibe.bot"
+VAULT_SANDBOX_PERMISSIONS_POLICY = (
+    f'publickey-credentials-get=("{VAULT_SANDBOX_ORIGIN}"), '
+    f'publickey-credentials-create=("{VAULT_SANDBOX_ORIGIN}"), '
+    f'clipboard-write=(self "{VAULT_SANDBOX_ORIGIN}")'
+)
 REMOTE_OAUTH_COOKIE_NAME = "__Host-vibe_remote_oauth"
 REMOTE_OAUTH_RETRY_PARAM = "__vibe_oauth_retry"
 # Lifetime of the short-lived OAuth handshake (signed state + PKCE cookie). The
@@ -2130,6 +2136,34 @@ def add_csrf_cookie(response: Response) -> Response:
     return _ensure_csrf_cookie(response)
 
 
+def _merge_csp_frame_src(existing: str | None) -> str:
+    required = ["'self'", VAULT_SANDBOX_ORIGIN]
+    if not existing:
+        return f"frame-src {' '.join(required)}"
+    directives = [part.strip() for part in existing.split(";") if part.strip()]
+    for index, directive in enumerate(directives):
+        name, _, rest = directive.partition(" ")
+        if name.lower() != "frame-src":
+            continue
+        tokens = rest.split()
+        for token in required:
+            if token not in tokens:
+                tokens.append(token)
+        directives[index] = f"frame-src {' '.join(tokens)}"
+        return "; ".join(directives)
+    directives.append(f"frame-src {' '.join(required)}")
+    return "; ".join(directives)
+
+
+@app.after_request
+def add_vault_sandbox_security_headers(response: Response) -> Response:
+    response.headers["Permissions-Policy"] = VAULT_SANDBOX_PERMISSIONS_POLICY
+    response.headers["Content-Security-Policy"] = _merge_csp_frame_src(
+        response.headers.get("Content-Security-Policy")
+    )
+    return response
+
+
 @app.after_request
 def renew_remote_access_cookie(response: Response) -> Response:
     # Logout handler explicitly clears the session cookie; never re-issue it.
@@ -3091,6 +3125,10 @@ def _webauthn_request_origin() -> str:
     return f"{scheme}://{host}"
 
 
+def _vault_sandbox_webauthn_origin() -> str:
+    return VAULT_SANDBOX_ORIGIN
+
+
 @app.route("/api/vault/secrets", methods=["GET"])
 def vault_secrets_get():
     from vibe import api
@@ -3139,6 +3177,26 @@ def vault_agent_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/sandbox/root-metadata", methods=["GET"])
+def vault_sandbox_root_metadata_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_sandbox_root_metadata())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/agent-binding", methods=["POST"])
+def vault_agent_binding_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_agent_binding(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/vmk", methods=["GET"])
 def vault_vmk_get():
     from vibe import api
@@ -3151,7 +3209,7 @@ def vault_authz_webauthn_options_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_authz_webauthn_options(origin=_webauthn_request_origin()))
+        return jsonify(api.create_vault_authz_webauthn_options(origin=_vault_sandbox_webauthn_origin()))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -3161,7 +3219,7 @@ def vault_authz_webauthn_register_post():
     from vibe import api
 
     try:
-        return jsonify(api.register_vault_authz_webauthn_factor(request.json or {}, origin=_webauthn_request_origin()))
+        return jsonify(api.register_vault_authz_webauthn_factor(request.json or {}, origin=_vault_sandbox_webauthn_origin()))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -3181,7 +3239,7 @@ def vault_secrets_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_secret(request.json or {}, origin=_webauthn_request_origin()))
+        return jsonify(api.create_vault_secret(request.json or {}, origin=_vault_sandbox_webauthn_origin()))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -3201,7 +3259,7 @@ def vault_secret_delete_challenge(name):
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_delete_challenge(name, origin=_webauthn_request_origin()))
+        return jsonify(api.create_vault_delete_challenge(name, origin=_vault_sandbox_webauthn_origin()))
     except ValueError as exc:
         return _vault_error_response(exc)
 

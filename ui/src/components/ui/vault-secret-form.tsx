@@ -323,7 +323,7 @@ export const VaultSecretForm: React.FC<{
   }, [signingKey, api]);
 
   const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
-  const valueReady = isKeypair ? signingKey != null : staticValueReady;
+  const valueReady = protection === 'protected' ? true : isKeypair ? signingKey != null : staticValueReady;
   const canSubmit = isEdit
     ? !submitting
     : Boolean(secretName && valueReady) &&
@@ -374,6 +374,16 @@ export const VaultSecretForm: React.FC<{
       clearSelectedFile();
     }
   };
+
+  useEffect(() => {
+    if (protection !== 'protected') return;
+    setValue('');
+    clearSelectedFile();
+    applySigningKey(null);
+    setImportHex('');
+    setSigningError(null);
+    setSigningAddresses(null);
+  }, [protection]);
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -464,7 +474,7 @@ export const VaultSecretForm: React.FC<{
         links: skillLinks.length ? { skills: skillLinks } : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
         provision_request_id: provisionRequestId || undefined,
-        ...(isKeypair && signingKey
+        ...(isKeypair && protection === 'standard' && signingKey
           ? {
               kind: 'keypair',
               signer_kind: 'local',
@@ -474,41 +484,52 @@ export const VaultSecretForm: React.FC<{
             }
           : {}),
       };
-      // For a signing key the sealed value is the raw 32-byte private key (avault
-      // opens it back into a 32-byte signing key); for a static secret it is the
-      // entered string.
-      let plaintext: Uint8Array | string;
-      if (isKeypair && signingKey) {
-        plaintext = signingKey.privateKey;
-      } else if (staticSource === 'file' && selectedFile) {
-        try {
-          fileBytesToWipe = new Uint8Array(await selectedFile.arrayBuffer());
-        } catch (err) {
-          throw new Error(t('vaults.dialog.errors.fileReadFailed'), { cause: err });
-        }
-        plaintext = fileBytesToWipe;
-      } else {
-        plaintext = value;
-      }
       let cryptoFields:
         | { sealed: ProtectedRecordEnvelope }
         | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> };
       let establishingVmk = false;
       let authzFactorRegistration: Awaited<ReturnType<typeof protectedVault.sealValue>>['authzFactorRegistration'];
+      let protectedPublicMeta: Record<string, unknown> | undefined;
       if (protection === 'protected') {
-        // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no
-        // plaintext). For a signing key this seals the raw 32-byte private key, not a string.
-        const sealed = await protectedVault.sealValue(secretName, plaintext);
+        // The sandbox owns protected plaintext/key entry and returns only an opaque envelope
+        // plus public key metadata for keypairs.
+        const sealed = await protectedVault.sealValue(secretName, kind);
         cryptoFields = { sealed: sealed.envelope };
         establishingVmk = sealed.establishingVmk;
         authzFactorRegistration = sealed.authzFactorRegistration;
+        if (isKeypair && !sealed.publicKey) {
+          throw new Error(t('vaults.dialog.errors.invalidPublicKey'));
+        }
+        if (isKeypair) {
+          protectedPublicMeta = {
+            signing_public_key: { curve: 'secp256k1', public_key: sealed.publicKey },
+            ...(sealed.addresses ? { signing_addresses: sealed.addresses } : {}),
+          };
+        }
       } else {
+        // For a standard signing key the sealed value is the raw 32-byte private key
+        // (avault opens it back into a 32-byte signing key); for a static secret it is
+        // the entered string.
+        let plaintext: Uint8Array | string;
+        if (isKeypair && signingKey) {
+          plaintext = signingKey.privateKey;
+        } else if (staticSource === 'file' && selectedFile) {
+          try {
+            fileBytesToWipe = new Uint8Array(await selectedFile.arrayBuffer());
+          } catch (err) {
+            throw new Error(t('vaults.dialog.errors.fileReadFailed'), { cause: err });
+          }
+          plaintext = fileBytesToWipe;
+        } else {
+          plaintext = value;
+        }
         const pubkey = await api.getVaultPubkey();
         cryptoFields = { blind_box: await sealBlindBox(plaintext, pubkey, standardCreateBlindBoxContext(secretName)) };
       }
       const created = await api.createVaultSecret(
         {
           ...base,
+          ...(protectedPublicMeta ? { kind: 'keypair', signer_kind: 'local', public_meta: protectedPublicMeta } : {}),
           ...cryptoFields,
           ...(establishingVmk
             ? {
@@ -907,11 +928,13 @@ export const VaultSecretForm: React.FC<{
           <Badge variant="secondary" className="bg-surface">{t('vaults.request.notSetYet')}</Badge>
         </div>
 
-        <label className="flex flex-col gap-1.5">
-          <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
-          {valueField}
-          <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.provisionValueHelp')}</span>
-        </label>
+        {protection !== 'protected' && (
+          <label className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
+            {valueField}
+            <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.provisionValueHelp')}</span>
+          </label>
+        )}
 
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
@@ -983,14 +1006,14 @@ export const VaultSecretForm: React.FC<{
       </label>
 
       {/* Value (static) or signing-key builder (keypair) */}
-      {!isKeypair && (
+      {!isKeypair && protection !== 'protected' && (
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
           {valueField}
         </label>
       )}
 
-      {isKeypair && (
+      {isKeypair && protection === 'standard' && (
         <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
           <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyHelp')}</span>
           <div className="grid grid-cols-2 gap-2">
@@ -1079,7 +1102,7 @@ export const VaultSecretForm: React.FC<{
 
           {signingError && <span className="text-xs text-destructive">{signingError}</span>}
 
-          {!p2Ready && protection !== 'protected' && (
+          {!p2Ready && (
             <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
               {t('vaults.dialog.signingNeedsAvault', { version: AVAULT_P2_MIN_VERSION })}
             </div>

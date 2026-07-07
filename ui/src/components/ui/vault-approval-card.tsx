@@ -6,13 +6,7 @@ import { useApi, type SigningAddresses, type VaultRequest, type VaultSourceSelec
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { SigningAddressList } from './signing-address-list';
-import {
-  blindBoxAgentDeliverOperationHash,
-  bytesToBase64,
-  protectedDekReleaseBlindBoxContext,
-  type BlindBox,
-  type SignatureScheme,
-} from '@/lib/vaultCrypto';
+import { type BlindBox, type SignatureScheme } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -113,7 +107,12 @@ export const VaultApprovalCard: React.FC<{
   // `grant_options[].unlock_material` are present for protected requests. No fetch or
   // loading state is needed here — the single-request GET is agent-audience (value-free).
   const card = (request.card ?? null) as ApprovalCard | null;
-  const delivery = (request.delivery ?? {}) as { digest?: string; scheme?: string };
+  const delivery = (request.delivery ?? {}) as {
+    digest?: string;
+    scheme?: string;
+    signing_context?: Record<string, unknown>;
+    signingContext?: Record<string, unknown>;
+  };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
   const isKeypair = card?.kind === 'keypair';
 
@@ -218,30 +217,30 @@ export const VaultApprovalCard: React.FC<{
           }),
         );
       } else {
-        // Protected members — release each DEK in the browser as an opaque HPKE blind box
-        // addressed to the resident avault agent, then relay only those boxes.
-        const pubkey = await api.getVaultAgentPubkey();
-        const agentPubkey = { public_key: pubkey.public_key, fingerprint: pubkey.fingerprint };
-        const expiresAtUnix = Math.floor(Date.now() / 1000) + ttlSeconds;
+        // Protected members — ask the daemon for signed, value-free agent bindings, then let the
+        // sandbox release each DEK as an opaque HPKE blind box for that pinned resident agent.
+        let agentPubkey: { public_key: string; fingerprint: string } | null = null;
         const deks: Array<{ name: string; dek_blindbox: BlindBox; approval: { nonce: string; expires_at_unix: number } }> = [];
         for (const material of materials) {
-          const approvalNonce = crypto.getRandomValues(new Uint8Array(16));
-          const context = await protectedDekReleaseBlindBoxContext(material.name, {
-            kind: 'agent-deliver',
-            grantId,
-            ttlSecs: ttlSeconds,
-            approval: { nonce: approvalNonce, expiresAtUnix },
-            operationHash: await blindBoxAgentDeliverOperationHash(material.name, ttlSeconds),
+          const binding = await api.createVaultAgentBinding({
+            request_id: request.id,
+            grant_id: grantId,
+            name: material.name,
+            ttl_seconds: ttlSeconds,
           });
-          // Value access only ever releases a delivery DEK — never a signing context.
-          if (context.purpose !== 'agent-deliver') throw new Error(t('vaults.approval.errors.failed'));
-          const dekBlindbox = await vault.releaseProtectedDelivery(material, agentPubkey, context);
+          failIfNotOk(binding);
+          if (agentPubkey && binding.agent_pubkey.fingerprint !== agentPubkey.fingerprint) {
+            throw new Error(t('vaults.approval.errors.failed'));
+          }
+          agentPubkey = binding.agent_pubkey;
+          const dekBlindbox = await vault.releaseProtectedDelivery(material, binding.binding);
           deks.push({
             name: material.name,
             dek_blindbox: dekBlindbox,
-            approval: { nonce: bytesToBase64(approvalNonce), expires_at_unix: expiresAtUnix },
+            approval: binding.approval,
           });
         }
+        if (!agentPubkey) throw new Error(t('vaults.approval.errors.failed'));
         failIfNotOk(
           await api.fulfillVaultAccessRequest(request.id, {
             grant_id: grantId,
@@ -262,10 +261,12 @@ export const VaultApprovalCard: React.FC<{
       const scheme = delivery.scheme;
       if (!name || !digest || !scheme) throw new Error(t('vaults.approval.errors.missingDigest'));
       if (isProtected) {
-        // Protected keypair: open + sign locally, submit only the public signature.
+        // Protected keypair: the sandbox opens + signs, parent submits only the public signature.
         const material = card?.secret_unlock_material;
         if (!material) throw new Error(t('vaults.approval.errors.missingMaterial'));
-        const sig = await vault.signProtectedRequest(material, digest, scheme as SignatureScheme);
+        const signingContext = delivery.signing_context ?? delivery.signingContext;
+        if (!signingContext || typeof signingContext !== 'object') throw new Error(t('vaults.approval.errors.missingDigest'));
+        const sig = await vault.signProtectedRequest(material, signingContext, scheme as SignatureScheme);
         const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
         failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme, signature }));
