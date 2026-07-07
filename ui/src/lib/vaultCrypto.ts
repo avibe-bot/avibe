@@ -2,7 +2,6 @@ import { Aes256Gcm, CipherSuite, HkdfSha256 } from '@hpke/core';
 import { DhkemX25519HkdfSha256 } from '@hpke/dhkem-x25519';
 import { secp256k1, schnorr } from '@noble/curves/secp256k1.js';
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js';
-import { argon2id, scrypt } from 'hash-wasm';
 
 export const BLIND_BOX_SCHEME = 'hpke-x25519-hkdfsha256-aes256gcm-v1';
 export const BLIND_BOX_HPKE_INFO = 'avault:blind-box:v1';
@@ -15,21 +14,9 @@ export const SIGN_SCHEME_SCHNORR_SECP256K1_BIP340 = 'schnorr-secp256k1-bip340';
 
 const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
-const ARGON2_VERSION = 19;
 const PASSKEY_PRF_SALT_BYTES = 32;
 const PASSKEY_HKDF_INFO = 'avault:protected-vmk:kek-passkey:v1';
 const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const DEFAULT_SCRYPT = {
-  n: 2 ** 15,
-  r: 8,
-  p: 1,
-} as const;
-
-const DEFAULT_ARGON2ID = {
-  iterations: 3,
-  memorySize: 64 * 1024,
-  parallelism: 1,
-} as const;
 
 const textEncoder = new TextEncoder();
 
@@ -60,27 +47,6 @@ export type ProtectedRecordContext = {
   version?: typeof WRAP_META_VERSION;
 };
 
-export type Argon2idParams = {
-  iterations: number;
-  memorySize: number;
-  parallelism: number;
-};
-
-type PasswordScryptFactor = {
-  kind: 'password';
-  password: string;
-  kdf?: 'scrypt';
-};
-
-type PasswordArgon2idFactor = {
-  kind: 'password';
-  password: string;
-  kdf: 'argon2id';
-  argon2id?: Partial<Argon2idParams>;
-};
-
-export type PasswordWrapFactor = PasswordScryptFactor | PasswordArgon2idFactor;
-
 export type PasskeyWrapFactor = {
   kind: 'passkey';
   prfOutput: BytesLike;
@@ -88,20 +54,11 @@ export type PasskeyWrapFactor = {
   credentialId?: string;
 };
 
-export type VmkWrapFactor = PasswordWrapFactor | PasskeyWrapFactor;
-
-export type PasswordUnlockFactor = {
-  kind: 'password';
-  password: string;
-};
-
 export type PasskeyUnlockFactor = {
   kind: 'passkey';
   prfOutput: BytesLike;
   prfSalt?: BytesLike;
 };
-
-export type VmkUnlockFactor = PasswordUnlockFactor | PasskeyUnlockFactor;
 
 export type SignatureScheme =
   | typeof SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE
@@ -177,30 +134,7 @@ export type ProtectedDekReleaseOperation =
 
 type WrapMeta = {
   v: 1;
-  copies: WrapCopy[];
-};
-
-type PasswordArgon2idCopy = {
-  kind: 'password';
-  kdf: 'argon2id';
-  version: 19;
-  iterations: number;
-  memorySize: number;
-  parallelism: number;
-  salt: string;
-  nonce: string;
-  wrapped: string;
-};
-
-type PasswordScryptCopy = {
-  kind: 'password';
-  kdf: 'scrypt';
-  n: number;
-  r: number;
-  p: number;
-  salt: string;
-  nonce: string;
-  wrapped: string;
+  copies: PasskeyPrfCopy[];
 };
 
 type PasskeyPrfCopy = {
@@ -211,8 +145,6 @@ type PasskeyPrfCopy = {
   wrapped: string;
   credential_id?: string;
 };
-
-type WrapCopy = PasswordArgon2idCopy | PasswordScryptCopy | PasskeyPrfCopy;
 
 export type WebAuthnPrfExtensionInput = {
   prf: {
@@ -288,32 +220,6 @@ function assertLength(bytes: Uint8Array, length: number, field: string): void {
 function wipeArrayBuffer(buffer: ArrayBuffer | undefined): void {
   if (buffer) {
     new Uint8Array(buffer).fill(0);
-  }
-}
-
-function normalizeArgon2idParams(params?: Partial<Argon2idParams>): Argon2idParams {
-  const normalized = { ...DEFAULT_ARGON2ID, ...params };
-  if (!Number.isInteger(normalized.iterations) || normalized.iterations < 1 || normalized.iterations > 10) {
-    throw new Error('argon2id iterations out of bounds');
-  }
-  if (!Number.isInteger(normalized.memorySize) || normalized.memorySize < 8 || normalized.memorySize > 256 * 1024) {
-    throw new Error('argon2id memorySize out of bounds');
-  }
-  if (!Number.isInteger(normalized.parallelism) || normalized.parallelism < 1 || normalized.parallelism > 8) {
-    throw new Error('argon2id parallelism out of bounds');
-  }
-  return normalized;
-}
-
-function validateScryptParams(n: number, r: number, p: number): void {
-  if (!Number.isInteger(n) || n < 2 || (n & (n - 1)) !== 0 || n > 2 ** 17) {
-    throw new Error('scrypt N out of bounds');
-  }
-  if (!Number.isInteger(r) || r < 1 || r > 16) {
-    throw new Error('scrypt r out of bounds');
-  }
-  if (!Number.isInteger(p) || p < 1 || p > 16) {
-    throw new Error('scrypt p out of bounds');
   }
 }
 
@@ -412,32 +318,6 @@ async function hkdfSha256(ikm: BytesLike, salt: BytesLike, info: BytesLike, leng
   }
 }
 
-async function kekPasswordArgon2id(password: string, salt: BytesLike, params?: Partial<Argon2idParams>): Promise<Uint8Array> {
-  const normalized = normalizeArgon2idParams(params);
-  return (await argon2id({
-    password: utf8(password),
-    salt: toUint8Array(salt),
-    iterations: normalized.iterations,
-    memorySize: normalized.memorySize,
-    parallelism: normalized.parallelism,
-    hashLength: KEY_BYTES,
-    outputType: 'binary',
-  })) as Uint8Array;
-}
-
-async function kekPasswordScrypt(password: string, salt: BytesLike, n: number, r: number, p: number): Promise<Uint8Array> {
-  validateScryptParams(n, r, p);
-  return (await scrypt({
-    password: utf8(password),
-    salt: toUint8Array(salt),
-    costFactor: n,
-    blockSize: r,
-    parallelism: p,
-    hashLength: KEY_BYTES,
-    outputType: 'binary',
-  })) as Uint8Array;
-}
-
 export async function derivePasskeyKek(prfOutput: BytesLike, prfSalt: BytesLike): Promise<Uint8Array> {
   const output = toUint8Array(prfOutput, 'passkey PRF output');
   try {
@@ -477,77 +357,6 @@ function parseWrapMeta(wrapMeta: string | WrapMeta): WrapMeta {
   return parsed as WrapMeta;
 }
 
-function normalizeWrapFactors(factors: VmkWrapFactor[] | string[]): VmkWrapFactor[] {
-  return factors.map((factor): VmkWrapFactor => {
-    if (typeof factor === 'string') {
-      return { kind: 'password', password: requireNonBlankPassword(factor) };
-    }
-    if (factor.kind === 'password') {
-      return { ...factor, password: requireNonBlankPassword(factor.password) };
-    }
-    return factor;
-  });
-}
-
-async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordArgon2idFactor): Promise<PasswordArgon2idCopy> {
-  const vmkBytes = toUint8Array(vmk, 'VMK');
-  const salt = randomBytes(16);
-  const nonce = randomBytes(NONCE_BYTES);
-  let kek: Uint8Array | undefined;
-  try {
-    assertLength(vmkBytes, KEY_BYTES, 'VMK');
-    const params = normalizeArgon2idParams(factor.argon2id);
-    kek = await kekPasswordArgon2id(factor.password, salt, params);
-    const wrapped = await aesgcmEncrypt(kek, nonce, vmkBytes);
-    return {
-      kind: 'password',
-      kdf: 'argon2id',
-      version: ARGON2_VERSION,
-      iterations: params.iterations,
-      memorySize: params.memorySize,
-      parallelism: params.parallelism,
-      salt: bytesToBase64(salt),
-      nonce: bytesToBase64(nonce),
-      wrapped: bytesToBase64(wrapped),
-    };
-  } finally {
-    kek?.fill(0);
-    vmkBytes.fill(0);
-  }
-}
-
-async function passwordScryptCopy(vmk: BytesLike, password: string): Promise<PasswordScryptCopy> {
-  const vmkBytes = toUint8Array(vmk, 'VMK');
-  const salt = randomBytes(16);
-  const nonce = randomBytes(NONCE_BYTES);
-  let kek: Uint8Array | undefined;
-  try {
-    assertLength(vmkBytes, KEY_BYTES, 'VMK');
-    kek = await kekPasswordScrypt(password, salt, DEFAULT_SCRYPT.n, DEFAULT_SCRYPT.r, DEFAULT_SCRYPT.p);
-    const wrapped = await aesgcmEncrypt(kek, nonce, vmkBytes);
-    return {
-      kind: 'password',
-      kdf: 'scrypt',
-      n: DEFAULT_SCRYPT.n,
-      r: DEFAULT_SCRYPT.r,
-      p: DEFAULT_SCRYPT.p,
-      salt: bytesToBase64(salt),
-      nonce: bytesToBase64(nonce),
-      wrapped: bytesToBase64(wrapped),
-    };
-  } finally {
-    kek?.fill(0);
-    vmkBytes.fill(0);
-  }
-}
-
-async function passwordCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise<PasswordArgon2idCopy | PasswordScryptCopy> {
-  const password = requireNonBlankPassword(factor.password);
-  return factor.kdf === 'argon2id'
-    ? passwordArgon2idCopy(vmk, { ...factor, password })
-    : passwordScryptCopy(vmk, password);
-}
-
 async function passkeyCopy(vmk: BytesLike, factor: PasskeyWrapFactor): Promise<PasskeyPrfCopy> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
   const nonce = randomBytes(NONCE_BYTES);
@@ -574,39 +383,21 @@ async function passkeyCopy(vmk: BytesLike, factor: PasskeyWrapFactor): Promise<P
   }
 }
 
-export async function buildWrapMeta(vmk: BytesLike, factors: VmkWrapFactor[] | string[]): Promise<string> {
+export async function buildWrapMeta(vmk: BytesLike, factors: PasskeyWrapFactor[]): Promise<string> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
   try {
     assertLength(vmkBytes, KEY_BYTES, 'VMK');
-    const normalized = normalizeWrapFactors(factors);
-    if (normalized.length === 0) {
+    if (factors.length === 0) {
       throw new Error('at least one protected unlock factor is required');
     }
-    const copies: WrapCopy[] = [];
-    for (const factor of normalized) {
-      copies.push(factor.kind === 'password' ? await passwordCopy(vmkBytes, factor) : await passkeyCopy(vmkBytes, factor));
+    const copies: PasskeyPrfCopy[] = [];
+    for (const factor of factors) {
+      copies.push(await passkeyCopy(vmkBytes, factor));
     }
     return JSON.stringify({ v: 1, copies } satisfies WrapMeta);
   } finally {
     vmkBytes.fill(0);
   }
-}
-
-export async function addPasswordCopy(
-  wrapMeta: string,
-  vmk: BytesLike,
-  password: string,
-  argon2idParams?: Partial<Argon2idParams>,
-): Promise<string> {
-  const meta = parseWrapMeta(wrapMeta);
-  meta.copies.push(
-    await passwordCopy(vmk, {
-      kind: 'password',
-      password,
-      ...(argon2idParams ? { kdf: 'argon2id', argon2id: argon2idParams } : {}),
-    }),
-  );
-  return JSON.stringify(meta);
 }
 
 export async function addPasskeyCopy(
@@ -619,25 +410,6 @@ export async function addPasskeyCopy(
   const meta = parseWrapMeta(wrapMeta);
   meta.copies.push(await passkeyCopy(vmk, { kind: 'passkey', prfOutput, prfSalt, credentialId }));
   return JSON.stringify(meta);
-}
-
-async function unwrapPasswordCopy(copy: PasswordArgon2idCopy | PasswordScryptCopy, password: string): Promise<Uint8Array> {
-  const salt = base64ToBytes(copy.salt);
-  const nonce = base64ToBytes(copy.nonce);
-  const wrapped = base64ToBytes(copy.wrapped);
-  const kek =
-    copy.kdf === 'argon2id'
-      ? await kekPasswordArgon2id(password, salt, {
-          iterations: copy.iterations,
-          memorySize: copy.memorySize,
-          parallelism: copy.parallelism,
-        })
-      : await kekPasswordScrypt(password, salt, copy.n, copy.r, copy.p);
-  try {
-    return await aesgcmDecrypt(kek, nonce, wrapped);
-  } finally {
-    kek.fill(0);
-  }
 }
 
 async function unwrapPasskeyCopy(copy: PasskeyPrfCopy, factor: PasskeyUnlockFactor): Promise<Uint8Array> {
@@ -653,23 +425,12 @@ async function unwrapPasskeyCopy(copy: PasskeyPrfCopy, factor: PasskeyUnlockFact
   }
 }
 
-export async function unwrapVmk(wrapMeta: string | WrapMeta, factor: VmkUnlockFactor | string): Promise<Uint8Array> {
+export async function unwrapVmk(wrapMeta: string | WrapMeta, factor: PasskeyUnlockFactor): Promise<Uint8Array> {
   const meta = parseWrapMeta(wrapMeta);
-  const normalized: VmkUnlockFactor = typeof factor === 'string' ? { kind: 'password', password: factor } : factor;
   for (const copy of meta.copies) {
     try {
-      if (normalized.kind === 'password' && copy.kind === 'password') {
-        const vmk = await unwrapPasswordCopy(copy, normalized.password);
-        try {
-          assertLength(vmk, KEY_BYTES, 'VMK');
-          return vmk;
-        } catch (error) {
-          vmk.fill(0);
-          throw error;
-        }
-      }
-      if (normalized.kind === 'passkey' && copy.kind === 'passkey') {
-        const vmk = await unwrapPasskeyCopy(copy, normalized);
+      if (copy.kind === 'passkey') {
+        const vmk = await unwrapPasskeyCopy(copy, factor);
         try {
           assertLength(vmk, KEY_BYTES, 'VMK');
           return vmk;
@@ -710,13 +471,6 @@ function protectedRecordAad(context: ProtectedRecordContext): Uint8Array {
 
 export function protectedRecordAadHex(context: ProtectedRecordContext): string {
   return bytesToHex(protectedRecordAad(context));
-}
-
-function requireNonBlankPassword(password: string): string {
-  if (typeof password !== 'string' || password.trim() === '') {
-    throw new Error('password must not be empty');
-  }
-  return password;
 }
 
 function requirePinnedPublicKey(publicKey: AvaultPublicKey): AvaultPublicKey & { fingerprint: string } {

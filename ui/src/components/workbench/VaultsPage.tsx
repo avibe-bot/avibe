@@ -678,7 +678,7 @@ export const VaultsPage: React.FC = () => {
   const protectedVault = useProtectedVault();
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
   const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
-  // Deleting a protected secret requires the user present at an unlocked vault (a passkey/password
+  // Deleting a protected secret requires the user present at an unlocked vault (a passkey
   // ceremony) — discover the current lock state when the delete dialog opens for one.
   useEffect(() => {
     if (deleteTarget?.protection !== 'protected') return;
