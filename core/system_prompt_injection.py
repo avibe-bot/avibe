@@ -151,8 +151,7 @@ Rules:
 - Refer to secrets only by secret name, tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
-- With `vibe vault fetch` and `vibe vault sign`, the agent does not receive the plaintext secret.
-- When protected `run` / `fetch` needs approval, Avibe only records the request; it does not rerun the command automatically. End the turn, let Avibe resume this session after the user's browser approval, then run the original `run` / `fetch` command again.
+- When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access. After the user approves, Avibe resumes this session; it does not replay the command for you, so run the same `run` / `fetch` command again.
 - When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, follow the callback instruction to read the completed request result and continue with the returned signature.
 
 Common commands:
