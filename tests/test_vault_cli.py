@@ -10,6 +10,7 @@ import io
 import json
 import shutil
 import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -40,6 +41,8 @@ def _ns(**kw):
         spec_json=None,
         wait=None,
         no_wait=False,
+        approval_wait=0,
+        no_approval_wait=False,
         json=False,
         out=None,
         file=None,
@@ -89,6 +92,24 @@ def _set_protected_grant(name: str, *, session_id: str | None = None, purpose: s
             delivery={"session_id": session_id, "mode": purpose} if session_id else {"mode": purpose},
         )
         return _grant_from_request(conn, req, session_id=session_id)
+
+
+def _approve_next_pending_access_request(*, session_id: str | None = None, purpose: str = "run") -> dict:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with cli._open_vault_engine().begin() as conn:
+            requests = []
+            for request in vault_service.list_requests(conn, status="pending"):
+                card = request.get("card") or {}
+                if request.get("request_type") == "access" and card.get("grant_options"):
+                    requests.append(request)
+            if requests:
+                request = requests[0]
+                grant = _grant_from_request(conn, request, session_id=session_id)
+                assert grant["purpose"] == purpose
+                return {"request": request, "grant": grant}
+        time.sleep(0.01)
+    raise AssertionError("pending access request was not created")
 
 
 def _set_protected_always_ask_grant(name: str, *, session_id: str | None = None, purpose: str = "run") -> dict:
@@ -973,6 +994,66 @@ def test_run_uses_session_bound_protected_grant(tmp_path, capfd, monkeypatch):
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["secrets"][0]["name"] == "PROTECTED_KEY"
     assert deliver.call_args.kwargs["grant_id"]
+
+
+def test_run_waits_for_protected_approval_then_delivers(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+    approved: dict = {}
+
+    def approve_request():
+        approved.update(_approve_next_pending_access_request(session_id="ses_cli", purpose="run"))
+
+    approver = threading.Thread(target=approve_request)
+    approver.start()
+    deliver = Mock(return_value={"exit_code": 0})
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(
+        _ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli", approval_wait=2)
+    )
+    approver.join(timeout=2)
+    captured = capfd.readouterr()
+
+    assert code == 0
+    assert not approver.is_alive()
+    assert "Waiting for Vault approval in the browser for vault run" in captured.err
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["grant_id"] == approved["grant"]["id"]
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(vault_requests.select().where(vault_requests.c.id == approved["request"]["id"])).mappings().one()
+    assert row["callback_status"] == "skipped"
+    assert json.loads(row["delivery"])["waiter"]["status"] == "completed"
+
+
+def test_run_approval_wait_timeout_keeps_callback_armed_for_later_resolution(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    code = cli.cmd_vault_run(
+        _ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli", approval_wait=0.01)
+    )
+    captured = capfd.readouterr()
+    payload = json.loads(captured.err[captured.err.index("{") :])
+
+    assert code == 1
+    assert payload["code"] == "approval_wait_timeout"
+    assert payload["details"]["callback_expected"] is True
+    request_id = payload["details"]["request_id"]
+    with cli._open_vault_engine().begin() as conn:
+        row = conn.execute(vault_requests.select().where(vault_requests.c.id == request_id)).mappings().one()
+        assert row["status"] == "pending"
+        assert row["callback_status"] is None
+        assert json.loads(row["delivery"])["waiter"]["status"] == "timed_out"
+        request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+        _grant_from_request(conn, request, session_id="ses_cli")
+        resolved = dict(conn.execute(vault_requests.select().where(vault_requests.c.id == request_id)).mappings().one())
+        assert resolved["callback_status"] == "pending"
+        assert vault_service.request_callback_ready(conn, resolved) is True
 
 
 def test_fetch_uses_session_bound_protected_grant(capfd, monkeypatch):
