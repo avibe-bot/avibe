@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
@@ -1486,24 +1487,24 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _load_or_create_vault_daemon_binding_key(conn) -> dict[str, str]:
+def _parse_vault_daemon_binding_key(raw: object) -> dict[str, str] | None:
+    if not isinstance(raw, str):
+        return None
+    with contextlib.suppress(Exception):
+        payload = json.loads(raw)
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("keyId"), str)
+            and isinstance(payload.get("privateKey"), str)
+            and isinstance(payload.get("publicKey"), str)
+        ):
+            return payload
+    return None
+
+
+def _new_vault_daemon_binding_key() -> dict[str, str]:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
-    from storage.models import state_meta
-
-    raw = conn.execute(
-        select(state_meta.c.value_json).where(state_meta.c.key == _VAULT_DAEMON_AGENT_BINDING_KEY)
-    ).scalar_one_or_none()
-    if isinstance(raw, str):
-        with contextlib.suppress(Exception):
-            payload = json.loads(raw)
-            if (
-                isinstance(payload, dict)
-                and isinstance(payload.get("keyId"), str)
-                and isinstance(payload.get("privateKey"), str)
-                and isinstance(payload.get("publicKey"), str)
-            ):
-                return payload
 
     private_key = ed25519.Ed25519PrivateKey.generate()
     private_raw = private_key.private_bytes(
@@ -1516,14 +1517,37 @@ def _load_or_create_vault_daemon_binding_key(conn) -> dict[str, str]:
         format=serialization.PublicFormat.Raw,
     )
     key_id = "vault-daemon-ed25519-v1"
-    payload = {"keyId": key_id, "privateKey": _b64(private_raw), "publicKey": _b64(public_raw)}
-    conn.execute(state_meta.delete().where(state_meta.c.key == _VAULT_DAEMON_AGENT_BINDING_KEY))
+    return {"keyId": key_id, "privateKey": _b64(private_raw), "publicKey": _b64(public_raw)}
+
+
+def _load_or_create_vault_daemon_binding_key(conn) -> dict[str, str]:
+    from storage.models import state_meta
+
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == _VAULT_DAEMON_AGENT_BINDING_KEY)
+    ).scalar_one_or_none()
+    existing = _parse_vault_daemon_binding_key(raw)
+    if existing is not None:
+        return existing
+
+    payload = _new_vault_daemon_binding_key()
+    stmt = sqlite_insert(state_meta).values(
+        key=_VAULT_DAEMON_AGENT_BINDING_KEY,
+        value_json=json.dumps(payload, sort_keys=True),
+        updated_at=_utc_now_iso(),
+    )
+    conn.execute(stmt.on_conflict_do_nothing(index_elements=[state_meta.c.key]))
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == _VAULT_DAEMON_AGENT_BINDING_KEY)
+    ).scalar_one_or_none()
+    existing = _parse_vault_daemon_binding_key(raw)
+    if existing is not None:
+        return existing
+
     conn.execute(
-        state_meta.insert().values(
-            key=_VAULT_DAEMON_AGENT_BINDING_KEY,
-            value_json=json.dumps(payload, sort_keys=True),
-            updated_at=_utc_now_iso(),
-        )
+        state_meta.update()
+        .where(state_meta.c.key == _VAULT_DAEMON_AGENT_BINDING_KEY)
+        .values(value_json=json.dumps(payload, sort_keys=True), updated_at=_utc_now_iso())
     )
     return payload
 
@@ -2211,11 +2235,17 @@ def request_vault_sign(payload: dict) -> dict:
                     code="unsupported_signer_kind",
                     status=409,
                 )
+            signing_context = _verifiable_signing_context_from_payload(
+                payload,
+                digest=digest,
+                required=meta.get("protection") == "protected",
+            )
             request = vault_service.create_sign_request(
                 conn,
                 name,
                 digest=digest,
                 scheme=scheme,
+                signing_context=signing_context,
                 requester=_vault_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
@@ -2739,6 +2769,40 @@ def _sign_digest_from_payload(value: object) -> str:
     return digest.lower()
 
 
+def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, required: bool = False) -> dict[str, Any] | None:
+    context = payload.get("signing_context")
+    if context is None:
+        context = payload.get("signingContext")
+    if context is None:
+        delivery = payload.get("delivery")
+        if isinstance(delivery, dict):
+            context = delivery.get("signing_context") if delivery.get("signing_context") is not None else delivery.get("signingContext")
+    if context is None:
+        if required:
+            raise VaultApiError("protected signing requires a verifiable signing_context", code="missing_signing_context", status=409)
+        return None
+    if not isinstance(context, dict):
+        raise VaultApiError("signing_context must be an object", code="invalid_request", status=409)
+    kind = context.get("kind")
+    if kind not in {"evm-transaction", "eip-712-typed-data", "avault-agent-operation"}:
+        raise VaultApiError("unsupported signing_context kind", code="invalid_request", status=409)
+    context_digest = context.get("digest")
+    if not isinstance(context_digest, str) or context_digest.lower() != digest:
+        raise VaultApiError("signing_context digest must match the sign request digest", code="invalid_request", status=409)
+    if kind == "evm-transaction":
+        if context.get("digestAlgorithm") != "keccak256" or not isinstance(context.get("chainId"), str):
+            raise VaultApiError("invalid evm signing_context", code="invalid_request", status=409)
+        if "unsignedTransaction" not in context:
+            raise VaultApiError("invalid evm signing_context", code="invalid_request", status=409)
+    elif kind == "eip-712-typed-data":
+        if context.get("digestAlgorithm") != "eip712" or "typedData" not in context:
+            raise VaultApiError("invalid EIP-712 signing_context", code="invalid_request", status=409)
+    else:
+        if context.get("digestAlgorithm") != "avault-operation-hash-v1" or not isinstance(context.get("canonicalPreimage"), str):
+            raise VaultApiError("invalid avault operation signing_context", code="invalid_request", status=409)
+    return dict(context)
+
+
 def _protected_sign_invalid(message: str) -> VaultApiError:
     return VaultApiError(message, code="invalid_request", status=409)
 
@@ -3068,11 +3132,13 @@ def vault_sign(payload: dict) -> dict:
             if meta.get("protection") == "protected":
                 signature = payload.get("signature")
                 if not isinstance(signature, dict):
+                    signing_context = _verifiable_signing_context_from_payload(payload, digest=digest, required=True)
                     request = vault_service.create_sign_request(
                         conn,
                         name,
                         digest=digest,
                         scheme=scheme,
+                        signing_context=signing_context,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                         delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
                     )
@@ -3087,7 +3153,14 @@ def vault_sign(payload: dict) -> dict:
                     request_id = str(payload.get("request_id") or "")
                     if not request_id:
                         raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
-                    vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                    sign_request = vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                    delivery = sign_request.get("delivery") if isinstance(sign_request.get("delivery"), dict) else {}
+                    if not isinstance(delivery.get("signing_context"), dict):
+                        raise VaultApiError(
+                            "protected signing request is missing a verifiable signing_context",
+                            code="missing_signing_context",
+                            status=409,
+                        )
                     signature = _normalized_protected_signature(signature)
                     # `meta` is the masked payload (derived addresses only, no raw key); source
                     # the pinned public key from storage for server-side verification.

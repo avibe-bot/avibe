@@ -625,9 +625,12 @@ equivocation, the server also controls its own response headers and could omit
 `worker-src 'none'` while serving the iframe, allowing a malicious same-origin
 Service Worker to persist. `worker-src 'none'` helps in the honest-serve case,
 but the parent cannot enforce the sandbox CSP for an equivocated navigation.
-This remains in the central-host equivocation residual bucket, bounded
-operationally by immutable versioned URLs, SRI inside the verified loader,
-reproducible builds, public hash transparency, fail-closed telemetry, and a
+The parent must at least navigate the iframe to the exact URL it fetched and
+hashed; verifying `/index.html` while loading `/index.html?...` reopens the
+equivocation gap as a separate byte request. This remains in the central-host
+equivocation residual bucket, bounded operationally by immutable versioned URLs,
+SRI inside the verified loader, reproducible builds, the sandbox `buildHash`
+ready/handshake gate, public hash transparency, fail-closed telemetry, and a
 future browser-supported iframe-integrity or signed-web-bundle mechanism if one
 ships.
 

@@ -6,9 +6,11 @@ REST create delegates sealing to avault and stores only the returned envelope.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
 import socket
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
@@ -63,6 +65,15 @@ def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> t
     }
     public_meta = {"signing_public_key": {"curve": "secp256k1", "public_key": public_key.hex()}}
     return public_meta, signature
+
+
+def _signing_context(digest: str) -> dict:
+    return {
+        "kind": "avault-agent-operation",
+        "canonicalPreimage": f"vault-sign-test:{digest}",
+        "digestAlgorithm": "avault-operation-hash-v1",
+        "digest": digest,
+    }
 
 
 def _assert_no_unlock_material(payload: object) -> None:
@@ -1080,6 +1091,26 @@ def test_vault_sandbox_root_metadata_persists_daemon_verification_key():
     assert second["root_metadata"]["daemon"]["verificationKeys"][0]["publicKey"] == key["publicKey"]
 
 
+def test_vault_sandbox_root_metadata_first_key_wins_under_concurrency(monkeypatch):
+    original = api._new_vault_daemon_binding_key
+    barrier = threading.Barrier(6)
+
+    def racing_key() -> dict[str, str]:
+        barrier.wait(timeout=5)
+        return original()
+
+    monkeypatch.setattr(api, "_new_vault_daemon_binding_key", racing_key)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(lambda _index: api.get_vault_sandbox_root_metadata(), range(6)))
+
+    keys = {
+        result["root_metadata"]["daemon"]["verificationKeys"][0]["publicKey"]
+        for result in results
+    }
+    assert len(keys) == 1
+
+
 def test_create_vault_agent_binding_signs_value_free_protected_grant(monkeypatch):
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -1943,6 +1974,7 @@ def test_agent_sign_request_accepts_protected_browser_signature(monkeypatch):
             "digest": digest,
             "scheme": "ecdsa-secp256k1-recoverable",
             "session_id": "ses_1",
+            "signing_context": _signing_context(digest),
         }
     )
 
@@ -1958,6 +1990,7 @@ def test_agent_sign_request_accepts_protected_browser_signature(monkeypatch):
 
     assert requested["ok"] is True
     assert requested["request"]["card"]["protection"] == "protected"
+    assert requested["request"]["delivery"]["signing_context"] == _signing_context(digest)
     assert completed["ok"] is True
     assert completed["signature"] == signature
     assert api.get_vault_request(requested["request"]["id"])["result"] == {"type": "signature", "signature": signature}
@@ -3223,11 +3256,24 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
             "public_meta": public_meta,
         }
     )
-    result = api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
+    digest = "00" * 32
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+    assert exc.value.code == "missing_signing_context"
+
+    result = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+        }
+    )
     assert result["ok"] is False
     assert result["code"] == "browser_signature_required"
     assert result["request"]["card"]["request_type"] == "sign"
     assert result["request"]["card"]["grant_options"] == []
+    assert result["request"]["delivery"]["signing_context"] == _signing_context(digest)
 
 
 def test_protected_sign_request_requires_pinned_signing_public_key(monkeypatch):
@@ -3245,7 +3291,14 @@ def test_protected_sign_request_requires_pinned_signing_public_key(monkeypatch):
     )
 
     with pytest.raises(api.VaultApiError) as exc:
-        api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
+        api.vault_sign(
+            {
+                "name": "ETH_KEY",
+                "digest": "00" * 32,
+                "scheme": "ecdsa-secp256k1-recoverable",
+                "signing_context": _signing_context("00" * 32),
+            }
+        )
 
     assert exc.value.code == "invalid_request"
     assert "per-use signable" in str(exc.value)
@@ -3295,7 +3348,14 @@ def test_protected_sign_completion_requires_matching_request(monkeypatch):
         api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable", "signature": {"signature": "sig"}})
     assert exc.value.code == "missing_request_id"
 
-    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+    pending = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+        }
+    )
     request_id = pending["request"]["id"]
     with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign(
@@ -3343,7 +3403,14 @@ def test_protected_sign_completion_rejects_malformed_browser_signature(monkeypat
         }
     )
     digest = "00" * 32
-    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+    pending = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+        }
+    )
 
     with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign(
@@ -3375,7 +3442,14 @@ def test_protected_sign_completion_rejects_signature_extra_fields(monkeypatch):
             "public_meta": public_meta,
         }
     )
-    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+    pending = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+        }
+    )
 
     with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign(
@@ -3415,7 +3489,14 @@ def test_protected_sign_completion_rejects_signature_that_does_not_verify(monkey
             "public_meta": public_meta,
         }
     )
-    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+    pending = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+        }
+    )
 
     with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign(
@@ -3455,7 +3536,14 @@ def test_protected_sign_completion_rejects_wrong_recovery_id(monkeypatch):
             "public_meta": public_meta,
         }
     )
-    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+    pending = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+        }
+    )
 
     with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign(
@@ -3500,7 +3588,14 @@ def test_protected_sign_completion_verifies_schnorr_browser_signature(monkeypatc
             },
         }
     )
-    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "schnorr-secp256k1-bip340"})
+    pending = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "schnorr-secp256k1-bip340",
+            "signing_context": _signing_context(digest),
+        }
+    )
 
     result = api.vault_sign(
         {

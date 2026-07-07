@@ -420,6 +420,96 @@ def test_webauthn_factor_registration_stores_public_key(vault):
     assert json.loads(row["transports"]) == ["internal"]
 
 
+def test_sandbox_cross_origin_webauthn_registration_and_assertion_accept_allowed_parent(vault):
+    credential = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")
+
+    with vault.begin() as conn:
+        options = vs.create_webauthn_registration_options(conn, rp_id=credential.rp_id, origin=credential.origin)
+        registration = credential.registration_payload(
+            challenge_id=options["challenge_id"],
+            challenge_b64=options["webauthn"]["challenge"],
+            cross_origin=True,
+            top_origin="http://localhost:5173",
+        )
+        factor = vs.register_webauthn_factor(conn, registration, rp_id=credential.rp_id, origin=credential.origin, establishment=True)[
+            "factor"
+        ]
+
+    with vault.connect() as conn:
+        factor_row = conn.execute(select(vault_auth_factors).where(vault_auth_factors.c.id == factor["id"])).mappings().one()
+    public_key = factor_row["public_key"]
+    challenge = b"sandbox-cross-origin-challenge"
+    challenge_b64 = vault_webauthn.b64encode(challenge)
+    allowed_assertion = credential.assertion_authz(
+        challenge_id="vop_cross_origin",
+        factor_id=factor["id"],
+        challenge_b64=challenge_b64,
+        sign_count=2,
+        cross_origin=True,
+        top_origin="https://team.avibe.bot",
+    )["assertion"]
+    assert (
+        vault_webauthn.verify_assertion(
+            allowed_assertion,
+            credential_id=credential.credential_id_b64,
+            public_key=public_key,
+            alg=vault_webauthn.ALG_ES256,
+            stored_sign_count=1,
+            expected_challenge_hash=vault_webauthn.challenge_hash(challenge),
+            expected_origin=credential.origin,
+            rp_id=credential.rp_id,
+        ).sign_count
+        == 2
+    )
+
+    safari_assertion = credential.assertion_authz(
+        challenge_id="vop_cross_origin",
+        factor_id=factor["id"],
+        challenge_b64=challenge_b64,
+        sign_count=3,
+        cross_origin=True,
+    )["assertion"]
+    assert (
+        vault_webauthn.verify_assertion(
+            safari_assertion,
+            credential_id=credential.credential_id_b64,
+            public_key=public_key,
+            alg=vault_webauthn.ALG_ES256,
+            stored_sign_count=2,
+            expected_challenge_hash=vault_webauthn.challenge_hash(challenge),
+            expected_origin=credential.origin,
+            rp_id=credential.rp_id,
+        ).sign_count
+        == 3
+    )
+
+
+def test_sandbox_cross_origin_webauthn_rejects_wrong_top_origin():
+    credential = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")
+    challenge = b"sandbox-cross-origin-challenge"
+    challenge_b64 = vault_webauthn.b64encode(challenge)
+
+    assertion = credential.assertion_authz(
+        challenge_id="vop_cross_origin",
+        factor_id="vaf_cross_origin",
+        challenge_b64=challenge_b64,
+        cross_origin=True,
+        top_origin="https://evil.example",
+    )["assertion"]
+
+    with pytest.raises(vault_webauthn.WebAuthnVerificationError, match="top origin"):
+        vault_webauthn.verify_assertion(
+            assertion,
+            credential_id=credential.credential_id_b64,
+            public_key=vault_webauthn.b64encode(credential.public_key_cose()),
+            alg=vault_webauthn.ALG_ES256,
+            stored_sign_count=0,
+            expected_challenge_hash=vault_webauthn.challenge_hash(challenge),
+            expected_origin=credential.origin,
+            rp_id=credential.rp_id,
+        )
+
+
 def test_delete_challenge_expiry_and_replay_are_rejected(vault):
     credential = WebAuthnTestCredential()
 

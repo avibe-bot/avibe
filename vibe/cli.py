@@ -4714,6 +4714,20 @@ def _vault_cli_delivery(args, **fields) -> dict:
     return delivery
 
 
+def _vault_cli_signing_context(args, *, digest: str, help_command: str) -> dict | None:
+    raw = getattr(args, "signing_context_json", None)
+    if raw is None:
+        return None
+    try:
+        context = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise TaskCliError("signing context must be valid JSON", code="invalid_signing_context", help_command=help_command) from exc
+    try:
+        return api._verifiable_signing_context_from_payload({"signing_context": context}, digest=digest, required=True)
+    except api.VaultApiError as exc:
+        raise TaskCliError(str(exc), code=exc.code, help_command=help_command) from exc
+
+
 def _publish_cli_vaults_updated(
     *,
     scope: str,
@@ -6633,6 +6647,7 @@ def cmd_vault_sign(args):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
         digest = api._sign_digest_from_payload(getattr(args, "digest", None))
         scheme = getattr(args, "scheme", None) or "ecdsa-secp256k1-recoverable"
+        signing_context = _vault_cli_signing_context(args, digest=digest, help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
@@ -6645,12 +6660,19 @@ def cmd_vault_sign(args):
                     help_command=help_command,
                 )
             needs_approval = vault_service.sign_needs_approval(conn, name)
+            if meta.get("protection") == "protected" and signing_context is None:
+                raise TaskCliError(
+                    "protected signing requires --signing-context-json",
+                    code="missing_signing_context",
+                    help_command=help_command,
+                )
             if needs_approval:
                 request = vault_service.create_sign_request(
                     conn,
                     name,
                     digest=digest,
                     scheme=scheme,
+                    signing_context=signing_context,
                     requester=_vault_cli_requester(args),
                     delivery=_vault_cli_delivery(args, mode="sign"),
                 )
@@ -6660,6 +6682,7 @@ def cmd_vault_sign(args):
                     "name": name,
                     "digest": digest,
                     "scheme": scheme,
+                    "signing_context": signing_context,
                     "requester": _vault_cli_requester(args),
                 }
             )
@@ -10889,6 +10912,10 @@ def build_parser():
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
     vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
+    vault_sign_parser.add_argument(
+        "--signing-context-json",
+        help="Verifiable signing context JSON required for protected keypairs",
+    )
     vault_sign_parser.add_argument(
         "--no-callback",
         action="store_true",

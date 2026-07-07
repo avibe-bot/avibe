@@ -24,10 +24,10 @@ export const VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS = Object.keys(VAULT_SANDBOX_P
   .sort();
 
 export const VAULT_SANDBOX_MANIFEST_PATH = '/build-manifest.json';
+export const VAULT_SANDBOX_IFRAME_RESOURCE_PATH = '/index.html';
 
-// The deployed sandbox currently serves the document at /index.html and pins the executable
-// assets by content hash. Keep the load URL cache-keyed by the pinned build metadata; the
-// fetch-and-hash gate below remains the authority and fails closed before the iframe is trusted.
-export const VAULT_SANDBOX_IFRAME_URL = `${VAULT_SANDBOX_ORIGIN}/index.html?version=${encodeURIComponent(
-  VAULT_SANDBOX_VERSION,
-)}&build=${encodeURIComponent(VAULT_SANDBOX_EXPECTED_BUILD_HASH)}`;
+// The iframe navigates to the exact document URL that the parent fetches and hashes.
+// Sandbox hosting should move this resource to an immutable /v/<version>/ path as soon as
+// the static host publishes one; until then the identical-URL gate closes the prior query
+// string equivocation gap while the pinned manifest remains the authority.
+export const VAULT_SANDBOX_IFRAME_URL = `${VAULT_SANDBOX_ORIGIN}${VAULT_SANDBOX_IFRAME_RESOURCE_PATH}`;

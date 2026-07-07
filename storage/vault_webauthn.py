@@ -32,6 +32,7 @@ SUPPORTED_ALGS = {ALG_ES256, ALG_RS256}
 _FLAG_UP = 0x01
 _FLAG_UV = 0x04
 _FLAG_AT = 0x40
+VAULT_SANDBOX_ORIGIN = "https://sandbox.avibe.bot"
 
 
 class WebAuthnVerificationError(ValueError):
@@ -182,6 +183,34 @@ def _cbor_decode_first(data: bytes) -> Any:
     return reader.decode()
 
 
+def _is_allowed_sandbox_top_origin(origin: str) -> bool:
+    parsed = urlsplit(str(origin or "").strip())
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return scheme in {"http", "https"}
+    return scheme == "https" and (host == "avibe.bot" or host.endswith(".avibe.bot"))
+
+
+def _validate_cross_origin_client_data(client_data: dict[str, Any], *, expected_origin: str) -> None:
+    cross_origin = client_data.get("crossOrigin")
+    if cross_origin in {None, False}:
+        return
+    if cross_origin is not True:
+        raise WebAuthnVerificationError("invalid WebAuthn crossOrigin flag")
+    if expected_origin != VAULT_SANDBOX_ORIGIN or client_data.get("origin") != VAULT_SANDBOX_ORIGIN:
+        raise WebAuthnVerificationError("cross-origin WebAuthn assertions are only accepted from the Vault sandbox")
+    top_origin = client_data.get("topOrigin")
+    # Safari may omit topOrigin for delegated WebAuthn; in that case the sandbox origin,
+    # frame policy, and sandbox-side parent allow-list remain the enforceable gates.
+    if top_origin is None:
+        return
+    if not isinstance(top_origin, str) or not _is_allowed_sandbox_top_origin(top_origin):
+        raise WebAuthnVerificationError("unexpected WebAuthn top origin")
+
+
 def _client_data(client_data_json_b64: str, *, expected_type: str, expected_challenge_hash: str, expected_origin: str) -> tuple[dict[str, Any], bytes]:
     client_data_json = b64decode(client_data_json_b64)
     try:
@@ -192,8 +221,7 @@ def _client_data(client_data_json_b64: str, *, expected_type: str, expected_chal
         raise WebAuthnVerificationError("unexpected WebAuthn client data type")
     if client_data.get("origin") != expected_origin:
         raise WebAuthnVerificationError("unexpected WebAuthn origin")
-    if client_data.get("crossOrigin") not in {None, False}:
-        raise WebAuthnVerificationError("cross-origin WebAuthn assertions are not accepted")
+    _validate_cross_origin_client_data(client_data, expected_origin=expected_origin)
     challenge = b64decode(str(client_data.get("challenge") or ""))
     if challenge_hash(challenge) != expected_challenge_hash:
         raise WebAuthnVerificationError("WebAuthn challenge mismatch")

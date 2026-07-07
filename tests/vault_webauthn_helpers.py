@@ -76,16 +76,23 @@ def _cbor(value) -> bytes:
     raise TypeError(f"unsupported CBOR test value: {type(value).__name__}")
 
 
-def _client_data(*, typ: str, challenge_b64: str, origin: str) -> bytes:
-    return json.dumps(
-        {
-            "type": typ,
-            "challenge": _b64url(_b64decode(challenge_b64)),
-            "origin": origin,
-            "crossOrigin": False,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+def _client_data(
+    *,
+    typ: str,
+    challenge_b64: str,
+    origin: str,
+    cross_origin: bool = False,
+    top_origin: str | None = None,
+) -> bytes:
+    payload = {
+        "type": typ,
+        "challenge": _b64url(_b64decode(challenge_b64)),
+        "origin": origin,
+        "crossOrigin": cross_origin,
+    }
+    if top_origin is not None:
+        payload["topOrigin"] = top_origin
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
 @dataclass
@@ -124,11 +131,15 @@ class WebAuthnTestCredential:
         challenge_b64: str,
         sign_count: int = 1,
         public_key_cose: bytes | None = None,
+        cross_origin: bool = False,
+        top_origin: str | None = None,
     ) -> dict:
         client_data = _client_data(
             typ=vault_webauthn.WEBAUTHN_CREATE_TYPE,
             challenge_b64=challenge_b64,
             origin=self.origin,
+            cross_origin=cross_origin,
+            top_origin=top_origin,
         )
         flags = 0x01 | 0x04 | 0x40
         auth_data = (
@@ -162,11 +173,15 @@ class WebAuthnTestCredential:
         factor_id: str,
         challenge_b64: str,
         sign_count: int = 2,
+        cross_origin: bool = False,
+        top_origin: str | None = None,
     ) -> dict:
         client_data = _client_data(
             typ=vault_webauthn.WEBAUTHN_GET_TYPE,
             challenge_b64=challenge_b64,
             origin=self.origin,
+            cross_origin=cross_origin,
+            top_origin=top_origin,
         )
         auth_data = (
             hashlib.sha256(self.rp_id.encode("utf-8")).digest()

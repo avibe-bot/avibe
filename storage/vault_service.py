@@ -2968,6 +2968,7 @@ def create_sign_request(
     *,
     digest: str,
     scheme: str,
+    signing_context: dict[str, Any] | None = None,
     requester: Any = None,
     delivery: dict[str, Any] | None = None,
     message_id: str | None = None,
@@ -2997,6 +2998,8 @@ def create_sign_request(
         grantable=False,
     )
     delivery_payload.update({"digest": digest, "scheme": scheme, "card": card})
+    if signing_context is not None:
+        delivery_payload["signing_context"] = signing_context
     conn.execute(
         vault_requests.insert().values(
             id=request_id,

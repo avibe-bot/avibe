@@ -9,6 +9,7 @@ import type { BlindBox, ProtectedRecordEnvelope, SignatureResult, SignatureSchem
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
   VAULT_SANDBOX_IFRAME_URL,
+  VAULT_SANDBOX_IFRAME_RESOURCE_PATH,
   VAULT_SANDBOX_MANIFEST_PATH,
   VAULT_SANDBOX_ORIGIN,
   VAULT_SANDBOX_PINNED_MANIFEST,
@@ -167,6 +168,9 @@ export async function verifyVaultSandboxIntegrity(): Promise<void> {
     const liveManifest = await manifestResponse.json();
     if (!sameManifestShape(liveManifest)) {
       failIntegrity('Sandbox manifest does not match the pinned build manifest');
+    }
+    if (!VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.includes(VAULT_SANDBOX_IFRAME_RESOURCE_PATH)) {
+      failIntegrity('Sandbox iframe URL is not pinned in the build manifest');
     }
 
     await Promise.all(

@@ -64,6 +64,17 @@ PROTECTED_SIGNING_PUBLIC_META = {
 }
 
 
+def _signing_context_json(digest: str) -> str:
+    return json.dumps(
+        {
+            "kind": "avault-agent-operation",
+            "canonicalPreimage": f"vault-sign-test:{digest}",
+            "digestAlgorithm": "avault-operation-hash-v1",
+            "digest": digest,
+        }
+    )
+
+
 def _create_standard_secret(name: str, *, sealed: Sealed | None = None, **kwargs):
     with cli._open_vault_engine().begin() as conn:
         return vault_service.create_secret(conn, name=name, sealed=sealed or _sealed(), **kwargs)
@@ -589,7 +600,7 @@ def test_sign_request_and_await_cli_reads_approved_signature_for_always_ask_stan
     assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
 
 
-def test_sign_request_cli_accepts_protected_keypair(capfd):
+def test_sign_request_cli_requires_context_for_protected_keypair(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
@@ -601,13 +612,28 @@ def test_sign_request_cli_accepts_protected_keypair(capfd):
             public_meta=PROTECTED_SIGNING_PUBLIC_META,
         )
 
-    assert cli.cmd_vault_sign(_ns(name="PROTECTED_ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0
+    assert cli.cmd_vault_sign(_ns(name="PROTECTED_ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 1
+    error = json.loads(capfd.readouterr().err)
+    assert error["code"] == "missing_signing_context"
+
+    assert (
+        cli.cmd_vault_sign(
+            _ns(
+                name="PROTECTED_ETH_KEY",
+                digest="00" * 32,
+                scheme="ecdsa-secp256k1-recoverable",
+                signing_context_json=_signing_context_json("00" * 32),
+            )
+        )
+        == 0
+    )
     payload = json.loads(capfd.readouterr().out)
 
     assert payload["kind"] == "vault_sign_request"
     assert payload["request"]["secret_name"] == "PROTECTED_ETH_KEY"
     assert payload["request"]["card"]["protection"] == "protected"
     assert payload["request"]["card"]["grant_options"] == []
+    assert payload["request"]["delivery"]["signing_context"] == json.loads(_signing_context_json("00" * 32))
 
 
 def test_vault_await_wait_treats_failed_request_as_terminal(capfd):
