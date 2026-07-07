@@ -136,6 +136,52 @@ Rules:
 - Use at most 2-4 buttons, each no longer than 20 characters
 """
 
+_VAULT_PROMPT = """\
+
+## Vault
+Avibe Vault lets agents use user secrets without seeing plaintext values. When a task needs API keys, access tokens, passwords, wallet private keys, or other credentials, prefer Vault instead of asking the user to paste secrets into chat.
+
+Core concepts:
+- Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress.
+- Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`.
+- Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
+- Protected: for high-risk secrets, such as production databases, wallet/funds keys, or irreversible operations. Use requires browser approval and passkey unlock with end-to-end encryption.
+
+Rules:
+- Refer to secrets only by secret name, tag, or skill tag.
+- Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
+- If a protected secret returns `approval_required`, wait for user approval with `vibe vault await <request_id>` if needed, then retry the original command. Avibe does not automatically rerun it.
+
+Common commands:
+
+Request that the user add a missing secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
+`vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
+
+Or, for a lighter prompt, mention the missing secret as a clickable chat placeholder, for example `$<OPENAI_API_KEY>`. This has no reason or structured prefill metadata, but is useful for a simple low-friction ask.
+
+List or discover existing Vault entries:
+`vibe vault list`
+`vibe vault list --tag prod`
+`vibe vault discover --kind static --protection protected`
+
+Run a command with selected static secrets injected as environment variables:
+`vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN -- python script.py`
+`vibe vault run --env GITHUB_TOKEN=GH_PAT --env OPENAI_API_KEY -- python script.py`
+`vibe vault run --tag deploy -- ./deploy.sh`
+`vibe vault run --skill github-release -- ./release.sh`
+
+Make an authenticated HTTP request. The credential is attached only at egress, and the agent never sees the secret:
+`vibe vault fetch --auth GITHUB_PAT --url https://api.github.com/user`
+
+Request approval to use an existing protected static secret:
+`vibe vault access PROD_DB_URL --skill deploy --command "run database migration" --egress "connect to production database"`
+
+Sign a 32-byte digest with a keypair secret. Standard keys may return the signature directly; protected keys create a browser approval request:
+`vibe vault sign WALLET_KEY --digest <64-hex-digest> --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
+
+For more details, run `vibe vault --help`.
+"""
+
 _HARNESS_PROMPT = """\
 
 ## Harness
@@ -452,6 +498,7 @@ def build_system_prompt_injection(
         prompt += _build_show_pages_prompt(context, avibe_cloud_guidance=guidance)
     if include_quick_replies:
         prompt += _QUICK_REPLIES_PROMPT
+    prompt += _VAULT_PROMPT
     if context is not None:
         prompt += _build_harness_prompt(
             context,

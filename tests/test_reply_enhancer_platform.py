@@ -118,6 +118,26 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("file:///Users/test/.codex/generated_images/thread-id/image-file.png", prompt)
         self.assertIn("Never emit variables, placeholder paths, or sandbox paths like `/mnt/data/...`", prompt)
 
+    def test_prompt_includes_vault_guidance(self):
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            prompt = build_system_prompt_injection(include_quick_replies=False)
+
+        self.assertIn("## Vault", prompt)
+        self.assertIn("Avibe Vault lets agents use user secrets without seeing plaintext values.", prompt)
+        self.assertIn("Static secret: a regular secret value", prompt)
+        self.assertIn("Keypair secret: a signing key", prompt)
+        self.assertIn("vibe vault await <request_id>", prompt)
+        self.assertIn("Avibe does not automatically rerun it.", prompt)
+        self.assertIn("vibe vault request OPENAI_API_KEY", prompt)
+        self.assertIn("$<OPENAI_API_KEY>", prompt)
+        self.assertIn("vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN", prompt)
+        self.assertIn("vibe vault run --tag deploy", prompt)
+        self.assertIn("vibe vault fetch --auth GITHUB_PAT", prompt)
+        self.assertIn("vibe vault access PROD_DB_URL", prompt)
+        self.assertIn("vibe vault sign WALLET_KEY", prompt)
+        self.assertNotIn("vibe vault sign WALLET_KEY --skill", prompt)
+        self.assertNotIn("vibe vault sign WALLET_KEY --tag", prompt)
+
     def test_prompt_can_exclude_show_pages(self):
         context = MessageContext(
             user_id="U1",
