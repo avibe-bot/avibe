@@ -139,9 +139,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Request that the user add a missing static secret.", prompt)
         self.assertIn("ask the user to create a keypair secret in the Vault UI", prompt)
         self.assertIn("do not request or store private-key material as a static secret", prompt)
-        self.assertIn("$<OPENAI_API_KEY>", prompt)
-        self.assertIn("On Web chat only", prompt)
-        self.assertIn("for IM/cross-platform asks, use `vibe vault request`", prompt)
+        self.assertNotIn("$<OPENAI_API_KEY>", prompt)
+        self.assertNotIn("clickable placeholder", prompt)
         self.assertIn("vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN", prompt)
         self.assertIn("vibe vault run --tag deploy", prompt)
         self.assertIn("vibe vault fetch --auth GITHUB_PAT", prompt)
@@ -152,6 +151,29 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vibe vault await <request_id>", prompt)
         self.assertNotIn("vibe vault sign WALLET_KEY --skill", prompt)
         self.assertNotIn("vibe vault sign WALLET_KEY --tag", prompt)
+
+    def test_prompt_includes_vault_web_placeholder_only_for_web_chat(self):
+        web_context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+        slack_context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            web_prompt = build_system_prompt_injection(include_quick_replies=False, context=web_context)
+            slack_prompt = build_system_prompt_injection(include_quick_replies=False, context=slack_context)
+
+        self.assertIn("$<OPENAI_API_KEY>", web_prompt)
+        self.assertIn("clickable placeholder in your reply", web_prompt)
+        self.assertNotIn("$<OPENAI_API_KEY>", slack_prompt)
+        self.assertNotIn("clickable placeholder in your reply", slack_prompt)
 
     def test_prompt_can_exclude_show_pages(self):
         context = MessageContext(

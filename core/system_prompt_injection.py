@@ -162,7 +162,7 @@ Request that the user add a missing static secret. `spec-json` may contain only 
 
 For a missing keypair/signing key, ask the user to create a keypair secret in the Vault UI; do not request or store private-key material as a static secret.
 
-On Web chat only, a lighter manual prompt can mention the missing secret as a clickable placeholder, for example `$<OPENAI_API_KEY>`. This has no reason, structured prefill metadata, or cross-platform callback; for IM/cross-platform asks, use `vibe vault request`.
+$web_chat_placeholder
 
 List or discover existing Vault entries:
 `vibe vault list`
@@ -187,6 +187,10 @@ Sign a 32-byte digest with a keypair secret. Standard keys may return the signat
 `vibe vault sign WALLET_KEY --digest <64-hex-digest> --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
 
 For more details, run `vibe vault --help`.
+"""
+
+_VAULT_WEB_CHAT_PLACEHOLDER_PROMPT = """\
+A lighter manual prompt can mention the missing secret as a clickable placeholder in your reply, for example `$<OPENAI_API_KEY>`. The user can click it and fill the secret from Web chat. This has no reason or structured prefill metadata; use `vibe vault request` when those are needed.
 """
 
 _HARNESS_PROMPT = """\
@@ -454,6 +458,16 @@ def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: s
     )
 
 
+def _build_vault_prompt(
+    context: Optional[MessageContext],
+    *,
+    fallback_platform: Optional[str] = None,
+) -> str:
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="")
+    web_chat_placeholder = f"\n{_VAULT_WEB_CHAT_PLACEHOLDER_PROMPT}" if _is_web_platform(platform) else ""
+    return Template(_VAULT_PROMPT).substitute(web_chat_placeholder=web_chat_placeholder)
+
+
 def _build_session_end_prompt(
     context: MessageContext,
     *,
@@ -505,7 +519,7 @@ def build_system_prompt_injection(
         prompt += _build_show_pages_prompt(context, avibe_cloud_guidance=guidance)
     if include_quick_replies:
         prompt += _QUICK_REPLIES_PROMPT
-    prompt += _VAULT_PROMPT
+    prompt += _build_vault_prompt(context, fallback_platform=fallback_platform)
     if context is not None:
         prompt += _build_harness_prompt(
             context,
