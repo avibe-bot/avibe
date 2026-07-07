@@ -65,6 +65,19 @@ let vaultLockExpiresAt: number | null = null;
 let vaultAutoLockTimer: ReturnType<typeof setTimeout> | null = null;
 const vaultLockListeners = new Set<() => void>();
 
+/**
+ * Cross-tab lock: a manual "Lock now" broadcasts here so every open tab for this origin wipes its
+ * own cached VMK, not just the tab that clicked. Auto-lock stays per-tab (each tab's idle timer is
+ * independent, so an idle tab locking shouldn't wipe a tab you're actively using).
+ */
+const vaultLockChannel: BroadcastChannel | null =
+  typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('avibe-vault-lock') : null;
+if (vaultLockChannel) {
+  vaultLockChannel.onmessage = (event: MessageEvent) => {
+    if (event.data === 'lock') lockVault(false);
+  };
+}
+
 function notifyVaultLockChange(): void {
   for (const listener of [...vaultLockListeners]) listener();
 }
@@ -82,7 +95,26 @@ export function vaultUnlockExpiresAt(): number | null {
   return sessionVault.vmk ? vaultLockExpiresAt : null;
 }
 
+/** True once the auto-lock wall-clock deadline has passed (independent of the setTimeout). */
+function autoLockExpired(): boolean {
+  return vaultLockExpiresAt != null && Date.now() >= vaultLockExpiresAt;
+}
+
 export function vaultUnlocked(): boolean {
+  return sessionVault.vmk != null && !autoLockExpired();
+}
+
+/**
+ * Enforce the auto-lock deadline synchronously. Browser timers fire late when a tab is
+ * backgrounded/suspended or the machine sleeps, so `setTimeout(lockVault)` can lag well past the
+ * deadline; call this before trusting or using the VMK to lock the moment the wall clock is past
+ * due. Safe in event/effect contexts (it notifies). Returns whether the vault is still unlocked.
+ */
+function enforceAutoLock(): boolean {
+  if (sessionVault.vmk && autoLockExpired()) {
+    lockVault();
+    return false;
+  }
   return sessionVault.vmk != null;
 }
 
@@ -113,7 +145,7 @@ function clearVmk(): void {
 }
 
 /** Lock the vault now: zero the VMK, drop an uncommitted fresh-setup VMK, notify subscribers. */
-function lockVault(): void {
+function lockVault(broadcast = false): void {
   const wasFreshSetup = sessionVault.freshSetup;
   clearVmk();
   if (wasFreshSetup) {
@@ -123,6 +155,8 @@ function lockVault(): void {
     sessionVault.freshSetup = false;
   }
   notifyVaultLockChange();
+  // A manual "Lock now" wipes every open tab for this origin, not just this one.
+  if (broadcast) vaultLockChannel?.postMessage('lock');
 }
 
 /** (Re)start the auto-lock countdown; call on unlock and on every VMK use. Notifies subscribers. */
@@ -355,6 +389,7 @@ export function useProtectedVault() {
    */
   const sealValue = useCallback(
     async (name: string, value: Uint8Array | string): Promise<{ envelope: ProtectedRecordEnvelope; establishingVmk: boolean }> => {
+      if (!enforceAutoLock()) throw new Error('vault-locked');
       const { vmk, wrapMeta, freshSetup } = sessionVault;
       if (!vmk || !wrapMeta) throw new Error('vault-locked');
       armVaultAutoLock();
@@ -381,6 +416,7 @@ export function useProtectedVault() {
    */
   const signProtectedRequest = useCallback(
     async (material: ProtectedUnlockMaterial, digest: string, scheme: SignatureScheme): Promise<SignatureResult> => {
+      if (!enforceAutoLock()) throw new Error('vault-locked');
       const { vmk } = sessionVault;
       if (!vmk) throw new Error('vault-locked');
       armVaultAutoLock();
@@ -402,6 +438,7 @@ export function useProtectedVault() {
       publicKey: AvaultPublicKey,
       context: ProtectedDekDeliveryBlindBoxContext,
     ): Promise<BlindBox> => {
+      if (!enforceAutoLock()) throw new Error('vault-locked');
       const { vmk } = sessionVault;
       if (!vmk) throw new Error('vault-locked');
       armVaultAutoLock();
@@ -412,7 +449,7 @@ export function useProtectedVault() {
   );
 
   const lock = useCallback(() => {
-    lockVault();
+    lockVault(true);
     setStatus(vaultStatusNow());
   }, []);
 
@@ -480,11 +517,17 @@ export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNo
   useEffect(() => {
     if (!unlocked) return;
     setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    // Tick the countdown, and enforce the deadline by wall-clock so a delayed timer (e.g. the tab
+    // was suspended) locks promptly on resume instead of lingering unlocked.
+    const id = setInterval(() => {
+      enforceAutoLock();
+      setNow(Date.now());
+    }, 1000);
     return () => clearInterval(id);
   }, [unlocked]);
 
   const expiresAt = vaultUnlockExpiresAt();
   const remainingMs = expiresAt ? Math.max(0, expiresAt - now) : 0;
-  return { unlocked, remainingMs, lockNow: lockVault };
+  // "Lock now" broadcasts so every open tab for this origin wipes its VMK, not just this one.
+  return { unlocked, remainingMs, lockNow: () => lockVault(true) };
 }
