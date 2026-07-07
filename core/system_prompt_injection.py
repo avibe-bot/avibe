@@ -150,8 +150,8 @@ Core concepts:
 Rules:
 - Refer to secrets only by secret name, tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
-- For protected `run` / `fetch`, an `approval_required` response does not automatically rerun the command. If blocking is appropriate, use `vibe vault await <request_id> --wait 300`; after approval, retry the original `run` / `fetch`. If a callback is armed, end the turn and continue when Avibe resumes you.
-- For protected `sign`, do not retry the signing command after approval. Use `vibe vault await <request_id> --wait 300` to receive the approved signature.
+- For protected `run` / `fetch`, an `approval_required` response does not automatically rerun the command. Default to ending the turn and letting Avibe resume you after the user's browser approval; then retry the original `run` / `fetch`.
+- For protected `sign`, do not retry the signing command after approval. The approved signature is returned by the approval result or callback.
 
 Common commands:
 
