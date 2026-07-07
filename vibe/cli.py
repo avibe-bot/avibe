@@ -65,7 +65,7 @@ from vibe.upgrade import (
 from storage.db import create_sqlite_engine
 from storage.background import compute_next_run_at, normalize_run_status
 from storage.models import scope_settings, scopes
-from storage.pagination import DEFAULT_PAGE_LIMIT, PageRequest, make_page_request, pagination_payload
+from storage.pagination import DEFAULT_PAGE_LIMIT, PageRequest, make_page_request, page_sequence, pagination_payload
 from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
 from storage.settings_service import make_scope_id
 
@@ -4627,7 +4627,7 @@ def cmd_session_update(args):
 
 
 # ----- vault: secret management (design: docs/plans/vaults.md) -----
-# The agent-facing CLI is value-free: it can discover, request, approve/wait, and
+# The agent-facing CLI is value-free: it can find, request, approve/wait, and
 # deliver existing vault material, but it never accepts plaintext secrets for create.
 
 
@@ -4904,47 +4904,206 @@ def _always_ask_names(metas: dict[str, dict], names: list[str]) -> list[str]:
     return selected
 
 
+def _vault_query_arg(args, *, help_command: str) -> str | None:
+    query = (getattr(args, "query", None) or "").strip()
+    query_flag = (getattr(args, "query_filter", None) or "").strip()
+    if query and query_flag:
+        raise TaskCliError("use positional query or --q, not both", code="invalid_query", help_command=help_command)
+    return query or query_flag or None
+
+
+def _vault_tag_filters(args) -> list[str]:
+    return _split_vault_metadata_values(getattr(args, "tag", None))
+
+
+def _vault_raw_tag_args(args) -> list[str]:
+    raw = getattr(args, "tag", None)
+    if isinstance(raw, str):
+        return [raw]
+    return [str(item) for item in raw or []]
+
+
+def _vault_page_payload(
+    *,
+    items: list[dict],
+    args,
+    help_command: str,
+    command: list[str],
+) -> tuple[list[dict], dict, str | None]:
+    page_request = _page_request_from_args(args, help_command=help_command)
+    result = page_sequence(items, page_request)
+    page_payload = pagination_payload(
+        result,
+        next_command=_next_command(command, result, include_all=bool(getattr(args, "all", False))),
+    )
+    return result.items, page_payload, _pagination_message(page_payload)
+
+
+def _vault_lookup_next_steps(*, has_more: bool, has_filters: bool) -> list[str]:
+    steps: list[str] = []
+    if has_more:
+        steps.append("Use pagination.next_command to fetch the next page.")
+    if not has_filters:
+        steps.append("Use `vibe vault find --q <keyword>` or filter by --tag/--kind/--protection to narrow results.")
+    steps.append("Use `vibe vault tags` to inspect available tags.")
+    return steps
+
+
+def _vault_capability_payload(secret: dict) -> dict:
+    return {
+        "name": secret["name"],
+        "kind": secret.get("kind"),
+        "protection": secret.get("protection"),
+        "tags": secret.get("tags") or [],
+        "description": secret.get("description"),
+        "policy": secret.get("policy") or {},
+        "access_grantable": bool(secret.get("access_grantable")),
+        "per_use_sign": bool(secret.get("per_use_sign")),
+    }
+
+
 def cmd_vault_list(args):
     from storage import vault_service
 
+    help_command = "vibe vault list --help"
     try:
         engine = _open_vault_engine()
+        tags = _vault_tag_filters(args)
+        query = _vault_query_arg(args, help_command=help_command)
         with engine.connect() as conn:
-            secrets = vault_service.list_secrets(conn, tag=getattr(args, "tag", None))
-        _print_cli_payload("vault_secrets", secrets=secrets)
+            secrets = vault_service.list_secrets(
+                conn,
+                tags=tags,
+                query=query,
+                kind=getattr(args, "kind", None),
+                protection=getattr(args, "protection", None),
+            )
+        command = ["vibe", "vault", "list"]
+        for tag in _vault_raw_tag_args(args):
+            _add_optional_arg(command, "--tag", tag)
+        _add_optional_arg(command, "--q", query)
+        _add_optional_arg(command, "--kind", getattr(args, "kind", None))
+        _add_optional_arg(command, "--protection", getattr(args, "protection", None))
+        page_items, page_payload, message = _vault_page_payload(
+            items=secrets,
+            args=args,
+            help_command=help_command,
+            command=command,
+        )
+        payload = {
+            "secrets": page_items,
+            "pagination": page_payload,
+            "next_steps": _vault_lookup_next_steps(
+                has_more=bool(page_payload.get("has_more")),
+                has_filters=bool(tags or query or getattr(args, "kind", None) or getattr(args, "protection", None)),
+            ),
+        }
+        if message:
+            payload["message"] = f"{message} To narrow results instead, use `vibe vault find --q <keyword>`."
+        elif not page_items:
+            payload["message"] = "No Vault secrets matched. Try `vibe vault find --q <keyword>` or ask the user to add one with `vibe vault request NAME --reason ...`."
+        _print_cli_payload("vault_secrets", **payload)
         return 0
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
     except Exception as exc:
-        _print_task_error(exc, help_command="vibe vault list --help")
+        _print_task_error(exc, help_command=help_command)
         return 1
 
 
-def cmd_vault_discover(args):
+def cmd_vault_find(args):
     from storage import vault_service
 
+    help_command = "vibe vault find --help"
     try:
         engine = _open_vault_engine()
+        tags = _vault_tag_filters(args)
+        query = _vault_query_arg(args, help_command=help_command)
         with engine.connect() as conn:
-            secrets = vault_service.list_secrets(conn, tag=getattr(args, "tag", None))
-        kind = (getattr(args, "kind", None) or "").strip()
-        if kind:
-            secrets = [secret for secret in secrets if secret.get("kind") == kind]
-        protection = (getattr(args, "protection", None) or "").strip()
-        if protection:
-            secrets = [secret for secret in secrets if secret.get("protection") == protection]
-        capabilities = [
-            {
-                "name": secret["name"],
-                "kind": secret.get("kind"),
-                "protection": secret.get("protection"),
-                "access_grantable": bool(secret.get("access_grantable")),
-                "per_use_sign": bool(secret.get("per_use_sign")),
-            }
-            for secret in secrets
-        ]
-        _print_cli_payload("vault_discovery", secrets=capabilities)
+            secrets = vault_service.list_secrets(
+                conn,
+                tags=tags,
+                query=query,
+                kind=getattr(args, "kind", None),
+                protection=getattr(args, "protection", None),
+            )
+        command = ["vibe", "vault", "find"]
+        if getattr(args, "query", None):
+            command.append(getattr(args, "query"))
+        _add_optional_arg(command, "--q", getattr(args, "query_filter", None))
+        for tag in _vault_raw_tag_args(args):
+            _add_optional_arg(command, "--tag", tag)
+        _add_optional_arg(command, "--kind", getattr(args, "kind", None))
+        _add_optional_arg(command, "--protection", getattr(args, "protection", None))
+        capabilities = [_vault_capability_payload(secret) for secret in secrets]
+        page_items, page_payload, message = _vault_page_payload(
+            items=capabilities,
+            args=args,
+            help_command=help_command,
+            command=command,
+        )
+        payload = {
+            "secrets": page_items,
+            "pagination": page_payload,
+            "next_steps": _vault_lookup_next_steps(
+                has_more=bool(page_payload.get("has_more")),
+                has_filters=bool(tags or query or getattr(args, "kind", None) or getattr(args, "protection", None)),
+            ),
+        }
+        if message:
+            payload["message"] = message
+        elif not page_items:
+            payload["message"] = "No Vault capabilities matched. Try a broader keyword, inspect `vibe vault tags`, or request a missing static secret with `vibe vault request NAME --reason ...`."
+        _print_cli_payload("vault_find", **payload)
         return 0
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
     except Exception as exc:
-        _print_task_error(exc, help_command="vibe vault discover --help")
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_tags(args):
+    from storage import vault_service
+
+    help_command = "vibe vault tags --help"
+    try:
+        engine = _open_vault_engine()
+        query = _vault_query_arg(args, help_command=help_command)
+        with engine.connect() as conn:
+            tags = vault_service.list_secret_tags(conn, query=query, tag_type=getattr(args, "type", None))
+        command = ["vibe", "vault", "tags"]
+        if getattr(args, "query", None):
+            command.append(getattr(args, "query"))
+        _add_optional_arg(command, "--q", getattr(args, "query_filter", None))
+        _add_optional_arg(command, "--type", getattr(args, "type", None))
+        page_items, page_payload, message = _vault_page_payload(
+            items=tags,
+            args=args,
+            help_command=help_command,
+            command=command,
+        )
+        payload = {
+            "tags": page_items,
+            "pagination": page_payload,
+            "next_steps": [
+                "Use `vibe vault find --tag <tag>` to inspect secrets under a tag.",
+                "Use `vibe vault edit NAME --tag <tag>` or `--skill <skill>` to update secret tags.",
+            ],
+        }
+        if message:
+            payload["message"] = message
+        elif not page_items:
+            payload["message"] = "No Vault tags matched. Add tags with `vibe vault edit NAME --tag <tag>` or request a new secret with tags in --spec-json."
+        _print_cli_payload("vault_tags", **payload)
+        return 0
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
         return 1
 
 
@@ -4980,9 +5139,10 @@ def cmd_vault_rm(args):
         return 1
 
 
-def _split_vault_metadata_values(values: list[str] | None) -> list[str]:
+def _split_vault_metadata_values(values: list[str] | str | None) -> list[str]:
     out: list[str] = []
-    for raw in values or []:
+    iterable = [values] if isinstance(values, str) else values or []
+    for raw in iterable:
         for item in str(raw).split(","):
             item = item.strip()
             if item:
@@ -5141,7 +5301,15 @@ def cmd_vault_edit(args):
             )
         api.release_vault_agent_scopes(release_scopes, reason="vault_edit")
         _publish_cli_vaults_updated(scope="secret", secret_name=secret.get("name") or args.name)
-        _print_cli_payload("vault_secret", secret=secret)
+        _print_cli_payload(
+            "vault_secret",
+            secret=secret,
+            message="Vault metadata updated. Secret value, kind, protection tier, and existing grant member snapshots were not changed.",
+            next_steps=[
+                "Use `vibe vault list --q <keyword>` or `vibe vault find --tag <tag>` to verify the metadata.",
+                "Use `vibe vault run` / `fetch` / `sign` according to the secret kind when continuing the task.",
+            ],
+        )
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
@@ -10325,8 +10493,9 @@ def build_parser():
         help="Store and deliver secrets to agents without exposing values",
         description=(
             "Manage Vault secrets. Values are encrypted at rest and never printed to stdout: "
-            "agents obtain them via 'vibe vault run', which injects them into a child process's "
-            "environment so the value never enters the agent's text channel."
+            "agents refer to them by name, tag, or skill tag. 'vibe vault run' injects static "
+            "secrets into a child process environment, so avoid commands that print env vars or "
+            "secret-bearing debug output."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault --help",
@@ -10334,31 +10503,51 @@ def build_parser():
     )
     vault_subparsers = vault_parser.add_subparsers(
         dest="vault_command",
-        metavar="{list,discover,edit,rm,run,fetch,access,sign,await,request,export,inject,key}",
+        metavar="{list,find,tags,edit,rm,run,fetch,access,sign,await,request,export,inject,key}",
     )
     vault_subparsers.required = True
 
     vault_list_parser = vault_subparsers.add_parser(
         "list",
         help="List secrets (names + masked metadata; never values)",
-        description="List secret names with masked metadata. Values are never shown.",
+        description="List secret names with masked metadata, 20 per page by default. Values are never shown.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault list --help",
     )
-    vault_list_parser.add_argument("--tag", help="Only list secrets with this tag")
+    vault_list_parser.add_argument("--tag", action="append", metavar="TAG[,TAG2]", help="Only list secrets with all of these tags. Repeatable; comma-separated values allowed.")
+    vault_list_parser.add_argument("--q", dest="query_filter", help="Search value-free metadata such as name, description, tags, allowed hosts, or public signing address")
+    vault_list_parser.add_argument("--kind", choices=["static", "keypair"], help="Only show this secret kind")
+    vault_list_parser.add_argument("--protection", choices=["standard", "protected"], help="Only show this protection tier")
+    _add_pagination_args(vault_list_parser, help_command="vibe vault list --help")
     _add_json_noop(vault_list_parser)
 
-    vault_discover_parser = vault_subparsers.add_parser(
-        "discover",
-        help="Discover requestable secrets and signing keys",
-        description="List value-free Vault capabilities for agents: name, kind, protection tier, access grantability, and per-use signing.",
+    vault_find_parser = vault_subparsers.add_parser(
+        "find",
+        help="Find requestable secrets and signing keys",
+        description="Search value-free Vault capabilities for agents: name, kind, protection tier, tags, fetch policy, access grantability, and per-use signing.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        error_help_command="vibe vault discover --help",
+        error_help_command="vibe vault find --help",
     )
-    vault_discover_parser.add_argument("--tag", help="Only list secrets with this tag")
-    vault_discover_parser.add_argument("--kind", choices=["static", "keypair"], help="Only show this secret kind")
-    vault_discover_parser.add_argument("--protection", choices=["standard", "protected"], help="Only show this protection tier")
-    _add_json_noop(vault_discover_parser)
+    vault_find_parser.add_argument("query", nargs="?", help="Keyword to search across value-free metadata")
+    vault_find_parser.add_argument("--q", dest="query_filter", help="Keyword search; use instead of positional query")
+    vault_find_parser.add_argument("--tag", action="append", metavar="TAG[,TAG2]", help="Only show secrets with all of these tags. Repeatable; comma-separated values allowed.")
+    vault_find_parser.add_argument("--kind", choices=["static", "keypair"], help="Only show this secret kind")
+    vault_find_parser.add_argument("--protection", choices=["standard", "protected"], help="Only show this protection tier")
+    _add_pagination_args(vault_find_parser, help_command="vibe vault find --help")
+    _add_json_noop(vault_find_parser)
+
+    vault_tags_parser = vault_subparsers.add_parser(
+        "tags",
+        help="List available Vault tags",
+        description="List normal tags and skill tags with secret counts, 20 per page by default.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault tags --help",
+    )
+    vault_tags_parser.add_argument("query", nargs="?", help="Keyword to search tag names")
+    vault_tags_parser.add_argument("--q", dest="query_filter", help="Keyword search; use instead of positional query")
+    vault_tags_parser.add_argument("--type", choices=["tag", "skill"], help="Only show normal tags or skill tags")
+    _add_pagination_args(vault_tags_parser, help_command="vibe vault tags --help")
+    _add_json_noop(vault_tags_parser)
 
     vault_rm_parser = vault_subparsers.add_parser(
         "rm",
@@ -10404,9 +10593,9 @@ def build_parser():
         "run",
         help="Run a command with secrets injected into its environment",
         description=(
-            "Resolve secrets and exec a command with them in its environment only. Nothing is "
-            "printed to stdout; the command's own output passes through. Safest mode: the value "
-            "lives only in the child process and never enters the agent's text channel."
+            "Resolve static secrets and exec a command with them in its environment only. Avibe "
+            "does not print values itself, but the command's own stdout/stderr passes through; "
+            "avoid commands that print env vars, config, or secret-bearing errors."
         ),
         epilog="Example: vibe vault run --env OPENAI_API_KEY --tag deploy --skill github-release -- python sync.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -11330,8 +11519,10 @@ def main():
     if args.command == "vault":
         if args.vault_command == "list":
             sys.exit(cmd_vault_list(args))
-        if args.vault_command == "discover":
-            sys.exit(cmd_vault_discover(args))
+        if args.vault_command == "find":
+            sys.exit(cmd_vault_find(args))
+        if args.vault_command == "tags":
+            sys.exit(cmd_vault_tags(args))
         if args.vault_command == "edit":
             sys.exit(cmd_vault_edit(args))
         if args.vault_command == "rm":

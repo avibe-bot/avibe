@@ -463,6 +463,57 @@ def test_get_vault_secrets_invalid_tag_filter_returns_vault_api_error():
     assert exc.value.status == 409
 
 
+def test_get_vault_secrets_filters_value_free_metadata(monkeypatch):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "OPENAI_PROD_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "description": "OpenAI production token",
+            "tags": ["openai", "prod"],
+            "policy": {"allowed_hosts": ["api.openai.com"], "auth": {"type": "bearer"}},
+        }
+    )
+    api.create_vault_secret(
+        {
+            "name": "GITHUB_PROD_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "description": "GitHub production token",
+            "tags": ["github", "prod"],
+        }
+    )
+
+    result = api.get_vault_secrets(tags=["prod"], query="openai", kind="static", protection="standard")
+
+    assert [secret["name"] for secret in result["secrets"]] == ["OPENAI_PROD_KEY"]
+
+
+def test_get_vault_tags_returns_tag_inventory(monkeypatch):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "OPENAI_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "tags": ["openai", "prod", "skill:model-work"],
+        }
+    )
+    api.create_vault_secret(
+        {
+            "name": "OPENAI_DEV_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "tags": ["openai", "dev", "skill:model-work"],
+        }
+    )
+
+    result = api.get_vault_tags(query="model", tag_type="skill")
+
+    assert result["tags"] == [
+        {"tag": "skill:model-work", "type": "skill", "secret_count": 2, "skill": "model-work"}
+    ]
+
+
 def test_get_provision_request_by_name_returns_pending_spec():
     with api._vault_engine().begin() as conn:
         req = vault_service.create_provision_request(
