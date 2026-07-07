@@ -2243,7 +2243,7 @@
       "keypairFunds": "If this key's address holds any funds, move them out first, or they will be lost for good.",
       "protectedUnlockNote": "This is a protected secret — unlock the vault to confirm it's you before deleting.",
       "protectedPasskeyNote": "This protected secret requires a fresh passkey authorization. The passkey prompt appears after you confirm.",
-      "authzSetupRequired": "Protected delete authorization is not set up for this vault yet. Add a protected passkey factor before deleting protected secrets.",
+      "authzSetupRequired": "Protected delete authorization is missing for this vault. Re-create the protected vault so setup can register the passkey authorization factor.",
       "authzInvalid": "That passkey authorization expired or could not be verified. Try deleting again.",
       "authzRequired": "Protected secrets require passkey authorization before deletion.",
       "authzUnavailable": "Protected delete needs a passkey-capable origin. Open Vaults from localhost or your avibe.bot address."

@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from storage import vault_service
-from storage.models import vault_audit, vault_requests, vault_secrets
+from storage.models import vault_audit, vault_auth_factors, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 from vibe import api
@@ -72,17 +72,34 @@ def _assert_no_unlock_material(payload: object) -> None:
     assert "wm-protected" not in encoded
 
 
-def _register_webauthn_factor(credential: WebAuthnTestCredential | None = None) -> tuple[WebAuthnTestCredential, dict]:
+def _auth_factor_for_credential(credential: WebAuthnTestCredential) -> dict:
+    with api._vault_engine().connect() as conn:
+        row = conn.execute(
+            select(vault_auth_factors).where(vault_auth_factors.c.credential_id == credential.credential_id_b64)
+        ).mappings().one()
+    return dict(row)
+
+
+def _establish_protected_secret_with_factor(
+    name: str = "PROTECTED_DELETE",
+    credential: WebAuthnTestCredential | None = None,
+) -> tuple[WebAuthnTestCredential, dict]:
     credential = credential or WebAuthnTestCredential()
     options = api.create_vault_authz_webauthn_options(origin=credential.origin)
-    result = api.register_vault_authz_webauthn_factor(
-        credential.registration_payload(
-            challenge_id=options["challenge_id"],
-            challenge_b64=options["webauthn"]["challenge"],
-        ),
+    api.create_vault_secret(
+        {
+            "name": name,
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d"}},
+            "establishing_vmk": True,
+            "authz_factor_registration": credential.registration_payload(
+                challenge_id=options["challenge_id"],
+                challenge_b64=options["webauthn"]["challenge"],
+            ),
+        },
         origin=credential.origin,
     )
-    return credential, result["factor"]
+    return credential, _auth_factor_for_credential(credential)
 
 
 def _delete_authz_for_secret(credential: WebAuthnTestCredential, factor: dict, name: str, *, sign_count: int = 2) -> dict:
@@ -877,10 +894,7 @@ def test_delete_protected_secret_without_assertion_is_rejected(monkeypatch):
 
 def test_delete_protected_secret_with_valid_assertion_deletes(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    api.create_vault_secret(
-        {"name": "PROTECTED_DELETE", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
-    )
-    credential, factor = _register_webauthn_factor()
+    credential, factor = _establish_protected_secret_with_factor("PROTECTED_DELETE")
     authz = _delete_authz_for_secret(credential, factor, "PROTECTED_DELETE")
 
     removed = api.delete_vault_secret("PROTECTED_DELETE", authz=authz)
@@ -889,6 +903,101 @@ def test_delete_protected_secret_with_valid_assertion_deletes(monkeypatch):
     with api._vault_engine().connect() as conn:
         with pytest.raises(vault_service.SecretNotFoundError):
             vault_service.get_secret_meta(conn, "PROTECTED_DELETE")
+
+
+def test_forged_webauthn_factor_registration_cannot_authorize_delete(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    _establish_protected_secret_with_factor("PROTECTED_DELETE")
+    forged = WebAuthnTestCredential(credential_id=b"forged-agent-factor")
+    options = api.create_vault_authz_webauthn_options(origin=forged.origin)
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.register_vault_authz_webauthn_factor(
+            forged.registration_payload(
+                challenge_id=options["challenge_id"],
+                challenge_b64=options["webauthn"]["challenge"],
+            ),
+            origin=forged.origin,
+        )
+
+    assert exc.value.code == "protected_auth_required"
+    challenge = api.create_vault_delete_challenge("PROTECTED_DELETE", origin=forged.origin)
+    forged_authz = forged.assertion_authz(
+        challenge_id=challenge["challenge_id"],
+        factor_id="vaf_forged",
+        challenge_b64=challenge["webauthn"]["challenge"],
+    )
+    with pytest.raises(api.VaultApiError) as delete_exc:
+        api.delete_vault_secret("PROTECTED_DELETE", authz=forged_authz)
+    assert delete_exc.value.code == "invalid_protected_authz"
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "PROTECTED_DELETE")["protection"] == "protected"
+
+
+def test_registering_second_webauthn_factor_requires_existing_factor_assertion(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    first, first_factor = _establish_protected_secret_with_factor("PROTECTED_DELETE")
+    second = WebAuthnTestCredential(credential_id=b"second-factor")
+    options = api.create_vault_authz_webauthn_options(origin=second.origin)
+    payload = second.registration_payload(
+        challenge_id=options["challenge_id"],
+        challenge_b64=options["webauthn"]["challenge"],
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.register_vault_authz_webauthn_factor(payload, origin=second.origin)
+    assert exc.value.code == "protected_auth_required"
+
+    payload["authz"] = first.assertion_authz(
+        challenge_id=options["authorization"]["challenge_id"],
+        factor_id=first_factor["id"],
+        challenge_b64=options["authorization"]["webauthn"]["challenge"],
+    )
+    result = api.register_vault_authz_webauthn_factor(payload, origin=second.origin)
+
+    assert result["factor"]["credential_id"] == second.credential_id_b64
+
+
+def test_first_webauthn_factor_registration_only_happens_during_establishment(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    credential = WebAuthnTestCredential()
+    options = api.create_vault_authz_webauthn_options(origin=credential.origin)
+    payload = credential.registration_payload(
+        challenge_id=options["challenge_id"],
+        challenge_b64=options["webauthn"]["challenge"],
+    )
+
+    with pytest.raises(api.VaultApiError) as empty_exc:
+        api.register_vault_authz_webauthn_factor(payload, origin=credential.origin)
+    assert empty_exc.value.code == "protected_authz_setup_required"
+
+    api.create_vault_secret(
+        {"name": "FACTORLESS", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
+    )
+    late = WebAuthnTestCredential(credential_id=b"late-first-factor")
+    late_options = api.create_vault_authz_webauthn_options(origin=late.origin)
+    with pytest.raises(api.VaultApiError) as late_exc:
+        api.register_vault_authz_webauthn_factor(
+            late.registration_payload(
+                challenge_id=late_options["challenge_id"],
+                challenge_b64=late_options["webauthn"]["challenge"],
+            ),
+            origin=late.origin,
+        )
+    assert late_exc.value.code == "protected_authz_setup_required"
+
+
+def test_factorless_protected_secret_surfaces_recreate_state_for_delete_challenge(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {"name": "FACTORLESS", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
+    )
+    credential = WebAuthnTestCredential()
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_delete_challenge("FACTORLESS", origin=credential.origin)
+
+    assert exc.value.code == "protected_authz_setup_required"
 
 
 def test_audit_lists_events_without_values(monkeypatch):
@@ -940,15 +1049,9 @@ def test_create_protected_stores_browser_envelope_without_avault(monkeypatch):
 
 
 def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
-    first = api.create_vault_secret(
-        {
-            "name": "FIRST_PROTECTED",
-            "protection": "protected",
-            "sealed": {"ciphertext": "ct1", "nonce": "n1", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d1"}},
-            "establishing_vmk": True,
-        }
-    )
-    assert first["ok"] is True
+    _establish_protected_secret_with_factor("FIRST_PROTECTED")
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "FIRST_PROTECTED")["protection"] == "protected"
 
     # A second "establishing" create (concurrent first-time setup) must be rejected so
     # the vault key history can't split under a different VMK.
@@ -2397,9 +2500,7 @@ def test_delete_protected_secret_releases_agent_scope(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_release = Mock(return_value={"released": True})
     monkeypatch.setattr(api, "avault_agent_release", agent_release)
-    api.create_vault_secret(
-        {"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
-    )
+    credential, factor = _establish_protected_secret_with_factor("GRANT_KEY")
     with api._vault_engine().begin() as conn:
         req = vault_service.create_access_request(
             conn,
@@ -2408,7 +2509,6 @@ def test_delete_protected_secret_releases_agent_scope(monkeypatch):
             delivery={"session_id": "ses_1"},
         )
         grant = _grant_from_request(conn, req, session_id="ses_1")
-    credential, factor = _register_webauthn_factor()
     authz = _delete_authz_for_secret(credential, factor, "GRANT_KEY")
 
     removed = api.delete_vault_secret("GRANT_KEY", authz=authz)

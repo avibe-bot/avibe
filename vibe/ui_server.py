@@ -3181,7 +3181,7 @@ def vault_secrets_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_secret(request.json or {}))
+        return jsonify(api.create_vault_secret(request.json or {}, origin=_webauthn_request_origin()))
     except ValueError as exc:
         return _vault_error_response(exc)
 

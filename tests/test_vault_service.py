@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from storage import vault_service as vs
+from storage import vault_service as vs, vault_webauthn
 from storage.db import create_sqlite_engine
 from storage.models import metadata, vault_auth_factors, vault_grants, vault_operation_challenges, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
@@ -43,6 +43,31 @@ def _protected_delete_authz(conn, name: str) -> vs.ProtectedOperationAuthz:
         challenge_id="test-challenge",
         factor_id="test-factor",
     )
+
+
+def _establish_protected_secret(conn, name: str, credential: WebAuthnTestCredential | None = None) -> tuple[WebAuthnTestCredential, dict]:
+    credential = credential or WebAuthnTestCredential()
+    options = vs.create_webauthn_registration_options(
+        conn,
+        rp_id=credential.rp_id,
+        origin=credential.origin,
+    )
+    vs.create_secret(
+        conn,
+        name=name,
+        protection="protected",
+        sealed=_sealed(name.lower()),
+        establishing_vmk=True,
+        authz_factor_registration=credential.registration_payload(
+            challenge_id=options["challenge_id"],
+            challenge_b64=options["webauthn"]["challenge"],
+        ),
+        authz_factor_origin=credential.origin,
+    )
+    factor = conn.execute(
+        select(vault_auth_factors).where(vault_auth_factors.c.credential_id == credential.credential_id_b64)
+    ).mappings().one()
+    return credential, dict(factor)
 
 
 def _grant_from_request(conn, request: dict, *, cache_ready: bool = True, ttl_seconds: int | None = None) -> dict:
@@ -386,23 +411,10 @@ def test_webauthn_factor_registration_stores_public_key(vault):
     credential = WebAuthnTestCredential()
 
     with vault.begin() as conn:
-        options = vs.create_webauthn_registration_options(
-            conn,
-            rp_id=credential.rp_id,
-            origin=credential.origin,
-        )
-        result = vs.register_webauthn_factor(
-            conn,
-            credential.registration_payload(
-                challenge_id=options["challenge_id"],
-                challenge_b64=options["webauthn"]["challenge"],
-            ),
-            rp_id=credential.rp_id,
-            origin=credential.origin,
-        )
-        row = conn.execute(select(vault_auth_factors).where(vault_auth_factors.c.id == result["factor"]["id"])).mappings().one()
+        _credential, factor = _establish_protected_secret(conn, "PROTECTED_KEY", credential)
+        row = conn.execute(select(vault_auth_factors).where(vault_auth_factors.c.id == factor["id"])).mappings().one()
 
-    assert result["factor"]["credential_id"] == credential.credential_id_b64
+    assert factor["credential_id"] == credential.credential_id_b64
     assert row["public_key"]
     assert row["alg"] == -7
     assert json.loads(row["transports"]) == ["internal"]
@@ -410,23 +422,9 @@ def test_webauthn_factor_registration_stores_public_key(vault):
 
 def test_delete_challenge_expiry_and_replay_are_rejected(vault):
     credential = WebAuthnTestCredential()
-    _create(vault, name="PROTECTED_KEY", protection="protected")
 
     with vault.begin() as conn:
-        registration_options = vs.create_webauthn_registration_options(
-            conn,
-            rp_id=credential.rp_id,
-            origin=credential.origin,
-        )
-        registered = vs.register_webauthn_factor(
-            conn,
-            credential.registration_payload(
-                challenge_id=registration_options["challenge_id"],
-                challenge_b64=registration_options["webauthn"]["challenge"],
-            ),
-            rp_id=credential.rp_id,
-            origin=credential.origin,
-        )
+        _credential, registered = _establish_protected_secret(conn, "PROTECTED_KEY", credential)
         expired = vs.create_delete_challenge(conn, "PROTECTED_KEY", rp_id=credential.rp_id, origin=credential.origin)
         conn.execute(
             vault_operation_challenges.update()
@@ -439,7 +437,7 @@ def test_delete_challenge_expiry_and_replay_are_rejected(vault):
                 "PROTECTED_KEY",
                 credential.assertion_authz(
                     challenge_id=expired["challenge_id"],
-                    factor_id=registered["factor"]["id"],
+                    factor_id=registered["id"],
                     challenge_b64=expired["webauthn"]["challenge"],
                 ),
             )
@@ -447,13 +445,71 @@ def test_delete_challenge_expiry_and_replay_are_rejected(vault):
         fresh = vs.create_delete_challenge(conn, "PROTECTED_KEY", rp_id=credential.rp_id, origin=credential.origin)
         authz = credential.assertion_authz(
             challenge_id=fresh["challenge_id"],
-            factor_id=registered["factor"]["id"],
+            factor_id=registered["id"],
             challenge_b64=fresh["webauthn"]["challenge"],
             sign_count=3,
         )
         assert vs.verify_delete_secret_authz(conn, "PROTECTED_KEY", authz).challenge_id == fresh["challenge_id"]
         with pytest.raises(vs.InvalidProtectedAuthzError):
             vs.verify_delete_secret_authz(conn, "PROTECTED_KEY", authz)
+
+
+def test_webauthn_counter_regression_rejects_zero_after_nonzero_counter():
+    credential = WebAuthnTestCredential()
+    challenge = b"counter-challenge"
+    challenge_b64 = vault_webauthn.b64encode(challenge)
+    public_key = vault_webauthn.b64encode(credential.public_key_cose())
+
+    zero_assertion = credential.assertion_authz(
+        challenge_id="vop_counter",
+        factor_id="vaf_counter",
+        challenge_b64=challenge_b64,
+        sign_count=0,
+    )["assertion"]
+    assert (
+        vault_webauthn.verify_assertion(
+            zero_assertion,
+            credential_id=credential.credential_id_b64,
+            public_key=public_key,
+            alg=vault_webauthn.ALG_ES256,
+            stored_sign_count=0,
+            expected_challenge_hash=vault_webauthn.challenge_hash(challenge),
+            expected_origin=credential.origin,
+            rp_id=credential.rp_id,
+        ).sign_count
+        == 0
+    )
+    with pytest.raises(vault_webauthn.WebAuthnVerificationError):
+        vault_webauthn.verify_assertion(
+            zero_assertion,
+            credential_id=credential.credential_id_b64,
+            public_key=public_key,
+            alg=vault_webauthn.ALG_ES256,
+            stored_sign_count=1,
+            expected_challenge_hash=vault_webauthn.challenge_hash(challenge),
+            expected_origin=credential.origin,
+            rp_id=credential.rp_id,
+        )
+
+    increasing_assertion = credential.assertion_authz(
+        challenge_id="vop_counter",
+        factor_id="vaf_counter",
+        challenge_b64=challenge_b64,
+        sign_count=2,
+    )["assertion"]
+    assert (
+        vault_webauthn.verify_assertion(
+            increasing_assertion,
+            credential_id=credential.credential_id_b64,
+            public_key=public_key,
+            alg=vault_webauthn.ALG_ES256,
+            stored_sign_count=1,
+            expected_challenge_hash=vault_webauthn.challenge_hash(challenge),
+            expected_origin=credential.origin,
+            rp_id=credential.rp_id,
+        ).sign_count
+        == 2
+    )
 
 
 def test_standard_secret_does_not_create_access_request_unless_always_ask(vault):

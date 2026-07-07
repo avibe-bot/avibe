@@ -494,18 +494,29 @@ export const VaultSecretForm: React.FC<{
         | { sealed: ProtectedRecordEnvelope }
         | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> };
       let establishingVmk = false;
+      let authzFactorRegistration: Awaited<ReturnType<typeof protectedVault.sealValue>>['authzFactorRegistration'];
       if (protection === 'protected') {
         // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no
         // plaintext). For a signing key this seals the raw 32-byte private key, not a string.
         const sealed = await protectedVault.sealValue(secretName, plaintext);
         cryptoFields = { sealed: sealed.envelope };
         establishingVmk = sealed.establishingVmk;
+        authzFactorRegistration = sealed.authzFactorRegistration;
       } else {
         const pubkey = await api.getVaultPubkey();
         cryptoFields = { blind_box: await sealBlindBox(plaintext, pubkey, standardCreateBlindBoxContext(secretName)) };
       }
       const created = await api.createVaultSecret(
-        { ...base, ...cryptoFields, ...(establishingVmk ? { establishing_vmk: true } : {}) },
+        {
+          ...base,
+          ...cryptoFields,
+          ...(establishingVmk
+            ? {
+                establishing_vmk: true,
+                authz_factor_registration: authzFactorRegistration,
+              }
+            : {}),
+        },
         { handleError: false },
       );
       if (!created.ok) {

@@ -1510,6 +1510,10 @@ def register_vault_authz_webauthn_factor(payload: dict, *, origin: str | None = 
             )
     except vault_service.InvalidProtectedAuthzError as exc:
         raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
+    except vault_service.ProtectedAuthRequiredError as exc:
+        raise VaultApiError(str(exc), code="protected_auth_required", status=409) from exc
+    except vault_service.ProtectedAuthzSetupRequiredError as exc:
+        raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409) from exc
     return result
 
 
@@ -1598,7 +1602,7 @@ def _sealed_from_payload(payload: dict):
     return Sealed(ciphertext=ciphertext, nonce=nonce, wrap_meta=wrap_meta)
 
 
-def create_vault_secret(payload: dict) -> dict:
+def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
     from storage import vault_crypto, vault_service
 
     if not isinstance(payload, dict):
@@ -1611,6 +1615,7 @@ def create_vault_secret(payload: dict) -> dict:
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
     links = payload.get("links") if isinstance(payload.get("links"), dict) else None
+    authz_factor_registration = payload.get("authz_factor_registration")
     try:
         if links and isinstance(links.get("skills"), list):
             tags.extend(vault_service.skill_tag(str(skill)) for skill in links["skills"] if isinstance(skill, str))
@@ -1684,6 +1689,8 @@ def create_vault_secret(payload: dict) -> dict:
                 policy=policy,
                 public_meta=public_meta,
                 establishing_vmk=establishing_vmk,
+                authz_factor_registration=authz_factor_registration if isinstance(authz_factor_registration, dict) else None,
+                authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
             )
     except vault_service.InvalidSecretNameError as exc:
@@ -1706,6 +1713,10 @@ def create_vault_secret(payload: dict) -> dict:
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
     except vault_service.VaultAlreadyInitializedError as exc:
         raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc
+    except vault_service.ProtectedAuthzSetupRequiredError as exc:
+        raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409) from exc
+    except vault_service.InvalidProtectedAuthzError as exc:
+        raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     _publish_vaults_updated(

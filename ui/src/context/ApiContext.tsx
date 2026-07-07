@@ -155,6 +155,7 @@ export type VaultWebAuthnRegistrationOptions = {
   expires_at: string;
   rp_id: string;
   origin: string;
+  requires_existing_factor?: boolean;
   webauthn: {
     rp: { name: string; id: string };
     user: { id: string; name: string; displayName: string };
@@ -162,6 +163,11 @@ export type VaultWebAuthnRegistrationOptions = {
     pubKeyCredParams: PublicKeyCredentialParameters[];
     authenticatorSelection: AuthenticatorSelectionCriteria;
     extensions?: AuthenticationExtensionsClientInputs;
+  };
+  authorization?: {
+    challenge_id: string;
+    expires_at: string;
+    webauthn: VaultDeleteChallengeResult['webauthn'];
   };
   code?: string;
   message?: string;
@@ -174,12 +180,21 @@ export type VaultWebAuthnSerializedCredential = {
   response: Record<string, unknown>;
 };
 
-export type VaultDeleteAuthz = {
+export type VaultWebAuthnAuthz = {
   kind: 'webauthn';
   challenge_id: string;
   factor_id: string;
   assertion: VaultWebAuthnSerializedCredential;
 };
+
+export type VaultWebAuthnRegistrationPayload = {
+  challenge_id: string;
+  credential: VaultWebAuthnSerializedCredential;
+  label?: string;
+  authz?: VaultWebAuthnAuthz;
+};
+
+export type VaultDeleteAuthz = VaultWebAuthnAuthz;
 
 export type VaultDeleteChallengeResult = {
   ok: boolean;
@@ -217,6 +232,8 @@ export type VaultCreatePayload = {
   provision_request_id?: string;
   /** Set on the first protected secret so the daemon atomically guards single VMK init. */
   establishing_vmk?: boolean;
+  /** First protected-vault setup registers the delete-authz public key in the same transaction. */
+  authz_factor_registration?: VaultWebAuthnRegistrationPayload;
 };
 
 /**
@@ -441,11 +458,9 @@ export type ApiContextType = {
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultAuthzWebAuthnOptions: () => Promise<VaultWebAuthnRegistrationOptions>;
-  registerVaultAuthzWebAuthnFactor: (payload: {
-    challenge_id: string;
-    credential: VaultWebAuthnSerializedCredential;
-    label?: string;
-  }) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
+  registerVaultAuthzWebAuthnFactor: (
+    payload: VaultWebAuthnRegistrationPayload,
+  ) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   createVaultDeleteChallenge: (name: string, opts?: { handleError?: boolean }) => Promise<VaultDeleteChallengeResult>;

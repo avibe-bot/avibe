@@ -5,6 +5,7 @@ import {
   type ApiContextType,
   type VaultDeleteAuthz,
   type VaultDeleteChallengeResult,
+  type VaultWebAuthnRegistrationPayload,
   type VaultWebAuthnSerializedCredential,
 } from '@/context/ApiContext';
 import {
@@ -54,10 +55,16 @@ export type ProtectedUnlockMaterial = {
  */
 export type ProtectedVaultStatus = 'checking' | 'needs-setup' | 'locked' | 'unlocked' | 'error';
 
-const sessionVault: { vmk: Uint8Array | null; wrapMeta: string | null; freshSetup: boolean } = {
+const sessionVault: {
+  vmk: Uint8Array | null;
+  wrapMeta: string | null;
+  freshSetup: boolean;
+  authzFactorRegistration: VaultWebAuthnRegistrationPayload | null;
+} = {
   vmk: null,
   wrapMeta: null,
   freshSetup: false,
+  authzFactorRegistration: null,
 };
 
 /**
@@ -172,6 +179,7 @@ function clearVmk(): void {
     // expiry in vaultUnlocked() — leaves a consistent state.
     sessionVault.wrapMeta = null;
     sessionVault.freshSetup = false;
+    sessionVault.authzFactorRegistration = null;
   }
 }
 
@@ -386,7 +394,7 @@ async function assertPasskeyPrf(entries: PasskeyEntry[]): Promise<{ prfOutput: U
 async function setupPasskeyFactor(
   api: ApiContextType,
   prfSalt: Uint8Array,
-): Promise<{ prfOutput: Uint8Array; credentialId: string }> {
+): Promise<{ prfOutput: Uint8Array; credentialId: string; registration: VaultWebAuthnRegistrationPayload }> {
   const options = await api.createVaultAuthzWebAuthnOptions();
   if (!options?.ok) throw new Error(options?.code || 'passkey-registration-options-failed');
   const created = (await navigator.credentials.create({
@@ -395,12 +403,14 @@ async function setupPasskeyFactor(
   if (!created) throw new Error('passkey-cancelled');
   const credentialId = bytesToBase64(toUint8(created.rawId));
   const { prfOutput } = await assertPasskeyPrf([{ credentialId, prfSalt }]);
-  const registered = await api.registerVaultAuthzWebAuthnFactor({
-    challenge_id: options.challenge_id,
-    credential: serializeAttestationCredential(created),
-  });
-  if (!registered?.ok) throw new Error(registered?.code || 'passkey-registration-failed');
-  return { prfOutput, credentialId };
+  return {
+    prfOutput,
+    credentialId,
+    registration: {
+      challenge_id: options.challenge_id,
+      credential: serializeAttestationCredential(created),
+    },
+  };
 }
 
 export function useProtectedVault() {
@@ -451,11 +461,17 @@ export function useProtectedVault() {
     }
   }, [api]);
 
-  const commit = (vmk: Uint8Array, wrapMeta: string, freshSetup: boolean) => {
+  const commit = (
+    vmk: Uint8Array,
+    wrapMeta: string,
+    freshSetup: boolean,
+    authzFactorRegistration: VaultWebAuthnRegistrationPayload | null = null,
+  ) => {
     sessionVault.vmk?.fill(0);
     sessionVault.vmk = vmk;
     sessionVault.wrapMeta = wrapMeta;
     sessionVault.freshSetup = freshSetup;
+    sessionVault.authzFactorRegistration = authzFactorRegistration;
     armVaultAutoLock();
     setStatus('unlocked');
     setError(null);
@@ -465,10 +481,10 @@ export function useProtectedVault() {
   // UI requires an explicit acknowledgement before calling this.
   const setupPasskey = useCallback(async () => {
     const prfSalt = newPasskeyPrfSalt();
-    const { prfOutput, credentialId } = await setupPasskeyFactor(api, prfSalt);
+    const { prfOutput, credentialId, registration } = await setupPasskeyFactor(api, prfSalt);
     const vmk = newVmk();
     const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]);
-    commit(vmk, withRpId(wrapMeta, window.location.hostname), true);
+    commit(vmk, withRpId(wrapMeta, window.location.hostname), true, registration);
   }, [api]);
 
   const unlockPasskey = useCallback(async () => {
@@ -486,7 +502,14 @@ export function useProtectedVault() {
    * signing keys seal the key material itself, not a UTF-8 string.
    */
   const sealValue = useCallback(
-    async (name: string, value: Uint8Array | string): Promise<{ envelope: ProtectedRecordEnvelope; establishingVmk: boolean }> => {
+    async (
+      name: string,
+      value: Uint8Array | string,
+    ): Promise<{
+      envelope: ProtectedRecordEnvelope;
+      establishingVmk: boolean;
+      authzFactorRegistration?: VaultWebAuthnRegistrationPayload;
+    }> => {
       if (!enforceAutoLock()) throw new Error('vault-locked');
       const { vmk, wrapMeta, freshSetup } = sessionVault;
       if (!vmk || !wrapMeta) throw new Error('vault-locked');
@@ -496,7 +519,11 @@ export function useProtectedVault() {
       // `establishingVmk` lets the create transaction enforce the atomic single-init
       // guard server-side (a UI re-check here can't be race-free); the daemon rejects a
       // second VMK so concurrent first-time setups can't split the key history.
-      return { envelope: packProtectedRecord(sealed, wrapMeta), establishingVmk: freshSetup };
+      return {
+        envelope: packProtectedRecord(sealed, wrapMeta),
+        establishingVmk: freshSetup,
+        authzFactorRegistration: freshSetup ? (sessionVault.authzFactorRegistration ?? undefined) : undefined,
+      };
     },
     [],
   );
@@ -504,6 +531,7 @@ export function useProtectedVault() {
   const afterCreated = useCallback(() => {
     // The vault now exists server-side; subsequent creates this session aren't "establishing".
     sessionVault.freshSetup = false;
+    sessionVault.authzFactorRegistration = null;
   }, []);
 
   /**
@@ -581,6 +609,7 @@ export function useProtectedVault() {
     clearVmk();
     sessionVault.wrapMeta = null;
     sessionVault.freshSetup = false;
+    sessionVault.authzFactorRegistration = null;
     notifyVaultLockChange();
     await refresh();
   }, [refresh]);

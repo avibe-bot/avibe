@@ -2,9 +2,12 @@
 
 This module intentionally implements only the server-verifiable pieces Vaults
 need today: passkey registration public-key capture and fresh assertion checks
-for protected operations. It does not perform attestation chain trust decisions;
-the security boundary here is possession/user verification of the registered
-credential, not device provenance.
+for protected operations. Passkeys commonly use ``none`` attestation, so device
+provenance and the registration signature are not a trust anchor here. The
+authorization factor trust anchor is instead enforced by ``vault_service``:
+the first factor is bound to the one-time protected-vault establishment
+transaction, and later factors must chain from a fresh assertion by an existing
+factor.
 """
 
 from __future__ import annotations
@@ -324,7 +327,7 @@ def verify_assertion(
         rp_id=rp_id,
         require_attested=False,
     )
-    if sign_count and stored_sign_count and sign_count <= stored_sign_count:
+    if stored_sign_count > 0 and sign_count <= stored_sign_count:
         raise WebAuthnVerificationError("WebAuthn signature counter replay")
     signature = b64decode(str(response.get("signature") or ""))
     verifier, parsed_alg = _public_key_from_cose(b64decode(public_key))
