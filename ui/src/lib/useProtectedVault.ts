@@ -158,18 +158,19 @@ function clearVmk(): void {
     clearTimeout(vaultAutoLockTimer);
     vaultAutoLockTimer = null;
   }
+  if (sessionVault.freshSetup) {
+    // An uncommitted fresh VMK (set up but no protected secret saved yet) — drop it so a later
+    // unlock can't seal under a stale local VMK that skips the atomic first-init guard. Done here
+    // (not only in lockVault) so EVERY teardown path — manual lock, auto-lock, and the render-time
+    // expiry in vaultUnlocked() — leaves a consistent state.
+    sessionVault.wrapMeta = null;
+    sessionVault.freshSetup = false;
+  }
 }
 
 /** Lock the vault now: zero the VMK, drop an uncommitted fresh-setup VMK, notify subscribers. */
 function lockVault(broadcast = false): void {
-  const wasFreshSetup = sessionVault.freshSetup;
-  clearVmk();
-  if (wasFreshSetup) {
-    // An uncommitted fresh VMK (set up but no protected secret saved yet) — discard it so a
-    // later unlock can't seal under a stale local VMK that skips the atomic init guard.
-    sessionVault.wrapMeta = null;
-    sessionVault.freshSetup = false;
-  }
+  clearVmk(); // zeros the VMK and drops any uncommitted fresh-setup state
   notifyVaultLockChange();
   // A manual "Lock now" wipes every open tab for this origin, not just this one.
   if (broadcast) getVaultLockChannel()?.postMessage('lock');
