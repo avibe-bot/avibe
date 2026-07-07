@@ -37,12 +37,11 @@ export type ProtectedUnlockMaterial = {
 /**
  * Protected-tier vault lifecycle for the Web UI.
  *
- * The Vault Master Key (VMK) lives only in browser memory and is wrapped by user
- * factors into an opaque `wrap_meta` the daemon stores per protected secret. A
- * **password is always set as the recovery root**; a passkey (WebAuthn-PRF, Touch ID /
- * Windows Hello) can be added on top as the quick primary unlock — so losing a device
- * never makes protected secrets unrecoverable. The daemon never sees the VMK or
- * plaintext. No cross-origin sandbox yet — that hardening is a later version.
+ * The Vault Master Key (VMK) lives only in browser memory and is wrapped by a
+ * passkey (WebAuthn-PRF, Face ID / Touch ID / Windows Hello) into an opaque
+ * `wrap_meta` the daemon stores per protected secret. The daemon never sees
+ * the VMK or plaintext. No cross-origin sandbox yet — that hardening is a later
+ * version.
  *
  * The unlocked VMK is cached at module scope so it survives `VaultSecretForm`
  * unmount/remount within one page session. A full reload re-initialises the module.
@@ -193,9 +192,8 @@ const WEBAUTHN_USER_HANDLE = new TextEncoder().encode('avibe-vault');
 
 /**
  * WebAuthn needs a secure context and a domain RP ID. Browsers reject raw IP RP IDs
- * (the default local `http://127.0.0.1:5123` workflow), so the passkey path is only
- * offered on `localhost` or an HTTPS domain (e.g. the tunnel); elsewhere we fall back
- * to the password, which is the recovery root anyway.
+ * (the default local `http://127.0.0.1:5123` workflow), so protected vault setup and
+ * unlock only work on `localhost` or an HTTPS domain (e.g. the tunnel).
  */
 export function webauthnAvailable(): boolean {
   if (typeof window === 'undefined' || typeof window.PublicKeyCredential === 'undefined') return false;
@@ -378,26 +376,14 @@ export function useProtectedVault() {
     setError(null);
   };
 
-  // First-time setup uses ONE factor. Passkey-only is the most secure option (no
-  // phishable/leakable password) but is unrecoverable if the device/passkey is lost —
-  // the UI requires an explicit acknowledgement. Password is the recoverable alternative.
-  const setupPassword = useCallback(async (password: string) => {
-    const vmk = newVmk();
-    commit(vmk, await buildWrapMeta(vmk, [{ kind: 'password', password }]), true);
-  }, []);
-
+  // First-time setup is passkey-only. A lost passkey is unrecoverable for now, so the
+  // UI requires an explicit acknowledgement before calling this.
   const setupPasskey = useCallback(async () => {
     const prfSalt = newPasskeyPrfSalt();
     const { prfOutput, credentialId } = await setupPasskeyFactor(prfSalt);
     const vmk = newVmk();
     const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]);
     commit(vmk, withRpId(wrapMeta, window.location.hostname), true);
-  }, []);
-
-  const unlockPassword = useCallback(async (password: string) => {
-    const wrapMeta = sessionVault.wrapMeta;
-    if (!wrapMeta) throw new Error('vault-not-setup');
-    commit(await unwrapVmk(wrapMeta, { kind: 'password', password }), wrapMeta, false);
   }, []);
 
   const unlockPasskey = useCallback(async () => {
@@ -501,17 +487,6 @@ export function useProtectedVault() {
     }
   }, []);
 
-  const hasPassword = useCallback(() => {
-    const wrapMeta = sessionVault.wrapMeta;
-    if (!wrapMeta) return false;
-    try {
-      const meta = JSON.parse(wrapMeta) as { copies?: Array<{ kind?: string }> };
-      return Array.isArray(meta.copies) && meta.copies.some((copy) => copy.kind === 'password');
-    } catch {
-      return false;
-    }
-  }, []);
-
   // A passkey can only be asserted on the host (RP ID) it was created on. Offer passkey
   // unlock only when the current host matches the stored one (legacy vaults without a
   // recorded rp_id are not blocked).
@@ -526,7 +501,22 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, signProtectedRequest, releaseProtectedDelivery, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword, passkeyUsableHere };
+  return {
+    status,
+    error,
+    setError,
+    refresh,
+    setupPasskey,
+    unlockPasskey,
+    sealValue,
+    signProtectedRequest,
+    releaseProtectedDelivery,
+    afterCreated,
+    lock,
+    discardAndRefresh,
+    hasPasskey,
+    passkeyUsableHere,
+  };
 }
 
 /**
