@@ -13,7 +13,7 @@ import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { VaultProtectedUnlock } from '../ui/vault-protected-unlock';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
-import { useProtectedVault, vaultFreshSetup } from '../../lib/useProtectedVault';
+import { useProtectedVault, vaultFreshSetup, vaultUnlocked } from '../../lib/useProtectedVault';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
@@ -689,13 +689,20 @@ export const VaultsPage: React.FC = () => {
     else void protectedVault.refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- vault callbacks are stable; re-run only on target change
   }, [deleteTarget]);
+  // Gate on the wall-clock lock state (vaultUnlocked), not the hook's cached status — a delayed
+  // auto-lock timer (tab resumed after the deadline) can leave status stale-'unlocked', which must
+  // NOT enable a protected delete without a fresh unlock.
   const deleteNeedsUnlock =
-    deleteTarget?.protection === 'protected' && (protectedVault.status !== 'unlocked' || vaultFreshSetup());
+    deleteTarget?.protection === 'protected' && (!vaultUnlocked() || vaultFreshSetup());
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const onEdit = (secret: VaultSecret) => setEditTarget(secret);
   const confirmDelete = async () => {
     const secret = deleteTarget;
     if (!secret) return;
+    // Belt-and-suspenders at the mutation point: a protected secret must have a committed,
+    // wall-clock-valid unlock right now — closes the delayed-auto-lock resume window where the
+    // button could momentarily be stale-enabled.
+    if (secret.protection === 'protected' && (!vaultUnlocked() || vaultFreshSetup())) return;
     try {
       await api.deleteVaultSecret(secret.name);
       showToast(t('vaults.deleted', { name: secret.name }), 'success');
