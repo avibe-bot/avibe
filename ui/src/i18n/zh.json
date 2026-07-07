@@ -2240,10 +2240,16 @@
       "title": "删除「{{name}}」？",
       "description": "Agent 将无法再使用这条密钥。",
       "keypairIrreversible": "这是一把签名密钥——删除会永久销毁私钥,没有备份,无法恢复。",
-      "keypairFunds": "如果这把密钥的地址里还有资金,请先转出,否则将永久丢失。"
+      "keypairFunds": "如果这把密钥的地址里还有资金,请先转出,否则将永久丢失。",
+      "protectedUnlockNote": "这是保护档密钥——删除前先解锁保险库,验证是你本人。"
     },
     "deleted": "已删除 {{name}}",
     "created": "已保存 {{name}}",
+    "lock": {
+      "unlocked": "已解锁",
+      "lockNow": "立即锁定",
+      "autoLockHint": "闲置 10 分钟后自动锁定——密钥会从浏览器内存中抹除。点「立即锁定」可马上抹除。"
+    },
     "saved": "已更新 {{name}}",
     "editSecret": "编辑信息",
     "rowActions": "更多操作",

@@ -9,8 +9,11 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { VaultLockIndicator } from '../ui/vault-lock-indicator';
+import { VaultProtectedUnlock } from '../ui/vault-protected-unlock';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
+import { useProtectedVault, vaultFreshSetup, vaultUnlocked } from '../../lib/useProtectedVault';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
@@ -672,13 +675,34 @@ export const VaultsPage: React.FC = () => {
     }
   }, [api, showAudit]);
 
+  const protectedVault = useProtectedVault();
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
   const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
+  // Deleting a protected secret requires the user present at an unlocked vault (a passkey/password
+  // ceremony) — discover the current lock state when the delete dialog opens for one.
+  useEffect(() => {
+    if (deleteTarget?.protection !== 'protected') return;
+    // A freshly set-up, uncommitted local VMK isn't a proven unlock of this secret's real vault
+    // (first-init collision) — drop it and rediscover the server vault so the user must unlock the
+    // actual one; otherwise just discover the current lock state.
+    if (vaultFreshSetup()) void protectedVault.discardAndRefresh();
+    else void protectedVault.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- vault callbacks are stable; re-run only on target change
+  }, [deleteTarget]);
+  // Gate on the wall-clock lock state (vaultUnlocked), not the hook's cached status — a delayed
+  // auto-lock timer (tab resumed after the deadline) can leave status stale-'unlocked', which must
+  // NOT enable a protected delete without a fresh unlock.
+  const deleteNeedsUnlock =
+    deleteTarget?.protection === 'protected' && (!vaultUnlocked() || vaultFreshSetup());
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const onEdit = (secret: VaultSecret) => setEditTarget(secret);
   const confirmDelete = async () => {
     const secret = deleteTarget;
     if (!secret) return;
+    // Belt-and-suspenders at the mutation point: a protected secret must have a committed,
+    // wall-clock-valid unlock right now — closes the delayed-auto-lock resume window where the
+    // button could momentarily be stale-enabled.
+    if (secret.protection === 'protected' && (!vaultUnlocked() || vaultFreshSetup())) return;
     try {
       await api.deleteVaultSecret(secret.name);
       showToast(t('vaults.deleted', { name: secret.name }), 'success');
@@ -713,6 +737,7 @@ export const VaultsPage: React.FC = () => {
         subtitle={t('vaults.subtitle')}
         actions={
           <>
+            <VaultLockIndicator />
             <Button variant={showAudit ? 'secondary' : 'ghost'} size="icon" onClick={toggleAudit} aria-label={t('vaults.history')}>
               <History className="size-4" />
             </Button>
@@ -847,6 +872,7 @@ export const VaultsPage: React.FC = () => {
         description={t('vaults.deleteDialog.description')}
         confirmLabel={t('common.delete')}
         holdSeconds={deleteTarget?.kind === 'keypair' ? 5 : 0}
+        confirmDisabled={deleteNeedsUnlock}
         onConfirm={confirmDelete}
       >
         {deleteTarget?.kind === 'keypair' ? (
@@ -859,6 +885,12 @@ export const VaultsPage: React.FC = () => {
               <Wallet className="mt-0.5 size-4 shrink-0 text-destructive" />
               <span>{t('vaults.deleteDialog.keypairFunds')}</span>
             </span>
+          </div>
+        ) : null}
+        {deleteNeedsUnlock ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-[12.5px] leading-snug text-muted-foreground">{t('vaults.deleteDialog.protectedUnlockNote')}</p>
+            <VaultProtectedUnlock vault={protectedVault} secretName={deleteTarget?.name} />
           </div>
         ) : null}
       </ConfirmDialog>
