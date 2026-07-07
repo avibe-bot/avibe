@@ -163,10 +163,12 @@ For a missing keypair/signing key, ask the user to create a keypair secret in th
 
 $web_chat_placeholder
 
-List or discover existing Vault entries:
+List or find existing Vault entries:
 `vibe vault list`
 `vibe vault list --tag prod`
-`vibe vault discover --kind static --protection protected`
+`vibe vault find --kind static --protection protected`
+`vibe vault find openai --tag prod`
+`vibe vault tags`
 
 Run a command with selected static secrets injected as environment variables:
 `vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN -- python script.py`
