@@ -395,8 +395,10 @@ type SignRequest = {
 ```
 
   - Result: `SignatureResult`
-  - Notes: the sandbox opens the sealed private key under the VMK, signs the
-    digest, zeroes the private key, and returns only the public signature.
+  - Notes: after per-operation in-sandbox confirmation (see "High-risk operations
+    require in-sandbox confirmation"), the sandbox opens the sealed private key
+    under the VMK, signs the digest, zeroes the private key, and returns only the
+    public signature. The unlock state alone never authorizes a signature.
 
 - `releaseDEK`
   - Request:
@@ -436,6 +438,42 @@ type DeleteAuthzAssertionResult = {
 
   - Notes: this composes with #818. It is a server-verifiable WebAuthn assertion
     and does not require the VMK to be unlocked.
+
+### High-risk operations require in-sandbox confirmation
+
+Isolation alone stops a main-app XSS from *reading* the VMK, but not from
+*using* it: while the vault is unlocked, main-app XSS could send `sign`,
+`releaseDEK`, or `unseal` RPCs and receive signatures, blind boxes, or plaintext
+without the user's intent. For a signing keypair (crypto wallet) that is nearly
+as damaging as key theft — an attacker who can request an arbitrary signature
+during the unlock window can drain funds.
+
+The sandbox therefore doubles as a **trusted confirmation surface**, not just a
+key store. High-risk operations require an explicit user confirmation the parent
+cannot synthesize, rendered entirely inside the sandbox frame:
+
+- **`sign` requires per-operation confirmation, every time.** The unlock window
+  releases the VMK into sandbox memory but does NOT pre-authorize signing. Each
+  `sign` RPC makes the sandbox render the operation context it can derive (secret
+  name, scheme, the digest, and any decoded/human-readable transaction detail
+  available) in sandbox-owned UI and wait for a real user gesture inside the
+  frame before it opens the key and signs. This is the software equivalent of a
+  hardware wallet's on-device display + confirm button: main-app XSS can
+  *request* a signature but cannot satisfy the in-sandbox confirmation.
+- **`releaseDEK` requires in-sandbox confirmation** when it grants an agent
+  ongoing access to a protected secret (the same confused-deputy-while-unlocked
+  risk). Headless/automatic protected DEK release must not be reachable straight
+  from a parent RPC.
+- **`unseal` to display/copy requires in-sandbox confirmation** and renders/copies
+  only inside the sandbox frame; the plaintext never returns to the parent.
+
+The parent cannot script into the sandbox realm, cannot see or click the
+sandbox's confirmation UI, and cannot forge the user gesture — so these
+confirmations hold even against a fully-compromised parent page. Prompts must
+show enough context for the user to judge what they are approving; a bare
+"confirm?" is not sufficient for signing. Auto-lock remains a backstop that
+bounds the window, but confirmation — not the unlock window — is the
+authorization for each high-risk operation.
 
 ## 3. Integrity model: central serving, local-anchored trust
 
@@ -725,9 +763,15 @@ Does not fully defend:
 - Browser or passkey-provider compromise.
 - Malware that can drive the user's browser and satisfy OS/passkey prompts.
 - Main-app XSS invoking allowed sandbox RPC operations while the vault is
-  unlocked. The sandbox removes direct key exfiltration, but not every possible
-  confused-deputy operation. Keep operations context-bound, user-visible where
-  appropriate, and server-challenge-bound for delete/sign/grant approvals.
+  unlocked. Direct key exfiltration is removed by isolation; abuse of high-risk
+  operations is blocked by **mandatory in-sandbox confirmation** — `sign` is
+  confirmed per operation (every time), and `releaseDEK` / `unseal`-to-plaintext
+  require an in-sandbox user gesture the parent cannot synthesize (see "High-risk
+  operations require in-sandbox confirmation"). Lower-risk operations stay
+  context-bound; delete/authz stays server-challenge-bound. Residual: an XSS can
+  still try to trick a *present* user into approving a malicious signature, so the
+  confirmation UI must render enough operation context to judge it — this reduces
+  the risk to social-engineering of a present user, not silent key use.
 - A central host that can perfectly equivocate between the parent's verification
   fetches and the iframe navigation. Current web platform support lacks native
   iframe SRI. Immutable versioned URLs, loader SRI, CSP, reproducible builds,
@@ -762,6 +806,11 @@ static hosting dependency.
 - Decide whether direct protected plaintext display/copy is in scope for the
   first sandbox release or whether first release only supports create, sign, and
   DEK release.
+- In-sandbox confirmation policy for high-risk operations. **Decided:** `sign`
+  requires per-operation in-sandbox confirmation every time (no unlock-window
+  pre-authorization); `releaseDEK` and `unseal`-to-plaintext require in-sandbox
+  confirmation. Finalize what operation context each confirmation renders,
+  especially decoded/human-readable transaction detail for signing.
 - Finalize the local pinned manifest format and release process.
 
 ### Phase 1: static sandbox app and RPC skeleton
@@ -789,8 +838,13 @@ static hosting dependency.
 - Move protected plaintext display/copy into sandbox-owned UI for `unseal`, if
   that product surface remains supported.
 - Move protected signing and DEK release into sandbox RPC operations.
+- Build the in-sandbox confirmation UI for high-risk operations: per-`sign`
+  confirmation that renders operation context (name, scheme, digest, any decoded
+  transaction detail), plus `releaseDEK` / `unseal` confirmation. The parent
+  cannot render, prefill, dismiss, or auto-approve these prompts.
 - Keep the parent as the daemon broker and result router only.
-- Add focused crypto vector tests and RPC contract tests.
+- Add focused crypto vector tests and RPC contract tests, including a test that a
+  parent-issued `sign` cannot complete without the in-sandbox confirmation.
 
 ### Phase 4: integrity, CSP, and control-plane deploy
 
