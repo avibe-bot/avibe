@@ -145,15 +145,15 @@ Core concepts:
 - Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress.
 - Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`.
 - Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
-- Protected: for high-risk secrets, such as production databases, wallet/funds keys, or irreversible operations. Use requires browser approval and passkey unlock with end-to-end encryption.
+- Protected: for high-risk secrets, such as production databases or wallet/funds keys. Because protected secrets are end-to-end encrypted, use requires browser approval and passkey unlock.
 
 Rules:
 - Refer to secrets only by secret name, tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
 - With `vibe vault fetch` and `vibe vault sign`, the agent does not receive the plaintext secret.
-- For protected `run` / `fetch`, an `approval_required` response does not automatically rerun the command. Default to ending the turn and letting Avibe resume you after the user's browser approval; then retry the original `run` / `fetch`.
-- For protected `sign`, do not retry the signing command after approval. The approved signature is returned by the approval result or callback.
+- When protected `run` / `fetch` needs approval, Avibe only records the request; it does not rerun the command automatically. End the turn, let Avibe resume this session after the user's browser approval, then run the original `run` / `fetch` command again.
+- When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, read the completed request result to get the signature and continue.
 
 Common commands:
 
