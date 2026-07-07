@@ -112,9 +112,11 @@ export function vaultUnlocked(): boolean {
   if (sessionVault.vmk && autoLockExpired()) {
     // Zero an expired VMK the instant anything checks the lock state, even if the (delayed) timer
     // hasn't fired — so no flow (delete gate, create/provision, approval) can treat a past-deadline
-    // vault as unlocked. No notify here (this may run during render); the interval tick / next op
-    // notifies subscribers.
+    // vault as unlocked.
     clearVmk();
+    // Notify subscribers so other mounted forms/approval cards drop out of 'unlocked' too. Deferred
+    // to a microtask because this may run during render (can't synchronously setState here).
+    queueMicrotask(notifyVaultLockChange);
     return false;
   }
   return sessionVault.vmk != null;
@@ -329,7 +331,13 @@ export function useProtectedVault() {
   useEffect(
     () =>
       subscribeVaultLock(() => {
-        setStatus((prev) => (prev === 'checking' || prev === 'error' ? prev : vaultStatusNow()));
+        setStatus((prev) => {
+          // A global unlock (from another dialog/tab) should win even over a stale 'error'/'checking'
+          // discovery state — otherwise that instance stays disabled though the vault is now unlocked.
+          if (sessionVault.vmk) return 'unlocked';
+          // No VMK: don't clobber an in-flight discovery; otherwise reflect locked/needs-setup.
+          return prev === 'checking' || prev === 'error' ? prev : vaultStatusNow();
+        });
       }),
     [],
   );
