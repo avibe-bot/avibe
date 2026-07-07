@@ -97,18 +97,24 @@ The main Avibe app embeds:
 ```
 
 The parent page also sends a Permissions-Policy response that delegates WebAuthn
-and protected copy only to the sandbox origin:
+only to the sandbox origin, while keeping first-party clipboard writes and
+delegating clipboard writes to the sandbox:
 
 ```http
 Permissions-Policy:
   publickey-credentials-get=("https://sandbox.avibe.bot"),
   publickey-credentials-create=("https://sandbox.avibe.bot"),
-  clipboard-write=("https://sandbox.avibe.bot")
+  clipboard-write=(self "https://sandbox.avibe.bot")
 ```
 
 Do not include `self` in the WebAuthn directives. If the parent origin can run
 WebAuthn, a same-origin main-app XSS could run the PRF ceremony against stored
 `wrap_meta` and unwrap the VMK outside the sandbox.
+This asymmetry is intentional: `clipboard-write` may keep `self` because the
+existing first-party app already has copy flows, including backend OAuth setup
+(`ui/src/components/settings/BackendOAuthPanel.tsx:317`) and workbench editor
+copy actions (`ui/src/components/workbench/MonacoEditor.tsx:185`), while WebAuthn must
+not.
 
 The iframe is not just a hidden crypto worker. WebAuthn `create()` in a
 cross-origin iframe requires transient user activation, and protected value entry
@@ -410,7 +416,6 @@ type VerifiableSigningContext =
       canonicalPreimage: string;
       digestAlgorithm: "avault-operation-hash-v1";
       digest: string;
-      display: { title: string; fields: { label: string; value: string }[] };
     };
 
 type SignRequest = {
@@ -427,14 +432,17 @@ type SignRequest = {
   - Notes: protected keys must not do blind digest signing. The request must carry
     typed transaction or canonical preimage data that the sandbox can
     independently hash and compare with `signingContext.digest` before rendering
-    a human-readable confirmation. If the sandbox cannot validate the
-    preimage-to-digest binding for that context type, it refuses to sign. After
-    per-operation OS-backed confirmation (see "High-risk operations require
-    OS-backed in-sandbox confirmation"), the sandbox opens the sealed private key
-    under the VMK, signs the verified digest, zeroes the private key, and returns
-    only the public signature. Full decode coverage is scheme-specific and should
-    be phased; unsupported schemes fail closed rather than falling back to raw
-    hex approval.
+    a human-readable confirmation. The sandbox must render only from data it can
+    independently derive from the verified preimage, transaction, or typed-data
+    payload; it must not accept parent-supplied display strings. If the sandbox
+    cannot validate the preimage-to-digest binding or decode that context type
+    with its own trusted decoder, it refuses to sign. After per-operation
+    OS-backed confirmation (see "High-risk operations require top-level or
+    OS-backed confirmation"), the sandbox opens the sealed private key under the
+    VMK, signs the verified digest, zeroes the private key, and returns only the
+    public signature. Full decode coverage is scheme-specific and should be
+    phased; unsupported schemes fail closed rather than falling back to raw hex
+    or parent-rendered approval.
 
 - `releaseDEK`
   - Request:
@@ -467,11 +475,14 @@ type ReleaseDekRequest = {
   - Notes: the sandbox must not accept a raw parent-supplied HPKE public key. The
     parent relays a daemon-signed binding over the grant/request id, operation
     context, agent public key, fingerprint, and expiry. The sandbox verifies that
-    signature with a daemon verification key pinned in VMK-authenticated
-    protected-vault root metadata before unwrapping the DEK. Only then does it
-    seal the DEK to the authenticated resident agent key. The raw DEK never
-    leaves the sandbox, and a compromised parent cannot substitute an attacker
-    HPKE key.
+    signature with the daemon verification public key pinned directly in
+    VMK-authenticated protected-vault root metadata before unwrapping the DEK.
+    If the design uses a fingerprint instead, the resolver must be
+    parent-independent and trusted by the sandbox. The sandbox must never obtain
+    the daemon verification key over parent `postMessage`. Only after verifying
+    the binding does it seal the DEK to the authenticated resident agent key.
+    The raw DEK never leaves the sandbox, and a compromised parent cannot
+    substitute an attacker HPKE key.
 
 - `deleteAuthzAssertion`
   - Request:
@@ -497,7 +508,7 @@ type DeleteAuthzAssertionResult = {
   - Notes: this composes with #818. It is a server-verifiable WebAuthn assertion
     and does not require the VMK to be unlocked.
 
-### High-risk operations require OS-backed in-sandbox confirmation
+### High-risk operations require top-level or OS-backed confirmation
 
 Isolation alone stops a main-app XSS from *reading* the VMK, but not from
 *using* it: while the vault is unlocked, main-app XSS could send `sign`,
@@ -508,32 +519,42 @@ during the unlock window can drain funds.
 
 The sandbox therefore doubles as a **trusted confirmation surface**, not just a
 key store. A bare in-frame button click is not enough, because a malicious parent
-controls iframe size, position, opacity, stacking, and surrounding UI. High-risk
-confirmation must combine sandbox-rendered context with a fresh OS-native
-WebAuthn user-verification assertion over an operation challenge. The browser/OS
-passkey prompt is the part the parent cannot overlay or synthesize.
+controls iframe size, position, opacity, stacking, and surrounding UI. Geometry
+checks are necessary but not sufficient: a parent can still overlay benign UI
+above a full-size visible iframe, and the OS WebAuthn prompt proves origin and
+presence rather than the transaction text the user saw.
+
+For the highest-risk operations, especially protected `sign` and `releaseDEK`,
+the safe target is a top-level `https://sandbox.avibe.bot` confirmation context
+using the same popup/redirect model as the WebAuthn-create fallback. A top-level
+sandbox document gives the browser an unobscured top document and avoids parent
+overlay control. When the product chooses in-iframe confirmation for lower
+friction, the residual UI-redress risk must be treated as accepted, documented,
+and limited by sandbox-derived display, visibility checks, and a fresh OS-native
+WebAuthn user-verification assertion over an operation challenge.
 
 - **`sign` requires per-operation confirmation, every time.** The unlock window
   releases the VMK into sandbox memory but does NOT pre-authorize signing. Each
   `sign` RPC must provide a verifiable signing context. The sandbox recomputes
   the digest from typed transaction/preimage data, refuses mismatches and
-  unsupported blind-digest contexts, renders decoded human-readable details, then
-  requires a fresh WebAuthn `get()` user-verification assertion bound to that
-  operation before it opens the key and signs. Main-app XSS can *request* a
-  signature but cannot silently complete a verified signature ceremony.
+  unsupported blind-digest contexts, renders decoded human-readable details from
+  its own trusted decoder, then requires top-level sandbox confirmation or a
+  fresh WebAuthn `get()` user-verification assertion bound to that operation
+  before it opens the key and signs. Main-app XSS can *request* a signature but
+  cannot silently complete a verified signature ceremony.
 - **`releaseDEK` requires in-sandbox confirmation** when it grants an agent
   ongoing access to a protected secret (the same confused-deputy-while-unlocked
   risk). The release is sealed only to a daemon-authenticated resident agent key,
-  and the confirmation is bound to a fresh WebAuthn UV assertion. Headless
-  protected DEK release must not be reachable straight from a parent RPC with a
-  parent-provided key.
+  and the confirmation is bound to top-level sandbox confirmation or a fresh
+  WebAuthn UV assertion. Headless protected DEK release must not be reachable
+  straight from a parent RPC with a parent-provided key.
 - **`unseal` to display/copy requires in-sandbox confirmation** and renders/copies
   only inside the sandbox frame; the plaintext never returns to the parent. Copy
   uses the delegated `clipboard-write` permission and should be gated by the same
   operation confirmation.
 
-Before presenting any high-risk confirmation, the sandbox should enforce
-anti-clickjacking constraints:
+Before presenting any in-iframe high-risk confirmation, the sandbox should
+enforce anti-clickjacking constraints:
 
 - require the iframe to be fully visible, focused, and above a minimum size for
   the operation UI;
@@ -543,10 +564,11 @@ anti-clickjacking constraints:
   parent-triggered hidden frame;
 - fail closed if these checks cannot run.
 
-These confirmations hold against a compromised parent only when the approval is
-bound to the OS passkey prompt and the sandbox refuses hostile or invisible frame
-geometry. A bare in-frame click alone does not. Auto-lock remains a backstop that
-bounds the window, but OS-backed confirmation — not the unlock window — is the
+These checks are necessary-not-sufficient. They block hidden/tiny/clipped
+confirmations but do not defeat overlays above an otherwise visible iframe. Phase
+0 must decide which operations require the top-level unobscurable sandbox
+context versus best-effort iframe confirmation. Auto-lock remains a backstop that
+bounds the window, but operation confirmation — not the unlock window — is the
 authorization for each high-risk operation.
 
 ## 3. Integrity model: central serving, local-anchored trust
@@ -584,11 +606,16 @@ pinned sandbox manifest and expects a new immutable sandbox version path.
 
 Residual caveat: because browsers do not enforce integrity on iframe navigation,
 a fully malicious server that can equivocate per request could serve honest bytes
-to the parent's verifier and different bytes to the iframe. The practical design
-should reduce that risk with immutable versioned URLs, SRI inside the verified
-loader, strict CSP, `worker-src 'none'`, public hash transparency, and
-fail-closed telemetry. If a future browser-supported iframe integrity or signed
-web bundle mechanism becomes available, this should adopt it.
+to the parent's verifier and different bytes to the iframe. Under that same
+equivocation, the server also controls its own response headers and could omit
+`worker-src 'none'` while serving the iframe, allowing a malicious same-origin
+Service Worker to persist. `worker-src 'none'` helps in the honest-serve case,
+but the parent cannot enforce the sandbox CSP for an equivocated navigation.
+This remains in the central-host equivocation residual bucket, bounded
+operationally by immutable versioned URLs, SRI inside the verified loader,
+reproducible builds, public hash transparency, fail-closed telemetry, and a
+future browser-supported iframe-integrity or signed-web-bundle mechanism if one
+ships.
 
 ### Sandbox self-reports build hash
 
@@ -621,8 +648,9 @@ Use a combined model:
 3. The loader uses SRI for JS/CSS and a CSP that allows only those same assets.
 4. The iframe URL is versioned and immutable. No mutable `latest` path is used
    for protected crypto.
-5. The sandbox blocks Service Workers with `worker-src 'none'`; a Service Worker
-   would be a persistent same-origin code path outside this integrity review.
+5. Honest sandbox responses include `worker-src 'none'`; Service Workers remain
+   out of the reviewed integrity model unless a later design deliberately adds
+   them. This is not parent-enforceable under central-host equivocation.
 6. The sandbox reports the same build hash during handshake; the parent treats a
    mismatch as fail-closed diagnostic evidence, not as the primary proof.
 7. Legitimate sandbox upgrades ship with a new Avibe local install version that
@@ -649,7 +677,9 @@ Delegation is needed in both places:
 
 The protected copy path also needs `clipboard-write` delegation in both places.
 Chromium blocks Clipboard API writes from cross-origin iframes unless that
-feature is explicitly granted.
+feature is explicitly granted. Unlike WebAuthn, `clipboard-write` should keep
+`self` or be scoped to Vault pages only, because existing first-party UI flows
+copy OAuth and editor values from the top-level app.
 
 The sandbox must trigger WebAuthn from a user action inside the iframe because
 cross-origin credential creation requires transient activation. The main app can
@@ -707,10 +737,11 @@ Content-Security-Policy:
 
 The exact CSP must match the final asset strategy. If the loader uses inline
 boot code or hashed styles, prefer hashes over broad inline allowances.
-Service workers are explicitly blocked with `worker-src 'none'`; they are out of
-the reviewed integrity model unless a later design adds them deliberately. This
-prevents a one-time bad sandbox load from registering a same-origin Service
-Worker that persists and controls later iframe navigations.
+Service workers are explicitly blocked with `worker-src 'none'` in honest
+sandbox responses; they are out of the reviewed integrity model unless a later
+design adds them deliberately. Under central-host equivocation, the parent cannot
+force this header onto the actual iframe response, so Service Worker persistence
+remains part of the equivocation residual risk rather than a fully solved issue.
 
 Allow `127.0.0.1` to embed the sandbox. The raw-IP parent still cannot be a
 WebAuthn RP, but it no longer needs to be. The sandbox's HTTPS origin is the RP.
@@ -746,6 +777,15 @@ Move the VMK lifecycle from `useProtectedVault.ts` into the sandbox:
 - Broadcast messages contain no secrets. They are lock/status signals only, and
   still include the non-secret install/vault id so unrelated protected-vault
   iframes on the shared `sandbox.avibe.bot` origin ignore them.
+- Browser storage and BroadcastChannel are partitioned by top-level site, so this
+  channel is best-effort within one top-level-site partition. A sandbox iframe
+  under `http://localhost` should not be expected to signal a sandbox iframe
+  under `https://<user>.avibe.bot`.
+- For cross-site "lock everywhere", use a daemon-mediated non-secret monotonic
+  lock generation. The sandbox checks that generation through the parent-brokered
+  daemon API before using the VMK and after focus/resume; if the daemon generation
+  is newer than the sandbox's local generation, the sandbox zeroes the VMK and
+  reports locked. The daemon is the shared authority across storage partitions.
 - Auto-lock can remain per iframe. A background tab expiring should not force an
   active tab to lock unless the product explicitly chooses global idle lock.
 
@@ -780,10 +820,12 @@ Expected client-visible `wrap_meta` changes:
 - `rp_id` should become `sandbox.avibe.bot`.
 - A non-secret per-vault user handle or key ID may be added for shared-RP
   WebAuthn account separation.
-- A daemon verification public key, or a key identifier that resolves to one,
-  must be pinned in VMK-authenticated protected-vault root metadata so
-  `releaseDEK` can verify daemon-signed agent-key bindings without trusting a
-  parent-supplied public key.
+- The daemon verification public key itself must be pinned in VMK-authenticated
+  protected-vault root metadata so `releaseDEK` can verify daemon-signed
+  agent-key bindings without trusting parent-supplied key material. A
+  cryptographic fingerprint is acceptable only if the sandbox has a
+  parent-independent trusted resolver. A bare `keyId` resolved through parent
+  data is not sufficient.
 - The existing `copies` list should remain the factor extension point.
 
 Minimal daemon changes may be needed to expose or store non-secret sandbox
@@ -863,27 +905,32 @@ Does not fully defend:
 - Malware that can drive the user's browser and satisfy OS/passkey prompts.
 - Main-app XSS invoking allowed sandbox RPC operations while the vault is
   unlocked. Direct key exfiltration is removed by isolation; abuse of high-risk
-  operations is blocked by **OS-backed in-sandbox confirmation** only when the
-  sandbox validates the operation context, enforces frame visibility/geometry
-  checks, and binds approval to a fresh WebAuthn UV prompt. A bare in-frame click
-  is clickjackable and is not a security boundary. `sign` is confirmed per
-  operation every time; `releaseDEK` authenticates the resident agent key before
-  sealing; `unseal`-to-plaintext stays sandbox-owned. Lower-risk operations stay
-  context-bound; delete/authz stays server-challenge-bound. Residual: an XSS can
-  still try to trick a *present* user into approving a malicious signature, so the
-  confirmation UI must render verified human-readable operation context — this
-  reduces the risk to social-engineering of a present user, not silent key use.
+  operations is blocked only when the sandbox validates the operation context,
+  derives its own display from verified inputs, and binds approval to top-level
+  sandbox confirmation or a fresh WebAuthn UV prompt. A bare in-frame click is
+  clickjackable and is not a security boundary. `sign` is confirmed per operation
+  every time; `releaseDEK` authenticates the resident agent key before sealing;
+  `unseal`-to-plaintext stays sandbox-owned. Lower-risk operations stay
+  context-bound; delete/authz stays server-challenge-bound. Residual: a
+  compromised parent can still try to trick a *present* user, and in-iframe
+  confirmation remains overlay-redressable even with geometry checks. Highest-risk
+  operations should escalate to top-level sandbox confirmation unless Phase 0
+  explicitly accepts iframe residual risk.
 - A compromised parent substituting an attacker HPKE key for protected DEK
   release. The sandbox refuses raw parent-supplied agent keys and verifies a
-  daemon-signed agent-key binding against VMK-authenticated root metadata before
-  unwrapping and sealing the DEK.
+  daemon-signed agent-key binding against the daemon verification public key
+  pinned directly in VMK-authenticated root metadata before unwrapping and
+  sealing the DEK. The verification key is never accepted over parent
+  `postMessage`.
 - A central host that can perfectly equivocate between the parent's verification
   fetches and the iframe navigation. Current web platform support lacks native
   iframe SRI. Immutable versioned URLs, loader SRI, CSP, reproducible builds,
-  public hash transparency, and `worker-src 'none'` bound this risk
-  operationally. Service Workers are blocked so a one-time bad/equivocated load
-  cannot persist as a same-origin controller for later honest iframe loads.
-  Future iframe integrity support should be adopted if available.
+  public hash transparency, and fail-closed telemetry bound this risk
+  operationally. `worker-src 'none'` is honest-serve defense-in-depth only: a
+  host that equivocates can omit it on the iframe response and register a
+  persistent Service Worker, so Service Worker persistence remains part of this
+  residual rather than solved by the parent. Future iframe integrity or
+  signed-web-bundle support should be adopted if available.
 
 Residual trust statement:
 
@@ -913,12 +960,13 @@ static hosting dependency.
 - Decide whether direct protected plaintext display/copy is in scope for the
   first sandbox release or whether first release only supports create, sign, and
   DEK release.
-- OS-backed in-sandbox confirmation policy for high-risk operations. **Decided:**
+- Top-level vs iframe confirmation policy for high-risk operations. **Decided:**
   `sign` requires per-operation confirmation every time (no unlock-window
   pre-authorization), with sandbox-verified preimage/transaction context before
   signing; `releaseDEK` and `unseal`-to-plaintext require operation confirmation
-  as well. Finalize scheme-specific decode coverage and visibility/geometry
-  requirements.
+  as well. Phase 0 must decide which operations require a top-level unobscurable
+  sandbox context versus best-effort iframe confirmation, and finalize
+  scheme-specific decode coverage plus visibility/geometry requirements.
 - Finalize the local pinned manifest format and release process.
 
 ### Phase 1: static sandbox app and RPC skeleton
@@ -946,18 +994,21 @@ static hosting dependency.
 - Move protected plaintext display/copy into sandbox-owned UI for `unseal`, if
   that product surface remains supported.
 - Move protected signing and DEK release into sandbox RPC operations.
-- Build the OS-backed in-sandbox confirmation UI for high-risk operations:
+- Build the high-risk confirmation UI:
   per-`sign` confirmation that verifies typed preimage/transaction data against
-  the digest and renders decoded human-readable detail, plus `releaseDEK` /
-  `unseal` confirmation. The parent cannot render, prefill, dismiss, or
-  auto-approve these prompts; a bare iframe click is not sufficient.
+  the digest and renders decoded human-readable detail derived by the sandbox,
+  plus `releaseDEK` / `unseal` confirmation. The highest-risk operations use the
+  top-level sandbox context unless Phase 0 explicitly accepts iframe residual
+  risk. The parent cannot render, prefill, dismiss, or auto-approve these
+  prompts; a bare iframe click is not sufficient.
 - Add daemon-signed agent-key binding verification before `releaseDEK` unwraps a
-  DEK, using the daemon verification key pinned in VMK-authenticated root
-  metadata.
+  DEK, using the daemon verification public key pinned directly in
+  VMK-authenticated root metadata.
 - Keep the parent as the daemon broker and result router only.
 - Add focused crypto vector tests and RPC contract tests, including a test that a
   parent-issued `sign` cannot complete without a verified preimage binding,
-  visible sandbox confirmation, and fresh WebAuthn UV assertion.
+  sandbox-derived display, and the required top-level or WebAuthn UV
+  confirmation.
 
 ### Phase 4: integrity, CSP, and control-plane deploy
 
