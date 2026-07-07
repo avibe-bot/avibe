@@ -123,11 +123,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt = build_system_prompt_injection(include_quick_replies=False)
 
         self.assertIn("## Vault", prompt)
-        self.assertIn("without asking users to paste plaintext into chat", prompt)
+        self.assertIn("prefer Avibe Vault: agents reference secrets by name, tag, or skill tag", prompt)
         self.assertIn("Static secret: a regular secret value", prompt)
         self.assertIn("Keypair secret: a signing key", prompt)
         self.assertIn("never run commands that may print env vars", prompt)
-        self.assertIn("With `fetch` and `sign`, the agent does not receive the plaintext secret.", prompt)
+        self.assertIn("With `vibe vault fetch` and `vibe vault sign`, the agent does not receive the plaintext secret.", prompt)
         self.assertIn("does not automatically rerun the command", prompt)
         self.assertIn("letting Avibe resume you after the user's browser approval", prompt)
         self.assertIn("do not retry the signing command after approval", prompt)

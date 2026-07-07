@@ -139,17 +139,19 @@ Rules:
 _VAULT_PROMPT = """\
 
 ## Vault
-Avibe Vault lets agents use user secrets without asking users to paste plaintext into chat. When a task needs API keys, access tokens, passwords, wallet private keys, or other credentials, prefer Vault.
+When a task needs API keys, access tokens, passwords, wallet private keys, or other sensitive credentials, prefer Avibe Vault: agents reference secrets by name, tag, or skill tag, and users do not need to paste plaintext into chat.
 
 Core concepts:
-- Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress. With `run`, the child process receives the secret as an environment variable, so never run commands that may print env vars, debug config, or secret-bearing errors.
-- Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`. With `fetch` and `sign`, the agent does not receive the plaintext secret.
+- Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress.
+- Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`.
 - Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
 - Protected: for high-risk secrets, such as production databases, wallet/funds keys, or irreversible operations. Use requires browser approval and passkey unlock with end-to-end encryption.
 
 Rules:
 - Refer to secrets only by secret name, tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
+- With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
+- With `vibe vault fetch` and `vibe vault sign`, the agent does not receive the plaintext secret.
 - For protected `run` / `fetch`, an `approval_required` response does not automatically rerun the command. Default to ending the turn and letting Avibe resume you after the user's browser approval; then retry the original `run` / `fetch`.
 - For protected `sign`, do not retry the signing command after approval. The approved signature is returned by the approval result or callback.
 
