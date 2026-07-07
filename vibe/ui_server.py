@@ -2155,8 +2155,14 @@ def _merge_csp_frame_src(existing: str | None) -> str:
     return "; ".join(directives)
 
 
+def _is_show_page_response_path(path: str) -> bool:
+    return path == "/show" or path.startswith("/show/") or path == "/p" or path.startswith("/p/")
+
+
 @app.after_request
 def add_vault_sandbox_security_headers(response: Response) -> Response:
+    if _is_show_page_response_path(request.path):
+        return response
     response.headers["Permissions-Policy"] = VAULT_SANDBOX_PERMISSIONS_POLICY
     response.headers["Content-Security-Policy"] = _merge_csp_frame_src(
         response.headers.get("Content-Security-Policy")

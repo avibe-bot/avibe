@@ -855,6 +855,7 @@ def test_public_show_page_clears_show_event_write_cookie(monkeypatch, tmp_path):
     cookies = "\n".join(response.headers.getlist("set-cookie"))
     assert "vibe_show_event_token=" in cookies
     assert "Max-Age=0" in cookies
+    assert "sandbox.avibe.bot" not in response.headers.get("content-security-policy", "")
 
 
 def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch, tmp_path):
