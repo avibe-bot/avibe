@@ -316,7 +316,7 @@ def test_edit_metadata_json_rejects_secret_material(capfd):
     assert payload["code"] == "secret_material_rejected"
 
 
-def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
+def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
     _create_standard_secret("STANDARD_KEY")
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
@@ -349,15 +349,18 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
             sealed=_sealed("remote-key"),
         )
 
-    assert cli.cmd_vault_discover(_ns()) == 0
+    assert cli.cmd_vault_find(_ns()) == 0
     payload = json.loads(capfd.readouterr().out)
 
-    assert payload["kind"] == "vault_discovery"
+    assert payload["kind"] == "vault_find"
     secrets = {item["name"]: item for item in payload["secrets"]}
     assert secrets["STANDARD_KEY"] == {
         "name": "STANDARD_KEY",
         "kind": "static",
         "protection": "standard",
+        "tags": [],
+        "description": None,
+        "policy": {},
         "access_grantable": True,
         "per_use_sign": False,
     }
@@ -366,6 +369,60 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
     assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is True
     assert secrets["REMOTE_ETH_KEY"]["per_use_sign"] is False
     assert "sk-" not in json.dumps(payload)
+
+
+def test_list_paginates_and_points_agents_to_find(capfd):
+    for index in range(25):
+        _create_standard_secret(f"KEY_{index:02d}")
+
+    assert cli.cmd_vault_list(_ns()) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_secrets"
+    assert len(payload["secrets"]) == 20
+    assert payload["secrets"][0]["name"] == "KEY_00"
+    assert payload["pagination"]["has_more"] is True
+    assert payload["pagination"]["next_command"] == "vibe vault list --page 2 --limit 20"
+    assert "vibe vault find --q <keyword>" in payload["message"]
+    assert "Use pagination.next_command" in payload["next_steps"][0]
+
+
+def test_find_filters_by_query_and_multiple_tags(capfd):
+    _create_standard_secret("OPENAI_PROD_KEY", tags=["openai", "prod"], description="OpenAI production token")
+    _create_standard_secret("OPENAI_DEV_KEY", tags=["openai", "dev"], description="OpenAI dev token")
+    _create_standard_secret("GITHUB_PROD_KEY", tags=["github", "prod"], description="GitHub production token")
+
+    assert cli.cmd_vault_find(_ns(query="openai", tag=["prod"], kind="static")) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert [secret["name"] for secret in payload["secrets"]] == ["OPENAI_PROD_KEY"]
+    assert payload["pagination"]["has_more"] is False
+
+
+def test_tags_lists_normal_and_skill_tags(capfd):
+    _create_standard_secret("OPENAI_PROD_KEY", tags=["openai", "prod", "skill:model-work"])
+    _create_standard_secret("OPENAI_DEV_KEY", tags=["openai", "dev", "skill:model-work"])
+
+    assert cli.cmd_vault_tags(_ns()) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    tags = {item["tag"]: item for item in payload["tags"]}
+    assert tags["openai"] == {"tag": "openai", "type": "tag", "secret_count": 2}
+    assert tags["skill:model-work"] == {
+        "tag": "skill:model-work",
+        "type": "skill",
+        "secret_count": 2,
+        "skill": "model-work",
+    }
+
+
+def test_tags_filters_skill_tags_by_query(capfd):
+    _create_standard_secret("OPENAI_KEY", tags=["skill:model-work", "skill:billing"])
+
+    assert cli.cmd_vault_tags(_ns(query="model", type="skill")) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert [item["tag"] for item in payload["tags"]] == ["skill:model-work"]
 
 
 def test_rm_refuses_protected_secret_and_leaves_it(capfd):

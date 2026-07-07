@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { KeyRound, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
+import { Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
@@ -7,7 +7,6 @@ import { webauthnAvailable } from '@/lib/useProtectedVault';
 import type { useProtectedVault } from '@/lib/useProtectedVault';
 import { Badge } from './badge';
 import { Button } from './button';
-import { Input } from './input';
 
 type Vault = ReturnType<typeof useProtectedVault>;
 
@@ -31,14 +30,10 @@ const PANEL = 'flex flex-col gap-4 rounded-2xl border border-border bg-surface p
 
 /**
  * Protected-tier setup / unlock panel — design.pen frames `kAmWj` (setup) and `g5Q7F`
- * (unlock). Setup leads with a single recommended passkey path and progressively reveals
- * the recoverable password fields behind a "Use a password instead" link; unlock leads
- * with passkey and reveals password the same way. Both are form-free: the panel often
- * lives inside the create dialog's own `<form>`, so a nested `<form>` here would be invalid
- * HTML and (in practice) trigger a full-page reload. Every action is a button `onClick`.
- *
- * Password is always the recovery root in the crypto layer; a passkey is the quick primary
- * unlock added on top. The unlocked VMK is cached for the session by {@link useProtectedVault}.
+ * (unlock). The panel is form-free: it often lives inside the create dialog's own `<form>`,
+ * so a nested `<form>` here would be invalid HTML and (in practice) trigger a full-page reload.
+ * Every action is a button `onClick`. The unlocked VMK is cached for the session by
+ * {@link useProtectedVault}.
  *
  * `secretName` is shown in the unlock subtitle ("<NAME> is protected …"); it is optional
  * because the create-dialog gating step has no single secret name yet.
@@ -49,14 +44,9 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
   onDismiss,
 }) => {
   const { t } = useTranslation();
-  const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
-  // Progressive disclosure: password fields stay hidden until the user opts out of the
-  // recommended passkey path. Resets whenever the panel re-mounts for a new state.
-  const [showPassword, setShowPassword] = useState(false);
-  // Passkey-only setup has no password/second-passkey/recovery fallback yet, so a lost
-  // passkey is unrecoverable — gate the recommended action behind an explicit ack.
+  // Passkey-only setup has no recovery fallback yet, so a lost passkey is
+  // unrecoverable — gate the recommended action behind an explicit ack.
   const [ackLoss, setAckLoss] = useState(false);
 
   const run = async (fn: () => Promise<void>) => {
@@ -64,8 +54,6 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
     vault.setError(null);
     try {
       await fn();
-      setPassword('');
-      setConfirm('');
     } catch (err) {
       vault.setError(friendlyError(t, err instanceof Error ? err.message : String(err)));
     } finally {
@@ -109,21 +97,9 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
   }
 
   const canUsePasskey = webauthnAvailable();
-  const passwordValid = password.trim().length > 0 && password === confirm;
 
   // ---- Setup (needs-setup): design.pen `kAmWj` ---------------------------------------
   if (vault.status === 'needs-setup') {
-    const submitPassword = () => {
-      if (password.trim().length === 0) return;
-      if (password !== confirm) {
-        vault.setError(t('vaults.protectedUnlock.errors.mismatch'));
-        return;
-      }
-      void run(() => vault.setupPassword(password));
-    };
-    // Password is the only factor when WebAuthn isn't available here — surface the fields
-    // immediately rather than hiding them behind a passkey card that can't be used.
-    const passwordRevealed = showPassword || !canUsePasskey;
     return (
       <div className={PANEL}>
         <div className="flex flex-col items-center gap-4">
@@ -138,8 +114,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
           </div>
         </div>
 
-        {/* Recommended: passkey — the single primary path (design leads with this). */}
-        {canUsePasskey && (
+        {canUsePasskey ? (
           <div className="flex flex-col items-center gap-2.5 rounded-xl border-[1.5px] border-mint bg-mint-soft p-4">
             <Badge variant="success" className="border-transparent bg-mint uppercase tracking-wide text-background">
               <Sparkles className="size-3" />
@@ -151,11 +126,12 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
             </Button>
             <span className="text-center text-[11.5px] text-muted-foreground">{t('vaults.protectedUnlock.passkeyCaption')}</span>
           </div>
+        ) : (
+          <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-snug text-warning">
+            {t('vaults.protectedUnlock.unlockUnavailableHere')}
+          </div>
         )}
 
-        {/* Unrecoverable acknowledgement — a passkey-only vault has no password/second-passkey/
-            recovery fallback yet, so a lost passkey means the protected secrets are gone. Gate
-            the recommended action behind an explicit ack until a recovery flow exists. */}
         {canUsePasskey && (
           <div className="flex flex-col gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3">
             <span className="text-[11.5px] leading-snug text-warning">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
@@ -163,61 +139,6 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
               <input type="checkbox" checked={ackLoss} onChange={(e) => setAckLoss(e.target.checked)} className="mt-0.5 shrink-0" />
               <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
             </label>
-          </div>
-        )}
-
-        {/* Progressive disclosure — password fields stay hidden until requested. */}
-        {!passwordRevealed ? (
-          <button
-            type="button"
-            onClick={() => setShowPassword(true)}
-            className="flex items-center justify-center gap-2 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {t('vaults.protectedUnlock.usePasswordInstead')}
-            <Badge variant="destructive">{t('vaults.protectedUnlock.lessSecure')}</Badge>
-          </button>
-        ) : (
-          <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-surface-2 p-3">
-            <span className="flex items-center gap-1.5 text-xs font-semibold">
-              <KeyRound className="size-3.5" />
-              {t('vaults.protectedUnlock.passwordOptionTitle')}
-            </span>
-            <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
-              {t('vaults.protectedUnlock.setPasswordLabel')}
-              <Input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={t('vaults.protectedUnlock.passwordPlaceholder')}
-                autoComplete="new-password"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    submitPassword();
-                  }
-                }}
-              />
-            </label>
-            <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
-              {t('vaults.protectedUnlock.confirmLabel')}
-              <Input
-                type="password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                placeholder={t('vaults.protectedUnlock.confirmPlaceholder')}
-                autoComplete="new-password"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    submitPassword();
-                  }
-                }}
-              />
-            </label>
-            <Button type="button" variant="secondary" onClick={submitPassword} disabled={busy || !passwordValid}>
-              {busy && <Loader2 className="size-4 animate-spin" />}
-              {t('vaults.protectedUnlock.createPassword')}
-            </Button>
           </div>
         )}
 
@@ -238,12 +159,6 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
 
   // ---- Unlock (locked): design.pen `g5Q7F` -------------------------------------------
   const showUnlockPasskey = vault.hasPasskey() && canUsePasskey && vault.passkeyUsableHere();
-  const showUnlockPassword = vault.hasPassword();
-  // If the passkey can't be used here, the password is the only way in — reveal it up front.
-  const passwordRevealed = showPassword || !showUnlockPasskey;
-  const submitUnlock = () => {
-    if (password.trim()) void run(() => vault.unlockPassword(password));
-  };
   return (
     <div className={PANEL}>
       <div className="flex flex-col items-center gap-4">
@@ -270,45 +185,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
         </div>
       )}
 
-      {showUnlockPassword &&
-        (!passwordRevealed ? (
-          <button
-            type="button"
-            onClick={() => setShowPassword(true)}
-            className="flex items-center justify-center gap-2 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {t('vaults.protectedUnlock.usePasswordInline')}
-            <Badge variant="destructive">{t('vaults.protectedUnlock.lessSecure')}</Badge>
-          </button>
-        ) : (
-          <div className="flex items-end gap-2">
-            <label className="flex flex-1 flex-col gap-1.5 text-xs font-medium text-muted-foreground">
-              <span className="flex items-center gap-1.5">
-                <KeyRound className="size-3.5" />
-                {t('vaults.protectedUnlock.passwordLabel')}
-              </span>
-              <Input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={t('vaults.protectedUnlock.passwordPlaceholder')}
-                autoComplete="current-password"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    submitUnlock();
-                  }
-                }}
-              />
-            </label>
-            <Button type="button" onClick={submitUnlock} disabled={busy || !password.trim()}>
-              {busy && <Loader2 className="size-4 animate-spin" />}
-              {t('vaults.protectedUnlock.unlockCta')}
-            </Button>
-          </div>
-        ))}
-
-      {!showUnlockPasskey && !showUnlockPassword && (
+      {!showUnlockPasskey && (
         <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
           {t('vaults.protectedUnlock.unlockUnavailableHere')}
         </div>

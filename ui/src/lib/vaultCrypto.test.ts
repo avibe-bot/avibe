@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Aes256Gcm, CipherSuite, HkdfSha256 } from '@hpke/core';
 import { DhkemX25519HkdfSha256 } from '@hpke/dhkem-x25519';
-import { scrypt } from 'hash-wasm';
 
 import vectors from './__fixtures__/p2_core_crypto.json';
 import {
   BLIND_BOX_AAD_DOMAIN,
   BLIND_BOX_SCHEME,
-  addPasswordCopy,
   avaultPublicKeyFingerprint,
   base64ToBytes,
   blindBoxAad,
@@ -89,29 +87,21 @@ async function aesgcmEncryptForTest(key: Uint8Array, nonce: Uint8Array, plaintex
   );
 }
 
-async function malformedScryptVmkCopy(password: string, plaintext: Uint8Array) {
-  const salt = new Uint8Array(16).fill(0xa5);
+async function malformedPasskeyVmkCopy(prfOutput: Uint8Array, prfSalt: Uint8Array, plaintext: Uint8Array) {
   const nonce = new Uint8Array(12).fill(0x5a);
-  const kek = (await scrypt({
-    password: encoder.encode(password),
-    salt,
-    costFactor: 2 ** 15,
-    blockSize: 8,
-    parallelism: 1,
-    hashLength: 32,
-    outputType: 'binary',
-  })) as Uint8Array;
-  const wrapped = await aesgcmEncryptForTest(kek, nonce, plaintext);
-  return {
-    kind: 'password',
-    kdf: 'scrypt',
-    n: 2 ** 15,
-    r: 8,
-    p: 1,
-    salt: bytesToBase64(salt),
-    nonce: bytesToBase64(nonce),
-    wrapped: bytesToBase64(wrapped),
-  };
+  const kek = await derivePasskeyKek(prfOutput, prfSalt);
+  try {
+    const wrapped = await aesgcmEncryptForTest(kek, nonce, plaintext);
+    return {
+      kind: 'passkey',
+      kdf: 'webauthn-prf-hkdf-sha256',
+      prf_salt: bytesToBase64(prfSalt),
+      nonce: bytesToBase64(nonce),
+      wrapped: bytesToBase64(wrapped),
+    };
+  } finally {
+    kek.fill(0);
+  }
 }
 
 async function avaultVectorReceiverKey(): Promise<CryptoKeyPair> {
@@ -311,28 +301,22 @@ describe('vaultCrypto blind boxes', () => {
 });
 
 describe('vaultCrypto protected hierarchy', () => {
-  it('unwraps the VMK with either passkey PRF or fallback password', async () => {
+  it('wraps and unwraps the VMK with a passkey PRF copy only', async () => {
     const vmk = newVmk();
     const prfSalt = new Uint8Array(32).fill(0x11);
     const prfOutput = new Uint8Array(32).fill(0x22);
-    const wrapMeta = await buildWrapMeta(vmk, [
-      { kind: 'passkey', prfOutput, prfSalt, credentialId: 'cred-1' },
-      { kind: 'password', password: 'less-secure-fallback' },
-    ]);
+    const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId: 'cred-1' }]);
 
     await expect(unwrapVmk(wrapMeta, { kind: 'passkey', prfOutput })).resolves.toEqual(vmk);
-    await expect(unwrapVmk(wrapMeta, 'less-secure-fallback')).resolves.toEqual(vmk);
-    expect(JSON.parse(wrapMeta).copies.find((copy: { kind: string }) => copy.kind === 'password')?.kdf).toBe('scrypt');
+    await expect(
+      unwrapVmk(wrapMeta, { kind: 'passkey', prfOutput, prfSalt: new Uint8Array(32).fill(0x99) }),
+    ).rejects.toThrow(/unwrapped/);
+    const copies = JSON.parse(wrapMeta).copies as Array<{ kind: string; kdf?: string }>;
+    expect(copies).toHaveLength(1);
+    expect(copies[0]).toEqual(expect.objectContaining({ kind: 'passkey', kdf: 'webauthn-prf-hkdf-sha256' }));
     expect(passkeyPrfSalts(wrapMeta)).toEqual([prfSalt]);
     expect(passkeyPrfSaltEntries(wrapMeta)).toEqual([{ prfSalt, credentialId: 'cred-1' }]);
     expect(webAuthnPrfExtensionInput(prfSalt).prf.eval.first.byteLength).toBe(32);
-
-    const withArgon2id = await addPasswordCopy(wrapMeta, vmk, 'argon2id-fallback', {
-      memorySize: 512,
-      iterations: 2,
-    });
-    const copies = JSON.parse(withArgon2id).copies as Array<{ kind: string; kdf?: string }>;
-    expect(copies.at(-1)?.kdf).toBe('argon2id');
   });
 
   it('keeps setup passkey PRF bytes and credential id intact through wrap_meta', async () => {
@@ -350,23 +334,30 @@ describe('vaultCrypto protected hierarchy', () => {
 
   it('skips malformed authenticated VMK copies and tries the next valid copy', async () => {
     const vmk = newVmk();
-    const password = 'less-secure-fallback';
-    const malformed = await malformedScryptVmkCopy(password, new Uint8Array(31).fill(0x44));
-    const valid = await buildWrapMeta(vmk, [password]);
+    const prfSalt = new Uint8Array(32).fill(0x11);
+    const prfOutput = new Uint8Array(32).fill(0x22);
+    const malformed = await malformedPasskeyVmkCopy(prfOutput, prfSalt, new Uint8Array(31).fill(0x44));
+    const valid = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt }]);
     const combined = JSON.stringify({
       v: 1,
       copies: [malformed, ...JSON.parse(valid).copies],
     });
 
-    await expect(unwrapVmk(combined, password)).resolves.toEqual(vmk);
+    await expect(unwrapVmk(combined, { kind: 'passkey', prfOutput, prfSalt })).resolves.toEqual(vmk);
   });
 
-  it('rejects blank password wrap factors before deriving VMK copies', async () => {
+  it('rejects missing or malformed passkey wrap factors before deriving VMK copies', async () => {
     const vmk = newVmk();
 
-    await expect(buildWrapMeta(vmk, [''])).rejects.toThrow(/password/);
-    await expect(buildWrapMeta(vmk, [{ kind: 'password', password: '   ' }])).rejects.toThrow(/password/);
-    await expect(addPasswordCopy(JSON.stringify({ v: 1, copies: [] }), vmk, '')).rejects.toThrow(/password/);
+    await expect(buildWrapMeta(vmk, [])).rejects.toThrow(/factor/);
+    await expect(
+      buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput: new Uint8Array(), prfSalt: new Uint8Array(32).fill(0x11) }]),
+    ).rejects.toThrow(/empty/);
+    await expect(
+      buildWrapMeta(vmk, [
+        { kind: 'passkey', prfOutput: new Uint8Array(32).fill(0x22), prfSalt: new Uint8Array(31).fill(0x11) },
+      ]),
+    ).rejects.toThrow(/PRF salt/);
   });
 
   it('wraps a protected value with a per-record DEK and releases only that DEK', async () => {
@@ -510,14 +501,16 @@ describe('vaultCrypto protected hierarchy', () => {
 describe('protected record storage composition', () => {
   it('packs a sealed record and unpacks it for a clean open round-trip', async () => {
     const vmk = newVmk();
-    const wrapMeta = await buildWrapMeta(vmk, ['vault-password']);
+    const prfSalt = new Uint8Array(32).fill(0x11);
+    const prfOutput = new Uint8Array(32).fill(0x22);
+    const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt }]);
     const context = { name: 'OPENAI_API_KEY' };
     const sealed = await sealProtected(new TextEncoder().encode('sk-secret-value'), vmk, context);
 
     const envelope = packProtectedRecord(sealed, wrapMeta);
     expect(JSON.parse(envelope.wrap_meta).scheme).toBe(WRAP_SCHEME);
     const restored = unpackProtectedRecord(envelope);
-    const vmkAgain = await unwrapVmk(restored.vmkWrapMeta, 'vault-password');
+    const vmkAgain = await unwrapVmk(restored.vmkWrapMeta, { kind: 'passkey', prfOutput, prfSalt });
     const opened = await openProtected(restored.sealed, vmkAgain, context);
 
     expect(new TextDecoder().decode(opened)).toBe('sk-secret-value');
@@ -525,7 +518,9 @@ describe('protected record storage composition', () => {
 
   it('refuses to fold a DEK into a wrap_meta that already carries one', async () => {
     const vmk = newVmk();
-    const wrapMeta = await buildWrapMeta(vmk, ['pw']);
+    const wrapMeta = await buildWrapMeta(vmk, [
+      { kind: 'passkey', prfOutput: new Uint8Array(32).fill(0x22), prfSalt: new Uint8Array(32).fill(0x11) },
+    ]);
     const sealed = await sealProtected(new TextEncoder().encode('v'), vmk, { name: 'NAME' });
     const once = packProtectedRecord(sealed, wrapMeta);
     expect(() => packProtectedRecord(sealed, once.wrap_meta)).toThrow();

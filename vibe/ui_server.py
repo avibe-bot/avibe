@@ -3087,7 +3087,25 @@ def vault_secrets_get():
     from vibe import api
 
     try:
-        return jsonify(api.get_vault_secrets(tag=request.args.get("tag") or None))
+        return jsonify(
+            api.get_vault_secrets(
+                tag=request.args.get("tag") or None,
+                tags=request.args.getlist("tag"),
+                query=request.args.get("q") or None,
+                kind=request.args.get("kind") or None,
+                protection=request.args.get("protection") or None,
+            )
+        )
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/tags", methods=["GET"])
+def vault_tags_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_tags(query=request.args.get("q") or None, tag_type=request.args.get("type") or None))
     except ValueError as exc:
         return _vault_error_response(exc)
 

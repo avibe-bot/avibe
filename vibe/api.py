@@ -1394,16 +1394,42 @@ def _vault_engine():
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
-def get_vault_secrets(*, tag: Optional[str] = None) -> dict:
+def get_vault_secrets(
+    *,
+    tag: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    query: Optional[str] = None,
+    kind: Optional[str] = None,
+    protection: Optional[str] = None,
+) -> dict:
     from storage import vault_service
 
     engine = _vault_engine()
     try:
         with engine.connect() as conn:
-            secrets = vault_service.list_secrets(conn, tag=tag)
+            secrets = vault_service.list_secrets(
+                conn,
+                tag=tag,
+                tags=tags,
+                query=query,
+                kind=kind,
+                protection=protection,
+            )
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     return {"ok": True, "secrets": secrets}
+
+
+def get_vault_tags(*, query: Optional[str] = None, tag_type: Optional[str] = None) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.connect() as conn:
+            tags = vault_service.list_secret_tags(conn, query=query, tag_type=tag_type)
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    return {"ok": True, "tags": tags}
 
 
 def get_vault_pubkey() -> dict:

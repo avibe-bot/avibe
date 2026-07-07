@@ -1596,14 +1596,107 @@ def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[s
     return get_secret_meta(conn, name)
 
 
-def list_secrets(conn: Connection, *, tag: str | None = None) -> list[dict[str, Any]]:
+def _normalize_secret_filter_values(values: list[str] | None, *, field: str) -> list[str]:
+    out: list[str] = []
+    for raw in values or []:
+        for item in str(raw).split(","):
+            stripped = item.strip()
+            if stripped:
+                out.append(stripped)
+    if field == "tags":
+        return _normalize_tags(out)
+    return out
+
+
+def _searchable_secret_text(secret: dict[str, Any]) -> str:
+    """Build a value-free search blob for Vault metadata queries."""
+
+    fields: list[Any] = [
+        secret.get("name"),
+        secret.get("kind"),
+        secret.get("protection"),
+        secret.get("signer_kind"),
+        secret.get("description"),
+        secret.get("tags"),
+    ]
+    policy = secret.get("policy")
+    if isinstance(policy, dict):
+        fields.append(policy.get("allowed_hosts"))
+        auth = policy.get("auth")
+        if isinstance(auth, dict):
+            fields.extend([auth.get("type"), auth.get("name")])
+    addresses = secret.get("signing_addresses")
+    if isinstance(addresses, dict):
+        fields.append(addresses)
+    return json.dumps(fields, sort_keys=True, default=str).lower()
+
+
+def _matches_secret_query(secret: dict[str, Any], query: str | None) -> bool:
+    raw = (query or "").strip().lower()
+    if not raw:
+        return True
+    haystack = _searchable_secret_text(secret)
+    return all(term in haystack for term in raw.split())
+
+
+def list_secrets(
+    conn: Connection,
+    *,
+    tag: str | None = None,
+    tags: list[str] | None = None,
+    query: str | None = None,
+    kind: str | None = None,
+    protection: str | None = None,
+) -> list[dict[str, Any]]:
     """Masked, value-free list. Never decrypts."""
-    query = select(vault_secrets).order_by(vault_secrets.c.name)
-    rows = [_meta_payload(dict(row)) for row in conn.execute(query).mappings()]
-    if tag is not None:
-        normalized = _normalize_tag(tag)
-        rows = [row for row in rows if normalized in row.get("tags", [])]
+    stmt = select(vault_secrets).order_by(vault_secrets.c.name)
+    rows = [_meta_payload(dict(row)) for row in conn.execute(stmt).mappings()]
+    normalized_tags = _normalize_secret_filter_values([tag] if tag is not None else [], field="tags")
+    normalized_tags.extend(_normalize_secret_filter_values(tags, field="tags"))
+    normalized_tags = list(dict.fromkeys(normalized_tags))
+    if normalized_tags:
+        rows = [row for row in rows if all(normalized in row.get("tags", []) for normalized in normalized_tags)]
+    normalized_kind = (kind or "").strip().lower()
+    if normalized_kind:
+        if normalized_kind not in {"static", "keypair"}:
+            raise VaultServiceError("kind must be static or keypair")
+        rows = [row for row in rows if row.get("kind") == normalized_kind]
+    normalized_protection = (protection or "").strip().lower()
+    if normalized_protection:
+        if normalized_protection not in {"standard", "protected"}:
+            raise VaultServiceError("protection must be standard or protected")
+        rows = [row for row in rows if row.get("protection") == normalized_protection]
+    rows = [row for row in rows if _matches_secret_query(row, query)]
     return rows
+
+
+def list_secret_tags(conn: Connection, *, query: str | None = None, tag_type: str | None = None) -> list[dict[str, Any]]:
+    """Return value-free tag inventory with secret counts."""
+
+    normalized_type = (tag_type or "").strip().lower()
+    if normalized_type and normalized_type not in {"tag", "skill"}:
+        raise VaultServiceError("tag type must be tag or skill")
+    counts: dict[str, int] = {}
+    for secret in list_secrets(conn):
+        for tag in secret.get("tags", []):
+            if isinstance(tag, str) and tag:
+                counts[tag] = counts.get(tag, 0) + 1
+    rows: list[dict[str, Any]] = []
+    raw_query = (query or "").strip().lower()
+    for tag, count in counts.items():
+        is_skill = tag.startswith(SKILL_TAG_PREFIX)
+        kind = "skill" if is_skill else "tag"
+        if normalized_type and kind != normalized_type:
+            continue
+        skill = tag[len(SKILL_TAG_PREFIX) :] if is_skill else None
+        haystack = " ".join(part for part in [tag, skill, kind] if part).lower()
+        if raw_query and not all(term in haystack for term in raw_query.split()):
+            continue
+        payload = {"tag": tag, "type": kind, "secret_count": count}
+        if skill:
+            payload["skill"] = skill
+        rows.append(payload)
+    return sorted(rows, key=lambda item: (item["type"] != "tag", item["tag"].lower()))
 
 
 def latest_protected_vmk_wrap_meta(conn: Connection) -> str | None:
