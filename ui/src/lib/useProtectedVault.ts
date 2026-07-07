@@ -69,13 +69,21 @@ const vaultLockListeners = new Set<() => void>();
  * Cross-tab lock: a manual "Lock now" broadcasts here so every open tab for this origin wipes its
  * own cached VMK, not just the tab that clicked. Auto-lock stays per-tab (each tab's idle timer is
  * independent, so an idle tab locking shouldn't wipe a tab you're actively using).
+ *
+ * Created lazily on first unlock (never at module import): `BroadcastChannel` also exists in
+ * Node/Vitest, and an open-at-import channel keeps the process alive and can hang the UI test run.
  */
-const vaultLockChannel: BroadcastChannel | null =
-  typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('avibe-vault-lock') : null;
-if (vaultLockChannel) {
+let vaultLockChannel: BroadcastChannel | null = null;
+let vaultLockChannelInit = false;
+function getVaultLockChannel(): BroadcastChannel | null {
+  if (vaultLockChannelInit) return vaultLockChannel;
+  vaultLockChannelInit = true;
+  if (typeof BroadcastChannel === 'undefined') return null;
+  vaultLockChannel = new BroadcastChannel('avibe-vault-lock');
   vaultLockChannel.onmessage = (event: MessageEvent) => {
     if (event.data === 'lock') lockVault(false);
   };
+  return vaultLockChannel;
 }
 
 function notifyVaultLockChange(): void {
@@ -101,7 +109,15 @@ function autoLockExpired(): boolean {
 }
 
 export function vaultUnlocked(): boolean {
-  return sessionVault.vmk != null && !autoLockExpired();
+  if (sessionVault.vmk && autoLockExpired()) {
+    // Zero an expired VMK the instant anything checks the lock state, even if the (delayed) timer
+    // hasn't fired — so no flow (delete gate, create/provision, approval) can treat a past-deadline
+    // vault as unlocked. No notify here (this may run during render); the interval tick / next op
+    // notifies subscribers.
+    clearVmk();
+    return false;
+  }
+  return sessionVault.vmk != null;
 }
 
 /**
@@ -156,15 +172,16 @@ function lockVault(broadcast = false): void {
   }
   notifyVaultLockChange();
   // A manual "Lock now" wipes every open tab for this origin, not just this one.
-  if (broadcast) vaultLockChannel?.postMessage('lock');
+  if (broadcast) getVaultLockChannel()?.postMessage('lock');
 }
 
 /** (Re)start the auto-lock countdown; call on unlock and on every VMK use. Notifies subscribers. */
 function armVaultAutoLock(): void {
   if (!sessionVault.vmk) return;
+  getVaultLockChannel(); // ensure this (unlocked) tab can receive a cross-tab "Lock now"
   vaultLockExpiresAt = Date.now() + VAULT_AUTO_LOCK_MS;
   if (vaultAutoLockTimer) clearTimeout(vaultAutoLockTimer);
-  vaultAutoLockTimer = setTimeout(lockVault, VAULT_AUTO_LOCK_MS);
+  vaultAutoLockTimer = setTimeout(() => lockVault(), VAULT_AUTO_LOCK_MS);
   notifyVaultLockChange();
 }
 
@@ -317,6 +334,7 @@ export function useProtectedVault() {
   );
 
   const refresh = useCallback(async () => {
+    enforceAutoLock(); // a cached VMK past its deadline isn't "unlocked" — lock it before trusting it
     if (sessionVault.vmk) {
       setStatus('unlocked');
       return;
