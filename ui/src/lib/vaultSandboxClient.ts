@@ -240,13 +240,18 @@ export class VaultSandboxClient {
     iframe.referrerPolicy = 'no-referrer';
     iframe.style.position = 'fixed';
     iframe.style.inset = '0';
-    iframe.style.width = '100vw';
-    iframe.style.height = '100vh';
     iframe.style.border = '0';
     iframe.style.background = 'transparent';
     iframe.style.zIndex = '2147483647';
-    iframe.style.pointerEvents = 'none';
     iframe.style.colorScheme = 'normal';
+    // At rest the sandbox is a headless RPC worker: keep it in the DOM (so
+    // postMessage works) but 0-sized + hidden so it never covers the app. It
+    // only expands to a full-screen overlay while an interactive ceremony is
+    // active — see setInteractive().
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.visibility = 'hidden';
+    iframe.style.pointerEvents = 'none';
 
     const client = new VaultSandboxClient(iframe);
     iframe.src = VAULT_SANDBOX_IFRAME_URL;
@@ -264,7 +269,13 @@ export class VaultSandboxClient {
   private setInteractive(active: boolean): void {
     this.interactiveDepth += active ? 1 : -1;
     this.interactiveDepth = Math.max(0, this.interactiveDepth);
-    this.iframe.style.pointerEvents = this.interactiveDepth > 0 ? 'auto' : 'none';
+    const interactive = this.interactiveDepth > 0;
+    // Expand to a full-screen overlay only while a ceremony is active; otherwise
+    // collapse to a hidden 0-size worker so the sandbox never covers the app.
+    this.iframe.style.width = interactive ? '100vw' : '0';
+    this.iframe.style.height = interactive ? '100vh' : '0';
+    this.iframe.style.visibility = interactive ? 'visible' : 'hidden';
+    this.iframe.style.pointerEvents = interactive ? 'auto' : 'none';
   }
 
   private waitForReady(): Promise<ReadyMessage> {
