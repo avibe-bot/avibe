@@ -2235,6 +2235,23 @@ def _reject_missing_protected_delete_authz(row: dict[str, Any], authz: Protected
         raise InvalidProtectedAuthzError("protected delete authorization does not match the current secret row")
 
 
+def _disable_webauthn_factors_if_vault_deestablished(conn: Connection) -> None:
+    protected_row = conn.execute(
+        select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)
+    ).first()
+    if protected_row is not None:
+        return
+    now = _now()
+    result = conn.execute(
+        vault_auth_factors.update()
+        .where(vault_auth_factors.c.kind == "webauthn", vault_auth_factors.c.disabled_at.is_(None))
+        .values(disabled_at=now, updated_at=now)
+    )
+    disabled_count = int(result.rowcount or 0)
+    if disabled_count:
+        audit(conn, "auth-factors-disabled", delivery={"reason": "vault-deestablished", "count": disabled_count})
+
+
 def delete_secret(
     conn: Connection,
     name: str,
@@ -2250,6 +2267,8 @@ def delete_secret(
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
+    if row.get("protection") == "protected":
+        _disable_webauthn_factors_if_vault_deestablished(conn)
     audit(conn, "deleted", secret_name=name)
 
 

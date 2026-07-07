@@ -101,19 +101,30 @@ class WebAuthnTestCredential:
     def credential_id_b64(self) -> str:
         return _b64(self.credential_id)
 
-    def public_key_cose(self) -> bytes:
-        numbers = self.private_key.public_key().public_numbers()
+    @staticmethod
+    def es256_public_key_cose(x: int, y: int) -> bytes:
         return _cbor(
             {
                 1: 2,
                 3: vault_webauthn.ALG_ES256,
                 -1: 1,
-                -2: numbers.x.to_bytes(32, "big"),
-                -3: numbers.y.to_bytes(32, "big"),
+                -2: x.to_bytes(32, "big"),
+                -3: y.to_bytes(32, "big"),
             }
         )
 
-    def registration_payload(self, *, challenge_id: str, challenge_b64: str, sign_count: int = 1) -> dict:
+    def public_key_cose(self) -> bytes:
+        numbers = self.private_key.public_key().public_numbers()
+        return self.es256_public_key_cose(numbers.x, numbers.y)
+
+    def registration_payload(
+        self,
+        *,
+        challenge_id: str,
+        challenge_b64: str,
+        sign_count: int = 1,
+        public_key_cose: bytes | None = None,
+    ) -> dict:
         client_data = _client_data(
             typ=vault_webauthn.WEBAUTHN_CREATE_TYPE,
             challenge_b64=challenge_b64,
@@ -127,7 +138,7 @@ class WebAuthnTestCredential:
             + (b"\x00" * 16)
             + len(self.credential_id).to_bytes(2, "big")
             + self.credential_id
-            + self.public_key_cose()
+            + (public_key_cose or self.public_key_cose())
         )
         attestation_object = _cbor({"fmt": "none", "authData": auth_data, "attStmt": {}})
         return {

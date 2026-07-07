@@ -512,6 +512,27 @@ def test_webauthn_counter_regression_rejects_zero_after_nonzero_counter():
     )
 
 
+def test_webauthn_registration_invalid_cose_point_fails_closed(vault):
+    credential = WebAuthnTestCredential()
+
+    with vault.begin() as conn:
+        options = vs.create_webauthn_registration_options(
+            conn,
+            rp_id=credential.rp_id,
+            origin=credential.origin,
+        )
+        payload = credential.registration_payload(
+            challenge_id=options["challenge_id"],
+            challenge_b64=options["webauthn"]["challenge"],
+            public_key_cose=WebAuthnTestCredential.es256_public_key_cose(1, 1),
+        )
+
+        with pytest.raises(vs.InvalidProtectedAuthzError) as exc:
+            vs.register_webauthn_factor(conn, payload, rp_id=credential.rp_id, origin=credential.origin, establishment=True)
+
+    assert isinstance(exc.value.__cause__, vault_webauthn.WebAuthnVerificationError)
+
+
 def test_standard_secret_does_not_create_access_request_unless_always_ask(vault):
     _create(vault, name="STANDARD_KEY", protection="standard")
     _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})

@@ -249,12 +249,18 @@ def _public_key_from_cose(public_key_cose: bytes):
             raise WebAuthnVerificationError("invalid ES256 COSE public key")
         x = int.from_bytes(cose[-2], "big")
         y = int.from_bytes(cose[-3], "big")
-        return ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key(), alg
+        try:
+            return ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key(), alg
+        except Exception as exc:
+            raise WebAuthnVerificationError("invalid ES256 COSE public key") from exc
     if kty != 3 or not isinstance(cose.get(-1), bytes) or not isinstance(cose.get(-2), bytes):
         raise WebAuthnVerificationError("invalid RS256 COSE public key")
     n = int.from_bytes(cose[-1], "big")
     e = int.from_bytes(cose[-2], "big")
-    return rsa.RSAPublicNumbers(e, n).public_key(), alg
+    try:
+        return rsa.RSAPublicNumbers(e, n).public_key(), alg
+    except Exception as exc:
+        raise WebAuthnVerificationError("invalid RS256 COSE public key") from exc
 
 
 def verify_registration(

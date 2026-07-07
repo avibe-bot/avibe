@@ -905,6 +905,26 @@ def test_delete_protected_secret_with_valid_assertion_deletes(monkeypatch):
             vault_service.get_secret_meta(conn, "PROTECTED_DELETE")
 
 
+def test_deleting_last_protected_secret_allows_fresh_vault_establishment(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    first, first_factor = _establish_protected_secret_with_factor("FIRST_PROTECTED")
+    authz = _delete_authz_for_secret(first, first_factor, "FIRST_PROTECTED")
+
+    removed = api.delete_vault_secret("FIRST_PROTECTED", authz=authz)
+
+    assert removed["removed"] is True
+    with api._vault_engine().connect() as conn:
+        old_factor = conn.execute(
+            select(vault_auth_factors).where(vault_auth_factors.c.id == first_factor["id"])
+        ).mappings().one()
+        assert old_factor["disabled_at"] is not None
+
+    second = WebAuthnTestCredential(credential_id=b"second-vault-first-factor")
+    _credential, second_factor = _establish_protected_secret_with_factor("SECOND_PROTECTED", second)
+
+    assert second_factor["credential_id"] == second.credential_id_b64
+
+
 def test_forged_webauthn_factor_registration_cannot_authorize_delete(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     _establish_protected_secret_with_factor("PROTECTED_DELETE")
