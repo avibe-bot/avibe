@@ -2159,15 +2159,20 @@ def _is_show_page_response_path(path: str) -> bool:
     return path == "/show" or path.startswith("/show/") or path == "/p" or path.startswith("/p/")
 
 
-@app.after_request
-def add_vault_sandbox_security_headers(response: Response) -> Response:
-    if _is_show_page_response_path(request.path):
+def _apply_vault_sandbox_security_headers(response: FastAPIResponse, path: str) -> FastAPIResponse:
+    if _is_show_page_response_path(path):
         return response
     response.headers["Permissions-Policy"] = VAULT_SANDBOX_PERMISSIONS_POLICY
     response.headers["Content-Security-Policy"] = _merge_csp_frame_src(
         response.headers.get("Content-Security-Policy")
     )
     return response
+
+
+@app.middleware("http")
+async def add_vault_sandbox_security_headers(starlette_request: FastAPIRequest, call_next):
+    response = await call_next(starlette_request)
+    return _apply_vault_sandbox_security_headers(response, starlette_request.url.path)
 
 
 @app.after_request
@@ -8559,12 +8564,12 @@ def _rewrite_show_runtime_location(session_id: str, location: str, *, external_p
 
 
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
+    # 'self' (not 'none') so the workbench can frame a Show Page in the chat
+    # view — same origin as the page — while cross-origin clickjacking stays
+    # blocked. Direct navigation is unaffected (frame-ancestors only governs
+    # framing).
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
     if enabled:
-        # 'self' (not 'none') so the workbench can frame a private Show Page in the
-        # chat view — same origin as the page — while cross-origin clickjacking
-        # stays blocked. Direct navigation is unaffected (frame-ancestors only
-        # governs framing).
-        response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
         response.set_cookie(
             SHOW_EVENT_WRITE_TOKEN_COOKIE,
             show_event_write_token(session_id),
@@ -8769,8 +8774,8 @@ def _ui_static_file_response(resolved_path: Path, *, content_type: str, cache_co
     return Response(content=compressed, headers=headers)
 
 
-@app.route("/", defaults={"path": ""})
-@app.route("/<path:path>")
+@app.route("/", defaults={"path": ""}, methods=["GET", "HEAD"])
+@app.route("/<path:path>", methods=["GET", "HEAD"])
 def serve_static(path):
     """Serve static files from ui/dist, with SPA fallback to index.html."""
     ui_dist = get_ui_dist_path()
