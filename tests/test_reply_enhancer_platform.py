@@ -134,7 +134,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("run the original `run` / `fetch` command again", prompt)
         self.assertIn("Avibe creates a browser signing request and returns immediately", prompt)
         self.assertIn("Do not rerun `sign`", prompt)
-        self.assertIn("read the completed request result to get the signature", prompt)
+        self.assertIn("follow the callback instruction to read the completed request result", prompt)
         self.assertIn("vibe vault request OPENAI_API_KEY", prompt)
         self.assertIn("Request that the user add a missing static secret.", prompt)
         self.assertIn("ask the user to create a keypair secret in the Vault UI", prompt)

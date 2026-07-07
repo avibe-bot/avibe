@@ -1004,8 +1004,11 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
         if request_type == "sign":
             # The public signature is the deliverable — the agent needs it to continue. It's stored
             # in the request; retrieving it by id returns immediately (the request is already done).
-            retrieve = f" Retrieve the signature with: vibe vault await {request_id}." if request_id else ""
-            return f"The user approved and completed your {subject}.{retrieve} Then continue the task."
+            retrieve = f" Retrieve the signature result with: vibe vault await {request_id}." if request_id else ""
+            return (
+                f"The user approved and completed your {subject}.{retrieve} "
+                "Do not rerun `vibe vault sign`; use the returned signature and continue the task."
+            )
         return f"The user approved your {subject}. Continue the task."
     if status == "denied":
         return f"The user declined your {subject}. Do not retry — adjust your approach or ask the user how to proceed."

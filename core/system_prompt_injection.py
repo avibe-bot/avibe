@@ -153,7 +153,7 @@ Rules:
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
 - With `vibe vault fetch` and `vibe vault sign`, the agent does not receive the plaintext secret.
 - When protected `run` / `fetch` needs approval, Avibe only records the request; it does not rerun the command automatically. End the turn, let Avibe resume this session after the user's browser approval, then run the original `run` / `fetch` command again.
-- When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, read the completed request result to get the signature and continue.
+- When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, follow the callback instruction to read the completed request result and continue with the returned signature.
 
 Common commands:
 

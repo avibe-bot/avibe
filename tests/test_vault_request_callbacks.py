@@ -423,7 +423,9 @@ def test_sign_approved_callback_points_to_the_signature():
     }
     plan = vs.resolve_request_callback(row)
     assert plan is not None
-    assert "vrq_sig" in plan.message and "vault await" in plan.message
+    assert "vrq_sig" in plan.message
+    assert "Retrieve the signature result with: vibe vault await vrq_sig" in plan.message
+    assert "Do not rerun `vibe vault sign`" in plan.message
 
 
 def test_callback_enabled_followup_does_not_suggest_await(monkeypatch):
@@ -561,4 +563,5 @@ def test_vault_callback_sweep_enqueues_protected_sign_callback(monkeypatch, tmp_
     assert callback_run.source_kind == "callback"
     assert callback_run.source_actor == f"vault:{req['id']}"
     assert callback_run.message
-    assert "vault await" in callback_run.message
+    assert "Retrieve the signature result with: vibe vault await" in callback_run.message
+    assert "Do not rerun `vibe vault sign`" in callback_run.message
