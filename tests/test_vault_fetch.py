@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
+import time
 
 import pytest
 
@@ -34,6 +36,8 @@ def _ns(**kw):
         data=None,
         data_file=None,
         output=None,
+        approval_wait=0,
+        no_approval_wait=False,
         json=False,
     )
     base.update(kw)
@@ -96,6 +100,23 @@ def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | 
             delivery={"session_id": session_id, "mode": "fetch"} if session_id else {"mode": "fetch"},
         )
         return _grant_from_request(conn, req, session_id=session_id)
+
+
+def _approve_next_pending_access_request(*, session_id: str | None = None) -> dict:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with cli._open_vault_engine().begin() as conn:
+            requests = []
+            for request in vault_service.list_requests(conn, status="pending"):
+                card = request.get("card") or {}
+                if request.get("request_type") == "access" and card.get("grant_options"):
+                    requests.append(request)
+            if requests:
+                request = requests[0]
+                grant = _grant_from_request(conn, request, session_id=session_id)
+                return {"request": request, "grant": grant}
+        time.sleep(0.01)
+    raise AssertionError("pending access request was not created")
 
 
 def _set_always_ask_grant(name: str, *, allow_host: list[str]) -> dict:
@@ -210,6 +231,127 @@ def test_fetch_persists_protected_approval_request_without_grant(capfd):
     assert requests[0]["secret_name"] == "GH_PAT"
     assert requests[0]["delivery"]["mode"] == "fetch"
     assert requests[0]["delivery"]["host"] == "api.github.com"
+
+
+def test_fetch_waits_for_protected_approval_then_delivers(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="GH_PAT",
+            protection="protected",
+            sealed=_sealed("gh_pat"),
+            policy={"allowed_hosts": ["api.github.com"]},
+        )
+    approved: dict = {}
+
+    def approve_request():
+        approved.update(_approve_next_pending_access_request(session_id="ses_cli"))
+
+    approver = threading.Thread(target=approve_request)
+    approver.start()
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": '{"ok":true}'})
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", fetch)
+    monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
+
+    code = cli.cmd_vault_fetch(
+        _ns(auth="GH_PAT", url="https://api.github.com/repos/o/r", session_id="ses_cli", approval_wait=2)
+    )
+    approver.join(timeout=2)
+    captured = capfd.readouterr()
+
+    assert code == 0
+    assert captured.out == '{"ok":true}'
+    assert "Waiting for Vault approval in the browser for vault fetch" in captured.err
+    assert not approver.is_alive()
+    fetch.assert_called_once()
+    assert fetch.call_args.kwargs["grant_id"] == approved["grant"]["id"]
+
+
+def test_fetch_revalidates_policy_after_approval_wait(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="GH_PAT",
+            protection="protected",
+            sealed=_sealed("gh_pat"),
+            policy={"allowed_hosts": ["api.github.com"]},
+        )
+
+    def approve_and_change_policy(args, exc, *, timeout, help_command, operation):
+        request_id = exc.details["request_id"]
+        with cli._open_vault_engine().begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            _grant_from_request(conn, request, session_id="ses_cli")
+            conn.execute(
+                vault_service.vault_secrets.update()
+                .where(vault_service.vault_secrets.c.name == "GH_PAT")
+                .values(policy=json.dumps({"allowed_hosts": ["api.example.com"]}))
+            )
+
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    monkeypatch.setattr(cli, "_wait_for_vault_delivery_approval", approve_and_change_policy)
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", fetch)
+    monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
+
+    code = cli.cmd_vault_fetch(
+        _ns(auth="GH_PAT", url="https://api.github.com/repos/o/r", session_id="ses_cli", approval_wait=2)
+    )
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "host_not_allowed"
+    fetch.assert_not_called()
+
+
+def test_fetch_revalidates_output_after_approval_wait(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    out = tmp_path / "response.json"
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="GH_PAT",
+            protection="protected",
+            sealed=_sealed("gh_pat"),
+            policy={"allowed_hosts": ["api.github.com"]},
+        )
+
+    def approve_and_block_output(args, exc, *, timeout, help_command, operation):
+        request_id = exc.details["request_id"]
+        with cli._open_vault_engine().begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            _grant_from_request(conn, request, session_id="ses_cli")
+        out.mkdir()
+
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    monkeypatch.setattr(cli, "_wait_for_vault_delivery_approval", approve_and_block_output)
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", fetch)
+    monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
+
+    code = cli.cmd_vault_fetch(
+        _ns(
+            auth="GH_PAT",
+            url="https://api.github.com/repos/o/r",
+            session_id="ses_cli",
+            approval_wait=2,
+            output=str(out),
+        )
+    )
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "output_unwritable"
+    fetch.assert_not_called()
 
 
 def test_fetch_header_auth_request_shape(tmp_path, capfd, monkeypatch):

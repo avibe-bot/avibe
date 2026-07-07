@@ -88,6 +88,7 @@ DOCTOR_REPAIR_DRY_RUN_MESSAGES = {
     "stale-restart-state": "Would remove stale restart metadata and refresh runtime status.",
 }
 
+DEFAULT_VAULT_APPROVAL_WAIT_SECONDS = 9 * 60
 WATCH_STARTUP_STABLE_RUNNING_SECONDS = 1.5
 WATCH_STARTUP_JITTER_BUFFER_SECONDS = 1.0
 
@@ -198,6 +199,23 @@ def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument("--limit", type=int, help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}.")
     parser.add_argument("--all", action="store_true", help="Return all matching rows without pagination.")
     parser.error_help_command = help_command
+
+
+def _add_vault_approval_wait_args(parser, *, default_seconds: int = DEFAULT_VAULT_APPROVAL_WAIT_SECONDS) -> None:
+    parser.add_argument(
+        "--approval-wait",
+        type=_non_negative_float,
+        metavar="SECONDS",
+        help=(
+            "Wait this many seconds for a protected approval before returning approval_wait_timeout "
+            f"(default {default_seconds})."
+        ),
+    )
+    parser.add_argument(
+        "--no-approval-wait",
+        action="store_true",
+        help="Return approval_required immediately instead of waiting for browser approval.",
+    )
 
 
 def _page_request_from_args(args, *, help_command: str) -> PageRequest | None:
@@ -6187,13 +6205,30 @@ def cmd_vault_run(args):
                 help_command=help_command,
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
-        grant, one_shot_grants, secrets = _resolve_vault_run_delivery(
-            engine,
-            mapping,
-            command_argv,
-            args=args,
-            source_selector=source_selector,
-        )
+        approval_wait = _vault_approval_wait_seconds(args, help_command=help_command)
+        waited_for_approval = False
+        while True:
+            try:
+                grant, one_shot_grants, secrets = _resolve_vault_run_delivery(
+                    engine,
+                    mapping,
+                    command_argv,
+                    args=args,
+                    source_selector=source_selector,
+                )
+                break
+            except TaskCliError as exc:
+                if exc.code == "approval_required" and approval_wait > 0 and not waited_for_approval:
+                    _wait_for_vault_delivery_approval(
+                        args,
+                        exc,
+                        timeout=approval_wait,
+                        help_command=help_command,
+                        operation="vault run",
+                    )
+                    waited_for_approval = True
+                    continue
+                raise
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
@@ -6313,7 +6348,7 @@ def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float
 
     deadline = time.monotonic() + timeout
     engine = _open_vault_engine()
-    while time.monotonic() < deadline:
+    while True:
         with engine.begin() as conn:
             try:
                 request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
@@ -6328,12 +6363,27 @@ def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float
     return None
 
 
-def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> dict | None:
+def _vault_access_delivery_ready(request: dict, result: dict | None) -> bool:
+    if request.get("request_type") != "access":
+        return True
+    if not isinstance(result, dict) or result.get("type") != "grant":
+        return True
+    grant = result.get("grant")
+    return not isinstance(grant, dict) or bool(grant.get("delivery_ready"))
+
+
+def _wait_for_vault_request(
+    request_id: str,
+    *,
+    timeout: float,
+    poll_interval: float = 2.0,
+    require_delivery_ready: bool = False,
+) -> dict | None:
     from storage import vault_service
 
     deadline = time.monotonic() + timeout
     engine = _open_vault_engine()
-    while time.monotonic() < deadline:
+    while True:
         with engine.begin() as conn:
             try:
                 request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
@@ -6343,12 +6393,112 @@ def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: f
             if request.get("status") == "approved":
                 result = api._vault_request_result(conn, request)
             if request.get("status") in {"approved", "denied", "expired", "failed", "fulfilled"}:
-                return {"request": request, "result": result}
+                if not (require_delivery_ready and not _vault_access_delivery_ready(request, result)):
+                    return {"request": request, "result": result}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(poll_interval, remaining))
     return None
+
+
+def _vault_approval_wait_seconds(args, *, help_command: str) -> float:
+    wait_value = getattr(args, "approval_wait", None)
+    no_wait = bool(getattr(args, "no_approval_wait", False))
+    if no_wait and wait_value is not None:
+        raise TaskCliError("use --approval-wait or --no-approval-wait, not both", code="invalid_wait", help_command=help_command)
+    if no_wait:
+        return 0.0
+    if wait_value is None:
+        return float(DEFAULT_VAULT_APPROVAL_WAIT_SECONDS)
+    return float(wait_value)
+
+
+def _approval_wait_callback_expected(args) -> bool:
+    return not _vault_callback_disabled(args) and bool(_vault_cli_session_id(args))
+
+
+def _approval_wait_timeout_hint(args, request_id: str) -> str:
+    if _approval_wait_callback_expected(args):
+        return (
+            "Avibe will resume this Session when the user approves or denies the request. "
+            "After approval, retry the original vault run/fetch command."
+        )
+    return f"Check the request later with: vibe vault await {request_id}"
+
+
+def _print_vault_approval_wait_notice(request_id: str, *, timeout: float, operation: str) -> None:
+    print(
+        f"Waiting for Vault approval in the browser for {operation} "
+        f"(request {request_id}, timeout {timeout:g}s)...",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _vault_terminal_request_error(request: dict, *, help_command: str) -> TaskCliError | None:
+    request_id = str(request.get("id") or "")
+    status = str(request.get("status") or "")
+    if status == "denied":
+        return TaskCliError(
+            f"Vault request '{request_id}' was denied",
+            code="request_denied",
+            help_command=help_command,
+            details={"request_id": request_id},
+        )
+    if status == "expired":
+        return TaskCliError(
+            f"Vault request '{request_id}' expired before approval",
+            code="request_expired",
+            help_command=help_command,
+            details={"request_id": request_id},
+        )
+    if status == "failed":
+        return TaskCliError(
+            f"Vault request '{request_id}' failed",
+            code="request_failed",
+            help_command=help_command,
+            details={"request_id": request_id},
+        )
+    return None
+
+
+def _wait_for_vault_delivery_approval(args, exc: TaskCliError, *, timeout: float, help_command: str, operation: str) -> None:
+    from storage import vault_service
+
+    request_id = str((exc.details or {}).get("request_id") or "").strip()
+    if not request_id:
+        raise exc
+    waiter_id = f"vw_{uuid4().hex[:12]}"
+    deadline_at = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
+    engine = _open_vault_engine()
+    with engine.begin() as conn:
+        vault_service.arm_request_waiter(conn, request_id, waiter_id=waiter_id, deadline_at=deadline_at)
+    _print_vault_approval_wait_notice(request_id, timeout=timeout, operation=operation)
+    waited = _wait_for_vault_request(request_id, timeout=timeout, require_delivery_ready=True)
+    if waited is None:
+        try:
+            with engine.begin() as conn:
+                vault_service.timeout_request_waiter(conn, request_id, waiter_id=waiter_id)
+        except Exception:
+            logger.debug("failed to mark vault request waiter timed out", exc_info=True)
+        raise TaskCliError(
+            f"Vault approval request '{request_id}' is still waiting for the user",
+            code="approval_wait_timeout",
+            hint=_approval_wait_timeout_hint(args, request_id),
+            help_command=help_command,
+            details={
+                "request_id": request_id,
+                "timeout_seconds": timeout,
+                "callback_expected": _approval_wait_callback_expected(args),
+            },
+        )
+    request = waited.get("request") or {}
+    terminal_error = _vault_terminal_request_error(request, help_command=help_command)
+    with engine.begin() as conn:
+        vault_service.complete_request_waiter(conn, request_id, waiter_id=waiter_id)
+    if terminal_error is not None:
+        raise terminal_error
 
 
 def cmd_vault_request(args):
@@ -6753,6 +6903,88 @@ def _read_request_body(args):
     return None
 
 
+def _validate_vault_fetch_output(output: str | None, *, help_command: str) -> None:
+    if not output:
+        return
+    out_path = Path(output)
+    if out_path.exists():
+        # Require an existing regular file: a dir can't be written as a file, and a
+        # FIFO / device (e.g. /dev/full) passes os.access but write_bytes can block or
+        # fail AFTER the credential-bearing request already ran.
+        writable = out_path.is_file() and os.access(out_path, os.W_OK)
+    else:
+        writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
+    if not writable:
+        raise TaskCliError(
+            f"output path is not writable: {output}",
+            code="output_unwritable",
+            help_command=help_command,
+        )
+
+
+def _build_vault_fetch_request(
+    engine,
+    *,
+    name: str,
+    url: str,
+    host: str,
+    method: str,
+    headers: dict,
+    body,
+    help_command: str,
+) -> dict:
+    from storage import vault_service
+
+    # Read policy in a read connection. The host check runs BEFORE handing the envelope to
+    # avault, so a disallowed target never even unwraps the secret. Callers run this both before
+    # and after an approval wait so a mid-wait metadata edit cannot leave a stale allowlist or auth
+    # injection policy in the egress frame.
+    with engine.connect() as conn:
+        policy = vault_service.get_secret_policy(conn, name)
+        meta = vault_service.get_secret_meta(conn, name)
+        if meta.get("kind") == "keypair":
+            raise vault_service.KeypairNotValueDeliverableError(
+                f"{name} is a signing key; use vault_sign instead of value delivery"
+            )
+        allowed = policy.get("allowed_hosts") or []
+        if not allowed:
+            raise TaskCliError(
+                f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
+                "(configure allowed hosts in the Vaults UI)",
+                code="proxy_unbound",
+                help_command=help_command,
+            )
+        if not _host_allowed(host, allowed):
+            raise TaskCliError(
+                f"host {host!r} is not allowed for secret '{name}'",
+                code="host_not_allowed",
+                help_command=help_command,
+                details={"host": host, "allowed_hosts": allowed},
+            )
+        auth = policy.get("auth") or {"type": "bearer"}
+        if auth.get("type") == "header":
+            # Defensive: set-time validation blocks new Host auth-headers; this also guards
+            # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
+            # even unwraps the secret.
+            _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
+
+    auth_type = auth.get("type") or "bearer"
+    if auth_type == "header":
+        inject = {"type": "header", "name": auth.get("name", "")}
+    elif auth_type == "query":
+        inject = {"type": "query", "name": auth.get("name", "")}
+    else:
+        inject = {"type": "bearer"}
+    return {
+        "method": method,
+        "url": url,
+        "allowed_hosts": allowed,
+        "headers": headers,
+        "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
+        "inject": inject,
+    }
+
+
 def cmd_vault_fetch(args):
     from urllib.parse import urlsplit
 
@@ -6786,21 +7018,7 @@ def cmd_vault_fetch(args):
         # the target itself (an existing dir, or an existing file we can't write), not just the
         # parent.
         output = getattr(args, "output", None)
-        if output:
-            out_path = Path(output)
-            if out_path.exists():
-                # Require an existing regular file: a dir can't be written as a file, and a
-                # FIFO / device (e.g. /dev/full) passes os.access but write_bytes can block or
-                # fail AFTER the credential-bearing request already ran.
-                writable = out_path.is_file() and os.access(out_path, os.W_OK)
-            else:
-                writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
-            if not writable:
-                raise TaskCliError(
-                    f"output path is not writable: {output}",
-                    code="output_unwritable",
-                    help_command=help_command,
-                )
+        _validate_vault_fetch_output(output, help_command=help_command)
         host = urlsplit(url).hostname
         if not host:
             raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
@@ -6816,65 +7034,53 @@ def cmd_vault_fetch(args):
             )
 
         engine = _open_vault_engine()
-        # Read policy + envelope in a read connection. The host check runs BEFORE handing the
-        # envelope to avault, so a disallowed target never even unwraps the secret.
-        with engine.connect() as conn:
-            policy = vault_service.get_secret_policy(conn, name)
-            meta = vault_service.get_secret_meta(conn, name)
-            if meta.get("kind") == "keypair":
-                raise vault_service.KeypairNotValueDeliverableError(
-                    f"{name} is a signing key; use vault_sign instead of value delivery"
-                )
-            allowed = policy.get("allowed_hosts") or []
-            if not allowed:
-                raise TaskCliError(
-                    f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
-                    "(configure allowed hosts in the Vaults UI)",
-                    code="proxy_unbound",
-                    help_command=help_command,
-                )
-            if not _host_allowed(host, allowed):
-                raise TaskCliError(
-                    f"host {host!r} is not allowed for secret '{name}'",
-                    code="host_not_allowed",
-                    help_command=help_command,
-                    details={"host": host, "allowed_hosts": allowed},
-                )
-            auth = policy.get("auth") or {"type": "bearer"}
-            if auth.get("type") == "header":
-                # Defensive: set-time validation blocks new Host auth-headers; this also guards
-                # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
-                # even unwraps the secret.
-                _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
-            # Envelope resolution happens below through resolve_secret_access so
-            # protected-tier secrets can use an active resident-agent grant.
-
-        # Hand the envelope + request to avault: it injects the credential at egress, performs
-        # the request, and returns ONLY the response (status/headers/body) — the value never
-        # returns here. avault re-enforces the allowed_hosts allowlist before decrypting.
-        auth_type = auth.get("type") or "bearer"
-        if auth_type == "header":
-            inject = {"type": "header", "name": auth.get("name", "")}
-        elif auth_type == "query":
-            inject = {"type": "query", "name": auth.get("name", "")}
-        else:
-            inject = {"type": "bearer"}
-        request = {
-            "method": method,
-            "url": url,
-            "allowed_hosts": allowed,
-            "headers": headers,
-            "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
-            "inject": inject,
-        }
-        requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="fetch", host=host, method=method)
-        grant, one_shot_grant, sealed = _resolve_single_vault_delivery(
+        request = _build_vault_fetch_request(
             engine,
-            name,
-            requester=requester,
-            delivery=delivery,
-            purpose="fetch",
+            name=name,
+            url=url,
+            host=host,
+            method=method,
+            headers=headers,
+            body=body,
+            help_command=help_command,
         )
+        requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="fetch", host=host, method=method)
+        approval_wait = _vault_approval_wait_seconds(args, help_command=help_command)
+        waited_for_approval = False
+        while True:
+            try:
+                grant, one_shot_grant, sealed = _resolve_single_vault_delivery(
+                    engine,
+                    name,
+                    requester=requester,
+                    delivery=delivery,
+                    purpose="fetch",
+                )
+                break
+            except TaskCliError as exc:
+                if exc.code == "approval_required" and approval_wait > 0 and not waited_for_approval:
+                    _wait_for_vault_delivery_approval(
+                        args,
+                        exc,
+                        timeout=approval_wait,
+                        help_command=help_command,
+                        operation="vault fetch",
+                    )
+                    waited_for_approval = True
+                    continue
+                raise
+        if waited_for_approval:
+            _validate_vault_fetch_output(output, help_command=help_command)
+            request = _build_vault_fetch_request(
+                engine,
+                name=name,
+                url=url,
+                host=host,
+                method=method,
+                headers=headers,
+                body=body,
+                help_command=help_command,
+            )
         handoff_started = True
         if grant is not None:
             result = api.avault_agent_deliver_fetch(
@@ -10609,6 +10815,7 @@ def build_parser():
     )
     vault_run_parser.add_argument("--tag", action="append", metavar="TAG", help="Inject all value-deliverable secrets with this tag. Repeatable.")
     vault_run_parser.add_argument("--skill", action="append", metavar="SKILL", help="Sugar for --tag skill:SKILL. Repeatable.")
+    _add_vault_approval_wait_args(vault_run_parser)
     vault_run_parser.add_argument("command_argv", nargs=argparse.REMAINDER, help="-- followed by the command to run")
     _add_json_noop(vault_run_parser)
 
@@ -10632,6 +10839,7 @@ def build_parser():
     vault_fetch_parser.add_argument("--data", help="Request body (string)")
     vault_fetch_parser.add_argument("--data-file", help="Request body read from this file")
     vault_fetch_parser.add_argument("--output", help="Write the response body to this file instead of stdout")
+    _add_vault_approval_wait_args(vault_fetch_parser)
     _add_json_noop(vault_fetch_parser)
 
     vault_access_parser = vault_subparsers.add_parser(

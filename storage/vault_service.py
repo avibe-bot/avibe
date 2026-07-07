@@ -47,6 +47,7 @@ SKILL_TAG_PREFIX = "skill:"
 DEFAULT_ENV_GRANT_TTL_SECONDS = 300
 DEFAULT_TAG_GRANT_TTL_SECONDS = 900
 DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS = 120
+DEFAULT_REQUEST_TTL_SECONDS = 30 * 60
 AUTH_FACTOR_REGISTRATION_AUTHZ_OPERATION = "authorize_webauthn_factor_registration"
 DEFAULT_GRANT_TTL_SECONDS = {
     "env": DEFAULT_ENV_GRANT_TTL_SECONDS,
@@ -287,6 +288,10 @@ GRANT_RUNTIME_CACHE = VaultGrantRuntimeCache()
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _request_expiry(ttl_seconds: int = DEFAULT_REQUEST_TTL_SECONDS) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -904,6 +909,151 @@ def _request_json_payloads(row: dict[str, Any]) -> tuple[Any, Any]:
     return _loads(row.get("requester")), _loads(row.get("delivery"))
 
 
+def _request_waiter(delivery: Any) -> dict[str, Any]:
+    if not isinstance(delivery, dict):
+        return {}
+    waiter = delivery.get("waiter")
+    return waiter if isinstance(waiter, dict) else {}
+
+
+def _request_waiter_active(row: dict[str, Any]) -> bool:
+    _, delivery = _request_json_payloads(row)
+    waiter = _request_waiter(delivery)
+    if waiter.get("status") != "active":
+        return False
+    deadline = _parse_iso_datetime(waiter.get("deadline_at"))
+    return deadline is not None and deadline > datetime.now(timezone.utc)
+
+
+def _grant_owner_waiter_active(conn: Connection, grants: list[dict[str, Any]]) -> bool:
+    request_ids = [
+        str(grant.get("request_id") or "")
+        for grant in grants
+        if isinstance(grant, dict) and str(grant.get("request_id") or "")
+    ]
+    if not request_ids:
+        return False
+    rows = conn.execute(select(vault_requests).where(vault_requests.c.id.in_(request_ids))).mappings()
+    return any(_request_waiter_active(dict(row)) for row in rows)
+
+
+def _skip_sibling_callbacks_for_completed_waiter(conn: Connection, request_id: str) -> None:
+    grant_rows = [
+        dict(row)
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.request_id == request_id)).mappings()
+    ]
+    if not grant_rows:
+        return
+    sibling_ids: set[str] = set()
+    for grant in grant_rows:
+        session_id = str(grant.get("session_id") or "")
+        purpose = str(grant.get("purpose") or "")
+        member_set = {str(name) for name in (_loads(grant.get("member_snapshot")) or []) if str(name)}
+        if not session_id or not purpose or not member_set:
+            continue
+        rows = conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.id != request_id,
+                vault_requests.c.request_type == "access",
+                vault_requests.c.status == "approved",
+                vault_requests.c.callback_status == "pending",
+            )
+        ).mappings()
+        for row in rows:
+            row_dict = dict(row)
+            try:
+                option = _request_grant_option(row_dict)
+            except InvalidRequestError:
+                continue
+            if (
+                _request_session_id(row_dict) == session_id
+                and option.purpose == purpose
+                and _request_members_are_subset(row_dict, member_set)
+            ):
+                sibling_ids.add(str(row_dict["id"]))
+    if sibling_ids:
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id.in_(sorted(sibling_ids)), vault_requests.c.callback_status == "pending")
+            .values(callback_status="skipped")
+        )
+
+
+def _update_request_waiter(
+    conn: Connection,
+    request_id: str,
+    *,
+    waiter_id: str,
+    status: str,
+    deadline_at: str | None = None,
+    completed_at: str | None = None,
+    timed_out_at: str | None = None,
+) -> dict[str, Any]:
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row_dict = dict(row)
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
+    current = _request_waiter(delivery_payload)
+    if current and current.get("id") and current.get("id") != waiter_id:
+        raise InvalidRequestError("request waiter id does not match")
+    waiter = {
+        "id": waiter_id,
+        "status": status,
+        "updated_at": _now(),
+    }
+    if deadline_at:
+        waiter["deadline_at"] = deadline_at
+    elif current.get("deadline_at"):
+        waiter["deadline_at"] = current["deadline_at"]
+    if completed_at:
+        waiter["completed_at"] = completed_at
+    if timed_out_at:
+        waiter["timed_out_at"] = timed_out_at
+    delivery_payload["waiter"] = waiter
+
+    values: dict[str, Any] = {"delivery": json.dumps(delivery_payload)}
+    if status == "completed" and row_dict.get("callback_status") == "pending":
+        values["callback_status"] = "skipped"
+
+    conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(**values))
+    if status == "completed":
+        _skip_sibling_callbacks_for_completed_waiter(conn, request_id)
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
+
+
+def arm_request_waiter(conn: Connection, request_id: str, *, waiter_id: str, deadline_at: str) -> dict[str, Any]:
+    return _update_request_waiter(
+        conn,
+        request_id,
+        waiter_id=waiter_id,
+        status="active",
+        deadline_at=deadline_at,
+    )
+
+
+def complete_request_waiter(conn: Connection, request_id: str, *, waiter_id: str) -> dict[str, Any]:
+    return _update_request_waiter(
+        conn,
+        request_id,
+        waiter_id=waiter_id,
+        status="completed",
+        completed_at=_now(),
+    )
+
+
+def timeout_request_waiter(conn: Connection, request_id: str, *, waiter_id: str) -> dict[str, Any]:
+    return _update_request_waiter(
+        conn,
+        request_id,
+        waiter_id=waiter_id,
+        status="timed_out",
+        timed_out_at=_now(),
+    )
+
+
 def _request_session_id(row: dict[str, Any]) -> str | None:
     requester, delivery = _request_json_payloads(row)
     for payload in (requester, delivery):
@@ -1119,8 +1269,12 @@ def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
     members. Every other terminal state (provision/sign/deny/expire, and standard grants which are
     ready on approval) is deliverable immediately; no active covering grant does not block forever.
     """
+    if _request_waiter_active(row):
+        return False
     if str(row.get("request_type") or "") == "access" and str(row.get("status") or "") == "approved":
         grants = _request_covering_grant_payloads(conn, row)
+        if grants and _grant_owner_waiter_active(conn, grants):
+            return False
         if grants and not any(grant.get("delivery_ready") for grant in grants):
             return False
     return True
@@ -2800,7 +2954,7 @@ def create_access_request(
             status="pending",
             message_id=message_id,
             created_at=_now(),
-            expires_at=expires_at,
+            expires_at=expires_at or _request_expiry(),
         )
     )
     audit(conn, "access_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
@@ -2853,7 +3007,7 @@ def create_sign_request(
             status="pending",
             message_id=message_id,
             created_at=_now(),
-            expires_at=expires_at,
+            expires_at=expires_at or _request_expiry(),
         )
     )
     audit(conn, "sign_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
