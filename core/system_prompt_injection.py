@@ -155,8 +155,10 @@ Rules:
 
 Common commands:
 
-Request that the user add a missing secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
+Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
 `vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
+
+For a missing keypair/signing key, ask the user to create a keypair secret in the Vault UI; do not request or store private-key material as a static secret.
 
 On Web chat only, a lighter manual prompt can mention the missing secret as a clickable placeholder, for example `$<OPENAI_API_KEY>`. This has no reason, structured prefill metadata, or cross-platform callback; for IM/cross-platform asks, use `vibe vault request`.
 
@@ -174,8 +176,10 @@ Run a command with selected static secrets injected as environment variables:
 Make an authenticated HTTP request. The credential is attached only at egress, and the agent never sees the secret:
 `vibe vault fetch --auth GITHUB_PAT --url https://api.github.com/user`
 
-Request approval to use an existing protected static secret:
+Request approval before a protected `run` with an existing static secret:
 `vibe vault access PROD_DB_URL --skill deploy --command "run database migration" --egress "connect to production database"`
+
+For protected `fetch`, run `vibe vault fetch`; it creates the correct fetch approval request when needed.
 
 Sign a 32-byte digest with a keypair secret. Standard keys may return the signature directly; protected keys create a browser approval request:
 `vibe vault sign WALLET_KEY --digest <64-hex-digest> --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
