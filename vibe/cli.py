@@ -6903,6 +6903,88 @@ def _read_request_body(args):
     return None
 
 
+def _validate_vault_fetch_output(output: str | None, *, help_command: str) -> None:
+    if not output:
+        return
+    out_path = Path(output)
+    if out_path.exists():
+        # Require an existing regular file: a dir can't be written as a file, and a
+        # FIFO / device (e.g. /dev/full) passes os.access but write_bytes can block or
+        # fail AFTER the credential-bearing request already ran.
+        writable = out_path.is_file() and os.access(out_path, os.W_OK)
+    else:
+        writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
+    if not writable:
+        raise TaskCliError(
+            f"output path is not writable: {output}",
+            code="output_unwritable",
+            help_command=help_command,
+        )
+
+
+def _build_vault_fetch_request(
+    engine,
+    *,
+    name: str,
+    url: str,
+    host: str,
+    method: str,
+    headers: dict,
+    body,
+    help_command: str,
+) -> dict:
+    from storage import vault_service
+
+    # Read policy in a read connection. The host check runs BEFORE handing the envelope to
+    # avault, so a disallowed target never even unwraps the secret. Callers run this both before
+    # and after an approval wait so a mid-wait metadata edit cannot leave a stale allowlist or auth
+    # injection policy in the egress frame.
+    with engine.connect() as conn:
+        policy = vault_service.get_secret_policy(conn, name)
+        meta = vault_service.get_secret_meta(conn, name)
+        if meta.get("kind") == "keypair":
+            raise vault_service.KeypairNotValueDeliverableError(
+                f"{name} is a signing key; use vault_sign instead of value delivery"
+            )
+        allowed = policy.get("allowed_hosts") or []
+        if not allowed:
+            raise TaskCliError(
+                f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
+                "(configure allowed hosts in the Vaults UI)",
+                code="proxy_unbound",
+                help_command=help_command,
+            )
+        if not _host_allowed(host, allowed):
+            raise TaskCliError(
+                f"host {host!r} is not allowed for secret '{name}'",
+                code="host_not_allowed",
+                help_command=help_command,
+                details={"host": host, "allowed_hosts": allowed},
+            )
+        auth = policy.get("auth") or {"type": "bearer"}
+        if auth.get("type") == "header":
+            # Defensive: set-time validation blocks new Host auth-headers; this also guards
+            # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
+            # even unwraps the secret.
+            _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
+
+    auth_type = auth.get("type") or "bearer"
+    if auth_type == "header":
+        inject = {"type": "header", "name": auth.get("name", "")}
+    elif auth_type == "query":
+        inject = {"type": "query", "name": auth.get("name", "")}
+    else:
+        inject = {"type": "bearer"}
+    return {
+        "method": method,
+        "url": url,
+        "allowed_hosts": allowed,
+        "headers": headers,
+        "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
+        "inject": inject,
+    }
+
+
 def cmd_vault_fetch(args):
     from urllib.parse import urlsplit
 
@@ -6936,21 +7018,7 @@ def cmd_vault_fetch(args):
         # the target itself (an existing dir, or an existing file we can't write), not just the
         # parent.
         output = getattr(args, "output", None)
-        if output:
-            out_path = Path(output)
-            if out_path.exists():
-                # Require an existing regular file: a dir can't be written as a file, and a
-                # FIFO / device (e.g. /dev/full) passes os.access but write_bytes can block or
-                # fail AFTER the credential-bearing request already ran.
-                writable = out_path.is_file() and os.access(out_path, os.W_OK)
-            else:
-                writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
-            if not writable:
-                raise TaskCliError(
-                    f"output path is not writable: {output}",
-                    code="output_unwritable",
-                    help_command=help_command,
-                )
+        _validate_vault_fetch_output(output, help_command=help_command)
         host = urlsplit(url).hostname
         if not host:
             raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
@@ -6966,57 +7034,16 @@ def cmd_vault_fetch(args):
             )
 
         engine = _open_vault_engine()
-        # Read policy + envelope in a read connection. The host check runs BEFORE handing the
-        # envelope to avault, so a disallowed target never even unwraps the secret.
-        with engine.connect() as conn:
-            policy = vault_service.get_secret_policy(conn, name)
-            meta = vault_service.get_secret_meta(conn, name)
-            if meta.get("kind") == "keypair":
-                raise vault_service.KeypairNotValueDeliverableError(
-                    f"{name} is a signing key; use vault_sign instead of value delivery"
-                )
-            allowed = policy.get("allowed_hosts") or []
-            if not allowed:
-                raise TaskCliError(
-                    f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
-                    "(configure allowed hosts in the Vaults UI)",
-                    code="proxy_unbound",
-                    help_command=help_command,
-                )
-            if not _host_allowed(host, allowed):
-                raise TaskCliError(
-                    f"host {host!r} is not allowed for secret '{name}'",
-                    code="host_not_allowed",
-                    help_command=help_command,
-                    details={"host": host, "allowed_hosts": allowed},
-                )
-            auth = policy.get("auth") or {"type": "bearer"}
-            if auth.get("type") == "header":
-                # Defensive: set-time validation blocks new Host auth-headers; this also guards
-                # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
-                # even unwraps the secret.
-                _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
-            # Envelope resolution happens below through resolve_secret_access so
-            # protected-tier secrets can use an active resident-agent grant.
-
-        # Hand the envelope + request to avault: it injects the credential at egress, performs
-        # the request, and returns ONLY the response (status/headers/body) — the value never
-        # returns here. avault re-enforces the allowed_hosts allowlist before decrypting.
-        auth_type = auth.get("type") or "bearer"
-        if auth_type == "header":
-            inject = {"type": "header", "name": auth.get("name", "")}
-        elif auth_type == "query":
-            inject = {"type": "query", "name": auth.get("name", "")}
-        else:
-            inject = {"type": "bearer"}
-        request = {
-            "method": method,
-            "url": url,
-            "allowed_hosts": allowed,
-            "headers": headers,
-            "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
-            "inject": inject,
-        }
+        request = _build_vault_fetch_request(
+            engine,
+            name=name,
+            url=url,
+            host=host,
+            method=method,
+            headers=headers,
+            body=body,
+            help_command=help_command,
+        )
         requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="fetch", host=host, method=method)
         approval_wait = _vault_approval_wait_seconds(args, help_command=help_command)
         waited_for_approval = False
@@ -7042,6 +7069,18 @@ def cmd_vault_fetch(args):
                     waited_for_approval = True
                     continue
                 raise
+        if waited_for_approval:
+            _validate_vault_fetch_output(output, help_command=help_command)
+            request = _build_vault_fetch_request(
+                engine,
+                name=name,
+                url=url,
+                host=host,
+                method=method,
+                headers=headers,
+                body=body,
+                help_command=help_command,
+            )
         handoff_started = True
         if grant is not None:
             result = api.avault_agent_deliver_fetch(

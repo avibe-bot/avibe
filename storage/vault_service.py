@@ -925,6 +925,60 @@ def _request_waiter_active(row: dict[str, Any]) -> bool:
     return deadline is not None and deadline > datetime.now(timezone.utc)
 
 
+def _grant_owner_waiter_active(conn: Connection, grants: list[dict[str, Any]]) -> bool:
+    request_ids = [
+        str(grant.get("request_id") or "")
+        for grant in grants
+        if isinstance(grant, dict) and str(grant.get("request_id") or "")
+    ]
+    if not request_ids:
+        return False
+    rows = conn.execute(select(vault_requests).where(vault_requests.c.id.in_(request_ids))).mappings()
+    return any(_request_waiter_active(dict(row)) for row in rows)
+
+
+def _skip_sibling_callbacks_for_completed_waiter(conn: Connection, request_id: str) -> None:
+    grant_rows = [
+        dict(row)
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.request_id == request_id)).mappings()
+    ]
+    if not grant_rows:
+        return
+    sibling_ids: set[str] = set()
+    for grant in grant_rows:
+        session_id = str(grant.get("session_id") or "")
+        purpose = str(grant.get("purpose") or "")
+        member_set = {str(name) for name in (_loads(grant.get("member_snapshot")) or []) if str(name)}
+        if not session_id or not purpose or not member_set:
+            continue
+        rows = conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.id != request_id,
+                vault_requests.c.request_type == "access",
+                vault_requests.c.status == "approved",
+                vault_requests.c.callback_status == "pending",
+            )
+        ).mappings()
+        for row in rows:
+            row_dict = dict(row)
+            try:
+                option = _request_grant_option(row_dict)
+            except InvalidRequestError:
+                continue
+            if (
+                _request_session_id(row_dict) == session_id
+                and option.purpose == purpose
+                and _request_members_are_subset(row_dict, member_set)
+            ):
+                sibling_ids.add(str(row_dict["id"]))
+    if sibling_ids:
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id.in_(sorted(sibling_ids)), vault_requests.c.callback_status == "pending")
+            .values(callback_status="skipped")
+        )
+
+
 def _update_request_waiter(
     conn: Connection,
     request_id: str,
@@ -964,6 +1018,8 @@ def _update_request_waiter(
         values["callback_status"] = "skipped"
 
     conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(**values))
+    if status == "completed":
+        _skip_sibling_callbacks_for_completed_waiter(conn, request_id)
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
@@ -1217,6 +1273,8 @@ def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
         return False
     if str(row.get("request_type") or "") == "access" and str(row.get("status") or "") == "approved":
         grants = _request_covering_grant_payloads(conn, row)
+        if grants and _grant_owner_waiter_active(conn, grants):
+            return False
         if grants and not any(grant.get("delivery_ready") for grant in grants):
             return False
     return True

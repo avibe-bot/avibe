@@ -361,6 +361,38 @@ def test_complete_request_waiter_suppresses_redundant_callback(vault):
         assert vs.list_pending_request_callbacks(conn) == []
 
 
+def test_covering_grant_owner_waiter_suppresses_sibling_callbacks(vault):
+    future = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="WAIT_A", sealed=_sealed("a"), protection="protected", tags=["deploy"])
+        vs.create_secret(conn, name="WAIT_B", sealed=_sealed("b"), protection="protected", tags=["deploy"])
+        primary = vs.create_access_request(
+            conn,
+            source_selector={"tags": ["deploy"]},
+            requester={"session_id": "ses_wait"},
+            delivery={"session_id": "ses_wait"},
+        )
+        sibling = vs.create_access_request(
+            conn,
+            "WAIT_A",
+            requester={"session_id": "ses_wait"},
+            delivery={"session_id": "ses_wait"},
+        )
+        vs.arm_request_waiter(conn, primary["id"], waiter_id="vw_primary", deadline_at=future)
+        _grant_from_request(conn, primary)
+
+        sibling_row = _row(conn, sibling["id"])
+        assert sibling_row["status"] == "approved"
+        assert sibling_row["callback_status"] == "pending"
+        assert vs.request_callback_ready(conn, sibling_row) is False
+
+        vs.complete_request_waiter(conn, primary["id"], waiter_id="vw_primary")
+
+        assert _callback_status(conn, primary["id"]) == "skipped"
+        assert _callback_status(conn, sibling["id"]) == "skipped"
+        assert vs.list_pending_request_callbacks(conn) == []
+
+
 def test_request_callback_ready_defers_sibling_access_until_covering_grant_ready(vault):
     with vault.begin() as conn:
         vs.create_secret(conn, name="GR_A", sealed=_sealed("a"), protection="protected", tags=["deploy"])
