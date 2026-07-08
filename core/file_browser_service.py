@@ -72,6 +72,9 @@ _DELETE_UNDO_ENTRY_NAME = "entry"
 _DELETE_UNDO_METADATA_NAME = "metadata.json"
 _DELETE_UNDO_LOCK = threading.Lock()
 _DELETE_UNDO_INITIALIZED = False
+_DELETE_UNDO_EXPIRY_TIMER: threading.Timer | None = None
+_DELETE_UNDO_EXPIRY_TIMER_DEADLINE: float | None = None
+_DELETE_UNDO_EXPIRY_TIMER_ROOT: Path | None = None
 _DELETE_UNDO_ENTRY_SIZE_CAP_ENV = "AVIBE_FILES_UNDO_SIZE_CAP_BYTES"
 _DELETE_UNDO_TTL_ENV = "AVIBE_FILES_UNDO_TTL_SECONDS"
 _DELETE_UNDO_MAX_ENTRIES_ENV = "AVIBE_FILES_UNDO_MAX_ENTRIES"
@@ -1436,13 +1439,67 @@ def _delete_undo_entry_from_dir(directory: Path) -> DeleteUndoEntry | None:
     )
 
 
-def _purge_delete_undo_store_locked(root: Path, *, now: float | None = None) -> list[DeleteUndoEntry]:
+def _cancel_delete_undo_expiry_timer_locked() -> None:
+    global _DELETE_UNDO_EXPIRY_TIMER
+    global _DELETE_UNDO_EXPIRY_TIMER_DEADLINE
+    global _DELETE_UNDO_EXPIRY_TIMER_ROOT
+    if _DELETE_UNDO_EXPIRY_TIMER is not None:
+        _DELETE_UNDO_EXPIRY_TIMER.cancel()
+    _DELETE_UNDO_EXPIRY_TIMER = None
+    _DELETE_UNDO_EXPIRY_TIMER_DEADLINE = None
+    _DELETE_UNDO_EXPIRY_TIMER_ROOT = None
+
+
+def _schedule_delete_undo_expiry_locked(root: Path, entries: list[DeleteUndoEntry], *, now: float) -> None:
+    global _DELETE_UNDO_EXPIRY_TIMER
+    global _DELETE_UNDO_EXPIRY_TIMER_DEADLINE
+    global _DELETE_UNDO_EXPIRY_TIMER_ROOT
+    ttl = _delete_undo_ttl_seconds()
+    future_deadlines = [entry.deleted_at + ttl for entry in entries if entry.deleted_at + ttl > now]
+    if not future_deadlines:
+        _cancel_delete_undo_expiry_timer_locked()
+        return
+    deadline = min(future_deadlines)
+    if (
+        _DELETE_UNDO_EXPIRY_TIMER is not None
+        and _DELETE_UNDO_EXPIRY_TIMER.is_alive()
+        and _DELETE_UNDO_EXPIRY_TIMER_DEADLINE == deadline
+        and _DELETE_UNDO_EXPIRY_TIMER_ROOT == root
+    ):
+        return
+    _cancel_delete_undo_expiry_timer_locked()
+    timer = threading.Timer(max(0.0, deadline - now), _run_delete_undo_expiry_timer, args=(root,))
+    timer.daemon = True
+    _DELETE_UNDO_EXPIRY_TIMER = timer
+    _DELETE_UNDO_EXPIRY_TIMER_DEADLINE = deadline
+    _DELETE_UNDO_EXPIRY_TIMER_ROOT = root
+    timer.start()
+
+
+def _run_delete_undo_expiry_timer(root: Path) -> None:
+    with _DELETE_UNDO_LOCK:
+        try:
+            root_stat = root.lstat()
+            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+                _cancel_delete_undo_expiry_timer_locked()
+                return
+            _purge_delete_undo_store_locked(root)
+        except OSError:
+            _cancel_delete_undo_expiry_timer_locked()
+            logger.debug("Delete undo expiry purge failed", exc_info=True)
+
+
+def _purge_delete_undo_store_locked(
+    root: Path, *, now: float | None = None, schedule_expiry: bool = True
+) -> list[DeleteUndoEntry]:
     current_time = time.time() if now is None else now
     ttl = _delete_undo_ttl_seconds()
     entries: list[DeleteUndoEntry] = []
     try:
         children = list(root.iterdir())
     except FileNotFoundError:
+        if schedule_expiry:
+            _cancel_delete_undo_expiry_timer_locked()
         return []
     for child in children:
         entry = _delete_undo_entry_from_dir(child)
@@ -1470,6 +1527,8 @@ def _purge_delete_undo_store_locked(root: Path, *, now: float | None = None) -> 
         if not _evict_one_delete_undo_entry(root, entries):
             break
         total_size = sum(entry.size for entry in entries)
+    if schedule_expiry:
+        _schedule_delete_undo_expiry_locked(root, entries, now=current_time)
     return entries
 
 
@@ -1548,7 +1607,11 @@ def _open_verified_delete_undo_parent(entry: DeleteUndoEntry) -> int | None:
     except OSError as exc:
         if fd >= 0:
             os.close(fd)
-        raise FileBrowserError("expired", "Undo token expired or unavailable", 410) from exc
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise FileBrowserError("expired", "Undo token expired or unavailable", 410) from exc
+        if exc.errno in {errno.EACCES, errno.EPERM} or isinstance(exc, PermissionError):
+            raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
 
 
 def _delete_undo_target_exists(parent_fd: int | None, target: Path) -> bool:

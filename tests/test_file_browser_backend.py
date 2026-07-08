@@ -24,9 +24,13 @@ def files_undo_runtime(tmp_path, monkeypatch):
 
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(paths, "get_runtime_dir", lambda: runtime)
-    monkeypatch.setattr(fs, "_DELETE_UNDO_INITIALIZED", False)
+    with fs._DELETE_UNDO_LOCK:
+        fs._cancel_delete_undo_expiry_timer_locked()
+        fs._DELETE_UNDO_INITIALIZED = False
     yield runtime
-    fs._DELETE_UNDO_INITIALIZED = False
+    with fs._DELETE_UNDO_LOCK:
+        fs._cancel_delete_undo_expiry_timer_locked()
+        fs._DELETE_UNDO_INITIALIZED = False
 
 
 def test_resolve_safe_path_expands_home_and_requires_absolute(tmp_path, monkeypatch):
@@ -885,6 +889,49 @@ def test_delete_undo_token_expiry_purges_staging(files_undo_runtime, tmp_path, m
     assert not (files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token).exists()
 
 
+def test_delete_undo_expiry_timer_purges_without_later_file_request(files_undo_runtime, tmp_path, monkeypatch):
+    now = 2000.0
+    scheduled: list[object] = []
+
+    class FakeTimer:
+        def __init__(self, interval, function, args=(), kwargs=None):
+            self.interval = interval
+            self.function = function
+            self.args = args
+            self.kwargs = kwargs or {}
+            self.started = False
+            self.cancelled = False
+            scheduled.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+        def is_alive(self):
+            return self.started and not self.cancelled
+
+    monkeypatch.setattr(fs.time, "time", lambda: now)
+    monkeypatch.setattr(fs, "DELETE_UNDO_TTL_SECONDS", 10)
+    monkeypatch.setattr(fs.threading, "Timer", FakeTimer)
+    target = tmp_path / "scheduled-expiry.txt"
+    target.write_text("expire me", encoding="utf-8")
+
+    token = fs.delete_path(str(target))["undo_token"]
+
+    assert scheduled
+    assert scheduled[-1].interval == 10
+    assert scheduled[-1].started is True
+    stage_dir = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token
+    assert stage_dir.exists()
+
+    now = 2011.0
+    scheduled[-1].function(*scheduled[-1].args, **scheduled[-1].kwargs)
+
+    assert not stage_dir.exists()
+
+
 def test_delete_undo_refuses_to_clobber_recreated_path(files_undo_runtime, tmp_path):
     target = tmp_path / "occupied.txt"
     target.write_text("deleted", encoding="utf-8")
@@ -1138,6 +1185,31 @@ def test_delete_undo_rejects_replaced_parent_symlink(files_undo_runtime, tmp_pat
     assert exc.value.code == "expired"
     assert not (other / "note.txt").exists()
     assert not (files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token).exists()
+
+
+def test_delete_undo_parent_open_permission_failure_preserves_token(files_undo_runtime, tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    target = parent / "note.txt"
+    target.write_text("deleted", encoding="utf-8")
+    token = fs.delete_path(str(target))["undo_token"]
+    stage_dir = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token
+    real_open = fs.os.open
+
+    def fail_parent_open(path, flags, *args, **kwargs):
+        if Path(path) == parent:
+            raise PermissionError(errno.EACCES, "permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fs.os, "open", fail_parent_open)
+        with pytest.raises(FileBrowserError) as exc:
+            fs.undo_delete_path(token)
+
+    assert exc.value.code == "permission_denied"
+    assert stage_dir.exists()
+    assert fs.undo_delete_path(token) == {"restored_path": str(target)}
+    assert target.read_text(encoding="utf-8") == "deleted"
 
 
 def test_delete_undo_restores_through_verified_parent_when_path_is_replaced(
