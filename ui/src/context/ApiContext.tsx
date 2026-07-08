@@ -64,6 +64,16 @@ export type VaultRequest = {
   decided_at: string | null;
   expires_at: string | null;
   card?: Record<string, unknown> | null;
+  session?: VaultRequestSession | null;
+};
+
+export type VaultRequestSession = {
+  id: string;
+  title: string | null;
+  label: string | null;
+  platform: string | null;
+  scope_kind: string | null;
+  is_workbench: boolean;
 };
 
 export type VaultRequestSpec = {

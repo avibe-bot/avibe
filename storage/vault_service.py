@@ -31,6 +31,8 @@ from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto, vault_webauthn
 from storage.models import (
+    agent_sessions,
+    scopes,
     vault_audit,
     vault_auth_factors,
     vault_grants,
@@ -873,6 +875,47 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
     return card
 
 
+def _request_session_summary(conn: Connection, session_id: str | None) -> dict[str, Any] | None:
+    """Resolve the request's originating session into UI-facing display metadata."""
+    if not session_id:
+        return None
+    row = conn.execute(
+        select(
+            agent_sessions.c.id,
+            agent_sessions.c.title,
+            scopes.c.platform,
+            scopes.c.scope_type,
+            scopes.c.native_id,
+            scopes.c.display_name,
+        )
+        .select_from(agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True))
+        .where(agent_sessions.c.id == session_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return {
+            "id": session_id,
+            "title": None,
+            "label": session_id,
+            "platform": None,
+            "scope_kind": None,
+            "is_workbench": False,
+        }
+    platform = str(row["platform"] or "").strip()
+    scope_kind = str(row["scope_type"] or "").strip()
+    is_workbench = platform == "avibe" or scope_kind == "project"
+    title = row["title"]
+    label = title if is_workbench else (row["display_name"] or row["native_id"] or title or session_id)
+    return {
+        "id": row["id"],
+        "title": title,
+        "label": label,
+        "platform": platform or None,
+        "scope_kind": scope_kind or None,
+        "is_workbench": is_workbench,
+    }
+
+
 def _request_row_payload(
     row: dict[str, Any],
     *,
@@ -890,7 +933,7 @@ def _request_row_payload(
         and isinstance(card, dict)
     ):
         card = _hydrate_card_unlock_material(conn, row, card)
-    return {
+    payload = {
         "id": row["id"],
         "request_type": row["request_type"],
         "secret_name": row.get("secret_name"),
@@ -903,6 +946,9 @@ def _request_row_payload(
         "expires_at": row.get("expires_at"),
         "card": card if isinstance(card, dict) else None,
     }
+    if policy.audience == REQUEST_AUDIENCE_UI and conn is not None:
+        payload["session"] = _request_session_summary(conn, _request_session_id(row))
+    return payload
 
 
 def _request_json_payloads(row: dict[str, Any]) -> tuple[Any, Any]:
@@ -2642,7 +2688,7 @@ def _secure_input_card(
         "request_id": request_id,
         "secret_name": name,
         # Carry the requesting session so surfaces can scope the card to its chat
-        # (mirrors approval_card); the Vaults page ignores it.
+        # (mirrors approval_card); UI reads resolve it into a display/link summary.
         "session_id": session_id,
         "reason": reason,
         "protection_options": ["standard", "protected"],

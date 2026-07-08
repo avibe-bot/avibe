@@ -12,6 +12,7 @@ import { Badge } from './badge';
 import { Button } from './button';
 import { Switch } from './switch';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
+import { VaultRequestSessionLink, vaultRequestSessionDisplay } from './vault-request-session-link';
 
 /**
  * The fixed protected grant the daemon attaches to an access request's card. In the
@@ -107,6 +108,7 @@ export const VaultApprovalCard: React.FC<{
   // `grant_options[].unlock_material` are present for protected requests. No fetch or
   // loading state is needed here — the single-request GET is agent-audience (value-free).
   const card = (request.card ?? null) as ApprovalCard | null;
+  const requestSession = vaultRequestSessionDisplay(request);
   const delivery = (request.delivery ?? {}) as {
     digest?: string;
     scheme?: string;
@@ -356,9 +358,9 @@ export const VaultApprovalCard: React.FC<{
             <SigningAddressList addresses={schemeAddresses} />
           </DetailRow>
         ) : null}
-        {card.session_id ? (
+        {requestSession ? (
           <DetailRow label={t('vaults.approval.session')}>
-            <span className="truncate text-[13px] text-foreground">{card.session_id}</span>
+            <VaultRequestSessionLink session={requestSession} className="text-foreground" textClassName="text-[13px]" />
           </DetailRow>
         ) : null}
         {!isSign && card.command ? (

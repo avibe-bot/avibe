@@ -18,6 +18,7 @@ import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
 import { SigningAddressList } from '../ui/signing-address-list';
 import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
+import { VaultRequestSessionLink, vaultRequestSessionDisplay } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 
 const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
@@ -247,6 +248,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
   const isProvision = type === 'provision';
   const isProtected = card.protection === 'protected';
   const Icon = isSign || card.kind === 'keypair' ? Wallet : KeyRound;
+  const session = vaultRequestSessionDisplay(r);
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-gold/40 bg-gold/[0.06] px-4 py-3">
       <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold">
@@ -260,13 +262,13 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
           </Badge>
           {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
         </div>
-        <span className="flex items-center gap-1.5 text-xs text-muted">
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted">
           <Clock className="size-3" />
           {isProvision ? t('vaults.requests.waitingForValue') : t('vaults.requests.waiting')}
-          {card.session_id ? (
+          {session ? (
             <>
               <span aria-hidden>·</span>
-              <span className="truncate font-mono">{card.session_id}</span>
+              <VaultRequestSessionLink session={session} />
             </>
           ) : null}
         </span>

@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import select
 
 from storage import vault_service
-from storage.models import vault_audit, vault_auth_factors, vault_requests, vault_secrets
+from storage.models import agent_sessions, scopes, vault_audit, vault_auth_factors, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 from vibe import api
@@ -27,6 +27,50 @@ from vibe import api
 
 def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
+
+
+def _insert_workbench_session(conn, *, session_id: str, title: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    scope_id = f"scope_{session_id}"
+    conn.execute(
+        scopes.insert().values(
+            id=scope_id,
+            platform="avibe",
+            scope_type="project",
+            native_id=f"project_{session_id}",
+            parent_scope_id=None,
+            display_name="Vault Project",
+            native_type=None,
+            is_private=1,
+            supports_threads=1,
+            metadata_json="{}",
+            first_seen_at=now,
+            last_seen_at=now,
+            updated_at=now,
+        )
+    )
+    conn.execute(
+        agent_sessions.insert().values(
+            id=session_id,
+            scope_id=scope_id,
+            agent_id=None,
+            agent_name="codex",
+            agent_backend="codex",
+            agent_variant="codex",
+            model=None,
+            reasoning_effort=None,
+            session_anchor=session_id,
+            workdir="/tmp/work",
+            native_session_id="native-1",
+            title=title,
+            status="active",
+            agent_status="idle",
+            metadata_json="{}",
+            created_at=now,
+            updated_at=now,
+            last_active_at=now,
+        )
+    )
 
 
 def _grant_from_request(conn, request: dict, *, session_id: str | None = None, cache_ready: bool = True) -> dict:
@@ -594,6 +638,29 @@ def test_provision_request_card_carries_session_id():
     assert req["card"]["session_id"] == "ses_abc123"
     result = api.get_vault_provision_request_by_name("DEPLOY_TOKEN")
     assert (result["request"]["card"] or {}).get("session_id") == "ses_abc123"
+
+
+def test_vault_request_ui_payload_resolves_workbench_session_summary():
+    with api._vault_engine().begin() as conn:
+        _insert_workbench_session(conn, session_id="ses_vault_title", title="Deploy checklist")
+        req = vault_service.create_provision_request(
+            conn,
+            "DEPLOY_TOKEN",
+            requester={"source": "agent-cli", "session_id": "ses_vault_title"},
+        )
+
+    listed = api.get_vault_requests(session="ses_vault_title")
+
+    assert listed["requests"][0]["session"] == {
+        "id": "ses_vault_title",
+        "title": "Deploy checklist",
+        "label": "Deploy checklist",
+        "platform": "avibe",
+        "scope_kind": "project",
+        "is_workbench": True,
+    }
+    agent_payload = api.get_vault_request(req["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    assert "session" not in agent_payload["request"]
 
 
 def test_list_requests_scopes_by_session():
