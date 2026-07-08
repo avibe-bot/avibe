@@ -18,7 +18,7 @@ from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def files_undo_runtime(tmp_path, monkeypatch):
     from config import paths
 
@@ -832,6 +832,18 @@ def test_delete_undo_restores_directory(files_undo_runtime, tmp_path):
     assert (nested / "child.txt").read_text(encoding="utf-8") == "child"
 
 
+def test_delete_undo_restores_empty_directory_without_recursive(files_undo_runtime, tmp_path):
+    folder = tmp_path / "empty"
+    folder.mkdir()
+
+    deleted = fs.delete_path(str(folder), recursive=False)
+
+    assert deleted["undo_token"]
+    assert not folder.exists()
+    assert fs.undo_delete_path(deleted["undo_token"]) == {"restored_path": str(folder)}
+    assert folder.is_dir()
+
+
 def test_delete_undo_token_expiry_purges_staging(files_undo_runtime, tmp_path, monkeypatch):
     now = 1000.0
     monkeypatch.setattr(fs.time, "time", lambda: now)
@@ -890,6 +902,27 @@ def test_delete_size_cap_falls_back_to_permanent_delete(files_undo_runtime, tmp_
 
     assert deleted == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
     assert not target.exists()
+
+
+def test_delete_post_rename_growth_falls_back_to_permanent_delete(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "8")
+    target = tmp_path / "active.log"
+    target.write_text("1234", encoding="utf-8")
+    real_rename = fs._os_rename_noreplace
+
+    def rename_then_grow(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        with destination.open("ab") as handle:
+            handle.write(b"567890")
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", rename_then_grow)
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    assert not target.exists()
+    undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
+    assert not undo_root.exists() or not list(undo_root.iterdir())
 
 
 def test_delete_stale_file_replaced_by_directory_is_not_staged_or_removed(files_undo_runtime, tmp_path, monkeypatch):
@@ -998,6 +1031,23 @@ def test_delete_undo_failed_eviction_keeps_caps_enforced(files_undo_runtime, tmp
     assert first.read_text(encoding="utf-8") == "first"
 
 
+def test_delete_undo_purges_entry_that_grows_past_cap(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "8")
+    target = tmp_path / "growing.log"
+    target.write_text("1234", encoding="utf-8")
+
+    token = fs.delete_path(str(target))["undo_token"]
+    staged_entry = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token / fs._DELETE_UNDO_ENTRY_NAME
+    staged_entry.write_text("123456789", encoding="utf-8")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.undo_delete_path(token)
+
+    assert exc.value.code == "expired"
+    assert not staged_entry.exists()
+    assert not target.exists()
+
+
 def test_delete_stages_symlink_entry_without_touching_target(files_undo_runtime, tmp_path):
     target = tmp_path / "target.txt"
     target.write_text("target", encoding="utf-8")
@@ -1013,6 +1063,26 @@ def test_delete_stages_symlink_entry_without_touching_target(files_undo_runtime,
     assert link.is_symlink()
     assert link.resolve() == target
     assert target.read_text(encoding="utf-8") == "target"
+
+
+def test_delete_undo_rejects_replaced_parent_symlink(files_undo_runtime, tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    target = parent / "note.txt"
+    target.write_text("deleted", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+
+    token = fs.delete_path(str(target))["undo_token"]
+    parent.rmdir()
+    parent.symlink_to(other, target_is_directory=True)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.undo_delete_path(token)
+
+    assert exc.value.code == "expired"
+    assert not (other / "note.txt").exists()
+    assert not (files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token).exists()
 
 
 def test_delete_undo_purges_corrupt_staging_entries(files_undo_runtime, tmp_path):
@@ -1044,6 +1114,7 @@ def test_delete_non_recursive_directory_maps_not_empty_only_for_not_empty_errno(
 def test_delete_non_recursive_directory_maps_permission_denied(tmp_path, monkeypatch):
     folder = tmp_path / "folder"
     folder.mkdir()
+    monkeypatch.setattr(fs, "_stage_delete_for_undo", lambda *args, **kwargs: None)
 
     def fail_rmdir(self: Path) -> None:
         if self == folder:
@@ -1063,6 +1134,7 @@ def test_delete_non_recursive_directory_maps_permission_denied(tmp_path, monkeyp
 def test_delete_non_recursive_directory_maps_concurrent_missing_to_not_found(tmp_path, monkeypatch):
     folder = tmp_path / "folder"
     folder.mkdir()
+    monkeypatch.setattr(fs, "_stage_delete_for_undo", lambda *args, **kwargs: None)
 
     def fail_rmdir(self: Path) -> None:
         if self == folder:
@@ -1082,6 +1154,7 @@ def test_delete_non_recursive_directory_maps_concurrent_missing_to_not_found(tmp
 def test_delete_non_recursive_directory_maps_generic_oserror_to_fs_error(tmp_path, monkeypatch):
     folder = tmp_path / "folder"
     folder.mkdir()
+    monkeypatch.setattr(fs, "_stage_delete_for_undo", lambda *args, **kwargs: None)
 
     def fail_rmdir(self: Path) -> None:
         if self == folder:
