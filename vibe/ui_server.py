@@ -6209,6 +6209,20 @@ async def files_delete(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/files/delete/undo", include_in_schema=False)
+async def files_delete_undo(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.undo_delete_path, payload.get("token") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/files/search", include_in_schema=False)
 async def files_search(starlette_request: FastAPIRequest):
     async def handler():

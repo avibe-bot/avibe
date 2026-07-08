@@ -4,6 +4,7 @@ import ctypes
 import errno
 import fnmatch
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_LIST_ENTRIES = 5000
+DELETE_UNDO_TTL_SECONDS = 3600
+DELETE_UNDO_MAX_ENTRIES = 32
+DELETE_UNDO_ENTRY_SIZE_CAP_BYTES = 512 * 1024 * 1024
+DELETE_UNDO_TOTAL_SIZE_CAP_BYTES = 2 * 1024 * 1024 * 1024
 
 INLINE_SAFE_CONTENT_TYPES = {
     "image/png",
@@ -62,6 +67,15 @@ _WRITE_TEMP_PREFIX = ".avibe-write-"
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _NO_REPLACE_UNSUPPORTED_ERRNOS = {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
 _HARD_LINK_UNSUPPORTED_ERRNOS = {errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP}
+_DELETE_UNDO_DIR_NAME = "files_undo"
+_DELETE_UNDO_ENTRY_NAME = "entry"
+_DELETE_UNDO_METADATA_NAME = "metadata.json"
+_DELETE_UNDO_LOCK = threading.Lock()
+_DELETE_UNDO_INITIALIZED = False
+_DELETE_UNDO_ENTRY_SIZE_CAP_ENV = "AVIBE_FILES_UNDO_SIZE_CAP_BYTES"
+_DELETE_UNDO_TTL_ENV = "AVIBE_FILES_UNDO_TTL_SECONDS"
+_DELETE_UNDO_MAX_ENTRIES_ENV = "AVIBE_FILES_UNDO_MAX_ENTRIES"
+_DELETE_UNDO_TOTAL_SIZE_CAP_ENV = "AVIBE_FILES_UNDO_TOTAL_SIZE_CAP_BYTES"
 
 
 class FileBrowserError(Exception):
@@ -88,6 +102,17 @@ class FileContent:
     mime: str
     disposition: str
     data: bytes
+
+
+@dataclass(frozen=True)
+class DeleteUndoEntry:
+    token: str
+    directory: Path
+    entry_path: Path
+    metadata_path: Path
+    original_path: Path
+    deleted_at: float
+    size: int
 
 
 def resolve_safe_path(raw: str) -> Path:
@@ -1167,6 +1192,246 @@ def _remove_path_if_exists_best_effort(path: Path) -> None:
         logger.debug("Failed to remove move backup after preserving placed target", exc_info=True)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Ignoring invalid integer value for %s", name)
+        return default
+
+
+def _delete_undo_ttl_seconds() -> int:
+    return _env_int(_DELETE_UNDO_TTL_ENV, DELETE_UNDO_TTL_SECONDS)
+
+
+def _delete_undo_max_entries() -> int:
+    return _env_int(_DELETE_UNDO_MAX_ENTRIES_ENV, DELETE_UNDO_MAX_ENTRIES)
+
+
+def _delete_undo_entry_size_cap_bytes() -> int:
+    return _env_int(_DELETE_UNDO_ENTRY_SIZE_CAP_ENV, DELETE_UNDO_ENTRY_SIZE_CAP_BYTES)
+
+
+def _delete_undo_total_size_cap_bytes() -> int:
+    return _env_int(_DELETE_UNDO_TOTAL_SIZE_CAP_ENV, DELETE_UNDO_TOTAL_SIZE_CAP_BYTES)
+
+
+def _delete_undo_root() -> Path:
+    from config import paths
+
+    return paths.get_runtime_dir() / _DELETE_UNDO_DIR_NAME
+
+
+def _ensure_delete_undo_root() -> Path:
+    root = _delete_undo_root()
+    root.mkdir(parents=True, exist_ok=True)
+    stat_result = root.lstat()
+    if stat.S_ISLNK(stat_result.st_mode) or not stat.S_ISDIR(stat_result.st_mode):
+        raise OSError(errno.ENOTDIR, "delete undo staging root is not a directory", str(root))
+    return root
+
+
+def _entry_size_no_follow(path: Path, *, cap: int) -> int | None:
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            stat_result = current.lstat()
+        except OSError:
+            return None
+        total += max(0, stat_result.st_size)
+        if total > cap:
+            return total
+        if not stat.S_ISDIR(stat_result.st_mode):
+            continue
+        try:
+            with os.scandir(current) as iterator:
+                stack.extend(Path(entry.path) for entry in iterator)
+        except OSError:
+            return None
+    return total
+
+
+def _write_delete_undo_metadata(path: Path, payload: dict[str, Any]) -> None:
+    data = json.dumps(payload, sort_keys=True).encode("utf-8")
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _delete_undo_entry_from_dir(directory: Path) -> DeleteUndoEntry | None:
+    if not re.fullmatch(r"[0-9a-f]{32}", directory.name):
+        return None
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+    metadata_path = directory / _DELETE_UNDO_METADATA_NAME
+    entry_path = directory / _DELETE_UNDO_ENTRY_NAME
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        original_path = Path(str(payload["original_path"]))
+        deleted_at = float(payload["deleted_at"])
+        size = int(payload["size"])
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not original_path.is_absolute() or "\x00" in str(original_path) or deleted_at < 0 or size < 0:
+        return None
+    if not _exists_no_follow(entry_path):
+        return None
+    return DeleteUndoEntry(
+        token=directory.name,
+        directory=directory,
+        entry_path=entry_path,
+        metadata_path=metadata_path,
+        original_path=original_path,
+        deleted_at=deleted_at,
+        size=size,
+    )
+
+
+def _purge_delete_undo_store_locked(root: Path, *, now: float | None = None) -> list[DeleteUndoEntry]:
+    current_time = time.time() if now is None else now
+    ttl = _delete_undo_ttl_seconds()
+    entries: list[DeleteUndoEntry] = []
+    try:
+        children = list(root.iterdir())
+    except FileNotFoundError:
+        return []
+    for child in children:
+        entry = _delete_undo_entry_from_dir(child)
+        if entry is None or current_time - entry.deleted_at > ttl:
+            _remove_path_if_exists_best_effort(child)
+            continue
+        entries.append(entry)
+
+    entries.sort(key=lambda item: (item.deleted_at, item.token))
+    max_entries = _delete_undo_max_entries()
+    while len(entries) > max_entries:
+        victim = entries.pop(0)
+        _remove_path_if_exists_best_effort(victim.directory)
+
+    total_cap = _delete_undo_total_size_cap_bytes()
+    total_size = sum(entry.size for entry in entries)
+    while entries and total_size > total_cap:
+        victim = entries.pop(0)
+        total_size -= victim.size
+        _remove_path_if_exists_best_effort(victim.directory)
+    return entries
+
+
+def _ensure_delete_undo_initialized() -> None:
+    global _DELETE_UNDO_INITIALIZED
+    if _DELETE_UNDO_INITIALIZED:
+        return
+    with _DELETE_UNDO_LOCK:
+        if _DELETE_UNDO_INITIALIZED:
+            return
+        try:
+            root = _ensure_delete_undo_root()
+            _purge_delete_undo_store_locked(root)
+        except OSError:
+            logger.debug("Delete undo staging initialization failed", exc_info=True)
+            return
+        _DELETE_UNDO_INITIALIZED = True
+
+
+def _purge_delete_undo_store_best_effort() -> None:
+    _ensure_delete_undo_initialized()
+    with _DELETE_UNDO_LOCK:
+        try:
+            root = _ensure_delete_undo_root()
+            _purge_delete_undo_store_locked(root)
+        except OSError:
+            logger.debug("Delete undo staging purge failed", exc_info=True)
+
+
+def _delete_permanently(target: Path, target_stat: os.stat_result, *, recursive: bool) -> dict[str, Any]:
+    try:
+        if stat.S_ISDIR(target_stat.st_mode):
+            if recursive:
+                shutil.rmtree(target)
+            else:
+                target.rmdir()
+        else:
+            target.unlink()
+        return {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    except OSError as exc:
+        if stat.S_ISDIR(target_stat.st_mode) and not recursive and exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+            raise ConflictError("not_empty", "Directory is not empty") from exc
+        if isinstance(exc, FileNotFoundError):
+            raise NotFoundError() from exc
+        if isinstance(exc, PermissionError):
+            raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+
+
+def _stage_delete_for_undo(target: Path, target_stat: os.stat_result, *, recursive: bool) -> dict[str, Any] | None:
+    if stat.S_ISDIR(target_stat.st_mode) and not recursive:
+        return None
+
+    entry_size_cap = _delete_undo_entry_size_cap_bytes()
+    total_size_cap = _delete_undo_total_size_cap_bytes()
+    effective_size_cap = min(entry_size_cap, total_size_cap)
+    if effective_size_cap <= 0:
+        return None
+    size = _entry_size_no_follow(target, cap=effective_size_cap)
+    if size is None or size > effective_size_cap:
+        return None
+
+    _ensure_delete_undo_initialized()
+    ttl = _delete_undo_ttl_seconds()
+    now = time.time()
+    token = uuid.uuid4().hex
+
+    with _DELETE_UNDO_LOCK:
+        stage_dir: Path | None = None
+        try:
+            root = _ensure_delete_undo_root()
+            _purge_delete_undo_store_locked(root, now=now)
+            stage_dir = root / token
+            stage_dir.mkdir(mode=0o700)
+            metadata_path = stage_dir / _DELETE_UNDO_METADATA_NAME
+            staged_entry = stage_dir / _DELETE_UNDO_ENTRY_NAME
+            _write_delete_undo_metadata(
+                metadata_path,
+                {
+                    "original_path": str(target),
+                    "deleted_at": now,
+                    "size": size,
+                },
+            )
+            _fsync_dir(stage_dir)
+            _os_rename_noreplace(target, staged_entry)
+        except OSError as exc:
+            if stage_dir is not None:
+                _remove_path_if_exists_best_effort(stage_dir)
+            logger.debug("Delete undo staging failed; falling back to permanent delete: %s", exc)
+            return None
+        _fsync_dir(stage_dir)
+        _fsync_dir(target.parent)
+        try:
+            entries = _purge_delete_undo_store_locked(root, now=now)
+            staged_retained = any(entry.token == token for entry in entries)
+        except OSError:
+            logger.debug("Delete undo staging cap purge failed after staging", exc_info=True)
+            staged_retained = True
+        if not staged_retained:
+            return {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    return {"ok": True, "undo_token": token, "undo_expires_seconds": ttl}
+
+
+def _validate_delete_undo_token(token: str) -> str:
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise FileBrowserError("expired", "Undo token expired or unavailable", 410)
+    return token
+
+
 def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
     target = _resolve_existing_entry_path(raw_path)
     if target == target.parent:
@@ -1176,25 +1441,49 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
     target_stat = _stat_existing(target, follow_symlinks=False)
 
     def _delete() -> dict[str, Any]:
-        try:
-            if stat.S_ISDIR(target_stat.st_mode):
-                if recursive:
-                    shutil.rmtree(target)
-                else:
-                    target.rmdir()
-            else:
-                target.unlink()
-            return {"ok": True}
-        except OSError as exc:
-            if stat.S_ISDIR(target_stat.st_mode) and not recursive and exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
-                raise ConflictError("not_empty", "Directory is not empty") from exc
-            if isinstance(exc, FileNotFoundError):
-                raise NotFoundError() from exc
-            if isinstance(exc, PermissionError):
-                raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
-            raise FileBrowserError("fs_error", str(exc), 400) from exc
+        _purge_delete_undo_store_best_effort()
+        staged = _stage_delete_for_undo(target, target_stat, recursive=recursive)
+        if staged is not None:
+            return staged
+        return _delete_permanently(target, target_stat, recursive=recursive)
 
     return _run_mutation("delete", target, _delete, recursive=recursive)
+
+
+def undo_delete_path(token: str) -> dict[str, Any]:
+    token = _validate_delete_undo_token(token)
+    _ensure_delete_undo_initialized()
+    with _DELETE_UNDO_LOCK:
+        try:
+            root = _ensure_delete_undo_root()
+            _purge_delete_undo_store_locked(root)
+        except OSError as exc:
+            raise FileBrowserError("expired", "Undo token expired or unavailable", 410) from exc
+        stage_dir = root / token
+        entry = _delete_undo_entry_from_dir(stage_dir)
+        if entry is None:
+            _remove_path_if_exists_best_effort(stage_dir)
+            raise FileBrowserError("expired", "Undo token expired or unavailable", 410)
+        if _exists_no_follow(entry.original_path):
+            raise ConflictError("exists", "Original path already exists")
+
+        def _restore() -> dict[str, Any]:
+            try:
+                _rename_no_replace(entry.entry_path, entry.original_path)
+            except ConflictError:
+                raise
+            except OSError as exc:
+                raise FileBrowserError("fs_error", str(exc), 400) from exc
+            _fsync_dir(entry.original_path.parent)
+            _fsync_dir(entry.directory)
+            try:
+                entry.metadata_path.unlink()
+                entry.directory.rmdir()
+            except OSError:
+                logger.debug("Failed to clean up delete undo staging directory after restore", exc_info=True)
+            return {"restored_path": str(entry.original_path)}
+
+        return _run_mutation("delete_undo", entry.original_path, _restore)
 
 
 # ---------------------------------------------------------------------------
