@@ -892,6 +892,51 @@ def test_delete_size_cap_falls_back_to_permanent_delete(files_undo_runtime, tmp_
     assert not target.exists()
 
 
+def test_delete_stale_file_replaced_by_directory_is_not_staged_or_removed(files_undo_runtime, tmp_path, monkeypatch):
+    target = tmp_path / "stale"
+    target.write_text("old file", encoding="utf-8")
+    real_purge = fs._purge_delete_undo_store_best_effort
+    swapped = False
+
+    def swap_file_for_directory_once() -> None:
+        nonlocal swapped
+        if not swapped:
+            target.unlink()
+            target.mkdir()
+            (target / "child.txt").write_text("new directory", encoding="utf-8")
+            swapped = True
+        real_purge()
+
+    monkeypatch.setattr(fs, "_purge_delete_undo_store_best_effort", swap_file_for_directory_once)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(target), recursive=False)
+
+    assert exc.value.code in {"fs_error", "permission_denied"}
+    assert target.is_dir()
+    assert (target / "child.txt").read_text(encoding="utf-8") == "new directory"
+    undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
+    assert not undo_root.exists() or not list(undo_root.iterdir())
+
+
+def test_delete_staging_fsyncs_undo_root_before_returning_token(files_undo_runtime, tmp_path, monkeypatch):
+    target = tmp_path / "durable.txt"
+    target.write_text("durable", encoding="utf-8")
+    fsynced: list[Path] = []
+    real_fsync_dir = fs._fsync_dir
+
+    def capture_fsync_dir(path: Path) -> None:
+        fsynced.append(Path(path))
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(fs, "_fsync_dir", capture_fsync_dir)
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted["undo_token"]
+    assert files_undo_runtime / fs._DELETE_UNDO_DIR_NAME in fsynced
+
+
 def test_delete_undo_eviction_by_count_and_total_size(files_undo_runtime, tmp_path, monkeypatch):
     now = 2000.0
     monkeypatch.setattr(fs.time, "time", lambda: now)
@@ -925,6 +970,32 @@ def test_delete_undo_eviction_by_count_and_total_size(files_undo_runtime, tmp_pa
         fs.undo_delete_path(first_token)
     assert total_exc.value.code == "expired"
     assert fs.undo_delete_path(second_token) == {"restored_path": str(second)}
+
+
+def test_delete_undo_failed_eviction_keeps_caps_enforced(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_MAX_ENTRIES", "1")
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    first_token = fs.delete_path(str(first))["undo_token"]
+    first_stage_dir = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / first_token
+    real_remove = fs._delete_undo_remove_path
+
+    def fail_first_eviction(path: Path) -> bool:
+        if Path(path) == first_stage_dir:
+            return False
+        return real_remove(path)
+
+    monkeypatch.setattr(fs, "_delete_undo_remove_path", fail_first_eviction)
+
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    deleted_second = fs.delete_path(str(second))
+
+    assert deleted_second == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    assert not second.exists()
+    assert first_stage_dir.exists()
+    assert fs.undo_delete_path(first_token) == {"restored_path": str(first)}
+    assert first.read_text(encoding="utf-8") == "first"
 
 
 def test_delete_stages_symlink_entry_without_touching_target(files_undo_runtime, tmp_path):
