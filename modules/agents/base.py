@@ -527,6 +527,13 @@ class BaseAgent(ABC):
             if visible_suffix:
                 parts.append(visible_suffix)
             body = "\n".join(parts)
+            # Footer-only completion (show_duration on, no visible result/suffix):
+            # promote the footnote to the visible body so a duration/token-only turn
+            # is still delivered/persisted/streamed. An empty body would otherwise be
+            # treated as a silent terminal result and the footnote would be lost.
+            if not body.strip() and result_footer:
+                body = result_footer
+                result_footer = None
             await self.controller.emit_agent_message(
                 context,
                 "result",

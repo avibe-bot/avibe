@@ -1433,7 +1433,11 @@ class ConsolidatedMessageDispatcher:
                 #     ``subtext`` kwarg) are never handed it.
                 folded_footer: Optional[str] = None
                 if result_footer:
-                    if self._capabilities(context).supports_status_bubble:
+                    # Gate on the DELIVERY TARGET's capabilities, not the source
+                    # context: a delivery_override can redirect a Slack/Discord/Lark
+                    # turn to a non-subtext target (or vice versa), and the footer
+                    # must follow where it is actually delivered/persisted.
+                    if self._capabilities(target_context).supports_status_bubble:
                         done_footer = result_footer
                     else:
                         # Non-subtext platform: fold onto the body AND remember it

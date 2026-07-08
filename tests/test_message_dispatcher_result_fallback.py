@@ -196,6 +196,28 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         channel_id, text, _parse_mode = im_client.sent_messages[0]
         self.assertEqual(text, "Answer body\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
 
+    async def test_result_footer_uses_delivery_target_capability_not_source(self):
+        """A Slack (subtext) turn redirected via ``delivery_override`` to a
+        non-subtext target (Telegram) must FOLD the footnote, not hand ``subtext``
+        to the target adapter that ignores it (Codex P2)."""
+        im_client = _StubIMClient()  # no ``subtext`` kwarg on send_message
+        controller = _StubController(platform="slack", im_client=im_client)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"delivery_override": {"platform": "telegram", "channel_id": "T1"}},
+        )
+
+        message_id = await dispatcher.emit_agent_message(
+            context, "result", "Answer body", result_footer="✅ ⏱️ 5s · 🪙 1.2k tok"
+        )
+
+        self.assertEqual(message_id, "msg-1")
+        _channel, text, _parse_mode = im_client.sent_messages[0]
+        self.assertEqual(text, "Answer body\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
+
     async def test_folded_result_footer_is_persisted_for_non_subtext_platform(self):
         """The folded footnote must be persisted too, so a reloaded transcript /
         inbox entry matches the delivered message (result-path invariant)."""

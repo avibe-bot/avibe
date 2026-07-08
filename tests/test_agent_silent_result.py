@@ -9,17 +9,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
+from modules.im.formatters.slack_formatter import SlackFormatter
 
 
 class _StubController:
-    def __init__(self):
+    def __init__(self, token_field: str = ""):
         self.config = SimpleNamespace(show_duration=True)
-        self.im_client = SimpleNamespace(formatter=None)
+        self.im_client = SimpleNamespace(formatter=SlackFormatter())
         self.settings_manager = SimpleNamespace(sessions=None)
         self.messages = []
+        self.result_footers = []
+        self._token_field = token_field
 
-    async def emit_agent_message(self, context, message_type, text, parse_mode="markdown", *, is_error=False, level="normal"):
+    def session_token_field(self, context):
+        return self._token_field
+
+    async def emit_agent_message(
+        self, context, message_type, text, parse_mode="markdown", *, is_error=False, level="normal", result_footer=None
+    ):
         self.messages.append((message_type, text, parse_mode))
+        self.result_footers.append(result_footer)
 
 
 class _StubAgent(BaseAgent):
@@ -59,6 +68,21 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         # An empty terminal result is emitted (no visible text); the dispatcher's
         # result path settles the dot + releases the stream.
         self.assertEqual(controller.messages, [("result", "", "markdown")])
+
+    async def test_footer_only_result_is_promoted_to_visible_body(self):
+        # show_duration on + no visible result/suffix: the duration/token footnote
+        # is promoted to the visible body (and NOT sent as a separate footer), so a
+        # timing-only completion is still delivered/persisted instead of going
+        # silent (Codex P2).
+        controller = _StubController(token_field="1.2k tok")
+        agent = _StubAgent(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        await agent.emit_result_message(context, "", subtype="success", duration_ms=5000)
+
+        self.assertEqual(controller.messages, [("result", "✅ ⏱️ 5s · 🪙 1.2k tok", "markdown")])
+        # Promoted to body, so no separate subtext footer is passed.
+        self.assertEqual(controller.result_footers, [None])
 
 
 class AgentSessionIdContextTests(unittest.TestCase):
