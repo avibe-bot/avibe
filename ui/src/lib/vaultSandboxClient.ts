@@ -214,6 +214,7 @@ function parseTerminalMessage(data: unknown): TerminalMessage | null {
 
 export class VaultSandboxClient {
   private iframe: HTMLIFrameElement;
+  private backdrop: HTMLDivElement | null = null;
   private pending = new Map<string, PendingRequest>();
   private readyPromise: Promise<ReadyMessage>;
   private interactiveDepth = 0;
@@ -233,14 +234,19 @@ export class VaultSandboxClient {
     iframe.allow = 'publickey-credentials-get; publickey-credentials-create; clipboard-write';
     iframe.referrerPolicy = 'no-referrer';
     iframe.style.position = 'fixed';
-    iframe.style.inset = '0';
+    iframe.style.top = '50%';
+    iframe.style.left = '50%';
+    iframe.style.transform = 'translate(-50%, -50%)';
     iframe.style.border = '0';
     iframe.style.background = 'transparent';
     iframe.style.zIndex = '2147483647';
     iframe.style.colorScheme = 'normal';
+    iframe.style.borderRadius = '16px';
+    iframe.style.overflow = 'hidden';
+    iframe.style.boxShadow = 'none';
     // At rest the sandbox is a headless RPC worker: keep it in the DOM (so
     // postMessage works) but 0-sized + hidden so it never covers the app. It
-    // only expands to a full-screen overlay while an interactive ceremony is
+    // only expands to a centered modal while an interactive ceremony is
     // active — see setInteractive().
     iframe.style.width = '0';
     iframe.style.height = '0';
@@ -260,16 +266,37 @@ export class VaultSandboxClient {
     return target;
   }
 
+  private ensureBackdrop(): HTMLDivElement {
+    if (this.backdrop?.isConnected) return this.backdrop;
+    const backdrop = document.createElement('div');
+    backdrop.setAttribute('aria-hidden', 'true');
+    backdrop.style.position = 'fixed';
+    backdrop.style.inset = '0';
+    backdrop.style.background = 'rgba(0, 0, 0, 0.5)';
+    backdrop.style.zIndex = '2147483646';
+    backdrop.style.pointerEvents = 'auto';
+    document.body.insertBefore(backdrop, this.iframe);
+    this.backdrop = backdrop;
+    return backdrop;
+  }
+
   private setInteractive(active: boolean): void {
     this.interactiveDepth += active ? 1 : -1;
     this.interactiveDepth = Math.max(0, this.interactiveDepth);
     const interactive = this.interactiveDepth > 0;
-    // Expand to a full-screen overlay only while a ceremony is active; otherwise
-    // collapse to a hidden 0-size worker so the sandbox never covers the app.
-    this.iframe.style.width = interactive ? '100vw' : '0';
-    this.iframe.style.height = interactive ? '100vh' : '0';
+    if (interactive) {
+      this.ensureBackdrop();
+    } else {
+      this.backdrop?.remove();
+      this.backdrop = null;
+    }
+    // Expand to a lightweight centered modal only while a ceremony is active;
+    // otherwise collapse to a hidden 0-size worker so the sandbox never covers the app.
+    this.iframe.style.width = interactive ? 'min(440px, 92vw)' : '0';
+    this.iframe.style.height = interactive ? 'min(640px, 88vh)' : '0';
     this.iframe.style.visibility = interactive ? 'visible' : 'hidden';
     this.iframe.style.pointerEvents = interactive ? 'auto' : 'none';
+    this.iframe.style.boxShadow = interactive ? '0 24px 80px rgba(15, 23, 42, 0.38)' : 'none';
   }
 
   private waitForReady(): Promise<ReadyMessage> {
@@ -384,7 +411,8 @@ export class VaultSandboxClient {
   seal(payload: {
     name: string;
     kind: 'static' | 'keypair';
-    inputMode: 'sandbox-entry';
+    inputMode: 'sandbox-entry' | 'parent-value';
+    value?: string;
     wrapMeta?: string | null;
   }): Promise<VaultSandboxSealResult> {
     return this.request<VaultSandboxSealResult>('seal', payload, {

@@ -23,6 +23,11 @@ export type ProtectedUnlockMaterial = {
   envelope: ProtectedRecordEnvelope;
 };
 
+type ParentStaticSealValue = {
+  valueRef: { current: string };
+  clear: () => void;
+};
+
 export type ProtectedVaultStatus = 'checking' | 'needs-setup' | 'locked' | 'unlocked' | 'error';
 
 const VAULT_AUTO_LOCK_MS = 10 * 60 * 1000;
@@ -267,6 +272,7 @@ export function useProtectedVault() {
     async (
       name: string,
       kind: 'static' | 'keypair' = 'static',
+      parentStaticValue?: ParentStaticSealValue,
     ): Promise<
       VaultSandboxSealResult & {
         authzFactorRegistration?: VaultWebAuthnRegistrationPayload;
@@ -276,12 +282,31 @@ export function useProtectedVault() {
       const wrapMeta = sessionVault.wrapMeta;
       if (!wrapMeta) throw new Error('vault-locked');
       armVaultAutoLock();
-      const sealed = await (await getVaultSandboxClient()).seal({
-        name,
-        kind,
-        inputMode: 'sandbox-entry',
-        wrapMeta,
-      });
+      let sealed: VaultSandboxSealResult;
+      if (kind === 'static') {
+        if (!parentStaticValue) throw new Error('protected-static-value-required');
+        try {
+          const sandbox = await getVaultSandboxClient();
+          sealed = await sandbox.seal({
+            name,
+            kind: 'static',
+            inputMode: 'parent-value',
+            value: parentStaticValue.valueRef.current,
+            wrapMeta,
+          });
+        } finally {
+          parentStaticValue.valueRef.current = '';
+          parentStaticValue.clear();
+        }
+      } else {
+        const sandbox = await getVaultSandboxClient();
+        sealed = await sandbox.seal({
+          name,
+          kind,
+          inputMode: 'sandbox-entry',
+          wrapMeta,
+        });
+      }
       return {
         ...sealed,
         authzFactorRegistration: sessionVault.freshSetup
@@ -363,12 +388,16 @@ export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNo
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!unlocked) return;
-    setNow(Date.now());
-    const id = setInterval(() => {
+    const updateNow = () => {
       enforceAutoLock();
       setNow(Date.now());
-    }, 1000);
-    return () => clearInterval(id);
+    };
+    const immediate = window.setTimeout(updateNow, 0);
+    const id = setInterval(updateNow, 1000);
+    return () => {
+      window.clearTimeout(immediate);
+      clearInterval(id);
+    };
   }, [unlocked]);
 
   const expiresAt = vaultUnlockExpiresAt();

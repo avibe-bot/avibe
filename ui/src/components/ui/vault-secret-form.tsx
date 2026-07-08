@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   Asterisk,
@@ -137,6 +137,11 @@ export const VaultSecretForm: React.FC<{
   const api = useApi();
   const [name, setName] = useState(fixedName ?? '');
   const [value, setValue] = useState('');
+  const staticValueRef = useRef('');
+  const setStaticValue = useCallback((next: string) => {
+    staticValueRef.current = next;
+    setValue(next);
+  }, []);
   const [staticSource, setStaticSource] = useState<StaticSecretSource>('text');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [kind, setKind] = useState<VaultKind>(requestSpec?.kind ?? 'static');
@@ -288,13 +293,13 @@ export const VaultSecretForm: React.FC<{
 
   // Replace the in-memory signing key, zeroing the previous private key so raw
   // key material never lingers longer than needed.
-  const applySigningKey = (next: SigningKeyMaterial | null) => {
+  const applySigningKey = useCallback((next: SigningKeyMaterial | null) => {
     if (signingKeyRef.current && signingKeyRef.current !== next) {
       signingKeyRef.current.privateKey.fill(0);
     }
     signingKeyRef.current = next;
     setSigningKey(next);
-  };
+  }, []);
 
   // Zero any held private key when the form unmounts.
   useEffect(
@@ -332,25 +337,31 @@ export const VaultSecretForm: React.FC<{
   }, [signingKey, api]);
 
   const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
-  const valueReady = protection === 'protected' ? true : isKeypair ? signingKey != null : staticValueReady;
+  const valueReady = isKeypair ? protection === 'protected' || signingKey != null : staticValueReady;
   const canSubmit = isEdit
     ? !submitting
     : Boolean(secretName && valueReady) &&
       !submitting &&
       ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
+  const clearSelectedFile = useCallback(() => {
+    setSelectedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  const clearStaticValue = useCallback(() => {
+    staticValueRef.current = '';
+    setValue('');
+    clearSelectedFile();
+  }, [clearSelectedFile]);
+
   const handleExistingSecret = () => {
     if (treatExistingAsFulfilled) {
-      setValue('');
+      clearStaticValue();
       onCreated(secretName, 'already_exists');
       return;
     }
     setError(t('vaults.dialog.errors.secretExists'));
-  };
-
-  const clearSelectedFile = () => {
-    setSelectedFile(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const chooseFile = (file: File | null) => {
@@ -370,7 +381,7 @@ export const VaultSecretForm: React.FC<{
     }
     setError(null);
     setSelectedFile(file);
-    setValue('');
+    setStaticValue('');
   };
 
   const switchStaticSource = (next: StaticSecretSource) => {
@@ -378,7 +389,7 @@ export const VaultSecretForm: React.FC<{
     setStaticSource(next);
     setError(null);
     if (next === 'file') {
-      setValue('');
+      setStaticValue('');
     } else {
       clearSelectedFile();
     }
@@ -386,13 +397,12 @@ export const VaultSecretForm: React.FC<{
 
   useEffect(() => {
     if (protection !== 'protected') return;
-    setValue('');
-    clearSelectedFile();
+    if (kind === 'keypair') clearStaticValue();
     applySigningKey(null);
     setImportHex('');
     setSigningError(null);
     setSigningAddresses(null);
-  }, [protection]);
+  }, [protection, kind, clearStaticValue, applySigningKey]);
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -500,9 +510,25 @@ export const VaultSecretForm: React.FC<{
       let authzFactorRegistration: Awaited<ReturnType<typeof protectedVault.sealValue>>['authzFactorRegistration'];
       let protectedPublicMeta: Record<string, unknown> | undefined;
       if (protection === 'protected') {
-        // The sandbox owns protected plaintext/key entry and returns only an opaque envelope
-        // plus public key metadata for keypairs.
-        const sealed = await protectedVault.sealValue(secretName, kind);
+        if (!isKeypair) {
+          if (staticSource === 'file' && selectedFile) {
+            try {
+              fileBytesToWipe = new Uint8Array(await selectedFile.arrayBuffer());
+            } catch (err) {
+              throw new Error(t('vaults.dialog.errors.fileReadFailed'), { cause: err });
+            }
+            staticValueRef.current = new TextDecoder().decode(fileBytesToWipe);
+          } else {
+            staticValueRef.current = value;
+          }
+        }
+        // Static protected values are entered in this form and handed to the sandbox once;
+        // keypairs still generate/import inside the sandbox and return only public metadata.
+        const sealed = await protectedVault.sealValue(
+          secretName,
+          kind,
+          isKeypair ? undefined : { valueRef: staticValueRef, clear: clearStaticValue },
+        );
         cryptoFields = { sealed: sealed.envelope };
         establishingVmk = sealed.establishingVmk;
         authzFactorRegistration = sealed.authzFactorRegistration;
@@ -568,7 +594,7 @@ export const VaultSecretForm: React.FC<{
         throw new Error(created.message || created.code || t('vaults.request.saveFailed'));
       }
       if (protection === 'protected') protectedVault.afterCreated();
-      setValue('');
+      clearStaticValue();
       setStaticSource('text');
       clearSelectedFile();
       applySigningKey(null);
@@ -615,7 +641,7 @@ export const VaultSecretForm: React.FC<{
           {showValue ? (
             <Textarea
               value={value}
-              onChange={(event) => setValue(event.target.value)}
+              onChange={(event) => setStaticValue(event.target.value)}
               placeholder={t('vaults.dialog.valuePlaceholder')}
               autoFocus={isProvision}
               required
@@ -627,7 +653,7 @@ export const VaultSecretForm: React.FC<{
             <Input
               type="password"
               value={value}
-              onChange={(event) => setValue(event.target.value)}
+              onChange={(event) => setStaticValue(event.target.value)}
               placeholder={t('vaults.dialog.valuePlaceholder')}
               autoFocus={isProvision}
               required
@@ -937,7 +963,7 @@ export const VaultSecretForm: React.FC<{
           <Badge variant="secondary" className="bg-surface">{t('vaults.request.notSetYet')}</Badge>
         </div>
 
-        {protection !== 'protected' && (
+        {!isKeypair && (
           <label className="flex flex-col gap-1.5">
             <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
             {valueField}
@@ -994,8 +1020,7 @@ export const VaultSecretForm: React.FC<{
               setImportHex('');
               setSigningError(null);
             } else {
-              setValue('');
-              clearSelectedFile();
+              clearStaticValue();
             }
           }}
           disabled={submitting}
@@ -1015,7 +1040,7 @@ export const VaultSecretForm: React.FC<{
       </label>
 
       {/* Value (static) or signing-key builder (keypair) */}
-      {!isKeypair && protection !== 'protected' && (
+      {!isKeypair && (
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
           {valueField}
