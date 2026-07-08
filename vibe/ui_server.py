@@ -2311,10 +2311,10 @@ def health():
 def status():
     from vibe import runtime
 
-    payload = json.loads(runtime.render_status())
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
     if not payload.get("running") and runtime.read_status().get("state") == "running":
         runtime.write_status("stopped", "process not running", None, payload.get("ui_pid"))
-        payload = json.loads(runtime.render_status())
+        payload = json.loads(runtime.render_status(detect_extra_processes=False))
     return jsonify(payload)
 
 

@@ -464,6 +464,58 @@ class RuntimeServiceLockTests(unittest.TestCase):
             self.assertEqual(payload["service_pid"], 12345)
             self.assertEqual(payload["pid"], 12345)
 
+    def test_render_status_skips_extra_process_scan_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_path = Path(tmpdir) / "status.json"
+            runtime.write_json(status_path, {"state": "running", "service_pid": 12345})
+
+            with patch("vibe.runtime.paths.get_runtime_status_path", return_value=status_path):
+                with patch("vibe.runtime.resolve_service_owner_pid", return_value=12345):
+                    with patch("vibe.runtime.extra_service_process_pids") as extra_service_process_pids:
+                        payload = runtime.json.loads(runtime.render_status(detect_extra_processes=False))
+
+            extra_service_process_pids.assert_not_called()
+            self.assertTrue(payload["running"])
+            self.assertEqual(payload["state"], "running")
+            self.assertEqual(payload["service_pid"], 12345)
+            self.assertEqual(payload["pid"], 12345)
+            self.assertEqual(payload["service_owner_pid"], 12345)
+            self.assertNotIn("extra_service_pids", payload)
+
+    def test_render_status_fast_path_skips_extra_process_scan_when_owner_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_path = Path(tmpdir) / "status.json"
+            runtime.write_json(status_path, {"state": "running", "service_pid": 12345})
+
+            with patch("vibe.runtime.paths.get_runtime_status_path", return_value=status_path):
+                with patch("vibe.runtime.resolve_service_owner_pid", return_value=None):
+                    with patch("vibe.runtime.extra_service_process_pids") as extra_service_process_pids:
+                        payload = runtime.json.loads(runtime.render_status(detect_extra_processes=False))
+
+            extra_service_process_pids.assert_not_called()
+            self.assertFalse(payload["running"])
+            self.assertEqual(payload["state"], "stopped")
+            self.assertIsNone(payload["service_pid"])
+            self.assertIsNone(payload["pid"])
+            self.assertEqual(payload["service_owner_pid"], None)
+
+    def test_render_status_can_surface_extra_processes_when_owner_is_running(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_path = Path(tmpdir) / "status.json"
+            runtime.write_json(status_path, {"state": "running", "service_pid": 12345})
+
+            with patch("vibe.runtime.paths.get_runtime_status_path", return_value=status_path):
+                with patch("vibe.runtime.resolve_service_owner_pid", return_value=12345):
+                    with patch("vibe.runtime.extra_service_process_pids", return_value=[22222]):
+                        payload = runtime.json.loads(runtime.render_status())
+
+            self.assertTrue(payload["running"])
+            self.assertEqual(payload["state"], "running")
+            self.assertEqual(payload["service_pid"], 12345)
+            self.assertEqual(payload["service_owner_pid"], 12345)
+            self.assertEqual(payload["extra_service_pids"], [22222])
+            self.assertEqual(payload["detail"], "pid=12345; extra_service_pids=22222")
+
     def test_render_status_surfaces_lockless_service_process(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             status_path = Path(tmpdir) / "status.json"
