@@ -35,13 +35,15 @@ export const FilePicker: React.FC<{
   initialPath?: string | null;
   /** save-file: pre-filled filename. */
   defaultName?: string;
+  /** Recently opened folders, shown as quick nav entries at the top of the rail. */
+  recentFolders?: string[];
   onCancel: () => void;
   /**
    * open-directory → result = { path: <folder> }; save-file → { path: <folder>, name }.
    * Async: THROW to keep the dialog open and surface the message (e.g. the name already exists).
    */
   onConfirm: (result: { path: string; name?: string }) => Promise<void> | void;
-}> = ({ mode, initialPath, defaultName, onCancel, onConfirm }) => {
+}> = ({ mode, initialPath, defaultName, recentFolders, onCancel, onConfirm }) => {
   const { t } = useTranslation();
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
@@ -219,6 +221,10 @@ export const FilePicker: React.FC<{
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Rail: favorites + projects */}
           <aside className="hidden w-[150px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-surface-2/40 p-2 sm:flex">
+            {recentFolders && recentFolders.length > 0 && <RailTitle>{t('apps.editor.recent')}</RailTitle>}
+            {(recentFolders || []).map((p) => (
+              <RailRow key={`r:${p}`} label={p.split(/[\\/]/).filter(Boolean).pop() || p} active={cwd === p} onClick={() => navigate(p)} />
+            ))}
             {sysFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.favorites')}</RailTitle>}
             {sysFavs.map((f) => (
               <RailRow key={f.path} label={f.path.split('/').filter(Boolean).pop() || f.path} active={cwd === f.path} onClick={() => navigate(f.path)} />

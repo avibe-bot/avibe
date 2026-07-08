@@ -636,7 +636,7 @@
       "welcomeSub": "A code editor for files on this machine · VS Code engine",
       "start": "Start",
       "recent": "Recent",
-      "noRecent": "No recent folders",
+      "noRecent": "No recent folders or files",
       "openFolder": "Open Folder…",
       "openFolderPrompt": "Folder path to open",
       "browseFiles": "Browse Files…",

@@ -636,7 +636,7 @@
       "welcomeSub": "本机文件的代码编辑器 · VS Code 内核",
       "start": "开始",
       "recent": "最近",
-      "noRecent": "暂无最近打开的目录",
+      "noRecent": "暂无最近打开的文件夹或文件",
       "openFolder": "打开文件夹…",
       "openFolderPrompt": "要打开的文件夹路径",
       "browseFiles": "浏览文件…",

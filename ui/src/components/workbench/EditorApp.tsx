@@ -5,8 +5,9 @@ import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager, useWindowState } from '../../context/WindowManagerContext';
 import { MAX_RESTORED_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
-import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
+import { FilesApiError, contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
+import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
 import { FilePicker, type FilePickerMode } from './FilePicker';
@@ -59,8 +60,15 @@ type PickerState = {
   mode: FilePickerMode;
   initialPath: string | null;
   defaultName?: string;
+  // Recent explorer roots, surfaced as quick nav entries in the picker's rail. Captured when the
+  // picker opens (a snapshot) rather than read live, so it stays a plain value.
+  recentFolders?: string[];
   onConfirm: (result: { path: string; name?: string }) => Promise<void> | void;
 };
+
+// Outcome of opening a welcome "Recent" file: it opened, it's provably gone (drop the row), or it
+// couldn't be reached right now (leave the row — it may still exist).
+type RecentOpenResult = 'opened' | 'gone' | 'unavailable';
 
 // Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
 const LANGUAGE_LABEL: Record<string, string> = {
@@ -154,6 +162,10 @@ export const EditorApp: React.FC<{
 
   const openFile = useCallback(
     (path: string, name: string, mtime: number | null, target?: { line: number; column: number; endColumn: number }) => {
+      // Record the recent file here — the single chokepoint every real open flows through (tree,
+      // search jump, launch param). Session RESTORE deliberately rebuilds tabs without calling this,
+      // so a reload doesn't re-stamp restored files as freshly opened.
+      rememberRecentFile(path, name);
       setRoot((r) => r ?? parentDir(path));
       if (!target) setCursor(null);
       setTabs((ts) => {
@@ -179,6 +191,7 @@ export const EditorApp: React.FC<{
   // Open (or focus) a rich file (raster image / PDF / Office doc) as a read-only preview tab (no
   // Monaco). Dedups by path inside the updater so a fast double-open can't append two tabs.
   const openPreview = useCallback((path: string, name: string) => {
+    rememberRecentFile(path, name); // same chokepoint as openFile; restore bypasses both
     setRoot((r) => r ?? parentDir(path));
     setTabs((ts) => {
       const existing = ts.find((x) => x.path === path);
@@ -371,13 +384,17 @@ export const EditorApp: React.FC<{
     const dir = typeof params?.newFileDir === 'string' ? params.newFileDir : null;
     if (dir) {
       setRoot(dir);
+      rememberRecentFolder(dir);
       newFile();
       return;
     }
     // "Open in Editor" from a project (sidebar): root the explorer at the folder with NO tab open —
     // just the file tree + the select-a-file hint, no untitled buffer.
     const rootDir = typeof params?.rootDir === 'string' ? params.rootDir : null;
-    if (rootDir) setRoot(rootDir);
+    if (rootDir) {
+      setRoot(rootDir);
+      rememberRecentFolder(rootDir);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -433,8 +450,10 @@ export const EditorApp: React.FC<{
     setPicker({
       mode: 'open-directory',
       initialPath: root,
+      recentFolders: loadEditorRecents().folders,
       onConfirm: ({ path }) => {
         setRoot(path);
+        rememberRecentFolder(path);
         setPicker(null);
       },
     });
@@ -456,11 +475,13 @@ export const EditorApp: React.FC<{
       setPicker({
         mode: 'save-file',
         initialPath: root,
+        recentFolders: loadEditorRecents().folders,
         onConfirm: async ({ path, name }) => {
           const full = joinPath(path, name as string);
           const result = await writeFile(full, text, undefined, true);
           setTabs((ts) => ts.map((x) => (x.id === tabId ? { ...x, path: full, name: name as string, mtime: result.mtime } : x)));
           setRoot((r) => r ?? path);
+          rememberRecentFile(full, name as string);
           // Re-list the folder the new file landed in, so it appears in the explorer tree.
           setTreeRefresh({ path, nonce: ++treeRefreshSeq.current });
           setPicker(null);
@@ -468,6 +489,34 @@ export const EditorApp: React.FC<{
       });
     },
     [root],
+  );
+
+  // Open a folder from the welcome "Recent" list: root the explorer there directly (no picker) and
+  // bump it to the front of the recents.
+  const openRecentFolder = useCallback((path: string) => {
+    setRoot(path);
+    rememberRecentFolder(path);
+  }, []);
+
+  // Open a file from the welcome "Recent" list. Fetch fresh metadata, exactly like every other open
+  // path (routing to preview tab / Monaco / download by the same gate as onTreeOpen). The result
+  // tells the caller how to treat the row: only a definitive 'gone' (the path no longer resolves,
+  // 404) drops the entry — a transient/permission/other failure leaves it in place (the file may
+  // well still exist) and simply doesn't open, so recent history isn't lost to a network blip.
+  const openRecentFile = useCallback(
+    async (file: RecentFile): Promise<RecentOpenResult> => {
+      let m: Awaited<ReturnType<typeof fileMeta>>;
+      try {
+        m = await fileMeta(file.path);
+      } catch (e) {
+        return e instanceof FilesApiError && e.code === 'not_found' ? 'gone' : 'unavailable';
+      }
+      if (previewOverlayKind(m)) openPreview(file.path, file.name);
+      else if (isEditableMeta(m)) openFile(file.path, file.name, m.mtime);
+      else downloadFile(file.path);
+      return 'opened';
+    },
+    [openFile, openPreview],
   );
 
   // ⌘O Open Folder · ⌘N New File — only while THIS editor window holds focus (several windows can
@@ -646,7 +695,7 @@ export const EditorApp: React.FC<{
             select-a-file hint (folder open, no tab). */}
         <div className="flex min-w-0 flex-1 flex-col bg-surface">
           {showWelcome ? (
-            <Welcome onOpenFolder={openFolder} onNewFile={newFile} />
+            <Welcome onOpenFolder={openFolder} onNewFile={newFile} onOpenRecentFolder={openRecentFolder} onOpenRecentFile={openRecentFile} />
           ) : (
             <>
               {tabs.length > 0 && (
@@ -750,6 +799,7 @@ export const EditorApp: React.FC<{
           mode={picker.mode}
           initialPath={picker.initialPath}
           defaultName={picker.defaultName}
+          recentFolders={picker.recentFolders}
           onCancel={() => setPicker(null)}
           onConfirm={picker.onConfirm}
         />
@@ -758,15 +808,37 @@ export const EditorApp: React.FC<{
   );
 };
 
-const Welcome: React.FC<{ onOpenFolder: () => void; onNewFile: () => void }> = ({ onOpenFolder, onNewFile }) => {
+const Welcome: React.FC<{
+  onOpenFolder: () => void;
+  onNewFile: () => void;
+  onOpenRecentFolder: (path: string) => void;
+  /** Opens a recent file; the caller drops the row only when it resolves 'gone'. */
+  onOpenRecentFile: (file: RecentFile) => Promise<RecentOpenResult>;
+}> = ({ onOpenFolder, onNewFile, onOpenRecentFolder, onOpenRecentFile }) => {
   const { t } = useTranslation();
+  // Read fresh on mount: the store is shared by every editor window + the full-page route (last
+  // write wins), and the welcome only mounts when nothing is open — so no live subscription is
+  // needed. Kept in state only so a 404'd file can be dropped from the view below.
+  const [recents, setRecents] = useState<EditorRecents>(() => loadEditorRecents());
   const actions: { Icon: typeof FolderOpen; color: string; label: string; onClick: () => void; sc?: string }[] = [
     { Icon: FolderOpen, color: 'text-cyan', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
     { Icon: FilePlus, color: 'text-mint', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
   ];
+  const hasRecents = recents.folders.length > 0 || recents.files.length > 0;
+
+  // Opening a recent file that's provably gone drops just that row — from the view and the store —
+  // showing nothing else. An 'unavailable' (transient/permission) result leaves the row untouched.
+  // Folder clicks always root the explorer, which unmounts this screen.
+  const openRecentFile = async (file: RecentFile) => {
+    if ((await onOpenRecentFile(file)) === 'gone') {
+      forgetRecentFile(file.path);
+      setRecents((r) => removeRecentFile(r, file.path));
+    }
+  };
+
   return (
     <div className="grid min-w-0 flex-1 place-items-center bg-surface p-10">
-      <div className="flex w-[440px] max-w-full flex-col gap-6">
+      <div className="flex max-h-full w-[440px] max-w-full flex-col gap-6 overflow-y-auto">
         <div className="flex items-center gap-3.5">
           <span className="grid size-14 place-items-center rounded-2xl border border-cyan/60 bg-cyan-soft">
             <CodeXml className="size-7 text-cyan" />
@@ -788,10 +860,32 @@ const Welcome: React.FC<{ onOpenFolder: () => void; onNewFile: () => void }> = (
           ))}
         </div>
         <div className="font-mono text-[11px] font-bold uppercase tracking-[0.1em] text-muted">{t('apps.editor.recent')}</div>
-        <div className="flex items-center gap-2 text-[12.5px] text-muted">
-          <Clock className="size-3.5" /> {t('apps.editor.noRecent')}
-        </div>
+        {hasRecents ? (
+          // Folders first, then files — each a compact row: name + its containing directory (dimmed).
+          <div className="flex flex-col gap-0.5">
+            {recents.folders.map((path) => (
+              <RecentRow key={`d:${path}`} Icon={FolderOpen} iconColor="text-cyan" name={recentPathLabel(path)} dir={parentDir(path)} onClick={() => onOpenRecentFolder(path)} />
+            ))}
+            {recents.files.map((file) => (
+              <RecentRow key={`f:${file.path}`} Icon={FileText} iconColor="text-violet" name={file.name} dir={parentDir(file.path)} onClick={() => void openRecentFile(file)} />
+            ))}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-[12.5px] text-muted">
+            <Clock className="size-3.5" /> {t('apps.editor.noRecent')}
+          </div>
+        )}
       </div>
     </div>
   );
 };
+
+// One row in the welcome "Recent" list: an icon, the folder/file name, and its containing directory
+// (dimmed, truncated) so same-named entries in different places stay distinguishable.
+const RecentRow: React.FC<{ Icon: typeof FolderOpen; iconColor: string; name: string; dir: string; onClick: () => void }> = ({ Icon, iconColor, name, dir, onClick }) => (
+  <button type="button" onClick={onClick} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-left transition hover:bg-foreground/[0.06]">
+    <Icon className={clsx('size-4 shrink-0', iconColor)} />
+    <span className="max-w-[55%] shrink-0 truncate text-[13px] font-medium text-foreground">{name}</span>
+    <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{dir}</span>
+  </button>
+);
