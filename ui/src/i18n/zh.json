@@ -729,6 +729,7 @@
       "uploadNoFolders": "无法上传文件夹，只能拖放文件。",
       "uploadError": "{{name}}：{{message}}",
       "open": "打开",
+      "openTerminalHere": "在此处打开终端",
       "rename": "重命名",
       "delete": "删除",
       "confirmDelete": "删除“{{name}}”？此操作无法撤销。",

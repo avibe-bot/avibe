@@ -127,9 +127,11 @@ class TerminalService:
         elif session.persistent:
             await _kill_tmux_session(session.session_id)
 
-    async def handle_websocket(self, websocket: WebSocket, raw_session_id: str) -> None:
+    async def handle_websocket(
+        self, websocket: WebSocket, raw_session_id: str, *, initial_cwd: str | None = None
+    ) -> None:
         session_id = sanitize_session_id(raw_session_id)
-        connection = await self.open(session_id)
+        connection = await self.open(session_id, initial_cwd=initial_cwd)
         try:
             await websocket.send_text(json.dumps({"type": "ready", "persistent": connection.persistent}))
         except BaseException:
@@ -197,7 +199,7 @@ class TerminalService:
             await asyncio.gather(output_task, input_task, wait_task, return_exceptions=True)
             await self.close(connection)
 
-    async def open(self, session_id: str) -> TerminalConnection:
+    async def open(self, session_id: str, *, initial_cwd: str | None = None) -> TerminalConnection:
         # Claim the id as OPENING under the lock. A single registry entry per id means a
         # concurrent open for the same id is rejected here (the slot is already OPENING), and
         # reconnecting an existing attached/detached id reuses its slot rather than allocating
@@ -232,13 +234,31 @@ class TerminalService:
             if replaced is not None:
                 await self._teardown_client(replaced, kill_session=False)
 
+            # A validated, enterable start directory for a brand-new session ("Open Terminal
+            # Here"); None (unset, invalid, or inaccessible) falls back to home. An unusable cwd
+            # must never fail the connection. See _resolve_initial_cwd.
+            start_dir = _resolve_initial_cwd(initial_cwd)
+
             persistent = False
             tmux_binary = resolve_tmux_binary()
             if tmux_binary:
                 cmd = _tmux_launch_command(tmux_binary, session_id)
                 persistent = True
+                if start_dir is not None and await _tmux_has_session(session_id):
+                    # A brand-new tmux session (launched with -f /dev/null, so no default-path)
+                    # takes its start directory from the client process cwd set below; an existing
+                    # session ignores the client cwd on reattach. Clear start_dir when the session
+                    # already exists so a reconnect never re-steers a live/detached session —
+                    # reattach semantics stay exactly as before. (Passing the directory as the
+                    # client cwd, rather than as a tmux `-c` argument, also keeps it out of tmux's
+                    # command-sequence parsing, where a trailing ';' would be a separator.)
+                    start_dir = None
             else:
                 cmd = [os.environ.get("SHELL") or "/bin/bash", "-l"]
+
+            # For a new tmux session this becomes its start directory (via the client cwd); for the
+            # plain-shell fallback it is the shell's own cwd. Falls back to home when unset.
+            spawn_cwd = start_dir or str(Path.home())
 
             master_fd, slave_fd = os.openpty()
             try:
@@ -247,7 +267,7 @@ class TerminalService:
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
-                    cwd=str(Path.home()),
+                    cwd=spawn_cwd,
                     env=_spawn_env(),
                     # start_new_session runs setsid() in the child via C (post-fork, pre-exec)
                     # instead of a Python preexec_fn — a Python preexec_fn can deadlock the
@@ -592,6 +612,35 @@ class TerminalServiceError(Exception):
 def sanitize_session_id(raw_session_id: str) -> str:
     safe = _SAFE_SESSION_ID_RE.sub("_", raw_session_id.strip())[:80].strip("_-")
     return safe or "terminal"
+
+
+def _resolve_initial_cwd(raw: str | None) -> str | None:
+    """Validate a requested start directory for a NEW terminal session.
+
+    Reuses the file browser's directory hardening (absolute, expanded/canonicalized, existing,
+    a real directory, no symlink followed on the final component) and then checks the process
+    can actually enter it (search/execute permission). That extra check matters because the
+    hardening only lstats the final component, so a directory that exists but is unenterable
+    (e.g. a 0700 directory owned by another user under a listable parent) would otherwise reach
+    the spawn and raise there — closing the socket instead of falling back. Anything invalid —
+    unset, relative, missing, a file, a symlink, or inaccessible — yields None so the caller
+    falls back to the default cwd. Never raises: an unusable cwd must not fail the terminal
+    connection, so it is logged at debug and dropped. Imported lazily since this only runs for an
+    "Open Terminal Here" open, keeping the normal terminal-open path free of the dependency.
+    """
+    if not raw:
+        return None
+    try:
+        from core import file_browser_service
+
+        resolved = file_browser_service.resolve_existing_directory(raw)
+        if not os.access(resolved, os.X_OK):
+            logger.debug("terminal initial cwd not searchable; using default")
+            return None
+        return str(resolved)
+    except Exception:
+        logger.debug("terminal initial cwd rejected; using default", exc_info=True)
+        return None
 
 
 def _tmux_launch_command(tmux_binary: str, session_id: str) -> list[str]:

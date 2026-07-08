@@ -729,6 +729,7 @@
       "uploadNoFolders": "Folders can't be uploaded — drop files only.",
       "uploadError": "{{name}}: {{message}}",
       "open": "Open",
+      "openTerminalHere": "Open Terminal Here",
       "rename": "Rename",
       "delete": "Delete",
       "confirmDelete": "Delete \"{{name}}\"? This can't be undone.",

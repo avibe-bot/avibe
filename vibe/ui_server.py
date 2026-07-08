@@ -2424,10 +2424,14 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     effective_session_id = _terminal_effective_session_id(session_id, remote_subject)
     session_ref = _terminal_session_log_ref(effective_session_id)
     logger.info("terminal.session_open session_ref=%s remote_addr=%s", session_ref, remote_addr)
+    # Optional start directory for a brand-new session ("Open Terminal Here" from the Files
+    # app). Validated server-side in the terminal service; an invalid/absent value silently
+    # falls back to the default cwd and reattaching an existing session ignores it entirely.
+    initial_cwd = websocket.query_params.get("cwd") or None
     try:
         service = get_terminal_service()
         service.start_reaper()
-        await service.handle_websocket(websocket, effective_session_id)
+        await service.handle_websocket(websocket, effective_session_id, initial_cwd=initial_cwd)
     except TerminalServiceError as exc:
         # Transient "try again shortly" conditions (not server faults): too_many_sessions (cap
         # full) and session_opening (the id is mid-open or mid-teardown). Close with 1013 so

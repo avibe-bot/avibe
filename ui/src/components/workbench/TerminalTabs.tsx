@@ -31,7 +31,7 @@ function getSessionId(identity: string | null, key?: string): string {
   }
 }
 
-type Tab = { key: number; slot: number | null; title?: string };
+type Tab = { key: number; slot: number | null; title?: string; cwd?: string };
 
 // The Terminal's persisted snapshot (via useWindowState): just the tab count + any custom titles.
 // Windowed terminal sessions are ephemeral by design (slot-based ids, DELETEd on pagehide), so we
@@ -57,7 +57,16 @@ function deleteTerminalSession(sid: string, slot: number, keepalive = false): vo
 //   - windowed: every tab is an ephemeral, slot-bounded session, disposed on close.
 //   - route (non-windowed): the FIRST tab keeps the persistent localStorage session (so it
 //     reconnects across reloads); extra tabs are slot-bounded like the windowed ones.
-export const TerminalTabs: React.FC<{ windowed?: boolean; windowId?: string; params?: Record<string, unknown> }> = ({ windowed = false, windowId, params }) => {
+export const TerminalTabs: React.FC<{
+  windowed?: boolean;
+  windowId?: string;
+  params?: Record<string, unknown>;
+  // Route (non-windowed) "Open Terminal Here" launch: open ONE extra slot-backed tab in this
+  // directory per distinct `launchKey`, leaving the persistent first tab (a reattach) untouched.
+  // Windowed mounts instead read their first tab's cwd from `params.cwd`.
+  launchCwd?: string | null;
+  launchKey?: string;
+}> = ({ windowed = false, windowId, params, launchCwd, launchKey }) => {
   const { t } = useTranslation();
   const { getAuthSession } = useApi();
   const [identity, setIdentity] = useState<string | null | undefined>(undefined); // undefined = resolving
@@ -75,7 +84,11 @@ export const TerminalTabs: React.FC<{ windowed?: boolean; windowId?: string; par
         title: typeof rt?.title === 'string' ? rt.title : undefined,
       }));
     }
-    return [{ key: ++tabSeq.current, slot: windowed ? acquireTerminalSlot() : null }];
+    // A windowed terminal launched from "Open Terminal Here" starts its first (only) tab in that
+    // directory. The route terminal's first tab stays the persistent reattach (slot null); its cwd
+    // tab is appended by the launch effect below instead.
+    const firstCwd = windowed && typeof params?.cwd === 'string' ? (params.cwd as string) : undefined;
+    return [{ key: ++tabSeq.current, slot: windowed ? acquireTerminalSlot() : null, cwd: firstCwd }];
   });
   const [active, setActive] = useState<number>(() => tabs[0]?.key ?? 0);
   // Whether sessions actually persist (tmux available) — reported by TerminalView's ready frame.
@@ -109,6 +122,18 @@ export const TerminalTabs: React.FC<{ windowed?: boolean; windowId?: string; par
       cancelled = true;
     };
   }, [getAuthSession]);
+
+  // Route (mobile) "Open Terminal Here": each navigation carries a distinct launchKey. Open exactly
+  // one slot-backed tab in launchCwd and focus it, without disturbing the persistent first tab.
+  // Deduped by key so a re-render (or a StrictMode double-invoke in dev) never opens duplicates.
+  const handledLaunchRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (windowed || !launchCwd || !launchKey || handledLaunchRef.current === launchKey) return;
+    handledLaunchRef.current = launchKey;
+    const tab: Tab = { key: ++tabSeq.current, slot: acquireTerminalSlot(), cwd: launchCwd };
+    setTabs((ts) => [...ts, tab]);
+    setActive(tab.key);
+  }, [windowed, launchCwd, launchKey]);
 
   const sessionIdFor = (tab: Tab): string | null =>
     identity === undefined ? null : getSessionId(identity, tab.slot != null ? `${TAB_TOKEN}-w${tab.slot}` : undefined);
@@ -274,6 +299,7 @@ export const TerminalTabs: React.FC<{ windowed?: boolean; windowId?: string; par
                 <Suspense fallback={loading}>
                   <TerminalView
                     sessionId={sid}
+                    cwd={tab.cwd}
                     onPersistent={setPersistent}
                     onStatus={(s) => setStatuses((m) => (m[tab.key] === s ? m : { ...m, [tab.key]: s }))}
                   />

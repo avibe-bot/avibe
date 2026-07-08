@@ -1498,7 +1498,7 @@ def test_terminal_websocket_accepts_local_origin_from_same_port(monkeypatch, tmp
 
     accepted = False
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         nonlocal accepted
         accepted = True
 
@@ -1511,6 +1511,27 @@ def test_terminal_websocket_accepts_local_origin_from_same_port(monkeypatch, tmp
         pass
 
     assert accepted is True
+
+
+def test_terminal_websocket_threads_cwd_query_param(monkeypatch, tmp_path):
+    # "Open Terminal Here" passes the start dir as a ?cwd= query param; the route must forward it
+    # to the service as initial_cwd (validation/fallback happens inside the service).
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    seen: dict = {}
+
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
+        seen["initial_cwd"] = initial_cwd
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/test?cwd=%2Fhome%2Falex%2Fproj",
+        headers={"host": "127.0.0.1:5123", "origin": "http://127.0.0.1:5123"},
+    ):
+        pass
+
+    assert seen.get("initial_cwd") == "/home/alex/proj"
 
 
 def test_terminal_delete_terminates_scoped_local_session(monkeypatch, tmp_path):
@@ -1646,3 +1667,186 @@ def test_terminal_service_ignores_invalid_limit_env(monkeypatch):
         assert service.max_sessions == 8
     finally:
         monkeypatch.setattr(ui_server, "_terminal_service", None)
+
+
+# ---------------------------------------------------------------------------
+# "Open Terminal Here" — a new session may start in a validated initial cwd.
+# ---------------------------------------------------------------------------
+
+
+async def _capture_terminal_open(monkeypatch, tmp_path, *, tmux, has_session, initial_cwd):
+    """Open one terminal session and return the captured spawn {cmd, cwd}.
+
+    Stubs the PTY + subprocess so the test observes exactly what open() would launch: the
+    argv (for the tmux -c start-directory) and the subprocess cwd (for the plain-shell
+    fallback). No real shell or tmux is started.
+    """
+    (tmp_path / "home").mkdir(exist_ok=True)
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux" if tmux else None)
+    if tmux:
+        await _set_tmux_has_session(monkeypatch, has_session)
+
+        async def _noop_kill(_session_id):
+            return None
+
+        async def _noop_kill_server():
+            return None
+
+        monkeypatch.setattr(terminal_service, "_kill_tmux_session", _noop_kill)
+        monkeypatch.setattr(terminal_service, "_kill_tmux_server", _noop_kill_server)
+
+    captured: dict = {}
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        def send_signal(self, _signum: int) -> None:
+            pass
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_spawn(*args, **kwargs):
+        captured["cmd"] = list(args)
+        captured["cwd"] = kwargs.get("cwd")
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    try:
+        await service.open("openhere", initial_cwd=initial_cwd)
+        return captured
+    finally:
+        await service.shutdown()
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
+def _resolved(path) -> "terminal_service.Path":
+    # macOS puts tmp_path under a /var -> /private/var symlink; compare canonicalized paths.
+    return terminal_service.Path(path).resolve()
+
+
+def test_new_session_applies_initial_cwd_plain_shell(monkeypatch, tmp_path):
+    asyncio.run(_new_session_applies_initial_cwd_plain_shell(monkeypatch, tmp_path))
+
+
+async def _new_session_applies_initial_cwd_plain_shell(monkeypatch, tmp_path):
+    # A valid initial cwd becomes the plain-shell fallback's spawn cwd (the shell starts there).
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    captured = await _capture_terminal_open(
+        monkeypatch, tmp_path, tmux=False, has_session=False, initial_cwd=str(workdir)
+    )
+    assert _resolved(captured["cwd"]) == workdir.resolve()
+
+
+def test_invalid_initial_cwd_falls_back_to_home_plain_shell(monkeypatch, tmp_path):
+    asyncio.run(_invalid_initial_cwd_falls_back_to_home_plain_shell(monkeypatch, tmp_path))
+
+
+async def _invalid_initial_cwd_falls_back_to_home_plain_shell(monkeypatch, tmp_path):
+    # A missing directory must NOT fail the connection — it silently falls back to home.
+    missing = tmp_path / "does-not-exist"
+    captured = await _capture_terminal_open(
+        monkeypatch, tmp_path, tmux=False, has_session=False, initial_cwd=str(missing)
+    )
+    assert _resolved(captured["cwd"]) == (tmp_path / "home").resolve()
+
+
+def test_symlink_final_component_initial_cwd_rejected(monkeypatch, tmp_path):
+    asyncio.run(_symlink_final_component_initial_cwd_rejected(monkeypatch, tmp_path))
+
+
+async def _symlink_final_component_initial_cwd_rejected(monkeypatch, tmp_path):
+    # No-follow on the final component: a symlink pointing at a real directory is refused as a
+    # start dir (same hardening as the files API), so it falls back to home.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    captured = await _capture_terminal_open(
+        monkeypatch, tmp_path, tmux=False, has_session=False, initial_cwd=str(link)
+    )
+    assert _resolved(captured["cwd"]) == (tmp_path / "home").resolve()
+
+
+def test_tmux_new_session_starts_in_initial_cwd(monkeypatch, tmp_path):
+    asyncio.run(_tmux_new_session_starts_in_initial_cwd(monkeypatch, tmp_path))
+
+
+async def _tmux_new_session_starts_in_initial_cwd(monkeypatch, tmp_path):
+    # A brand-new tmux session (has-session False) takes its start directory from the client
+    # process cwd — the launch command stays the plain `new-session` (no cwd baked into the tmux
+    # command string, so a directory name is never parsed as tmux syntax).
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    captured = await _capture_terminal_open(
+        monkeypatch, tmp_path, tmux=True, has_session=False, initial_cwd=str(workdir)
+    )
+    assert "-c" not in captured["cmd"]
+    assert _resolved(captured["cwd"]) == workdir.resolve()
+
+
+def test_tmux_reattach_ignores_initial_cwd(monkeypatch, tmp_path):
+    asyncio.run(_tmux_reattach_ignores_initial_cwd(monkeypatch, tmp_path))
+
+
+async def _tmux_reattach_ignores_initial_cwd(monkeypatch, tmp_path):
+    # Reattaching an EXISTING tmux session (has-session True) must not steer it: the client cwd
+    # falls back to home, so the session keeps its own cwd — reattach semantics are unchanged.
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    captured = await _capture_terminal_open(
+        monkeypatch, tmp_path, tmux=True, has_session=True, initial_cwd=str(workdir)
+    )
+    assert "-c" not in captured["cmd"]
+    assert _resolved(captured["cwd"]) == (tmp_path / "home").resolve()
+
+
+def test_resolve_initial_cwd_rejects_inaccessible_dir(tmp_path):
+    # A directory that exists but the process cannot enter (no search/execute bit) must be
+    # rejected so it falls back to the default cwd instead of failing the spawn. Root bypasses
+    # permission bits, so skip there.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        import pytest as _pytest
+
+        _pytest.skip("root bypasses directory permission bits")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    os.chmod(locked, 0o000)
+    try:
+        assert terminal_service._resolve_initial_cwd(str(locked)) is None
+    finally:
+        os.chmod(locked, 0o700)  # restore so tmp_path teardown can remove it
+
+    usable = tmp_path / "usable"
+    usable.mkdir()
+    assert _resolved(terminal_service._resolve_initial_cwd(str(usable))) == usable.resolve()
+
+
+def test_resolve_initial_cwd_rejects_non_directories(tmp_path):
+    # Blank/None, a regular file, and a symlinked final component all fall back (None).
+    assert terminal_service._resolve_initial_cwd(None) is None
+    assert terminal_service._resolve_initial_cwd("") is None
+    a_file = tmp_path / "file.txt"
+    a_file.write_text("x", encoding="utf-8")
+    assert terminal_service._resolve_initial_cwd(str(a_file)) is None
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert terminal_service._resolve_initial_cwd(str(link)) is None
