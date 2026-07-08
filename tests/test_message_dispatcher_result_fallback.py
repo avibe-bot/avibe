@@ -218,6 +218,29 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         _channel, text, _parse_mode = im_client.sent_messages[0]
         self.assertEqual(text, "Answer body\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
 
+    async def test_result_footer_persisted_on_subtext_platform(self):
+        """On a subtext platform (Slack) the footer is delivered out-of-band as
+        subtext, but the stored text must still keep it so a reloaded transcript /
+        inbox / agent-run record retains the duration/token info (Codex P2)."""
+        im_client = _SubtextNativeMarkdownIMClient()
+        controller = _StubController(platform="slack", im_client=im_client)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            await dispatcher.emit_agent_message(
+                context, "result", "Answer body", result_footer="✅ ⏱️ 5s · 🪙 1.2k tok"
+            )
+
+        # Delivered: body clean, footer rides subtext.
+        _c, text, _k, _r, subtext = im_client.native_markdown_messages[0]
+        self.assertEqual(text, "Answer body")
+        self.assertEqual(subtext, "✅ ⏱️ 5s · 🪙 1.2k tok")
+        # Persisted: footer folded into the stored text.
+        persist.assert_called_once()
+        _, _ptype, ptext = persist.call_args.args
+        self.assertEqual(ptext, "Answer body\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
+
     async def test_folded_result_footer_is_persisted_for_non_subtext_platform(self):
         """The folded footnote must be persisted too, so a reloaded transcript /
         inbox entry matches the delivered message (result-path invariant)."""

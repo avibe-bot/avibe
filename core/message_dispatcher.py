@@ -1431,19 +1431,22 @@ class ConsolidatedMessageDispatcher:
                 #     fold it onto the body as a trailing line, so the footnote
                 #     stays visible AND their senders (which don't accept the
                 #     ``subtext`` kwarg) are never handed it.
-                folded_footer: Optional[str] = None
+                # ``folded_footer`` is the footnote to APPEND to the stored text so
+                # a reloaded transcript / inbox / agent-run record keeps the
+                # duration/token info (it used to live in the result body). It is
+                # set for BOTH platform kinds; only the DELIVERY form differs.
+                folded_footer: Optional[str] = result_footer or None
                 if result_footer:
                     # Gate on the DELIVERY TARGET's capabilities, not the source
                     # context: a delivery_override can redirect a Slack/Discord/Lark
                     # turn to a non-subtext target (or vice versa), and the footer
                     # must follow where it is actually delivered/persisted.
                     if self._capabilities(target_context).supports_status_bubble:
+                        # Subtext-capable: deliver as the grey subtext footer (body
+                        # stays clean); persistence still folds it in below.
                         done_footer = result_footer
                     else:
-                        # Non-subtext platform: fold onto the body AND remember it
-                        # so the persisted transcript/inbox matches what was shown
-                        # (the result-path invariant — persist what the user saw).
-                        folded_footer = result_footer
+                        # No subtext rendering: fold onto the delivered body too.
                         display_text = self._fold_footer(display_text, result_footer)
                 # Pass subtext to RAW send_message calls only when set, so an adapter
                 # whose send_message predates the subtext kwarg is never handed it
@@ -1609,9 +1612,17 @@ class ConsolidatedMessageDispatcher:
                 else:
                     await self._clear_consolidated_state(context)
 
+                # The stored text keeps the footnote for BOTH platform kinds:
+                # ``display_text`` already carries it on non-subtext platforms (folded
+                # above), while subtext platforms delivered it out-of-band — folding
+                # ``folded_footer`` onto the clean ``persist_text`` reconstructs the
+                # same body+footer without double-appending (persist_text is never
+                # mutated) and is a no-op when there is no footer.
+                persisted_result_text = self._fold_footer(persist_text, folded_footer)
+
                 self._record_agent_run_terminal_result(
                     context,
-                    display_text,
+                    persisted_result_text,
                     primary_message_id,
                     is_error=is_error,
                 )
@@ -1645,7 +1656,7 @@ class ConsolidatedMessageDispatcher:
                         )
                     else:
                         persist_agent_message(
-                            target_context, result_type, self._fold_footer(persist_text, folded_footer)
+                            target_context, result_type, persisted_result_text
                         )
 
                 if primary_message_id and display_text:
