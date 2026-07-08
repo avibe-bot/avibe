@@ -182,21 +182,24 @@ def test_rest_agent_pubkey_route(monkeypatch):
     assert response.get_json() == {"ok": True, "public_key": "pk", "fingerprint": "fp"}
 
 
-def test_rest_security_headers_delegate_webauthn_to_sandbox_only():
+def test_rest_security_headers_delegate_webauthn_to_self_and_sandbox():
     client = app.test_client()
 
     response = client.get("/api/csrf-token")
 
     permissions = response.headers["Permissions-Policy"]
-    assert 'publickey-credentials-get=("https://sandbox.avibe.bot")' in permissions
-    assert 'publickey-credentials-create=("https://sandbox.avibe.bot")' in permissions
+    # Chrome only honors WebAuthn delegation to the cross-origin sandbox iframe when the
+    # allowlist includes `self` (an origin-only allowlist does not reach the child) — see
+    # VAULT_SANDBOX_PERMISSIONS_POLICY. Still narrowly scoped to self + the sandbox origin.
+    assert 'publickey-credentials-get=(self "https://sandbox.avibe.bot")' in permissions
+    assert 'publickey-credentials-create=(self "https://sandbox.avibe.bot")' in permissions
     assert 'clipboard-write=(self "https://sandbox.avibe.bot")' in permissions
-    assert "publickey-credentials-get=(self" not in permissions
-    assert "publickey-credentials-create=(self" not in permissions
+    assert "publickey-credentials-get=*" not in permissions
+    assert "publickey-credentials-create=*" not in permissions
     assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
 
 
-def test_spa_document_security_headers_delegate_webauthn_to_sandbox_only():
+def test_spa_document_security_headers_delegate_webauthn_to_self_and_sandbox():
     client = app.test_client()
 
     response = client.request("HEAD", "/vaults", base_url="http://127.0.0.1:5123")
@@ -204,11 +207,12 @@ def test_spa_document_security_headers_delegate_webauthn_to_sandbox_only():
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     permissions = response.headers["Permissions-Policy"]
-    assert 'publickey-credentials-get=("https://sandbox.avibe.bot")' in permissions
-    assert 'publickey-credentials-create=("https://sandbox.avibe.bot")' in permissions
+    # See the companion REST test: `self` is required for the cross-origin iframe delegation.
+    assert 'publickey-credentials-get=(self "https://sandbox.avibe.bot")' in permissions
+    assert 'publickey-credentials-create=(self "https://sandbox.avibe.bot")' in permissions
     assert 'clipboard-write=(self "https://sandbox.avibe.bot")' in permissions
-    assert "publickey-credentials-get=(self" not in permissions
-    assert "publickey-credentials-create=(self" not in permissions
+    assert "publickey-credentials-get=*" not in permissions
+    assert "publickey-credentials-create=*" not in permissions
     assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
 
 
