@@ -114,6 +114,18 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
           </div>
         </div>
 
+        {/* Ack sits ABOVE the button: the natural order is read-the-risk → check → the
+            (now-enabled) Add-Passkey button right below it. The button gates on `ackLoss`. */}
+        {canUsePasskey && (
+          <div className="flex flex-col gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3">
+            <span className="text-[11.5px] leading-snug text-warning">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
+            <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
+              <input type="checkbox" checked={ackLoss} onChange={(e) => setAckLoss(e.target.checked)} className="mt-0.5 shrink-0" />
+              <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
+            </label>
+          </div>
+        )}
+
         {canUsePasskey ? (
           <div className="flex flex-col items-center gap-2.5 rounded-xl border-[1.5px] border-mint bg-mint-soft p-4">
             <Badge variant="success" className="border-transparent bg-mint uppercase tracking-wide text-background">
@@ -129,16 +141,6 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
         ) : (
           <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-snug text-warning">
             {t('vaults.protectedUnlock.unlockUnavailableHere')}
-          </div>
-        )}
-
-        {canUsePasskey && (
-          <div className="flex flex-col gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3">
-            <span className="text-[11.5px] leading-snug text-warning">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
-            <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
-              <input type="checkbox" checked={ackLoss} onChange={(e) => setAckLoss(e.target.checked)} className="mt-0.5 shrink-0" />
-              <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
-            </label>
           </div>
         )}
 

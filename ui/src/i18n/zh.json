@@ -2281,8 +2281,8 @@
       "unlockPasskeyCaption": "Face ID · Touch ID · 安全密钥",
       "factorNote": "你的 passkey 证明绝不会离开浏览器——单凭这台机器无法解密",
       "cancel": "取消",
-      "passkeyUnrecoverableWarning": "一旦丢失此 passkey、或从与设置时不同的站点/地址打开此保险库,这些保护层密钥将无法恢复(没有恢复兜底)。",
-      "passkeyAck": "我明白:丢失此 passkey、或从其他站点打开此保险库后,这些密钥将无法恢复。",
+      "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
+      "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
       "unlockUnavailableHere": "保护层保险库需要 passkey。请从 localhost 或你的 avibe.bot 地址打开 Vaults；127.0.0.1 这类原始 IP 无法使用 WebAuthn。",
       "errors": {
         "prfUnavailable": "这个 passkey/浏览器不支持加密所需的 PRF 扩展。请改用平台 passkey(Touch ID / Windows Hello)。",

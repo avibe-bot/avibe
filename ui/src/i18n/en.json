@@ -2281,8 +2281,8 @@
       "unlockPasskeyCaption": "Face ID · Touch ID · security key",
       "factorNote": "Your passkey proof never leaves the browser — the machine alone can't decrypt this",
       "cancel": "Cancel",
-      "passkeyUnrecoverableWarning": "If you lose this passkey — or open this vault from a different site/address than where you set it up — these protected secrets can't be recovered. There is no recovery fallback.",
-      "passkeyAck": "I understand: if I lose this passkey or open this vault from a different site, these secrets can't be recovered.",
+      "passkeyUnrecoverableWarning": "This passkey is the only key. Lose it and the protected secrets can't be recovered — there is no backup.",
+      "passkeyAck": "I understand: if I lose this passkey, these secrets can't be recovered.",
       "unlockUnavailableHere": "Protected vaults need a passkey. Open Vaults from localhost or your avibe.bot address; raw IP addresses like 127.0.0.1 can't use WebAuthn.",
       "errors": {
         "prfUnavailable": "This passkey/browser doesn't support the PRF extension needed for encryption. Try a platform passkey (Touch ID / Windows Hello).",
