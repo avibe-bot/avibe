@@ -206,6 +206,52 @@ def test_config_load_defaults_missing_audio_asr_to_enabled():
     assert created.audio_asr.enabled_configured is False
 
 
+def test_config_payload_defaults_instance_name_to_remote_access_slug(monkeypatch):
+    monkeypatch.setattr(api, "_system_hostname", lambda: "macbook")
+    config = V2Config.from_payload(_full_config_payload())
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.public_url = "https://alex-app.avibe.bot"
+
+    payload = api.config_to_payload(config)
+
+    assert payload["ui"]["instance_name"] == ""
+    assert payload["ui"]["default_instance_name"] == "alex"
+    assert payload["ui"]["system_hostname"] == "macbook"
+
+
+def test_config_payload_default_instance_name_falls_back_to_hostname(monkeypatch):
+    monkeypatch.setattr(api, "_system_hostname", lambda: "macbook")
+    config = V2Config.from_payload(_full_config_payload())
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.public_url = "https://alex-app.avibe.bot"
+
+    payload = api.config_to_payload(config)
+
+    assert payload["ui"]["default_instance_name"] == "macbook"
+
+
+def test_config_payload_default_instance_name_ignores_invalid_remote_url(monkeypatch):
+    monkeypatch.setattr(api, "_system_hostname", lambda: "macbook")
+    config = V2Config.from_payload(_full_config_payload())
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.public_url = "http://alex-app.avibe.bot"
+
+    payload = api.config_to_payload(config)
+
+    assert payload["ui"]["default_instance_name"] == "macbook"
+
+
+def test_config_payload_default_instance_name_ignores_malformed_remote_url(monkeypatch):
+    monkeypatch.setattr(api, "_system_hostname", lambda: "macbook")
+    config = V2Config.from_payload(_full_config_payload())
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.public_url = "https://["
+
+    payload = api.config_to_payload(config)
+
+    assert payload["ui"]["default_instance_name"] == "macbook"
+
+
 def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

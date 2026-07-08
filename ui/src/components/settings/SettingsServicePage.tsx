@@ -137,6 +137,7 @@ export const SettingsServicePage: React.FC = () => {
     setNameMessage(null);
     try {
       const instanceName = (config.ui?.instance_name || '').trim();
+      const defaultInstanceName = (config.ui?.default_instance_name || config.ui?.system_hostname || '').trim();
       // Persist ONLY the instance name. Spreading the shared (and possibly
       // dirty) config.ui would also save unsaved Console server host/port
       // edits — but without the /api/ui/reload + redirect that
@@ -144,9 +145,15 @@ export const SettingsServicePage: React.FC = () => {
       // while the next restart silently moves to the unsaved address. The
       // backend deep-merges config saves, so host/port are preserved.
       await api.saveConfig({ ui: { instance_name: instanceName } });
-      // Reflect the new title immediately. system_hostname is the read-only,
-      // server-computed fallback (unaffected by host/port edits).
-      applyAppTitle({ ui: { instance_name: instanceName, system_hostname: config.ui?.system_hostname } });
+      // Reflect the new title immediately. default_instance_name is the
+      // read-only, server-computed fallback (unaffected by host/port edits).
+      applyAppTitle({
+        ui: {
+          instance_name: instanceName,
+          default_instance_name: defaultInstanceName,
+          system_hostname: config.ui?.system_hostname,
+        },
+      });
       setNameMessage(t('common.saved'));
     } catch {
       setNameMessage(t('common.saveFailed'));
@@ -154,6 +161,8 @@ export const SettingsServicePage: React.FC = () => {
       setNameSaving(false);
     }
   };
+
+  const defaultInstanceName = (config?.ui?.default_instance_name || config?.ui?.system_hostname || '').trim();
 
   return (
     <SettingsPageShell
@@ -294,7 +303,7 @@ export const SettingsServicePage: React.FC = () => {
             <div className="grid grid-cols-[minmax(160px,220px)_auto] items-center gap-2">
               <CompactField
                 aria-label={t('settings.instanceNameTitle')}
-                placeholder={config?.ui?.system_hostname || ''}
+                placeholder={defaultInstanceName}
                 value={config?.ui?.instance_name || ''}
                 onChange={(event) => {
                   const instanceName = event.target.value;

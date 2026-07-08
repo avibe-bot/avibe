@@ -932,10 +932,38 @@ def _system_hostname() -> str:
         return ""
 
 
+def _remote_access_instance_name(config: V2Config) -> str:
+    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
+    if not cloud or not getattr(cloud, "enabled", False):
+        return ""
+    public_url = (getattr(cloud, "public_url", "") or "").strip()
+    if not public_url:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(public_url)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() != "https" or parsed.username or parsed.password:
+        return ""
+    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    labels = hostname.split(".")
+    if len(labels) < 3 or labels[-2:] != ["avibe", "bot"]:
+        return ""
+    slug = labels[0]
+    if slug.endswith("-app"):
+        slug = slug[:-4]
+    return slug.strip("-")
+
+
+def _default_instance_name(config: V2Config, *, system_hostname: str) -> str:
+    return _remote_access_instance_name(config) or system_hostname
+
+
 def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dict:
     from config.platform_registry import platform_descriptors
     from modules.agents.catalog import agent_backend_catalog_payload
 
+    system_hostname = _system_hostname()
     platform_payload = {}
     for descriptor in platform_descriptors():
         descriptor_config = descriptor.get_config(config)
@@ -975,11 +1003,16 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             _GATEWAY_SECRET_FIELDS,
             include_secrets=include_secrets,
         ),
-        # ``system_hostname`` is a read-only, computed hint (not a stored config
-        # field): the UI uses it as the browser-title fallback when
-        # ``ui.instance_name`` is blank. It is dropped on save via
-        # ``_filter_dataclass_fields`` so it never persists.
-        "ui": {**config.ui.__dict__, "system_hostname": _system_hostname()},
+        # ``system_hostname`` and ``default_instance_name`` are read-only,
+        # computed hints (not stored config fields): the UI uses the default as
+        # the browser-title fallback when ``ui.instance_name`` is blank. They
+        # are dropped on save via ``_filter_dataclass_fields`` so they never
+        # persist.
+        "ui": {
+            **config.ui.__dict__,
+            "system_hostname": system_hostname,
+            "default_instance_name": _default_instance_name(config, system_hostname=system_hostname),
+        },
         "remote_access": {
             "provider": config.remote_access.provider,
             "vibe_cloud": _vibe_cloud_payload(config, include_secrets),

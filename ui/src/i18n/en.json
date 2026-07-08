@@ -222,7 +222,7 @@
     "consoleServerTitle": "Console server",
     "consoleServerHint": "Saving these values restarts only the Web UI server.",
     "instanceNameTitle": "Instance name",
-    "instanceNameHint": "Shown in the browser tab title (\"Avibe - name\"). Leave blank to use the system hostname.",
+    "instanceNameHint": "Shown in the browser tab title (\"Avibe - name\"). Leave blank to use the remote-access name when paired, otherwise the system hostname.",
     "consoleServerRedirecting": "UI server moved. Redirecting to {{origin}}...",
     "consoleServerRelocated": "UI server now listens on {{origin}}. Open this URL to continue.",
     "serviceNotesTitle": "Operational notes",
