@@ -627,6 +627,13 @@ class ConsolidatedMessageDispatcher:
             return ""
         return self._t("status.tokens", count=self._format_token_count(tokens))
 
+    def session_token_field(self, context: MessageContext) -> str:
+        """Public accessor for the compact ``{n} tok`` field of the session's
+        current context-window occupancy (``""`` when unknown/zero). Lets the
+        ``show_duration`` result footer reuse the same figure and styling as the
+        concise status bubble."""
+        return self._token_field(context)
+
     def _status_footer_text(
         self,
         context: MessageContext,

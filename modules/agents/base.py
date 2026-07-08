@@ -504,11 +504,19 @@ class BaseAgent(ABC):
                 # dot stays green and the stream hangs until the 600s timeout (Codex P2).
                 await self.controller.emit_agent_message(context, "result", "", parse_mode=parse_mode, is_error=is_error)
         else:
+            token_field = ""
+            get_token_field = getattr(self.controller, "session_token_field", None)
+            if callable(get_token_field):
+                try:
+                    token_field = get_token_field(context) or ""
+                except Exception:
+                    token_field = ""
             formatted = self._get_formatter(context).format_result_message(
                 subtype or "",
                 duration_ms,
                 visible_result,
                 show_duration=True,
+                token_field=token_field,
             )
             if visible_suffix:
                 formatted = f"{formatted}\n{visible_suffix}"

@@ -398,11 +398,17 @@ class BaseMarkdownFormatter(ABC):
         duration_ms: int,
         result: Optional[str] = None,
         show_duration: bool = True,
+        token_field: str = "",
     ) -> str:
         """Format result message.
 
-        Format: ⏱️ Success: 2m 24s  (when show_duration=True)
-                ⏱️ Success           (when show_duration=False)
+        Format: ⏱️ Success: 2m 24s · 240k tok  (show_duration=True, tokens known)
+                ⏱️ Success: 2m 24s              (show_duration=True, no tokens)
+                ⏱️ Success                       (show_duration=False)
+
+        ``token_field`` is the already-formatted compact usage string (e.g.
+        ``240k tok``); it is appended with the same ``·`` separator as the concise
+        status footer and omitted when empty.
         """
         subtype_display = subtype.capitalize() if subtype else "Done"
 
@@ -419,6 +425,9 @@ class BaseMarkdownFormatter(ABC):
             result_text = f"⏱️ {subtype_display}: {duration_str}"
         else:
             result_text = f"⏱️ {subtype_display}"
+
+        if token_field:
+            result_text += f" · {token_field}"
 
         if result:
             result_text += f"\n\n{result}"

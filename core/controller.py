@@ -1284,6 +1284,15 @@ class Controller:
             return
         dispatcher.note_session_tokens(context, total=total)
 
+    def session_token_field(self, context: MessageContext) -> str:
+        """The compact ``{n} tok`` footer field for the session's current
+        context-window occupancy, or "" when unknown/zero or the dispatcher is
+        unavailable (partially-wired test controllers)."""
+        dispatcher = getattr(self, "message_dispatcher", None)
+        if dispatcher is None:
+            return ""
+        return dispatcher.session_token_field(context)
+
     # Main run method
     def run(self):
         """Run the controller"""
