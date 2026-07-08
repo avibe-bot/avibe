@@ -2,6 +2,15 @@ export const VAULT_SANDBOX_ORIGIN = 'https://sandbox.avibe.bot';
 export const VAULT_SANDBOX_VERSION = '0.1.0';
 export const VAULT_SANDBOX_EXPECTED_BUILD_HASH = 'dev';
 
+// DEFERRED (pre-launch iteration): while sandbox.avibe.bot is still being iterated, the parent
+// does NOT fail-closed on a pinned-manifest mismatch — otherwise every sandbox deploy would
+// require re-pinning VAULT_SANDBOX_PINNED_MANIFEST before the app could load. Cross-origin
+// isolation still holds regardless (that comes from the origin split, not the pin).
+// FIRM PRE-LAUNCH GATE: set this back to `true` — with a freshly re-pinned manifest + an
+// immutable versioned iframe URL — before real users store protected secrets. Until then a
+// sandbox deploy-pipeline compromise would not be detected by the parent.
+export const VAULT_SANDBOX_INTEGRITY_ENFORCED = false;
+
 export type VaultSandboxPinnedManifest = {
   algorithm: 'sha256';
   resources: Record<string, string>;

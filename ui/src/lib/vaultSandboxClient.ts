@@ -8,6 +8,7 @@ import type {
 import type { BlindBox, ProtectedRecordEnvelope, SignatureResult, SignatureScheme } from './vaultCrypto';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
+  VAULT_SANDBOX_INTEGRITY_ENFORCED,
   VAULT_SANDBOX_IFRAME_URL,
   VAULT_SANDBOX_IFRAME_RESOURCE_PATH,
   VAULT_SANDBOX_MANIFEST_PATH,
@@ -233,7 +234,9 @@ export class VaultSandboxClient {
   }
 
   static async create(): Promise<VaultSandboxClient> {
-    await verifyVaultSandboxIntegrity();
+    // Gated during pre-launch iteration — see VAULT_SANDBOX_INTEGRITY_ENFORCED. When off, the
+    // parent still origin-isolates the sandbox; it just doesn't fail-closed on a manifest mismatch.
+    if (VAULT_SANDBOX_INTEGRITY_ENFORCED) await verifyVaultSandboxIntegrity();
     const iframe = document.createElement('iframe');
     iframe.title = 'Avibe protected vault sandbox';
     iframe.allow = 'publickey-credentials-get; publickey-credentials-create; clipboard-write';
