@@ -68,25 +68,27 @@ function buildWsUrl(sessionId: string, cwd?: string | null): string {
   return cwd ? `${base}?cwd=${encodeURIComponent(cwd)}` : base;
 }
 
-// Which modifier opens Find: ⌘ on Apple platforms, Ctrl elsewhere. The gating matters — Ctrl+F is a
-// live terminal key on macOS (readline forward-char, less/vim page-forward, the system emacs binding),
-// so hijacking Ctrl+F on every platform would eat a keystroke mac shells depend on. Windows/Linux
-// terminals don't bind Ctrl+F that way, so it's the natural Find shortcut there.
+// Apple vs. non-Apple decides the Find chord below. Detected once (navigator.platform is deprecated but
+// remains the most reliable signal, with userAgent as a fallback).
 const IS_APPLE =
   typeof navigator !== 'undefined' &&
   /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 
-// True when the event is the platform Find chord (⌘F / Ctrl+F) with no stray extra modifier. Shared by
-// the terminal's key handler and the search field so both agree on the platform gating.
+// The chord that opens Find: ⌘F on Apple platforms, Ctrl+Shift+F everywhere else. Plain Ctrl+F is a live
+// terminal key on BOTH macOS and Linux (readline forward-char, less/vim page-forward), so it must keep
+// reaching the PTY — hence ⌘ on Apple (a free modifier) and the Shift-qualified chord elsewhere, which is
+// exactly what native terminals bind for find (GNOME Terminal, Konsole, Windows Terminal). Shared by the
+// terminal key handler and the search field so both agree; altKey is excluded to avoid stray combos.
 const isFindHotkey = (e: {
   metaKey: boolean;
   ctrlKey: boolean;
+  shiftKey: boolean;
   altKey: boolean;
   key: string;
 }): boolean =>
-  (IS_APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) &&
   !e.altKey &&
-  (e.key === 'f' || e.key === 'F');
+  (e.key === 'f' || e.key === 'F') &&
+  (IS_APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey && !e.metaKey);
 
 export const TerminalView: React.FC<{
   sessionId: string;
@@ -352,12 +354,16 @@ export const TerminalView: React.FC<{
 
   const closeSearch = () => {
     setSearchOpen(false);
+    setQuery(''); // drop the term so reopening starts fresh instead of showing a stale "0/0" counter
     searchRef.current?.clearDecorations();
     setMatches({ index: -1, count: 0 });
     termRef.current?.focus();
   };
 
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Mid-IME-composition (e.g. a CJK candidate), Enter/Escape belong to the IME — accepting or
+    // cancelling the candidate — not to search navigation. Let them through untouched.
+    if (e.nativeEvent.isComposing) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       runFind(e.shiftKey ? 'prev' : 'next');
