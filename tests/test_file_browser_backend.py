@@ -18,6 +18,21 @@ from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
 
 
+@pytest.fixture(autouse=True)
+def files_undo_runtime(tmp_path, monkeypatch):
+    from config import paths
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(paths, "get_runtime_dir", lambda: runtime)
+    with fs._DELETE_UNDO_LOCK:
+        fs._cancel_delete_undo_expiry_timer_locked()
+        fs._DELETE_UNDO_INITIALIZED = False
+    yield runtime
+    with fs._DELETE_UNDO_LOCK:
+        fs._cancel_delete_undo_expiry_timer_locked()
+        fs._DELETE_UNDO_INITIALIZED = False
+
+
 def test_resolve_safe_path_expands_home_and_requires_absolute(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
@@ -790,6 +805,467 @@ def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
     assert any("file_browser.delete" in record.message for record in caplog.records)
 
 
+def test_delete_undo_restores_file(files_undo_runtime, tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="core.file_browser_service")
+    target = tmp_path / "note.txt"
+    target.write_text("keep", encoding="utf-8")
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted["ok"] is True
+    assert isinstance(deleted["undo_token"], str)
+    assert deleted["undo_expires_seconds"] == fs.DELETE_UNDO_TTL_SECONDS
+    assert not target.exists()
+    restored = fs.undo_delete_path(deleted["undo_token"])
+    assert restored == {"restored_path": str(target)}
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert any("file_browser.delete_undo" in record.message for record in caplog.records)
+
+
+def test_delete_undo_restores_directory(files_undo_runtime, tmp_path):
+    folder = tmp_path / "folder"
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
+    (nested / "child.txt").write_text("child", encoding="utf-8")
+
+    deleted = fs.delete_path(str(folder), recursive=True)
+
+    assert deleted["undo_token"]
+    assert not folder.exists()
+    assert fs.undo_delete_path(deleted["undo_token"]) == {"restored_path": str(folder)}
+    assert (nested / "child.txt").read_text(encoding="utf-8") == "child"
+
+
+def test_delete_undo_restores_empty_directory_without_recursive(files_undo_runtime, tmp_path):
+    folder = tmp_path / "empty"
+    folder.mkdir()
+
+    deleted = fs.delete_path(str(folder), recursive=False)
+
+    assert deleted["undo_token"]
+    assert not folder.exists()
+    assert fs.undo_delete_path(deleted["undo_token"]) == {"restored_path": str(folder)}
+    assert folder.is_dir()
+
+
+def test_delete_non_recursive_directory_created_child_during_staging_returns_not_empty(
+    files_undo_runtime, tmp_path, monkeypatch
+):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    real_rename = fs._os_rename_noreplace
+
+    def rename_then_populate(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if Path(destination).name == fs._DELETE_UNDO_ENTRY_NAME:
+            (Path(destination) / "child.txt").write_text("child", encoding="utf-8")
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", rename_then_populate)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(folder), recursive=False)
+
+    assert exc.value.code == "not_empty"
+    assert folder.is_dir()
+    assert (folder / "child.txt").read_text(encoding="utf-8") == "child"
+    undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
+    assert not undo_root.exists() or not list(undo_root.iterdir())
+
+
+def test_delete_undo_token_expiry_purges_staging(files_undo_runtime, tmp_path, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(fs.time, "time", lambda: now)
+    monkeypatch.setattr(fs, "DELETE_UNDO_TTL_SECONDS", 10)
+    target = tmp_path / "expired.txt"
+    target.write_text("old", encoding="utf-8")
+    token = fs.delete_path(str(target))["undo_token"]
+
+    now = 1011.0
+    with pytest.raises(FileBrowserError) as exc:
+        fs.undo_delete_path(token)
+
+    assert exc.value.code == "expired"
+    assert exc.value.status_code == 410
+    assert not (files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token).exists()
+
+
+def test_delete_undo_expiry_timer_purges_without_later_file_request(files_undo_runtime, tmp_path, monkeypatch):
+    now = 2000.0
+    scheduled: list[object] = []
+
+    class FakeTimer:
+        def __init__(self, interval, function, args=(), kwargs=None):
+            self.interval = interval
+            self.function = function
+            self.args = args
+            self.kwargs = kwargs or {}
+            self.started = False
+            self.cancelled = False
+            scheduled.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+        def is_alive(self):
+            return self.started and not self.cancelled
+
+    monkeypatch.setattr(fs.time, "time", lambda: now)
+    monkeypatch.setattr(fs, "DELETE_UNDO_TTL_SECONDS", 10)
+    monkeypatch.setattr(fs.threading, "Timer", FakeTimer)
+    target = tmp_path / "scheduled-expiry.txt"
+    target.write_text("expire me", encoding="utf-8")
+
+    token = fs.delete_path(str(target))["undo_token"]
+
+    assert scheduled
+    assert scheduled[-1].interval == 10
+    assert scheduled[-1].started is True
+    stage_dir = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token
+    assert stage_dir.exists()
+
+    now = 2011.0
+    scheduled[-1].function(*scheduled[-1].args, **scheduled[-1].kwargs)
+
+    assert not stage_dir.exists()
+
+
+def test_delete_undo_refuses_to_clobber_recreated_path(files_undo_runtime, tmp_path):
+    target = tmp_path / "occupied.txt"
+    target.write_text("deleted", encoding="utf-8")
+    token = fs.delete_path(str(target))["undo_token"]
+    target.write_text("new", encoding="utf-8")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.undo_delete_path(token)
+
+    assert exc.value.code == "exists"
+    assert exc.value.status_code == 409
+    assert target.read_text(encoding="utf-8") == "new"
+    target.unlink()
+    assert fs.undo_delete_path(token) == {"restored_path": str(target)}
+    assert target.read_text(encoding="utf-8") == "deleted"
+
+
+def test_delete_cross_device_staging_falls_back_to_permanent_delete(files_undo_runtime, tmp_path, monkeypatch):
+    target = tmp_path / "cross-device.txt"
+    target.write_text("delete me", encoding="utf-8")
+
+    def raise_exdev(_source: Path, _target: Path) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", raise_exdev)
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    assert not target.exists()
+
+
+def test_delete_size_cap_falls_back_to_permanent_delete(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "3")
+    target = tmp_path / "large.txt"
+    target.write_bytes(b"1234")
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    assert not target.exists()
+
+
+def test_delete_post_rename_growth_falls_back_to_permanent_delete(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "8")
+    target = tmp_path / "active.log"
+    target.write_text("1234", encoding="utf-8")
+    real_rename = fs._os_rename_noreplace
+
+    def rename_then_grow(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        with destination.open("ab") as handle:
+            handle.write(b"567890")
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", rename_then_grow)
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    assert not target.exists()
+    undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
+    assert not undo_root.exists() or not list(undo_root.iterdir())
+
+
+def test_delete_post_rename_growth_reports_cleanup_failure(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "8")
+    target = tmp_path / "active.log"
+    target.write_text("1234", encoding="utf-8")
+    real_rename = fs._os_rename_noreplace
+    real_remove = fs._delete_undo_remove_path
+    failed_removals: list[Path] = []
+
+    def rename_then_grow(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        with destination.open("ab") as handle:
+            handle.write(b"567890")
+
+    def fail_stage_cleanup(path: Path) -> bool:
+        if Path(path).parent == files_undo_runtime / fs._DELETE_UNDO_DIR_NAME:
+            failed_removals.append(Path(path))
+            return False
+        return real_remove(path)
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", rename_then_grow)
+    monkeypatch.setattr(fs, "_delete_undo_remove_path", fail_stage_cleanup)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(target))
+
+    assert exc.value.code == "fs_error"
+    assert not target.exists()
+    assert failed_removals
+    assert failed_removals[0].exists()
+
+
+def test_delete_stale_file_replaced_by_directory_is_not_staged_or_removed(files_undo_runtime, tmp_path, monkeypatch):
+    target = tmp_path / "stale"
+    target.write_text("old file", encoding="utf-8")
+    real_purge = fs._purge_delete_undo_store_best_effort
+    swapped = False
+
+    def swap_file_for_directory_once() -> None:
+        nonlocal swapped
+        if not swapped:
+            target.unlink()
+            target.mkdir()
+            (target / "child.txt").write_text("new directory", encoding="utf-8")
+            swapped = True
+        real_purge()
+
+    monkeypatch.setattr(fs, "_purge_delete_undo_store_best_effort", swap_file_for_directory_once)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(target), recursive=False)
+
+    assert exc.value.code in {"fs_error", "permission_denied"}
+    assert target.is_dir()
+    assert (target / "child.txt").read_text(encoding="utf-8") == "new directory"
+    undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
+    assert not undo_root.exists() or not list(undo_root.iterdir())
+
+
+def test_delete_staging_fsyncs_undo_root_before_returning_token(files_undo_runtime, tmp_path, monkeypatch):
+    target = tmp_path / "durable.txt"
+    target.write_text("durable", encoding="utf-8")
+    fsynced: list[Path] = []
+    real_fsync_dir = fs._fsync_dir
+
+    def capture_fsync_dir(path: Path) -> None:
+        fsynced.append(Path(path))
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(fs, "_fsync_dir", capture_fsync_dir)
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted["undo_token"]
+    assert files_undo_runtime / fs._DELETE_UNDO_DIR_NAME in fsynced
+
+
+def test_delete_undo_eviction_by_count_and_total_size(files_undo_runtime, tmp_path, monkeypatch):
+    now = 2000.0
+    monkeypatch.setattr(fs.time, "time", lambda: now)
+    monkeypatch.setenv("AVIBE_FILES_UNDO_MAX_ENTRIES", "2")
+    tokens: list[str] = []
+    for index in range(3):
+        now = 2000.0 + index
+        target = tmp_path / f"count-{index}.txt"
+        target.write_text(str(index), encoding="utf-8")
+        tokens.append(fs.delete_path(str(target))["undo_token"])
+
+    with pytest.raises(FileBrowserError) as count_exc:
+        fs.undo_delete_path(tokens[0])
+    assert count_exc.value.code == "expired"
+    assert fs.undo_delete_path(tokens[1]) == {"restored_path": str(tmp_path / "count-1.txt")}
+    assert fs.undo_delete_path(tokens[2]) == {"restored_path": str(tmp_path / "count-2.txt")}
+
+    now_total = 3000.0
+    monkeypatch.setattr(fs.time, "time", lambda: now_total)
+    monkeypatch.setenv("AVIBE_FILES_UNDO_MAX_ENTRIES", "32")
+    monkeypatch.setenv("AVIBE_FILES_UNDO_TOTAL_SIZE_CAP_BYTES", "6")
+    first = tmp_path / "total-1.txt"
+    second = tmp_path / "total-2.txt"
+    first.write_text("1234", encoding="utf-8")
+    second.write_text("5678", encoding="utf-8")
+    first_token = fs.delete_path(str(first))["undo_token"]
+    now_total = 3001.0
+    second_token = fs.delete_path(str(second))["undo_token"]
+
+    with pytest.raises(FileBrowserError) as total_exc:
+        fs.undo_delete_path(first_token)
+    assert total_exc.value.code == "expired"
+    assert fs.undo_delete_path(second_token) == {"restored_path": str(second)}
+
+
+def test_delete_undo_failed_eviction_keeps_caps_enforced(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_MAX_ENTRIES", "1")
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    first_token = fs.delete_path(str(first))["undo_token"]
+    first_stage_dir = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / first_token
+    real_remove = fs._delete_undo_remove_path
+
+    def fail_first_eviction(path: Path) -> bool:
+        if Path(path) == first_stage_dir:
+            return False
+        return real_remove(path)
+
+    monkeypatch.setattr(fs, "_delete_undo_remove_path", fail_first_eviction)
+
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    deleted_second = fs.delete_path(str(second))
+
+    assert deleted_second == {"ok": True, "undo_token": None, "undo_expires_seconds": None}
+    assert not second.exists()
+    assert first_stage_dir.exists()
+    assert fs.undo_delete_path(first_token) == {"restored_path": str(first)}
+    assert first.read_text(encoding="utf-8") == "first"
+
+
+def test_delete_undo_purges_entry_that_grows_past_cap(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "8")
+    target = tmp_path / "growing.log"
+    target.write_text("1234", encoding="utf-8")
+
+    token = fs.delete_path(str(target))["undo_token"]
+    staged_entry = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token / fs._DELETE_UNDO_ENTRY_NAME
+    staged_entry.write_text("123456789", encoding="utf-8")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.undo_delete_path(token)
+
+    assert exc.value.code == "expired"
+    assert not staged_entry.exists()
+    assert not target.exists()
+
+
+def test_delete_stages_symlink_entry_without_touching_target(files_undo_runtime, tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("target", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+
+    deleted = fs.delete_path(str(link))
+
+    assert deleted["undo_token"]
+    assert not link.exists()
+    assert target.read_text(encoding="utf-8") == "target"
+    assert fs.undo_delete_path(deleted["undo_token"]) == {"restored_path": str(link)}
+    assert link.is_symlink()
+    assert link.resolve() == target
+    assert target.read_text(encoding="utf-8") == "target"
+
+
+def test_delete_undo_rejects_replaced_parent_symlink(files_undo_runtime, tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    target = parent / "note.txt"
+    target.write_text("deleted", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+
+    token = fs.delete_path(str(target))["undo_token"]
+    parent.rmdir()
+    parent.symlink_to(other, target_is_directory=True)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.undo_delete_path(token)
+
+    assert exc.value.code == "expired"
+    assert not (other / "note.txt").exists()
+    assert not (files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token).exists()
+
+
+def test_delete_undo_parent_open_permission_failure_preserves_token(files_undo_runtime, tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    target = parent / "note.txt"
+    target.write_text("deleted", encoding="utf-8")
+    token = fs.delete_path(str(target))["undo_token"]
+    stage_dir = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token
+    real_open = fs.os.open
+
+    def fail_parent_open(path, flags, *args, **kwargs):
+        if Path(path) == parent:
+            raise PermissionError(errno.EACCES, "permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fs.os, "open", fail_parent_open)
+        with pytest.raises(FileBrowserError) as exc:
+            fs.undo_delete_path(token)
+
+    assert exc.value.code == "permission_denied"
+    assert stage_dir.exists()
+    assert fs.undo_delete_path(token) == {"restored_path": str(target)}
+    assert target.read_text(encoding="utf-8") == "deleted"
+
+
+def test_delete_undo_restores_through_verified_parent_when_path_is_replaced(
+    files_undo_runtime, tmp_path, monkeypatch
+):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    folder = parent / "folder"
+    folder.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    detached_parent = tmp_path / "detached-parent"
+    token = fs.delete_path(str(folder), recursive=True)["undo_token"]
+    real_os_rename = os.rename
+    swapped = False
+
+    def renameat2_unavailable(*args, **kwargs):
+        raise AttributeError("renameat2 unavailable")
+
+    def replace_parent_then_rename(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and kwargs.get("dst_dir_fd") is not None and destination == folder.name:
+            swapped = True
+            real_os_rename(parent, detached_parent)
+            parent.symlink_to(other, target_is_directory=True)
+            try:
+                return real_os_rename(source, destination, *args, **kwargs)
+            finally:
+                parent.unlink()
+                real_os_rename(detached_parent, parent)
+        return real_os_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(fs, "_glibc_renameat2_noreplace_between", renameat2_unavailable)
+    monkeypatch.setattr(fs.os, "rename", replace_parent_then_rename)
+
+    assert fs.undo_delete_path(token) == {"restored_path": str(folder)}
+
+    assert swapped is True
+    assert folder.is_dir()
+    assert not (other / "folder").exists()
+
+
+def test_delete_undo_purges_corrupt_staging_entries(files_undo_runtime, tmp_path):
+    corrupt = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / ("0" * 32)
+    corrupt.mkdir(parents=True)
+    (corrupt / fs._DELETE_UNDO_ENTRY_NAME).write_text("orphan", encoding="utf-8")
+    (corrupt / fs._DELETE_UNDO_METADATA_NAME).write_text("{not json", encoding="utf-8")
+    target = tmp_path / "fresh.txt"
+    target.write_text("fresh", encoding="utf-8")
+
+    deleted = fs.delete_path(str(target))
+
+    assert deleted["undo_token"]
+    assert not corrupt.exists()
+
+
 def test_delete_non_recursive_directory_maps_not_empty_only_for_not_empty_errno(tmp_path):
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -805,6 +1281,7 @@ def test_delete_non_recursive_directory_maps_not_empty_only_for_not_empty_errno(
 def test_delete_non_recursive_directory_maps_permission_denied(tmp_path, monkeypatch):
     folder = tmp_path / "folder"
     folder.mkdir()
+    monkeypatch.setattr(fs, "_stage_delete_for_undo", lambda *args, **kwargs: None)
 
     def fail_rmdir(self: Path) -> None:
         if self == folder:
@@ -824,6 +1301,7 @@ def test_delete_non_recursive_directory_maps_permission_denied(tmp_path, monkeyp
 def test_delete_non_recursive_directory_maps_concurrent_missing_to_not_found(tmp_path, monkeypatch):
     folder = tmp_path / "folder"
     folder.mkdir()
+    monkeypatch.setattr(fs, "_stage_delete_for_undo", lambda *args, **kwargs: None)
 
     def fail_rmdir(self: Path) -> None:
         if self == folder:
@@ -843,6 +1321,7 @@ def test_delete_non_recursive_directory_maps_concurrent_missing_to_not_found(tmp
 def test_delete_non_recursive_directory_maps_generic_oserror_to_fs_error(tmp_path, monkeypatch):
     folder = tmp_path / "folder"
     folder.mkdir()
+    monkeypatch.setattr(fs, "_stage_delete_for_undo", lambda *args, **kwargs: None)
 
     def fail_rmdir(self: Path) -> None:
         if self == folder:
@@ -1538,6 +2017,42 @@ def test_http_delete_and_move_string_false_flags_are_not_truthy(tmp_path):
     assert move_response.status_code == 409
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "destination"
+
+
+def test_http_delete_response_adds_undo_fields_without_dropping_ok(files_undo_runtime, tmp_path):
+    client = app.test_client()
+    headers = csrf_headers(client)
+    target = tmp_path / "delete-me.txt"
+    target.write_text("delete me", encoding="utf-8")
+
+    response = client.post(
+        "/api/files/delete",
+        json={"path": str(target)},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert isinstance(payload["undo_token"], str)
+    assert payload["undo_expires_seconds"] == fs.DELETE_UNDO_TTL_SECONDS
+
+    undo_response = client.post(
+        "/api/files/delete/undo",
+        json={"token": payload["undo_token"]},
+        headers=headers,
+    )
+    assert undo_response.status_code == 200
+    assert undo_response.get_json() == {"restored_path": str(target)}
+    assert target.read_text(encoding="utf-8") == "delete me"
+
+    expired = client.post(
+        "/api/files/delete/undo",
+        json={"token": payload["undo_token"]},
+        headers=headers,
+    )
+    assert expired.status_code == 410
+    assert expired.get_json()["error"]["code"] == "expired"
 
 
 def test_startup_reconcile_skips_tmux_when_env_set(monkeypatch):
