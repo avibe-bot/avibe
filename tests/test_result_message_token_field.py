@@ -19,7 +19,7 @@ def test_result_message_uses_status_emoji_and_token_field() -> None:
         token_field="240k tok",
     )
 
-    assert rendered == "✅ 2m 24s · 240k tok"
+    assert rendered == "✅ ⏱️ 2m 24s · 🪙 240k tok"
 
 
 def test_result_message_omits_token_field_when_empty() -> None:
@@ -33,7 +33,7 @@ def test_result_message_omits_token_field_when_empty() -> None:
         token_field="",
     )
 
-    assert rendered == "✅ 5s"
+    assert rendered == "✅ ⏱️ 5s"
 
 
 def test_result_message_shows_token_field_without_duration() -> None:
@@ -47,7 +47,7 @@ def test_result_message_shows_token_field_without_duration() -> None:
         token_field="12.3k tok",
     )
 
-    assert rendered == "✅ 12.3k tok"
+    assert rendered == "✅ 🪙 12.3k tok"
 
 
 def test_result_message_bare_marker_when_nothing_else() -> None:
@@ -74,8 +74,8 @@ def test_result_message_error_and_warning_markers() -> None:
         "warning", duration_ms=5_000, show_duration=True
     )
 
-    assert error == "❌ 5s"
-    assert warning == "⚠️ 5s"
+    assert error == "❌ ⏱️ 5s"
+    assert warning == "⚠️ ⏱️ 5s"
 
 
 def test_result_message_token_field_precedes_result_body() -> None:
@@ -89,4 +89,4 @@ def test_result_message_token_field_precedes_result_body() -> None:
         token_field="240k tok",
     )
 
-    assert rendered == "✅ 2m 24s · 240k tok\n\nall done"
+    assert rendered == "✅ ⏱️ 2m 24s · 🪙 240k tok\n\nall done"

@@ -403,14 +403,15 @@ class BaseMarkdownFormatter(ABC):
         """Format result message.
 
         The outcome word (``Success``/``Done``/…) is replaced by a compact status
-        emoji so the footer reads like the concise status bubble:
+        emoji, and the duration/token fields keep their own glyphs (⏱️ time, 🪙
+        tokens) so the footer reads like the concise status bubble:
 
-        Format: ✅ 2m 24s · 240k tok  (success, show_duration=True, tokens known)
-                ✅ 2m 24s             (success, show_duration=True, no tokens)
-                ✅ 240k tok           (show_duration=False / no duration, tokens known)
-                ✅                     (nothing else to show)
-                ⚠️ 2m 24s             (warning subtype)
-                ❌ 2m 24s             (error subtype)
+        Format: ✅ ⏱️ 2m 24s · 🪙 240k tok  (success, duration + tokens known)
+                ✅ ⏱️ 2m 24s               (success, no tokens)
+                ✅ 🪙 240k tok             (no duration, tokens known)
+                ✅                          (nothing else to show)
+                ⚠️ ⏱️ 2m 24s               (warning subtype)
+                ❌ ⏱️ 2m 24s               (error subtype)
 
         ``token_field`` is the already-formatted compact usage string (e.g.
         ``240k tok``); duration and tokens share the same ``·`` separator as the
@@ -431,12 +432,12 @@ class BaseMarkdownFormatter(ABC):
             seconds = int(total_seconds % 60)
 
             if minutes > 0:
-                segments.append(f"{minutes}m {seconds}s")
+                segments.append(f"⏱️ {minutes}m {seconds}s")
             else:
-                segments.append(f"{seconds}s")
+                segments.append(f"⏱️ {seconds}s")
 
         if token_field:
-            segments.append(token_field)
+            segments.append(f"🪙 {token_field}")
 
         result_text = marker
         if segments:
