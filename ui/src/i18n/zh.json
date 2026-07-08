@@ -652,6 +652,13 @@
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
       "confirmDiscardSwitch": "放弃未保存的更改？",
+      "conflict": {
+        "message": "打开后该文件在磁盘上已被改动，可能是 agent 修改了它。",
+        "reload": "从磁盘重新加载",
+        "overwrite": "覆盖保存",
+        "compare": "对比",
+        "compareTitle": "磁盘版本（左）与你的更改（右）"
+      },
       "selectAll": "全选",
       "copyAll": "全部复制",
       "untitled": "未命名-{{n}}",

@@ -652,6 +652,13 @@
       "saveBeforePopOut": "Save before opening in a window",
       "confirmDiscardClose": "Discard unsaved changes and close this window?",
       "confirmDiscardSwitch": "Discard unsaved changes?",
+      "conflict": {
+        "message": "This file changed on disk since you opened it. The agent may have edited it.",
+        "reload": "Reload from disk",
+        "overwrite": "Overwrite",
+        "compare": "Compare",
+        "compareTitle": "Disk (left) vs your changes (right)"
+      },
       "selectAll": "Select all",
       "copyAll": "Copy all",
       "untitled": "Untitled-{{n}}",

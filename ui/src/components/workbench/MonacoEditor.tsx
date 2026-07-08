@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ClipboardCopy, TextSelect } from 'lucide-react';
 import * as monaco from 'monaco-editor';
-import { Editor, loader, type OnChange, type OnMount } from '@monaco-editor/react';
+import { DiffEditor, Editor, loader, type OnChange, type OnMount } from '@monaco-editor/react';
 
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
@@ -259,5 +259,52 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
         </button>
       </div>
     </div>
+  );
+}
+
+export interface MonacoDiffEditorProps {
+  /** Left side — the on-disk content (read-only baseline). */
+  original: string;
+  /** Right side — the local editor buffer. */
+  modified: string;
+  /** Monaco language id, applied to both sides; falls back to plaintext when omitted. */
+  language?: string;
+  /** Resolved app theme — drives the dark VS Code theme vs the light one. */
+  dark?: boolean;
+}
+
+// Read-only side-by-side diff, used by the save-conflict Compare view (disk vs the local buffer).
+// Lives in THIS module so it rides the same lazy monaco chunk + `setupMonaco` theme registration as
+// the editor — opening it from an already-open file loads no extra chunk. Both sides are read-only:
+// this is a comparison, not a merge surface; the conflict is resolved via Reload / Overwrite instead.
+export function MonacoDiffEditor({ original, modified, language, dark = true }: MonacoDiffEditorProps) {
+  const { t } = useTranslation();
+  return (
+    <DiffEditor
+      theme={dark ? 'avibe-dark' : 'light'}
+      language={language}
+      original={original}
+      modified={modified}
+      beforeMount={setupMonaco}
+      loading={
+        <div className="grid h-full w-full place-items-center bg-surface-2 text-[12px] text-muted">
+          {t('common.loading')}
+        </div>
+      }
+      options={{
+        readOnly: true,
+        originalEditable: false,
+        // Side-by-side per the design; Monaco auto-collapses to inline when the pane is too narrow
+        // (its default useInlineViewWhenSpaceIsLimited), so the mobile single-file page stays legible.
+        renderSideBySide: true,
+        fontSize: 13,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        minimap: { enabled: false },
+        scrollBeyondLastLine: false,
+        automaticLayout: true,
+        renderOverviewRuler: false,
+        scrollbar: { useShadows: false },
+      }}
+    />
   );
 }

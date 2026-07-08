@@ -1,18 +1,21 @@
 import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Code2, Eye, FolderOpen, Loader2, PanelRightOpen, Save } from 'lucide-react';
+import { AlertTriangle, Code2, Eye, FolderOpen, GitCompare, Loader2, PanelRightOpen, RotateCcw, Save, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useTheme } from '../../context/ThemeContext';
 import { useWindowCloseGuard } from '../../context/WindowManagerContext';
 import { Button } from '../ui/button';
-import { fileBrowserErrorMessage, readText, writeFile } from '../../lib/filesApi';
+import { FilesApiError, fileBrowserErrorMessage, fileMeta, readText, writeFile } from '../../lib/filesApi';
 import { editorPreviewKind } from '../../lib/filePreview';
 import { FilePreview } from '../ui/file-preview';
 
 // Monaco (the VS Code kernel) is heavy; lazy-load it so it stays out of the main
 // bundle and only loads when a file is actually opened for editing.
 const MonacoEditor = lazy(() => import('./MonacoEditor'));
+// The save-conflict Compare view shares MonacoEditor's lazy chunk (same module), so opening it once
+// the editor is up loads no extra JS. Named export → unwrap to a default for React.lazy.
+const MonacoDiffEditor = lazy(() => import('./MonacoEditor').then((m) => ({ default: m.MonacoDiffEditor })));
 
 // Map a filename to a Monaco language id. Monaco colours unknown languages as
 // plaintext, so this only needs to cover the common cases; the heavy semantic
@@ -126,6 +129,15 @@ export const FileEditorPane: React.FC<{
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Save-conflict resolution. The backend rejects a save with error code `conflict` when the file's
+  // mtime changed since we opened it — in this product that usually means the agent edited a file the
+  // user has open. Rather than dead-end on the bare error strip, surface a conflict bar with Reload /
+  // Overwrite / Compare. `comparing` opens the read-only side-by-side diff (disk vs the local buffer),
+  // `diskText` holds the freshly-fetched disk content for it, and `resolving` guards the async actions.
+  const [conflict, setConflict] = useState(false);
+  const [comparing, setComparing] = useState(false);
+  const [diskText, setDiskText] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
   // Markdown / SVG / HTML can be previewed (rendered) as well as edited, VS-Code-style. `mode` toggles
   // the body between the Monaco source and the rendered FilePreview, using the LIVE buffer so the
   // preview reflects unsaved edits.
@@ -159,6 +171,10 @@ export const FileEditorPane: React.FC<{
     let cancelled = false;
     setError(null);
     setSavedMtime(mtime);
+    // A fresh read (open / rename adopt / forced reload) clears any prior conflict UI.
+    setConflict(false);
+    setComparing(false);
+    setDiskText(null);
     // Untitled buffer (no path yet): start empty with no fetch. Saving opens the save-as picker;
     // once written, the parent re-points this pane at the real path and this effect re-runs to read it.
     if (path === null) {
@@ -215,7 +231,9 @@ export const FileEditorPane: React.FC<{
   useWindowCloseGuard(windowId, dirty ? t('apps.editor.confirmDiscardClose') : null);
 
   async function save() {
-    if (text === null || saving || readOnly) return;
+    // `resolving` guards the window while a Reload/Overwrite is in flight: a stray ⌘S then would
+    // race a save against a stale baseline (harmless — it just re-conflicts — but avoid the flicker).
+    if (text === null || saving || resolving || readOnly) return;
     // Untitled: hand the buffer text up so the parent runs the save-as picker + write (an empty new
     // file is allowed to be saved, unlike a clean existing file which skips the no-op PUT below).
     if (path === null) {
@@ -232,12 +250,130 @@ export const FileEditorPane: React.FC<{
       setOriginal(text);
       setSavedMtime(result.mtime);
     } catch (e: unknown) {
-      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
+      // An mtime conflict (the file changed on disk since we opened it) gets the dedicated conflict
+      // bar with Reload / Overwrite / Compare; every other failure keeps the plain error strip.
+      if (e instanceof FilesApiError && e.code === 'conflict') {
+        setConflict(true);
+      } else {
+        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
+      }
     } finally {
       setSaving(false);
     }
   }
   saveRef.current = save;
+
+  // Conflict → Reload: re-read the file from disk, dropping local edits. Confirm first (the buffer is
+  // discarded), and adopt the fresh disk mtime as the new save baseline so the next save doesn't
+  // immediately re-conflict. `path` is non-null here — the conflict bar only shows for a saved file.
+  async function reloadFromDisk() {
+    if (path === null || resolving) return;
+    if (!window.confirm(t('apps.editor.confirmDiscardSwitch'))) return;
+    setResolving(true);
+    setError(null);
+    try {
+      // Stat before reading so the adopted baseline corresponds to (at most) the bytes we load: if the
+      // file changes again in between, our baseline stays older than disk and the next save conflicts
+      // rather than silently clobbering the newer writer.
+      const meta = await fileMeta(path);
+      const body = await readText(path);
+      setText(body);
+      setOriginal(body);
+      setSavedMtime(meta.mtime);
+      setConflict(false);
+      setComparing(false);
+      setDiskText(null);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.loadFailed')));
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  // Conflict → Overwrite: force-save the local buffer over the disk version. writeFile WITHOUT an
+  // expected_mtime skips the backend's mtime check, and its returned mtime becomes the new baseline.
+  async function overwrite() {
+    if (path === null || text === null || resolving) return;
+    setResolving(true);
+    setError(null);
+    try {
+      const result = await writeFile(path, text, undefined);
+      setOriginal(text);
+      setSavedMtime(result.mtime);
+      setConflict(false);
+      setComparing(false);
+      setDiskText(null);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  // Conflict → Compare: fetch fresh disk content for the diff's left side, then open the overlay.
+  async function openCompare() {
+    if (path === null || resolving) return;
+    setResolving(true);
+    setError(null);
+    try {
+      setDiskText(await readText(path));
+      setComparing(true);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.loadFailed')));
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  // Reload + Overwrite are offered both in the conflict bar and from inside the Compare overlay, so
+  // the shared pair lives here; the third slot differs (bar → Compare, overlay → Close).
+  const conflictActions = (context: 'bar' | 'diff') => (
+    <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-7 gap-1.5 px-2.5 text-[12px]"
+        disabled={resolving}
+        onClick={() => void reloadFromDisk()}
+      >
+        <RotateCcw className="size-3" /> {t('apps.editor.conflict.reload')}
+      </Button>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-7 gap-1.5 px-2.5 text-[12px]"
+        disabled={resolving}
+        onClick={() => void overwrite()}
+      >
+        <Save className="size-3" /> {t('apps.editor.conflict.overwrite')}
+      </Button>
+      {context === 'bar' ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7 gap-1.5 px-2.5 text-[12px]"
+          disabled={resolving}
+          onClick={() => void openCompare()}
+        >
+          <GitCompare className="size-3" /> {t('apps.editor.conflict.compare')}
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 gap-1.5 px-2.5 text-[12px]"
+          disabled={resolving}
+          onClick={() => setComparing(false)}
+        >
+          <X className="size-3" /> {t('common.close')}
+        </Button>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -279,7 +415,7 @@ export const FileEditorPane: React.FC<{
               type="button"
               size="sm"
               variant="brand"
-              disabled={!dirty || saving || text === null}
+              disabled={!dirty || saving || resolving || text === null}
               onClick={() => void save()}
               className="h-7 gap-1.5 px-2.5 text-[12px]"
             >
@@ -293,6 +429,20 @@ export const FileEditorPane: React.FC<{
       {error && (
         <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">
           {error}
+        </div>
+      )}
+
+      {/* Save-conflict bar — replaces the dead-end error strip when a save loses the mtime race.
+          Rendered outside the header block so it also shows in chromeless (IDE) and on the mobile
+          single-file page; wraps to two rows on narrow widths. Hidden while the Compare overlay is
+          open, which carries its own copy of the actions. */}
+      {conflict && !comparing && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warning/40 bg-warning/[0.08] px-3 py-2">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[11.5px] text-foreground">
+            <AlertTriangle className="size-3.5 shrink-0 text-warning" />
+            <span className="min-w-0">{t('apps.editor.conflict.message')}</span>
+          </div>
+          {conflictActions('bar')}
         </div>
       )}
 
@@ -322,7 +472,7 @@ export const FileEditorPane: React.FC<{
         </div>
       )}
 
-      <div className={clsx('min-h-0 flex-1', loading && 'grid place-items-center')}>
+      <div className={clsx('relative min-h-0 flex-1', loading && 'grid place-items-center')}>
         {loading ? (
           <Loader2 className="size-5 animate-spin text-muted" />
         ) : text === null ? null : mode === 'preview' && previewable ? (
@@ -344,6 +494,34 @@ export const FileEditorPane: React.FC<{
               reveal={reveal}
             />
           </Suspense>
+        )}
+
+        {/* Compare overlay: read-only side-by-side diff (disk left, local buffer right), laid over the
+            editor rather than replacing it so Close returns to editing with the buffer + undo history
+            intact. Reload / Overwrite resolve the conflict straight from here. */}
+        {comparing && diskText !== null && text !== null && (
+          <div className="absolute inset-0 z-10 flex flex-col bg-surface">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border bg-surface-2/40 px-3 py-1.5">
+              <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{t('apps.editor.conflict.compareTitle')}</span>
+              {conflictActions('diff')}
+            </div>
+            <div className="min-h-0 flex-1">
+              <Suspense
+                fallback={
+                  <div className="grid h-full w-full place-items-center bg-surface-2 text-[12px] text-muted">
+                    {t('common.loading')}
+                  </div>
+                }
+              >
+                <MonacoDiffEditor
+                  original={diskText}
+                  modified={text}
+                  language={language}
+                  dark={chromeless || resolvedTheme === 'dark'}
+                />
+              </Suspense>
+            </div>
+          </div>
         )}
       </div>
     </div>
