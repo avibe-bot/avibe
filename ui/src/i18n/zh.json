@@ -806,7 +806,14 @@
         "interrupt": "^C",
         "pipe": "|"
       },
-      "renameHint": "双击重命名"
+      "renameHint": "双击重命名",
+      "search": {
+        "placeholder": "搜索",
+        "ariaLabel": "搜索终端输出",
+        "prev": "上一个匹配",
+        "next": "下一个匹配",
+        "close": "关闭搜索"
+      }
     },
     "picker": {
       "openFolderTitle": "打开文件夹",

@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import { RotateCw } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCw, Search, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { Input } from '../ui/input';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
 // backend): client sends raw stdin as BINARY frames and JSON control as TEXT
@@ -26,6 +29,20 @@ const TERMINAL_THEME = {
   cursor: '#e4e4e7',
   cursorAccent: TERMINAL_BG,
   selectionBackground: 'rgba(148,163,184,0.35)',
+};
+
+// Search-match highlight colors for the SearchAddon. Amber reads clearly on the dark terminal and
+// stays out of the app theme's way (the terminal is theme-locked dark). Colors must be #RRGGBB; the
+// active (current) match is brighter than the rest. Decorations rely on the terminal's proposed
+// decoration API — allowProposedApi is already enabled below. The overview-ruler colors are only
+// painted when overviewRulerWidth is set (we don't set it), but the type requires them.
+const SEARCH_DECORATIONS = {
+  matchBackground: '#664d00',
+  matchBorder: '#8a6d1a',
+  matchOverviewRuler: '#b8860b',
+  activeMatchBackground: '#b8860b',
+  activeMatchBorder: '#ffcf5c',
+  activeMatchColorOverviewRuler: '#ffcf5c',
 };
 
 // Accessory key bar for phones (their soft keyboards lack these). Each button sends the raw
@@ -51,6 +68,26 @@ function buildWsUrl(sessionId: string, cwd?: string | null): string {
   return cwd ? `${base}?cwd=${encodeURIComponent(cwd)}` : base;
 }
 
+// Which modifier opens Find: ⌘ on Apple platforms, Ctrl elsewhere. The gating matters — Ctrl+F is a
+// live terminal key on macOS (readline forward-char, less/vim page-forward, the system emacs binding),
+// so hijacking Ctrl+F on every platform would eat a keystroke mac shells depend on. Windows/Linux
+// terminals don't bind Ctrl+F that way, so it's the natural Find shortcut there.
+const IS_APPLE =
+  typeof navigator !== 'undefined' &&
+  /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
+
+// True when the event is the platform Find chord (⌘F / Ctrl+F) with no stray extra modifier. Shared by
+// the terminal's key handler and the search field so both agree on the platform gating.
+const isFindHotkey = (e: {
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  key: string;
+}): boolean =>
+  (IS_APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) &&
+  !e.altKey &&
+  (e.key === 'f' || e.key === 'F');
+
 export const TerminalView: React.FC<{
   sessionId: string;
   /** Start directory for a newly created session (from "Open Terminal Here"). Stable per tab. */
@@ -62,6 +99,8 @@ export const TerminalView: React.FC<{
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const ctrlStickyRef = useRef(false);
   const busyRetriesRef = useRef(0);
@@ -74,6 +113,11 @@ export const TerminalView: React.FC<{
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+  // Scrollback search (SearchAddon). Opened with ⌘F/Ctrl+F while the terminal has focus; results
+  // carry {index,count} for the "3/12" match counter (index is -1 past the highlight threshold).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [matches, setMatches] = useState<{ index: number; count: number }>({ index: -1, count: 0 });
 
   // Surface connection status to the parent (tab bar). The standalone status row inside the
   // body was removed — only the terminating states render an in-body overlay (below).
@@ -93,6 +137,35 @@ export const TerminalView: React.FC<{
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Clickable URLs open in a new tab. noopener defeats reverse-tabnabbing (the addon's own typings
+    // call this out); routing through window.open means a link never navigates the app frame itself.
+    term.loadAddon(
+      new WebLinksAddon((_event, uri) => {
+        window.open(uri, '_blank', 'noopener');
+      }),
+    );
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    searchRef.current = search;
+    const searchResults = search.onDidChangeResults((e) =>
+      setMatches({ index: e.resultIndex, count: e.resultCount }),
+    );
+    // Intercept the Find chord only while xterm's textarea has focus (this handler runs solely for
+    // terminal key events), so the browser's own find stays available everywhere else in the app.
+    // Returning false stops xterm forwarding the key to the PTY; preventDefault stops the browser find.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && isFindHotkey(e)) {
+        e.preventDefault();
+        setSearchOpen(true);
+        // Focus once the bar has mounted (first open) or refocus it (already open); rAF waits for commit.
+        requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        });
+        return false;
+      }
+      return true;
+    });
     termRef.current = term;
     const settleTimers: number[] = [];
     let resizeSendTimer: number | null = null;
@@ -160,6 +233,7 @@ export const TerminalView: React.FC<{
     });
     setStatus('connecting');
     setExitCode(null);
+    setMatches({ index: -1, count: 0 }); // a reconnect rebuilds the SearchAddon; drop the stale count
     const ws = new WebSocket(buildWsUrl(sessionId, cwd));
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
@@ -219,6 +293,7 @@ export const TerminalView: React.FC<{
       for (const id of settleTimers) window.clearTimeout(id);
       ro.disconnect();
       onData.dispose();
+      searchResults.dispose();
       // Detach handlers before closing. A closing socket's onclose can fire asynchronously
       // *after* its replacement has already reported 'ready' (reconnect / effect remount);
       // left attached, the stale onclose would mark the live terminal 'closed' or schedule a
@@ -235,6 +310,7 @@ export const TerminalView: React.FC<{
       term.dispose();
       wsRef.current = null;
       termRef.current = null;
+      searchRef.current = null;
     };
   }, [sessionId, cwd, reconnectKey]);
 
@@ -253,6 +329,51 @@ export const TerminalView: React.FC<{
     setReconnectKey((k) => k + 1);
   };
 
+  // Step between matches. Incremental (type-ahead) applies only to findNext — it grows the current
+  // selection while it still matches; explicit next/prev jump to the adjacent match.
+  const runFind = (direction: 'next' | 'prev', incremental = false) => {
+    const s = searchRef.current;
+    if (!s || !query) return;
+    if (direction === 'prev') s.findPrevious(query, { decorations: SEARCH_DECORATIONS });
+    else s.findNext(query, { decorations: SEARCH_DECORATIONS, incremental });
+  };
+
+  const onQueryChange = (value: string) => {
+    setQuery(value);
+    const s = searchRef.current;
+    if (!s) return;
+    if (!value) {
+      s.clearDecorations();
+      setMatches({ index: -1, count: 0 });
+      return;
+    }
+    s.findNext(value, { decorations: SEARCH_DECORATIONS, incremental: true });
+  };
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    searchRef.current?.clearDecorations();
+    setMatches({ index: -1, count: 0 });
+    termRef.current?.focus();
+  };
+
+  const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runFind(e.shiftKey ? 'prev' : 'next');
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSearch();
+    } else if (isFindHotkey(e)) {
+      // Focus is already in the field — keep the browser find bar from opening; reselect instead.
+      e.preventDefault();
+      e.currentTarget.select();
+    }
+  };
+
+  const matchLabel =
+    matches.count === 0 ? '0/0' : `${matches.index >= 0 ? matches.index + 1 : '?'}/${matches.count}`;
+
   return (
     <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: TERMINAL_BG }}>
       {status === 'disabled' ? (
@@ -262,6 +383,60 @@ export const TerminalView: React.FC<{
       ) : (
         <div className="relative min-h-0 flex-1">
           <div ref={containerRef} className="absolute inset-0 overflow-hidden p-1.5" />
+          {searchOpen && (
+            // Compact find widget pinned to the terminal's top-right, like an editor's find bar. Colors
+            // are fixed-dark (not theme tokens) because the terminal body is theme-locked dark — the
+            // same reason the touch key bar below uses fixed colors rather than the global palette.
+            <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-lg border border-zinc-700/80 bg-zinc-900/95 px-1.5 py-1 shadow-lg backdrop-blur-sm">
+              <Search className="ml-0.5 size-3.5 shrink-0 text-zinc-500" aria-hidden />
+              <Input
+                ref={searchInputRef}
+                variant="bare"
+                value={query}
+                onChange={(e) => onQueryChange(e.target.value)}
+                onKeyDown={onSearchKeyDown}
+                placeholder={t('apps.terminal.search.placeholder')}
+                aria-label={t('apps.terminal.search.ariaLabel')}
+                spellCheck={false}
+                autoComplete="off"
+                className="h-6 w-36 px-1 text-[12px] text-zinc-100 placeholder:text-zinc-500 sm:w-48"
+              />
+              {query && (
+                <span
+                  className="shrink-0 px-1 text-[11px] tabular-nums text-zinc-500"
+                  aria-live="polite"
+                >
+                  {matchLabel}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => runFind('prev')}
+                disabled={matches.count === 0}
+                aria-label={t('apps.terminal.search.prev')}
+                className="grid size-6 shrink-0 place-items-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <ChevronUp className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => runFind('next')}
+                disabled={matches.count === 0}
+                aria-label={t('apps.terminal.search.next')}
+                className="grid size-6 shrink-0 place-items-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <ChevronDown className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={closeSearch}
+                aria-label={t('apps.terminal.search.close')}
+                className="grid size-6 shrink-0 place-items-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+          )}
           {(status === 'closed' || status === 'error') && (
             // The "connected" status no longer occupies its own row — it lives in the tab bar.
             // Only the terminating states surface in the body, as a centred overlay that offers

@@ -806,7 +806,14 @@
         "interrupt": "^C",
         "pipe": "|"
       },
-      "renameHint": "Double-click to rename"
+      "renameHint": "Double-click to rename",
+      "search": {
+        "placeholder": "Search",
+        "ariaLabel": "Search terminal output",
+        "prev": "Previous match",
+        "next": "Next match",
+        "close": "Close search"
+      }
     },
     "picker": {
       "openFolderTitle": "Open Folder",
