@@ -22,6 +22,7 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  SquareTerminal,
   Trash2,
   Upload,
   X,
@@ -284,6 +285,20 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
       } else {
         routerNavigate('/apps/editor', { state: { path, filename, mtime } });
+      }
+    },
+    [wm, routerNavigate],
+  );
+
+  // Open a terminal rooted at a folder ("Open Terminal Here"): desktop opens a Terminal window
+  // whose first tab starts in `dir`; mobile — which has no window layer — navigates to the terminal
+  // route with the dir in router state. Mirrors openInEditor.
+  const openTerminalHere = useCallback(
+    (dir: string) => {
+      if (window.matchMedia('(min-width: 768px)').matches) {
+        wm.openApp('terminal', { params: { cwd: dir } });
+      } else {
+        routerNavigate('/apps/terminal', { state: { cwd: dir } });
       }
     },
     [wm, routerNavigate],
@@ -634,7 +649,9 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
   const showInitialSpinner = inSearch ? searchBusy && searchResults === null : loading && !listing;
   const showEmpty = inSearch ? !searchBusy && (searchResults?.length ?? 0) === 0 : !!listing && rows.length === 0 && newEntry === null;
-  const menuItemCount = menu ? (menu.item ? (menu.item.entry.kind === 'dir' ? 3 : 4) : 2) : 0;
+  // Row: file = Open/Download/Rename/Delete (4); dir = Open/Open Terminal Here/Rename/Delete (4).
+  // Blank: New File/New Folder (+ Open Terminal Here when a folder is loaded).
+  const menuItemCount = menu ? (menu.item ? 4 : cwd ? 3 : 2) : 0;
 
   return (
     <div className={windowed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
@@ -953,6 +970,17 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   void openItem(it);
                 }}
               />
+              {menu.item.entry.kind === 'dir' && (
+                <ContextMenuItem
+                  icon={<SquareTerminal className="size-3.5 text-mint" />}
+                  label={t('apps.fileBrowser.openTerminalHere')}
+                  onClick={() => {
+                    const it = menu.item as RowItem;
+                    closeMenu();
+                    openTerminalHere(it.full);
+                  }}
+                />
+              )}
               {menu.item.entry.kind !== 'dir' && (
                 <ContextMenuItem
                   icon={<Download className="size-3.5 text-mint" />}
@@ -993,6 +1021,16 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   startNewEntry('folder');
                 }}
               />
+              {cwd && (
+                <ContextMenuItem
+                  icon={<SquareTerminal className="size-3.5 text-mint" />}
+                  label={t('apps.fileBrowser.openTerminalHere')}
+                  onClick={() => {
+                    closeMenu();
+                    openTerminalHere(cwd);
+                  }}
+                />
+              )}
             </>
           )}
         </ContextMenu>

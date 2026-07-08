@@ -43,17 +43,22 @@ const KEYS: { labelKey: string; seq?: string; ctrl?: boolean }[] = [
   { labelKey: 'apps.terminal.keys.pipe', seq: '|' },
 ];
 
-function buildWsUrl(sessionId: string): string {
+function buildWsUrl(sessionId: string, cwd?: string | null): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${window.location.host}/api/terminal/${encodeURIComponent(sessionId)}`;
+  const base = `${proto}://${window.location.host}/api/terminal/${encodeURIComponent(sessionId)}`;
+  // `cwd` starts a NEW session in that directory ("Open Terminal Here"). The backend validates it
+  // and ignores it when reattaching an existing session, so it's harmless to resend on reconnect.
+  return cwd ? `${base}?cwd=${encodeURIComponent(cwd)}` : base;
 }
 
 export const TerminalView: React.FC<{
   sessionId: string;
+  /** Start directory for a newly created session (from "Open Terminal Here"). Stable per tab. */
+  cwd?: string | null;
   onPersistent?: (persistent: boolean) => void;
   /** Report connection status up so the tab bar can show one combined status + persistence chip. */
   onStatus?: (status: TerminalStatus, exitCode: number | null) => void;
-}> = ({ sessionId, onPersistent, onStatus }) => {
+}> = ({ sessionId, cwd, onPersistent, onStatus }) => {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -155,7 +160,7 @@ export const TerminalView: React.FC<{
     });
     setStatus('connecting');
     setExitCode(null);
-    const ws = new WebSocket(buildWsUrl(sessionId));
+    const ws = new WebSocket(buildWsUrl(sessionId, cwd));
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
     ws.onopen = () => {
@@ -231,7 +236,7 @@ export const TerminalView: React.FC<{
       wsRef.current = null;
       termRef.current = null;
     };
-  }, [sessionId, reconnectKey]);
+  }, [sessionId, cwd, reconnectKey]);
 
   const sendKey = (k: { seq?: string; ctrl?: boolean }) => {
     if (k.ctrl) {

@@ -108,6 +108,43 @@ def _expanded_absolute_path(raw: str) -> Path:
     return expanded
 
 
+def resolve_existing_directory(raw: str) -> Path:
+    """Resolve an absolute path to an existing directory WITHOUT following a symlink on the
+    final component.
+
+    Same hardening family as the upload-destination check (``_resolve_upload_directory``) and
+    the list/write/rename mutations: expand ``~``, require absolute, canonicalize the PARENT
+    strictly, append the final component without following a symlink there, then require the
+    result to be a real directory. Raises ``FileBrowserError`` / ``NotFoundError`` on any
+    violation. Shared by the terminal service's "Open Terminal Here" start directory.
+    """
+    resolve_safe_path(raw)  # reject blank / relative / uncanonicalizable early
+    expanded = _expanded_absolute_path(raw)
+    if expanded.parent == expanded:
+        directory = expanded  # a filesystem root is a valid, already-canonical directory
+    else:
+        if expanded.name in {"", ".", ".."} or _raw_final_component(raw) in {".", ".."}:
+            raise NotFoundError("Directory not found")
+        try:
+            parent = expanded.parent.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise NotFoundError("Directory not found") from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise FileBrowserError("fs_error", str(exc), 400) from exc
+        directory = parent / expanded.name
+    try:
+        stat_result = directory.lstat()
+    except FileNotFoundError as exc:
+        raise NotFoundError("Directory not found") from exc
+    except PermissionError as exc:
+        raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
+    except OSError as exc:
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+    if not stat.S_ISDIR(stat_result.st_mode):
+        raise FileBrowserError("not_dir", "Path is not a directory", 400)
+    return directory
+
+
 def _resolve_existing_path(raw: str) -> Path:
     resolved = resolve_safe_path(raw)
     try:
@@ -694,36 +731,18 @@ def _validate_new_name(new_name: str) -> str:
 
 
 def _resolve_upload_directory(raw_dir: str) -> Path:
+    # Shares the no-follow directory resolver; only remaps its errors to the upload API's
+    # historical contract (an unusable destination reads as "not found", not invalid_path).
     try:
-        resolve_safe_path(raw_dir)
-        expanded = _expanded_absolute_path(raw_dir)
+        return resolve_existing_directory(raw_dir)
+    except NotFoundError as exc:
+        raise NotFoundError("Destination directory not found") from exc
     except FileBrowserError as exc:
-        raise NotFoundError("Destination directory not found") from exc
-
-    if expanded.parent == expanded:
-        directory = expanded
-    else:
-        if expanded.name in {"", ".", ".."} or _raw_final_component(raw_dir) in {".", ".."}:
-            raise NotFoundError("Destination directory not found")
-        try:
-            parent = expanded.parent.resolve(strict=True)
-        except FileNotFoundError as exc:
+        if exc.code == "invalid_path":
             raise NotFoundError("Destination directory not found") from exc
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise FileBrowserError("fs_error", str(exc), 400) from exc
-        directory = parent / expanded.name
-
-    try:
-        stat_result = directory.lstat()
-    except FileNotFoundError as exc:
-        raise NotFoundError("Destination directory not found") from exc
-    except PermissionError as exc:
-        raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
-    except OSError as exc:
-        raise FileBrowserError("fs_error", str(exc), 400) from exc
-    if not stat.S_ISDIR(stat_result.st_mode):
-        raise FileBrowserError("not_dir", "Destination is not a directory", 400)
-    return directory
+        if exc.code == "not_dir":
+            raise FileBrowserError("not_dir", "Destination is not a directory", 400) from exc
+        raise
 
 
 def _open_stable_upload_directory(directory: Path) -> int | None:
