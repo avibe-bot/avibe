@@ -4,6 +4,8 @@ import json
 
 from unittest.mock import Mock
 
+import pytest
+
 from storage import vault_service
 from storage.vault_crypto import Sealed
 from tests.ui_server_test_helpers import csrf_headers
@@ -78,7 +80,7 @@ def test_rest_list_invalid_tag_returns_vault_error():
     assert response.get_json()["code"] == "invalid_request"
 
 
-def test_rest_delete_protected_without_assertion_is_rejected(monkeypatch):
+def test_rest_delete_protected_without_assertion_deletes(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     api.create_vault_secret(
         {
@@ -91,10 +93,11 @@ def test_rest_delete_protected_without_assertion_is_rejected(monkeypatch):
 
     response = client.delete("/api/vault/secrets/PROTECTED_HTTP_DELETE", headers=csrf_headers(client))
 
-    assert response.status_code == 409
-    assert response.get_json()["code"] == "protected_auth_required"
+    assert response.status_code == 200
+    assert response.get_json()["removed"] is True
     with api._vault_engine().connect() as conn:
-        assert vault_service.get_secret_meta(conn, "PROTECTED_HTTP_DELETE")["protection"] == "protected"
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "PROTECTED_HTTP_DELETE")
 
 
 def test_rest_create_rejects_plaintext_value_in_mixed_payloads(monkeypatch):

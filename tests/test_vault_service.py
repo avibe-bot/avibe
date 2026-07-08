@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from storage import vault_service as vs, vault_webauthn
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_auth_factors, vault_grants, vault_operation_challenges, vault_requests, vault_secrets
+from storage.models import metadata, vault_auth_factors, vault_grants, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 
@@ -31,18 +31,6 @@ def _sealed(suffix: str = "1") -> Sealed:
 def _create(engine, **kw):
     with engine.begin() as conn:
         return vs.create_secret(conn, sealed=_sealed(kw.get("name", "x").lower()), **kw)
-
-
-def _protected_delete_authz(conn, name: str) -> vs.ProtectedOperationAuthz:
-    row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().one()
-    return vs.ProtectedOperationAuthz(
-        operation="delete_secret",
-        secret_name=row["name"],
-        secret_id=row["id"],
-        secret_updated_at=row["updated_at"],
-        challenge_id="test-challenge",
-        factor_id="test-factor",
-    )
 
 
 def _establish_protected_secret(conn, name: str, credential: WebAuthnTestCredential | None = None) -> tuple[WebAuthnTestCredential, dict]:
@@ -379,7 +367,7 @@ def test_secret_delete_rotate_and_classification_changes_expire_covering_grants(
         grant_b = _grant_from_request(conn, vs.create_access_request(conn, "B_KEY"))
         grant_c = _grant_from_request(conn, vs.create_access_request(conn, "C_KEY"))
         vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
-        vs.delete_secret(conn, "B_KEY", protected_authz=_protected_delete_authz(conn, "B_KEY"))
+        vs.delete_secret(conn, "B_KEY")
         vs.update_secret_classification(conn, "C_KEY", protection="standard")
         statuses = {
             row["id"]: row["status"]
@@ -389,13 +377,13 @@ def test_secret_delete_rotate_and_classification_changes_expire_covering_grants(
     assert statuses == {grant_a["id"]: "expired", grant_b["id"]: "expired", grant_c["id"]: "expired"}
 
 
-def test_protected_delete_requires_verified_authz_at_chokepoint(vault):
+def test_protected_delete_does_not_require_authz_at_chokepoint(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected")
 
     with vault.begin() as conn:
-        with pytest.raises(vs.ProtectedAuthRequiredError):
-            vs.delete_secret(conn, "PROTECTED_KEY")
-        assert vs.get_secret_meta(conn, "PROTECTED_KEY")["protection"] == "protected"
+        vs.delete_secret(conn, "PROTECTED_KEY")
+        with pytest.raises(vs.SecretNotFoundError):
+            vs.get_secret_meta(conn, "PROTECTED_KEY")
 
 
 def test_standard_delete_does_not_require_authz(vault):
@@ -508,40 +496,6 @@ def test_sandbox_cross_origin_webauthn_rejects_wrong_top_origin():
             expected_origin=credential.origin,
             rp_id=credential.rp_id,
         )
-
-
-def test_delete_challenge_expiry_and_replay_are_rejected(vault):
-    credential = WebAuthnTestCredential()
-
-    with vault.begin() as conn:
-        _credential, registered = _establish_protected_secret(conn, "PROTECTED_KEY", credential)
-        expired = vs.create_delete_challenge(conn, "PROTECTED_KEY", rp_id=credential.rp_id, origin=credential.origin)
-        conn.execute(
-            vault_operation_challenges.update()
-            .where(vault_operation_challenges.c.id == expired["challenge_id"])
-            .values(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
-        )
-        with pytest.raises(vs.InvalidProtectedAuthzError):
-            vs.verify_delete_secret_authz(
-                conn,
-                "PROTECTED_KEY",
-                credential.assertion_authz(
-                    challenge_id=expired["challenge_id"],
-                    factor_id=registered["id"],
-                    challenge_b64=expired["webauthn"]["challenge"],
-                ),
-            )
-
-        fresh = vs.create_delete_challenge(conn, "PROTECTED_KEY", rp_id=credential.rp_id, origin=credential.origin)
-        authz = credential.assertion_authz(
-            challenge_id=fresh["challenge_id"],
-            factor_id=registered["id"],
-            challenge_b64=fresh["webauthn"]["challenge"],
-            sign_count=3,
-        )
-        assert vs.verify_delete_secret_authz(conn, "PROTECTED_KEY", authz).challenge_id == fresh["challenge_id"]
-        with pytest.raises(vs.InvalidProtectedAuthzError):
-            vs.verify_delete_secret_authz(conn, "PROTECTED_KEY", authz)
 
 
 def test_webauthn_counter_regression_rejects_zero_after_nonzero_counter():

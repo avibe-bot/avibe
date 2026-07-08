@@ -2241,12 +2241,7 @@
       "description": "Agent 将无法再使用这条密钥。",
       "keypairIrreversible": "这是一把签名密钥——删除会永久销毁私钥,没有备份,无法恢复。",
       "keypairFunds": "如果这把密钥的地址里还有资金,请先转出,否则将永久丢失。",
-      "protectedUnlockNote": "这是保护档密钥——删除前先解锁保险库,验证是你本人。",
-      "protectedPasskeyNote": "删除这条保护档密钥需要一次新的 passkey 授权。确认后会弹出 passkey 验证。",
-      "authzSetupRequired": "这个保险库缺少保护档删除授权。请重新创建保护档保险库,让 setup 流程注册 passkey 授权因子。",
-      "authzInvalid": "这次 passkey 授权已过期或无法验证。请重新删除一次。",
-      "authzRequired": "保护档密钥删除前必须完成 passkey 授权。",
-      "authzUnavailable": "保护档删除需要支持 passkey 的访问来源。请从 localhost 或你的 avibe.bot 地址打开 Vaults。"
+      "protectedUnlockNote": "这是保护档密钥——删除记录不会暴露密钥值,但 Agent 会立刻失去访问权限。"
     },
     "deleted": "已删除 {{name}}",
     "created": "已保存 {{name}}",

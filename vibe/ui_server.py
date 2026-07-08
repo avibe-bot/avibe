@@ -3265,24 +3265,12 @@ def vault_secret_patch(name):
         return _vault_error_response(exc)
 
 
-@app.route("/api/vault/secrets/<name>/delete-challenge", methods=["POST"])
-def vault_secret_delete_challenge(name):
-    from vibe import api
-
-    try:
-        return jsonify(api.create_vault_delete_challenge(name, origin=_vault_sandbox_webauthn_origin()))
-    except ValueError as exc:
-        return _vault_error_response(exc)
-
-
 @app.route("/api/vault/secrets/<name>", methods=["DELETE"])
 def vault_secret_delete(name):
     from vibe import api
 
     try:
-        payload = request.json or {}
-        authz = payload.get("authz") if isinstance(payload, dict) else None
-        return jsonify(api.delete_vault_secret(name, authz=authz))
+        return jsonify(api.delete_vault_secret(name))
     except ValueError as exc:
         return _vault_error_response(exc)
 

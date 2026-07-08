@@ -114,16 +114,6 @@ def _establish_protected_secret_with_factor(
     return credential, _auth_factor_for_credential(credential)
 
 
-def _delete_authz_for_secret(credential: WebAuthnTestCredential, factor: dict, name: str, *, sign_count: int = 2) -> dict:
-    challenge = api.create_vault_delete_challenge(name, origin=credential.origin)
-    return credential.assertion_authz(
-        challenge_id=challenge["challenge_id"],
-        factor_id=factor["id"],
-        challenge_b64=challenge["webauthn"]["challenge"],
-        sign_count=sign_count,
-    )
-
-
 @pytest.fixture
 def avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
@@ -889,27 +879,25 @@ def test_delete_missing_is_404():
     assert exc.value.status == 404
 
 
-def test_delete_protected_secret_without_assertion_is_rejected(monkeypatch):
+def test_delete_protected_secret_without_assertion_deletes(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     api.create_vault_secret(
         {"name": "PROTECTED_DELETE", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
     )
 
-    with pytest.raises(api.VaultApiError) as exc:
-        api.delete_vault_secret("PROTECTED_DELETE")
+    removed = api.delete_vault_secret("PROTECTED_DELETE")
 
-    assert exc.value.code == "protected_auth_required"
-    assert exc.value.status == 409
+    assert removed == {"ok": True, "removed": True, "name": "PROTECTED_DELETE"}
     with api._vault_engine().connect() as conn:
-        assert vault_service.get_secret_meta(conn, "PROTECTED_DELETE")["protection"] == "protected"
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "PROTECTED_DELETE")
 
 
-def test_delete_protected_secret_with_valid_assertion_deletes(monkeypatch):
+def test_delete_protected_secret_with_registered_factor_deletes_without_assertion(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    credential, factor = _establish_protected_secret_with_factor("PROTECTED_DELETE")
-    authz = _delete_authz_for_secret(credential, factor, "PROTECTED_DELETE")
+    _establish_protected_secret_with_factor("PROTECTED_DELETE")
 
-    removed = api.delete_vault_secret("PROTECTED_DELETE", authz=authz)
+    removed = api.delete_vault_secret("PROTECTED_DELETE")
 
     assert removed == {"ok": True, "removed": True, "name": "PROTECTED_DELETE"}
     with api._vault_engine().connect() as conn:
@@ -920,9 +908,8 @@ def test_delete_protected_secret_with_valid_assertion_deletes(monkeypatch):
 def test_deleting_last_protected_secret_allows_fresh_vault_establishment(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     first, first_factor = _establish_protected_secret_with_factor("FIRST_PROTECTED")
-    authz = _delete_authz_for_secret(first, first_factor, "FIRST_PROTECTED")
 
-    removed = api.delete_vault_secret("FIRST_PROTECTED", authz=authz)
+    removed = api.delete_vault_secret("FIRST_PROTECTED")
 
     assert removed["removed"] is True
     with api._vault_engine().connect() as conn:
@@ -937,7 +924,7 @@ def test_deleting_last_protected_secret_allows_fresh_vault_establishment(monkeyp
     assert second_factor["credential_id"] == second.credential_id_b64
 
 
-def test_forged_webauthn_factor_registration_cannot_authorize_delete(monkeypatch):
+def test_forged_webauthn_factor_registration_still_requires_existing_factor(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     _establish_protected_secret_with_factor("PROTECTED_DELETE")
     forged = WebAuthnTestCredential(credential_id=b"forged-agent-factor")
@@ -953,17 +940,9 @@ def test_forged_webauthn_factor_registration_cannot_authorize_delete(monkeypatch
         )
 
     assert exc.value.code == "protected_auth_required"
-    challenge = api.create_vault_delete_challenge("PROTECTED_DELETE", origin=forged.origin)
-    forged_authz = forged.assertion_authz(
-        challenge_id=challenge["challenge_id"],
-        factor_id="vaf_forged",
-        challenge_b64=challenge["webauthn"]["challenge"],
-    )
-    with pytest.raises(api.VaultApiError) as delete_exc:
-        api.delete_vault_secret("PROTECTED_DELETE", authz=forged_authz)
-    assert delete_exc.value.code == "invalid_protected_authz"
-    with api._vault_engine().connect() as conn:
-        assert vault_service.get_secret_meta(conn, "PROTECTED_DELETE")["protection"] == "protected"
+
+    removed = api.delete_vault_secret("PROTECTED_DELETE")
+    assert removed["removed"] is True
 
 
 def test_registering_second_webauthn_factor_requires_existing_factor_assertion(monkeypatch):
@@ -1019,17 +998,18 @@ def test_first_webauthn_factor_registration_only_happens_during_establishment(mo
     assert late_exc.value.code == "protected_authz_setup_required"
 
 
-def test_factorless_protected_secret_surfaces_recreate_state_for_delete_challenge(monkeypatch):
+def test_factorless_protected_secret_deletes_normally(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     api.create_vault_secret(
         {"name": "FACTORLESS", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
     )
-    credential = WebAuthnTestCredential()
 
-    with pytest.raises(api.VaultApiError) as exc:
-        api.create_vault_delete_challenge("FACTORLESS", origin=credential.origin)
+    removed = api.delete_vault_secret("FACTORLESS")
 
-    assert exc.value.code == "protected_authz_setup_required"
+    assert removed == {"ok": True, "removed": True, "name": "FACTORLESS"}
+    with api._vault_engine().connect() as conn:
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "FACTORLESS")
 
 
 def test_audit_lists_events_without_values(monkeypatch):
@@ -2616,7 +2596,7 @@ def test_delete_protected_secret_releases_agent_scope(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_release = Mock(return_value={"released": True})
     monkeypatch.setattr(api, "avault_agent_release", agent_release)
-    credential, factor = _establish_protected_secret_with_factor("GRANT_KEY")
+    _establish_protected_secret_with_factor("GRANT_KEY")
     with api._vault_engine().begin() as conn:
         req = vault_service.create_access_request(
             conn,
@@ -2625,9 +2605,8 @@ def test_delete_protected_secret_releases_agent_scope(monkeypatch):
             delivery={"session_id": "ses_1"},
         )
         grant = _grant_from_request(conn, req, session_id="ses_1")
-    authz = _delete_authz_for_secret(credential, factor, "GRANT_KEY")
 
-    removed = api.delete_vault_secret("GRANT_KEY", authz=authz)
+    removed = api.delete_vault_secret("GRANT_KEY")
 
     assert removed["removed"] is True
     agent_release.assert_called_once_with(grant_id=grant["id"])

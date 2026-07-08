@@ -1,8 +1,18 @@
 # Protected Vault secret deletion authorization
 
-Status: design plan only, no implementation.
+Status: superseded by product decision on 2026-07-08. Do not implement this
+delete-authorization design.
 Owner: Vaults workstream.
 Date: 2026-07-07.
+
+Superseding rule: a passkey protects the protected secret value's
+confidentiality for unlock, use, reveal, sign, and DEK release. It does not
+protect the record's existence. Deleting a protected secret does not expose its
+value, so protected deletion is a normal user-confirmed Vaults UI delete. The
+CLI still refuses protected deletes as the agent guard, but the UI/API delete
+path must not require a WebAuthn/passkey assertion.
+
+The original plan below is retained as rejected historical context only.
 
 This revises the earlier #818 design for the pre-launch product decision:
 protected-tier vaults are Passkey (WebAuthn-PRF) only. There is no password

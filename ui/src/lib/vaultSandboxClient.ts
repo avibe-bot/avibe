@@ -1,9 +1,6 @@
 import type {
   SigningAddresses,
-  VaultDeleteAuthz,
-  VaultDeleteChallengeResult,
   VaultWebAuthnRegistrationPayload,
-  VaultWebAuthnSerializedCredential,
 } from '@/context/ApiContext';
 import type { BlindBox, ProtectedRecordEnvelope, SignatureResult, SignatureScheme } from './vaultCrypto';
 import {
@@ -28,7 +25,6 @@ const REQUIRED_OPS = [
   'unseal',
   'sign',
   'releaseDEK',
-  'deleteAuthzAssertion',
 ] as const;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
@@ -86,11 +82,6 @@ export type VaultSandboxSealResult = {
   establishingVmk: boolean;
   publicKey?: string;
   addresses?: SigningAddresses;
-};
-
-export type VaultSandboxDeleteAssertionResult = {
-  challengeId: string;
-  assertion: VaultDeleteAuthz | VaultWebAuthnSerializedCredential;
 };
 
 export type DaemonAgentBinding = {
@@ -428,18 +419,6 @@ export class VaultSandboxClient {
     agentBinding: DaemonAgentBinding;
   }): Promise<BlindBox> {
     return this.request<BlindBox>('releaseDEK', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
-  }
-
-  deleteAuthzAssertion(payload: {
-    challengeId: string;
-    operation: 'delete_secret';
-    secretName: string;
-    webauthn: VaultDeleteChallengeResult['webauthn'];
-  }): Promise<VaultSandboxDeleteAssertionResult> {
-    return this.request<VaultSandboxDeleteAssertionResult>('deleteAuthzAssertion', payload, {
       timeoutMs: INTERACTIVE_TIMEOUT_MS,
       interactive: true,
     });

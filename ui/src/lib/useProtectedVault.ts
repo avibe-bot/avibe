@@ -2,8 +2,6 @@ import { useCallback, useEffect, useReducer, useState } from 'react';
 
 import {
   useApi,
-  type ApiContextType,
-  type VaultDeleteAuthz,
   type VaultWebAuthnRegistrationPayload,
   type VaultWebAuthnSerializedCredential,
 } from '@/context/ApiContext';
@@ -189,37 +187,6 @@ function registrationFromSandbox(value: unknown): VaultWebAuthnRegistrationPaylo
   return null;
 }
 
-export async function authorizeProtectedDeleteWithSandbox(
-  name: string,
-  api: Pick<ApiContextType, 'createVaultDeleteChallenge'>,
-  clientFactory = getVaultSandboxClient,
-): Promise<VaultDeleteAuthz> {
-  const challenge = await api.createVaultDeleteChallenge(name, { handleError: false });
-  if (!challenge?.ok) {
-    throw new Error(challenge?.code || challenge?.message || 'protected-delete-challenge-failed');
-  }
-  const result = await (await clientFactory()).deleteAuthzAssertion({
-    challengeId: challenge.challenge_id,
-    operation: 'delete_secret',
-    secretName: name,
-    webauthn: challenge.webauthn,
-  });
-  const assertion = result.assertion as VaultDeleteAuthz | VaultWebAuthnSerializedCredential;
-  if ('kind' in assertion && assertion.kind === 'webauthn' && assertion.factor_id) {
-    return assertion;
-  }
-  const credential = isSerializedCredential(assertion) ? assertion : assertion.assertion;
-  const rawId = credential.rawId;
-  const factor = rawId ? challenge.webauthn.allowCredentials.find((entry) => entry.id === rawId) : undefined;
-  if (!factor?.factor_id) throw new Error('protected-authz-factor-missing');
-  return {
-    kind: 'webauthn',
-    challenge_id: result.challengeId || challenge.challenge_id,
-    factor_id: factor.factor_id,
-    assertion: credential,
-  };
-}
-
 export function useProtectedVault() {
   const api = useApi();
   const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.status);
@@ -352,13 +319,6 @@ export function useProtectedVault() {
     [],
   );
 
-  const authorizeProtectedDelete = useCallback(
-    async (name: string): Promise<VaultDeleteAuthz> => {
-      return authorizeProtectedDeleteWithSandbox(name, api);
-    },
-    [api],
-  );
-
   const lock = useCallback(() => {
     void lockVault(true);
     setStatus(vaultStatusNow());
@@ -387,7 +347,6 @@ export function useProtectedVault() {
     sealValue,
     signProtectedRequest,
     releaseProtectedDelivery,
-    authorizeProtectedDelete,
     afterCreated,
     lock,
     discardAndRefresh,

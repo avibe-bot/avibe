@@ -5152,7 +5152,7 @@ def cmd_vault_rm(args):
             if meta.get("protection") == "protected":
                 raise TaskCliError(
                     f"'{args.name}' is a protected secret — delete it in the browser (Vaults), where it's "
-                    f"confirmed with your passkey. The CLI can't delete protected secrets.",
+                    f"confirmed by the signed-in user. The CLI can't delete protected secrets.",
                     code="protected_delete_forbidden",
                     help_command=help_command,
                 )

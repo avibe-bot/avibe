@@ -128,16 +128,6 @@ class CardHydrationPolicy:
     include_protected_unlock_material: bool
 
 
-@dataclass(frozen=True)
-class ProtectedOperationAuthz:
-    operation: str
-    secret_name: str
-    secret_id: str
-    secret_updated_at: str | None
-    challenge_id: str
-    factor_id: str
-
-
 class VaultServiceError(Exception):
     """Base class for vault data-layer errors."""
 
@@ -1835,103 +1825,6 @@ def register_webauthn_factor(
     return {"ok": True, "factor": _factor_payload(dict(row))}
 
 
-def create_delete_challenge(
-    conn: Connection,
-    name: str,
-    *,
-    rp_id: str,
-    origin: str,
-    ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS,
-) -> dict[str, Any]:
-    row = _require_row(conn, name)
-    if row.get("protection") != "protected":
-        raise SecretNotProtectedError(name)
-    factors = _usable_webauthn_factor_rows(conn, rp_id=rp_id)
-    if not factors:
-        raise ProtectedAuthzSetupRequiredError("protected delete requires a registered passkey authorization factor")
-    challenge, challenge_digest = _new_challenge()
-    challenge_id = _id("vop")
-    expires_at = _challenge_expiry(ttl_seconds)
-    conn.execute(
-        vault_operation_challenges.insert().values(
-            id=challenge_id,
-            operation="delete_secret",
-            secret_name=name,
-            secret_id=row.get("id"),
-            secret_updated_at=row.get("updated_at"),
-            challenge_hash=challenge_digest,
-            rp_id=rp_id,
-            origin=origin,
-            expires_at=expires_at,
-            created_at=_now(),
-        )
-    )
-    audit(
-        conn,
-        "delete-challenge-issued",
-        secret_name=name,
-        delivery={"challenge_id": challenge_id, "rp_id": rp_id},
-    )
-    allow_credentials = []
-    for factor in factors:
-        credential: dict[str, Any] = {
-            "type": "public-key",
-            "id": factor["credential_id"],
-            "factor_id": factor["id"],
-        }
-        transports = _stored_json_list(factor.get("transports"))
-        if transports:
-            credential["transports"] = transports
-        allow_credentials.append(credential)
-    return {
-        "ok": True,
-        "challenge_id": challenge_id,
-        "expires_at": expires_at,
-        "operation": "delete_secret",
-        "secret_name": name,
-        "webauthn": {
-            "challenge": challenge,
-            "rpId": rp_id,
-            "userVerification": "required",
-            "allowCredentials": allow_credentials,
-        },
-    }
-
-
-def verify_delete_secret_authz(conn: Connection, name: str, payload: dict[str, Any] | None) -> ProtectedOperationAuthz:
-    if not isinstance(payload, dict):
-        raise ProtectedAuthRequiredError("protected delete requires WebAuthn authorization")
-    row = _require_row(conn, name)
-    if row.get("protection") != "protected":
-        raise SecretNotProtectedError(name)
-    factor_id, challenge = _verify_webauthn_operation_authz(
-        conn,
-        payload,
-        operation="delete_secret",
-    )
-    challenge_id = str(payload.get("challenge_id") or "").strip()
-    if (
-        challenge.get("secret_name") != name
-        or challenge.get("secret_id") != row.get("id")
-        or challenge.get("secret_updated_at") != row.get("updated_at")
-    ):
-        raise InvalidProtectedAuthzError("protected delete challenge does not match the current secret row")
-    audit(
-        conn,
-        "delete-authorized",
-        secret_name=name,
-        delivery={"challenge_id": challenge_id, "factor_id": factor_id},
-    )
-    return ProtectedOperationAuthz(
-        operation="delete_secret",
-        secret_name=name,
-        secret_id=str(row["id"]),
-        secret_updated_at=row.get("updated_at"),
-        challenge_id=challenge_id,
-        factor_id=factor_id,
-    )
-
-
 def fulfill_pending_provision_requests_for_secret(
     conn: Connection,
     name: str,
@@ -2041,6 +1934,8 @@ def create_secret(
         raise SecretExistsError(name) from exc
     audit(conn, "created", secret_name=name)
     if establishing_vmk and protection == "protected":
+        # Vestigial after protected-delete authz was removed: the sandbox still
+        # submits this registration until the setup-time authz flow is cleaned up.
         register_webauthn_factor(
             conn,
             authz_factor_registration or {},
@@ -2378,20 +2273,6 @@ def rotate_secret(
     return _meta_payload(_require_row(conn, name))
 
 
-def _reject_missing_protected_delete_authz(row: dict[str, Any], authz: ProtectedOperationAuthz | None) -> None:
-    if row.get("protection") != "protected":
-        return
-    if authz is None:
-        raise ProtectedAuthRequiredError("protected delete requires verified authorization")
-    if (
-        authz.operation != "delete_secret"
-        or authz.secret_name != row.get("name")
-        or authz.secret_id != row.get("id")
-        or authz.secret_updated_at != row.get("updated_at")
-    ):
-        raise InvalidProtectedAuthzError("protected delete authorization does not match the current secret row")
-
-
 def _disable_webauthn_factors_if_vault_deestablished(conn: Connection) -> None:
     protected_row = conn.execute(
         select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)
@@ -2413,14 +2294,12 @@ def delete_secret(
     conn: Connection,
     name: str,
     *,
-    protected_authz: ProtectedOperationAuthz | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> None:
     row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
     if row is None:
         raise SecretNotFoundError(name)
     row = dict(row)
-    _reject_missing_protected_delete_authz(row, protected_authz)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
