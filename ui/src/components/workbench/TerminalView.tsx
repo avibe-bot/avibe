@@ -139,11 +139,16 @@ export const TerminalView: React.FC<{
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    // Clickable URLs open in a new tab. noopener defeats reverse-tabnabbing (the addon's own typings
-    // call this out); routing through window.open means a link never navigates the app frame itself.
+    // Clickable URLs open in a new tab, but only on a modifier-click (⌘ on Apple, Ctrl elsewhere).
+    // Persistent sessions run tmux with `mouse on`, so an unmodified click is meaningful input for
+    // tmux/copy-mode and mouse-aware TUIs — gating on the modifier keeps plain clicks as terminal input
+    // and matches how VS Code / iTerm / GNOME Terminal follow terminal links. noopener defeats reverse-
+    // tabnabbing (the addon's own typings call this out); window.open never navigates the app frame.
     term.loadAddon(
-      new WebLinksAddon((_event, uri) => {
-        window.open(uri, '_blank', 'noopener');
+      new WebLinksAddon((event, uri) => {
+        if (IS_APPLE ? event.metaKey : event.ctrlKey) {
+          window.open(uri, '_blank', 'noopener');
+        }
       }),
     );
     const search = new SearchAddon();
