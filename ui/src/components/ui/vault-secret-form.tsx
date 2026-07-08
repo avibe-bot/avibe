@@ -398,11 +398,16 @@ export const VaultSecretForm: React.FC<{
   useEffect(() => {
     if (protection !== 'protected') return;
     if (kind === 'keypair') clearStaticValue();
+    // Protected static values are typed text only (byte-safe UTF-8 handed to the sandbox);
+    // file uploads (possibly binary) aren't supported for protected secrets, so force text
+    // source and drop any file the user had selected while standard.
+    setStaticSource('text');
+    clearSelectedFile();
     applySigningKey(null);
     setImportHex('');
     setSigningError(null);
     setSigningAddresses(null);
-  }, [protection, kind, clearStaticValue, applySigningKey]);
+  }, [protection, kind, clearStaticValue, clearSelectedFile, applySigningKey]);
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -511,16 +516,11 @@ export const VaultSecretForm: React.FC<{
       let protectedPublicMeta: Record<string, unknown> | undefined;
       if (protection === 'protected') {
         if (!isKeypair) {
-          if (staticSource === 'file' && selectedFile) {
-            try {
-              fileBytesToWipe = new Uint8Array(await selectedFile.arrayBuffer());
-            } catch (err) {
-              throw new Error(t('vaults.dialog.errors.fileReadFailed'), { cause: err });
-            }
-            staticValueRef.current = new TextDecoder().decode(fileBytesToWipe);
-          } else {
-            staticValueRef.current = value;
-          }
+          // Protected static values are typed text only — the source toggle is hidden for
+          // protected and reset to text (see the value field + the protection effect). No
+          // file/binary path here on purpose: TextDecoder would corrupt non-UTF-8 bytes, so a
+          // file secret can't round-trip through the string-based parent-value contract.
+          staticValueRef.current = value;
         }
         // Static protected values are entered in this form and handed to the sandbox once;
         // keypairs still generate/import inside the sandbox and return only public metadata.
@@ -624,18 +624,23 @@ export const VaultSecretForm: React.FC<{
 
   const valueField = (
     <div className="flex flex-col gap-2">
-      <div className="self-start">
-        <SegmentedRadio<StaticSecretSource>
-          value={staticSource}
-          onChange={switchStaticSource}
-          disabled={submitting}
-          ariaLabel={t('vaults.dialog.valueSource')}
-          options={[
-            { id: 'text', label: t('vaults.dialog.valueSourceText') },
-            { id: 'file', label: t('vaults.dialog.valueSourceFile') },
-          ]}
-        />
-      </div>
+      {/* Protected static values are typed and handed to the sandbox as text (byte-safe UTF-8).
+          File uploads (which may be binary) aren't supported for protected secrets yet, so the
+          text/file switch only shows for standard secrets. */}
+      {protection !== 'protected' && (
+        <div className="self-start">
+          <SegmentedRadio<StaticSecretSource>
+            value={staticSource}
+            onChange={switchStaticSource}
+            disabled={submitting}
+            ariaLabel={t('vaults.dialog.valueSource')}
+            options={[
+              { id: 'text', label: t('vaults.dialog.valueSourceText') },
+              { id: 'file', label: t('vaults.dialog.valueSourceFile') },
+            ]}
+          />
+        </div>
+      )}
       {staticSource === 'text' ? (
         <div className="flex items-start gap-2">
           {showValue ? (

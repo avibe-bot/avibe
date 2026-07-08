@@ -285,19 +285,21 @@ export function useProtectedVault() {
       let sealed: VaultSandboxSealResult;
       if (kind === 'static') {
         if (!parentStaticValue) throw new Error('protected-static-value-required');
-        try {
-          const sandbox = await getVaultSandboxClient();
-          sealed = await sandbox.seal({
-            name,
-            kind: 'static',
-            inputMode: 'parent-value',
-            value: parentStaticValue.valueRef.current,
-            wrapMeta,
-          });
-        } finally {
-          parentStaticValue.valueRef.current = '';
-          parentStaticValue.clear();
-        }
+        const sandbox = await getVaultSandboxClient();
+        // Hand the plaintext to the sandbox, then drop the parent-held copy IMMEDIATELY.
+        // `seal()` captures `value` into the request payload synchronously here, so we can
+        // clear the persistent ref + revealed field right away rather than leaving the
+        // plaintext in parent memory for the whole interactive ceremony (up to a 5-min timeout).
+        const sealing = sandbox.seal({
+          name,
+          kind: 'static',
+          inputMode: 'parent-value',
+          value: parentStaticValue.valueRef.current,
+          wrapMeta,
+        });
+        parentStaticValue.valueRef.current = '';
+        parentStaticValue.clear();
+        sealed = await sealing;
       } else {
         const sandbox = await getVaultSandboxClient();
         sealed = await sandbox.seal({
