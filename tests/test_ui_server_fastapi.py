@@ -1,4 +1,5 @@
 import gzip
+import json
 
 import pytest
 
@@ -56,6 +57,24 @@ def test_fastapi_schema_routes_are_not_exposed():
     docs_response = client.get("/docs")
     assert b"swagger-ui" not in docs_response.content.lower()
     assert client.get("/openapi.json").status_code != 200
+
+
+def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
+    from vibe import runtime
+
+    calls = []
+
+    def fake_render_status(*, detect_extra_processes=True):
+        calls.append(detect_extra_processes)
+        return json.dumps({"state": "running", "running": True, "service_pid": 12345})
+
+    monkeypatch.setattr(runtime, "render_status", fake_render_status)
+
+    response = app.test_client().get("/status")
+
+    assert response.status_code == 200
+    assert response.get_json()["service_pid"] == 12345
+    assert calls == [False]
 
 
 def test_route_path_to_fastapi_converts_named_path_converter():

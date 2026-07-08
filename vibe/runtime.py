@@ -1028,10 +1028,12 @@ def _pid_mismatches_service(pid: int) -> bool:
     return not _command_looks_like_service_entry(command, cwd=cwd)
 
 
-def render_status():
+def render_status(*, detect_extra_processes: bool = True):
     status = read_status()
     owner_pid = resolve_service_owner_pid(include_starting=False)
-    extra_pids = extra_service_process_pids(owner_pid=owner_pid)
+    extra_pids: list[int] = []
+    if detect_extra_processes:
+        extra_pids = extra_service_process_pids(owner_pid=owner_pid)
     running = bool(owner_pid or extra_pids)
     if owner_pid:
         status["state"] = "running"
