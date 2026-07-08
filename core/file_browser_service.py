@@ -284,11 +284,69 @@ def _os_rename_noreplace(source: Path, target: Path) -> None:
     source.rename(target)
 
 
+def _rename_no_replace_into_dir(
+    source: Path,
+    target_parent_fd: int | None,
+    target_parent: Path,
+    target_name: str,
+) -> None:
+    if target_parent_fd is None:
+        _rename_no_replace(source, target_parent / target_name)
+        return
+
+    try:
+        _glibc_renameat2_noreplace_between(
+            _AT_FDCWD,
+            os.fsencode(source),
+            target_parent_fd,
+            os.fsencode(target_name),
+            target_name,
+        )
+        return
+    except FileExistsError as exc:
+        raise ConflictError("exists", "Destination already exists") from exc
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise
+        if exc.errno not in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise
+    except AttributeError:
+        pass
+
+    try:
+        os.link(source, target_name, dst_dir_fd=target_parent_fd, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise ConflictError("exists", "Destination already exists") from exc
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise
+    else:
+        _unlink_source_after_hard_link_at(source, target_parent_fd, target_name)
+        return
+
+    _warn_rename_noreplace_fallback()
+    try:
+        os.stat(target_name, dir_fd=target_parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise ConflictError("exists", "Destination already exists")
+    os.rename(source, target_name, dst_dir_fd=target_parent_fd)
+
+
 def _unlink_source_after_hard_link(source: Path, target: Path) -> None:
     try:
         os.unlink(source)
     except OSError:
         _remove_created_hard_link(target, source)
+        raise
+
+
+def _unlink_source_after_hard_link_at(source: Path, target_parent_fd: int, target_name: str) -> None:
+    try:
+        os.unlink(source)
+    except OSError:
+        _remove_created_hard_link_at(target_parent_fd, target_name, source)
         raise
 
 
@@ -298,6 +356,16 @@ def _remove_created_hard_link(target: Path, source: Path) -> None:
         target_stat = target.lstat()
         if (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino):
             os.unlink(target)
+    except OSError:
+        logger.debug("Failed to remove rollback hard link after no-replace rename failure", exc_info=True)
+
+
+def _remove_created_hard_link_at(target_parent_fd: int, target_name: str, source: Path) -> None:
+    try:
+        source_stat = source.lstat()
+        target_stat = os.stat(target_name, dir_fd=target_parent_fd, follow_symlinks=False)
+        if (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino):
+            os.unlink(target_name, dir_fd=target_parent_fd)
     except OSError:
         logger.debug("Failed to remove rollback hard link after no-replace rename failure", exc_info=True)
 
@@ -1421,6 +1489,24 @@ def _delete_undo_store_within_caps(entries: list[DeleteUndoEntry]) -> bool:
     )
 
 
+def _discard_delete_undo_stage_or_raise(stage_dir: Path, root: Path, *, target_parent: Path | None = None) -> None:
+    if not _delete_undo_remove_path(stage_dir):
+        raise FileBrowserError("fs_error", "Failed to remove delete undo staging entry", 400)
+    if target_parent is not None:
+        _fsync_dir(target_parent)
+    _fsync_dir(root)
+
+
+def _restore_staged_directory_after_not_empty(staged_entry: Path, target: Path, stage_dir: Path, root: Path) -> None:
+    try:
+        _rename_no_replace(staged_entry, target)
+    except ConflictError as exc:
+        raise FileBrowserError("fs_error", "Failed to restore non-empty directory after staging", 400) from exc
+    except OSError as exc:
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+    _discard_delete_undo_stage_or_raise(stage_dir, root, target_parent=target.parent)
+
+
 def _delete_undo_parent_matches(entry: DeleteUndoEntry) -> bool:
     try:
         parent_stat = entry.original_path.parent.lstat()
@@ -1431,6 +1517,60 @@ def _delete_undo_parent_matches(entry: DeleteUndoEntry) -> bool:
         and not stat.S_ISLNK(parent_stat.st_mode)
         and (parent_stat.st_dev, parent_stat.st_ino) == (entry.parent_dev, entry.parent_ino)
     )
+
+
+def _open_verified_delete_undo_parent(entry: DeleteUndoEntry) -> int | None:
+    if os.name != "posix":
+        if _delete_undo_parent_matches(entry):
+            return None
+        raise FileBrowserError("expired", "Undo token expired or unavailable", 410)
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    try:
+        fd = os.open(entry.original_path.parent, flags)
+        parent_stat = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or stat.S_ISLNK(parent_stat.st_mode)
+            or (parent_stat.st_dev, parent_stat.st_ino) != (entry.parent_dev, entry.parent_ino)
+        ):
+            raise FileBrowserError("expired", "Undo token expired or unavailable", 410)
+        return fd
+    except FileBrowserError:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    except OSError as exc:
+        if fd >= 0:
+            os.close(fd)
+        raise FileBrowserError("expired", "Undo token expired or unavailable", 410) from exc
+
+
+def _delete_undo_target_exists(parent_fd: int | None, target: Path) -> bool:
+    if parent_fd is None:
+        return _exists_no_follow(target)
+    try:
+        os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise FileBrowserError("fs_error", str(exc), 400) from exc
+
+
+def _fsync_delete_undo_parent(parent_fd: int | None, parent: Path) -> None:
+    if parent_fd is None:
+        _fsync_dir(parent)
+        return
+    try:
+        os.fsync(parent_fd)
+    except OSError:
+        pass
 
 
 def _ensure_delete_undo_initialized() -> None:
@@ -1539,24 +1679,24 @@ def _stage_delete_for_undo(target: Path, target_stat: os.stat_result, *, recursi
                 return None
             _os_rename_noreplace(target, staged_entry)
             renamed_to_stage = True
+            if current_is_dir and not recursive and _directory_empty_no_follow(staged_entry) is not True:
+                _restore_staged_directory_after_not_empty(staged_entry, target, stage_dir, root)
+                raise ConflictError("not_empty", "Directory is not empty")
             staged_size = _entry_size_no_follow(staged_entry, cap=effective_size_cap)
             if staged_size is None or staged_size > effective_size_cap:
-                _delete_undo_remove_path(stage_dir)
-                _fsync_dir(target.parent)
-                _fsync_dir(root)
+                _discard_delete_undo_stage_or_raise(stage_dir, root, target_parent=target.parent)
                 return {"ok": True, "undo_token": None, "undo_expires_seconds": None}
             if staged_size != size:
                 metadata_payload["size"] = staged_size
                 _replace_delete_undo_metadata(metadata_path, metadata_payload)
         except OSError as exc:
             if stage_dir is not None:
-                _delete_undo_remove_path(stage_dir)
-                _fsync_dir(root)
+                _discard_delete_undo_stage_or_raise(
+                    stage_dir,
+                    root,
+                    target_parent=target.parent if renamed_to_stage else None,
+                )
             if renamed_to_stage:
-                try:
-                    _fsync_dir(target.parent)
-                except OSError:
-                    logger.debug("Failed to fsync delete parent after undo staging fallback", exc_info=True)
                 logger.debug("Delete undo staging failed after rename; treating delete as permanent: %s", exc)
                 return {"ok": True, "undo_token": None, "undo_expires_seconds": None}
             logger.debug("Delete undo staging failed; falling back to permanent delete: %s", exc)
@@ -1570,8 +1710,7 @@ def _stage_delete_for_undo(target: Path, target_stat: os.stat_result, *, recursi
             logger.debug("Delete undo staging cap purge failed after staging", exc_info=True)
             staged_retained = True
         if not staged_retained:
-            _delete_undo_remove_path(stage_dir)
-            _fsync_dir(root)
+            _discard_delete_undo_stage_or_raise(stage_dir, root, target_parent=target.parent)
             return {"ok": True, "undo_token": None, "undo_expires_seconds": None}
     return {"ok": True, "undo_token": token, "undo_expires_seconds": ttl}
 
@@ -1615,31 +1754,43 @@ def undo_delete_path(token: str) -> dict[str, Any]:
         if entry is None or now - entry.deleted_at > _delete_undo_ttl_seconds():
             _delete_undo_remove_path(stage_dir)
             raise FileBrowserError("expired", "Undo token expired or unavailable", 410)
-        if not _delete_undo_parent_matches(entry):
-            _delete_undo_remove_path(stage_dir)
-            _fsync_dir(root)
-            raise FileBrowserError("expired", "Undo token expired or unavailable", 410)
-        if _exists_no_follow(entry.original_path):
-            raise ConflictError("exists", "Original path already exists")
-
-        def _restore() -> dict[str, Any]:
-            try:
-                _rename_no_replace(entry.entry_path, entry.original_path)
-            except ConflictError:
-                raise
-            except OSError as exc:
-                raise FileBrowserError("fs_error", str(exc), 400) from exc
-            _fsync_dir(entry.original_path.parent)
-            _fsync_dir(entry.directory)
-            try:
-                entry.metadata_path.unlink()
-                entry.directory.rmdir()
+        try:
+            parent_fd = _open_verified_delete_undo_parent(entry)
+        except FileBrowserError as exc:
+            if exc.code == "expired":
+                _delete_undo_remove_path(stage_dir)
                 _fsync_dir(root)
-            except OSError:
-                logger.debug("Failed to clean up delete undo staging directory after restore", exc_info=True)
-            return {"restored_path": str(entry.original_path)}
+            raise
+        try:
+            if _delete_undo_target_exists(parent_fd, entry.original_path):
+                raise ConflictError("exists", "Original path already exists")
 
-        return _run_mutation("delete_undo", entry.original_path, _restore)
+            def _restore() -> dict[str, Any]:
+                try:
+                    _rename_no_replace_into_dir(
+                        entry.entry_path,
+                        parent_fd,
+                        entry.original_path.parent,
+                        entry.original_path.name,
+                    )
+                except ConflictError:
+                    raise
+                except OSError as exc:
+                    raise FileBrowserError("fs_error", str(exc), 400) from exc
+                _fsync_delete_undo_parent(parent_fd, entry.original_path.parent)
+                _fsync_dir(entry.directory)
+                try:
+                    entry.metadata_path.unlink()
+                    entry.directory.rmdir()
+                    _fsync_dir(root)
+                except OSError:
+                    logger.debug("Failed to clean up delete undo staging directory after restore", exc_info=True)
+                return {"restored_path": str(entry.original_path)}
+
+            return _run_mutation("delete_undo", entry.original_path, _restore)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
 
 
 # ---------------------------------------------------------------------------

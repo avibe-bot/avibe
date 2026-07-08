@@ -844,6 +844,30 @@ def test_delete_undo_restores_empty_directory_without_recursive(files_undo_runti
     assert folder.is_dir()
 
 
+def test_delete_non_recursive_directory_created_child_during_staging_returns_not_empty(
+    files_undo_runtime, tmp_path, monkeypatch
+):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    real_rename = fs._os_rename_noreplace
+
+    def rename_then_populate(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if Path(destination).name == fs._DELETE_UNDO_ENTRY_NAME:
+            (Path(destination) / "child.txt").write_text("child", encoding="utf-8")
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", rename_then_populate)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(folder), recursive=False)
+
+    assert exc.value.code == "not_empty"
+    assert folder.is_dir()
+    assert (folder / "child.txt").read_text(encoding="utf-8") == "child"
+    undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
+    assert not undo_root.exists() or not list(undo_root.iterdir())
+
+
 def test_delete_undo_token_expiry_purges_staging(files_undo_runtime, tmp_path, monkeypatch):
     now = 1000.0
     monkeypatch.setattr(fs.time, "time", lambda: now)
@@ -923,6 +947,37 @@ def test_delete_post_rename_growth_falls_back_to_permanent_delete(files_undo_run
     assert not target.exists()
     undo_root = files_undo_runtime / fs._DELETE_UNDO_DIR_NAME
     assert not undo_root.exists() or not list(undo_root.iterdir())
+
+
+def test_delete_post_rename_growth_reports_cleanup_failure(files_undo_runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_FILES_UNDO_SIZE_CAP_BYTES", "8")
+    target = tmp_path / "active.log"
+    target.write_text("1234", encoding="utf-8")
+    real_rename = fs._os_rename_noreplace
+    real_remove = fs._delete_undo_remove_path
+    failed_removals: list[Path] = []
+
+    def rename_then_grow(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        with destination.open("ab") as handle:
+            handle.write(b"567890")
+
+    def fail_stage_cleanup(path: Path) -> bool:
+        if Path(path).parent == files_undo_runtime / fs._DELETE_UNDO_DIR_NAME:
+            failed_removals.append(Path(path))
+            return False
+        return real_remove(path)
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", rename_then_grow)
+    monkeypatch.setattr(fs, "_delete_undo_remove_path", fail_stage_cleanup)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(target))
+
+    assert exc.value.code == "fs_error"
+    assert not target.exists()
+    assert failed_removals
+    assert failed_removals[0].exists()
 
 
 def test_delete_stale_file_replaced_by_directory_is_not_staged_or_removed(files_undo_runtime, tmp_path, monkeypatch):
@@ -1083,6 +1138,46 @@ def test_delete_undo_rejects_replaced_parent_symlink(files_undo_runtime, tmp_pat
     assert exc.value.code == "expired"
     assert not (other / "note.txt").exists()
     assert not (files_undo_runtime / fs._DELETE_UNDO_DIR_NAME / token).exists()
+
+
+def test_delete_undo_restores_through_verified_parent_when_path_is_replaced(
+    files_undo_runtime, tmp_path, monkeypatch
+):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    folder = parent / "folder"
+    folder.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    detached_parent = tmp_path / "detached-parent"
+    token = fs.delete_path(str(folder), recursive=True)["undo_token"]
+    real_os_rename = os.rename
+    swapped = False
+
+    def renameat2_unavailable(*args, **kwargs):
+        raise AttributeError("renameat2 unavailable")
+
+    def replace_parent_then_rename(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and kwargs.get("dst_dir_fd") is not None and destination == folder.name:
+            swapped = True
+            real_os_rename(parent, detached_parent)
+            parent.symlink_to(other, target_is_directory=True)
+            try:
+                return real_os_rename(source, destination, *args, **kwargs)
+            finally:
+                parent.unlink()
+                real_os_rename(detached_parent, parent)
+        return real_os_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(fs, "_glibc_renameat2_noreplace_between", renameat2_unavailable)
+    monkeypatch.setattr(fs.os, "rename", replace_parent_then_rename)
+
+    assert fs.undo_delete_path(token) == {"restored_path": str(folder)}
+
+    assert swapped is True
+    assert folder.is_dir()
+    assert not (other / "folder").exists()
 
 
 def test_delete_undo_purges_corrupt_staging_entries(files_undo_runtime, tmp_path):
