@@ -1876,7 +1876,7 @@ def test_terminal_websocket_accepts_setup_host_origin_from_same_port(monkeypatch
 
     accepted = False
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         nonlocal accepted
         accepted = True
 
@@ -1905,7 +1905,7 @@ def test_terminal_websocket_accepts_setup_host_from_trusted_proxy(monkeypatch, t
 
     accepted = False
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         nonlocal accepted
         accepted = True
 
@@ -1942,7 +1942,7 @@ def test_terminal_websocket_accepts_trusted_public_origin_from_proxy_when_remote
 
     accepted = False
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         nonlocal accepted
         accepted = True
 
@@ -2055,7 +2055,7 @@ def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp
     config = _save_config(tmp_path)
     accepted = False
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         nonlocal accepted
         accepted = True
 
@@ -2100,7 +2100,7 @@ def test_terminal_websocket_scopes_remote_session_id_by_authenticated_subject(mo
     config = _save_config(tmp_path)
     handled_session_ids: list[str] = []
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         handled_session_ids.append(session_id)
 
     monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
@@ -2139,7 +2139,7 @@ def test_terminal_websocket_keeps_local_session_id_unscoped(monkeypatch, tmp_pat
     _mock_interface(monkeypatch, "192.168.2.3", 24)
     handled_session_ids: list[str] = []
 
-    async def fake_handle_websocket(websocket, session_id):
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
         handled_session_ids.append(session_id)
 
     monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)

@@ -1784,22 +1784,21 @@ async def _symlink_final_component_initial_cwd_rejected(monkeypatch, tmp_path):
     assert _resolved(captured["cwd"]) == (tmp_path / "home").resolve()
 
 
-def test_tmux_new_session_applies_start_dir(monkeypatch, tmp_path):
-    asyncio.run(_tmux_new_session_applies_start_dir(monkeypatch, tmp_path))
+def test_tmux_new_session_starts_in_initial_cwd(monkeypatch, tmp_path):
+    asyncio.run(_tmux_new_session_starts_in_initial_cwd(monkeypatch, tmp_path))
 
 
-async def _tmux_new_session_applies_start_dir(monkeypatch, tmp_path):
-    # A brand-new tmux session (has-session False) gets -c <dir>; the client process cwd itself
-    # stays at home because tmux -c owns the session's start directory.
+async def _tmux_new_session_starts_in_initial_cwd(monkeypatch, tmp_path):
+    # A brand-new tmux session (has-session False) takes its start directory from the client
+    # process cwd — the launch command stays the plain `new-session` (no cwd baked into the tmux
+    # command string, so a directory name is never parsed as tmux syntax).
     workdir = tmp_path / "proj"
     workdir.mkdir()
     captured = await _capture_terminal_open(
         monkeypatch, tmp_path, tmux=True, has_session=False, initial_cwd=str(workdir)
     )
-    cmd = captured["cmd"]
-    assert "-c" in cmd
-    assert _resolved(cmd[cmd.index("-c") + 1]) == workdir.resolve()
-    assert _resolved(captured["cwd"]) == (tmp_path / "home").resolve()
+    assert "-c" not in captured["cmd"]
+    assert _resolved(captured["cwd"]) == workdir.resolve()
 
 
 def test_tmux_reattach_ignores_initial_cwd(monkeypatch, tmp_path):
@@ -1807,19 +1806,47 @@ def test_tmux_reattach_ignores_initial_cwd(monkeypatch, tmp_path):
 
 
 async def _tmux_reattach_ignores_initial_cwd(monkeypatch, tmp_path):
-    # Reattaching an EXISTING tmux session (has-session True) must never pass -c, so the
-    # session keeps its own cwd — reattach semantics are unchanged.
+    # Reattaching an EXISTING tmux session (has-session True) must not steer it: the client cwd
+    # falls back to home, so the session keeps its own cwd — reattach semantics are unchanged.
     workdir = tmp_path / "proj"
     workdir.mkdir()
     captured = await _capture_terminal_open(
         monkeypatch, tmp_path, tmux=True, has_session=True, initial_cwd=str(workdir)
     )
     assert "-c" not in captured["cmd"]
+    assert _resolved(captured["cwd"]) == (tmp_path / "home").resolve()
 
 
-def test_tmux_launch_command_includes_start_dir():
-    cmd = _tmux_launch_command("/tmp/tmux", "sess", start_dir="/work/dir")
-    start = cmd.index("new-session")
-    assert cmd[start:start + 6] == ["new-session", "-A", "-s", "sess", "-c", "/work/dir"]
-    # Default (no start_dir) is unchanged — no -c is added.
-    assert "-c" not in _tmux_launch_command("/tmp/tmux", "sess")
+def test_resolve_initial_cwd_rejects_inaccessible_dir(tmp_path):
+    # A directory that exists but the process cannot enter (no search/execute bit) must be
+    # rejected so it falls back to the default cwd instead of failing the spawn. Root bypasses
+    # permission bits, so skip there.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        import pytest as _pytest
+
+        _pytest.skip("root bypasses directory permission bits")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    os.chmod(locked, 0o000)
+    try:
+        assert terminal_service._resolve_initial_cwd(str(locked)) is None
+    finally:
+        os.chmod(locked, 0o700)  # restore so tmp_path teardown can remove it
+
+    usable = tmp_path / "usable"
+    usable.mkdir()
+    assert _resolved(terminal_service._resolve_initial_cwd(str(usable))) == usable.resolve()
+
+
+def test_resolve_initial_cwd_rejects_non_directories(tmp_path):
+    # Blank/None, a regular file, and a symlinked final component all fall back (None).
+    assert terminal_service._resolve_initial_cwd(None) is None
+    assert terminal_service._resolve_initial_cwd("") is None
+    a_file = tmp_path / "file.txt"
+    a_file.write_text("x", encoding="utf-8")
+    assert terminal_service._resolve_initial_cwd(str(a_file)) is None
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert terminal_service._resolve_initial_cwd(str(link)) is None

@@ -234,30 +234,31 @@ class TerminalService:
             if replaced is not None:
                 await self._teardown_client(replaced, kill_session=False)
 
-            # A validated start directory for a brand-new session ("Open Terminal Here"). None
-            # (unset or invalid) means fall back to the home directory — an unusable cwd must
-            # never fail the connection. See _resolve_initial_cwd.
+            # A validated, enterable start directory for a brand-new session ("Open Terminal
+            # Here"); None (unset, invalid, or inaccessible) falls back to home. An unusable cwd
+            # must never fail the connection. See _resolve_initial_cwd.
             start_dir = _resolve_initial_cwd(initial_cwd)
 
             persistent = False
             tmux_binary = resolve_tmux_binary()
             if tmux_binary:
-                tmux_start_dir: str | None = None
-                if start_dir is not None and not await _tmux_has_session(session_id):
-                    # Only a freshly created tmux session honors a start directory; an existing
-                    # session keeps its own cwd on reattach. Gate on has-session so reconnecting
-                    # to a live/detached session never changes its directory — reattach semantics
-                    # stay exactly as before.
-                    tmux_start_dir = start_dir
-                cmd = _tmux_launch_command(tmux_binary, session_id, start_dir=tmux_start_dir)
+                cmd = _tmux_launch_command(tmux_binary, session_id)
                 persistent = True
-                # tmux owns the session cwd (via -c above); the client process cwd is irrelevant,
-                # so leave it at home as before.
-                spawn_cwd = str(Path.home())
+                if start_dir is not None and await _tmux_has_session(session_id):
+                    # A brand-new tmux session (launched with -f /dev/null, so no default-path)
+                    # takes its start directory from the client process cwd set below; an existing
+                    # session ignores the client cwd on reattach. Clear start_dir when the session
+                    # already exists so a reconnect never re-steers a live/detached session —
+                    # reattach semantics stay exactly as before. (Passing the directory as the
+                    # client cwd, rather than as a tmux `-c` argument, also keeps it out of tmux's
+                    # command-sequence parsing, where a trailing ';' would be a separator.)
+                    start_dir = None
             else:
                 cmd = [os.environ.get("SHELL") or "/bin/bash", "-l"]
-                # Plain-shell fallback: no tmux to own the cwd, so the shell process starts here.
-                spawn_cwd = start_dir or str(Path.home())
+
+            # For a new tmux session this becomes its start directory (via the client cwd); for the
+            # plain-shell fallback it is the shell's own cwd. Falls back to home when unset.
+            spawn_cwd = start_dir or str(Path.home())
 
             master_fd, slave_fd = os.openpty()
             try:
@@ -617,37 +618,42 @@ def _resolve_initial_cwd(raw: str | None) -> str | None:
     """Validate a requested start directory for a NEW terminal session.
 
     Reuses the file browser's directory hardening (absolute, expanded/canonicalized, existing,
-    a real directory, no symlink followed on the final component). Anything invalid — unset,
-    relative, missing, a file, or a symlink — yields None so the caller falls back to the
-    default cwd. Never raises: an unusable cwd must not fail the terminal connection, so it is
-    logged at debug and dropped. Imported lazily since this only runs for an "Open Terminal
-    Here" open, keeping the normal terminal-open path free of the dependency.
+    a real directory, no symlink followed on the final component) and then checks the process
+    can actually enter it (search/execute permission). That extra check matters because the
+    hardening only lstats the final component, so a directory that exists but is unenterable
+    (e.g. a 0700 directory owned by another user under a listable parent) would otherwise reach
+    the spawn and raise there — closing the socket instead of falling back. Anything invalid —
+    unset, relative, missing, a file, a symlink, or inaccessible — yields None so the caller
+    falls back to the default cwd. Never raises: an unusable cwd must not fail the terminal
+    connection, so it is logged at debug and dropped. Imported lazily since this only runs for an
+    "Open Terminal Here" open, keeping the normal terminal-open path free of the dependency.
     """
     if not raw:
         return None
     try:
         from core import file_browser_service
 
-        return str(file_browser_service.resolve_existing_directory(raw))
+        resolved = file_browser_service.resolve_existing_directory(raw)
+        if not os.access(resolved, os.X_OK):
+            logger.debug("terminal initial cwd not searchable; using default")
+            return None
+        return str(resolved)
     except Exception:
         logger.debug("terminal initial cwd rejected; using default", exc_info=True)
         return None
 
 
-def _tmux_launch_command(tmux_binary: str, session_id: str, *, start_dir: str | None = None) -> list[str]:
-    new_session = ["new-session", "-A", "-s", session_id]
-    if start_dir is not None:
-        # -c sets the start directory of a NEWLY created session. Under -A an existing session
-        # is attached and tmux ignores -c; open() also only passes start_dir when the session
-        # does not yet exist, so a reattach never changes the session's own cwd.
-        new_session += ["-c", start_dir]
+def _tmux_launch_command(tmux_binary: str, session_id: str) -> list[str]:
     return [
         tmux_binary,
         "-L",
         _tmux_socket_name(),
         "-f",
         "/dev/null",
-        *new_session,
+        "new-session",
+        "-A",
+        "-s",
+        session_id,
         ";",
         "set-option",
         "-g",
