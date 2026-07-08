@@ -125,9 +125,21 @@ TRACEBACK_EXCEPTION_PATTERN = re.compile(
 CSRF_COOKIE_NAME = "vibe_csrf_token"
 CSRF_HEADER_NAME = "X-Vibe-CSRF-Token"
 VAULT_SANDBOX_ORIGIN = "https://sandbox.avibe.bot"
+# WebAuthn is delegated to the cross-origin sandbox iframe via Permissions-Policy. Chrome only
+# honors the delegation when the allowlist includes `self`: an origin-only allowlist
+# (`("origin")`, no self) does NOT reach the cross-origin child — verified empirically against
+# the sandbox iframe's DevTools "Allowed Features". So get + create both include self.
+#
+# Accepted trade-off (product decision): with `self`, the parent origin can also invoke the
+# get/create ceremonies, so a parent-app XSS could — via a user-approved passkey prompt — derive
+# the VMK. We intentionally do NOT defend against that. The sandbox's purpose is that the VMK /
+# PRF output / private keys / plaintext are only ever handled *inside* the sandbox origin, and the
+# agent (a backend process, never in the browser) can never reach them — those guarantees hold
+# regardless of self. Forcing a top-level popup on every unlock to close a
+# browser-XSS-social-engineering gap would wreck UX for a strictly secondary threat.
 VAULT_SANDBOX_PERMISSIONS_POLICY = (
-    f'publickey-credentials-get=("{VAULT_SANDBOX_ORIGIN}"), '
-    f'publickey-credentials-create=("{VAULT_SANDBOX_ORIGIN}"), '
+    f'publickey-credentials-get=(self "{VAULT_SANDBOX_ORIGIN}"), '
+    f'publickey-credentials-create=(self "{VAULT_SANDBOX_ORIGIN}"), '
     f'clipboard-write=(self "{VAULT_SANDBOX_ORIGIN}")'
 )
 REMOTE_OAUTH_COOKIE_NAME = "__Host-vibe_remote_oauth"
