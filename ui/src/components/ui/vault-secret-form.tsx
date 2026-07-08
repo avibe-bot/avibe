@@ -160,9 +160,10 @@ export const VaultSecretForm: React.FC<{
   const [allowHosts, setAllowHosts] = useState<string[]>(requestSpec?.policy?.allowed_hosts ?? []);
   const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>(requestSpec?.policy?.auth?.type ?? 'bearer');
   const [fetchAuthName, setFetchAuthName] = useState(requestSpec?.policy?.auth?.name ?? '');
-  // Advanced now holds only proxy policy (allowed hosts + fetch auth), so it auto-opens
-  // for a spec that carries policy; description and tags moved out into the main body.
-  const [advancedOpen, setAdvancedOpen] = useState(Boolean(requestSpec?.policy));
+  // Advanced holds only proxy policy (allowed hosts + fetch auth). It stays collapsed by
+  // default — even when an agent's request prefills hosts — so the form isn't cluttered;
+  // a dot on the toggle marks prefilled policy and the user can expand to review it.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
@@ -233,8 +234,18 @@ export const VaultSecretForm: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [protection]);
 
+  // Seed editable fields from an agent's request spec ONCE per distinct request. The chat
+  // page rebuilds the request object on every poll/re-render, so keying this on the
+  // requestSpec *identity* re-ran it mid-edit and clobbered the user's choices — most
+  // visibly reverting a manual "Protected" pick to the spec's default while the sandbox
+  // iframe was still loading. Key on the stable request id so re-renders never overwrite
+  // what the user has since changed; a genuinely new request still re-seeds.
+  const seededSpecRef = useRef<string | null>(null);
   useEffect(() => {
     if (!requestSpec) return;
+    const seedKey = provisionRequestId ?? '__spec__';
+    if (seededSpecRef.current === seedKey) return;
+    seededSpecRef.current = seedKey;
     if (requestSpec.kind) setKind(requestSpec.kind);
     if (requestSpec.protection) setProtection(requestSpec.protection);
     if (requestSpec.description) setDescription(requestSpec.description);
@@ -244,9 +255,7 @@ export const VaultSecretForm: React.FC<{
     if (requestSpec.policy?.allowed_hosts) setAllowHosts(requestSpec.policy.allowed_hosts);
     if (requestSpec.policy?.auth?.type) setFetchAuthMode(requestSpec.policy.auth.type);
     if (requestSpec.policy?.auth?.name) setFetchAuthName(requestSpec.policy.auth.name);
-    // Only proxy policy lives under Advanced now, so open it only for a policy-bearing spec.
-    if (requestSpec.policy) setAdvancedOpen(true);
-  }, [requestSpec]);
+  }, [requestSpec, provisionRequestId]);
 
   // Edit mode: seed editable metadata from the existing secret. Name / kind / protection are
   // shown read-only (not seeded into editable controls); the value is never loaded; always_ask
@@ -824,8 +833,8 @@ export const VaultSecretForm: React.FC<{
   );
 
   // Advanced — collapsible proxy policy (allowed hosts + fetch auth). Shared by BOTH modes so the
-  // provide ($NAME) dialog hides/reveals these exactly like the create dialog; auto-opens for a
-  // spec that carries policy (see `advancedOpen` init) so an agent's prefilled hosts stay visible.
+  // provide ($NAME) dialog hides/reveals these exactly like the create dialog. Collapsed by default
+  // (even when a spec prefills hosts); the toggle shows a dot so prefilled policy isn't missed.
   const advancedSection = (
     <div className="flex flex-col overflow-hidden rounded-[10px] bg-surface-2">
       <button
@@ -948,7 +957,7 @@ export const VaultSecretForm: React.FC<{
         {tagsField}
 
         {/* Protection tier + Advanced proxy policy — identical to create mode (allowed hosts for a
-            brokered-fetch secret live under Advanced, which auto-opens when a spec prefilled them). */}
+            brokered-fetch secret live under Advanced, collapsed by default with a dot when prefilled). */}
         {protectionCards}
 
         {advancedSection}
