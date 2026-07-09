@@ -237,7 +237,9 @@ def test_rest_reveal_context_route(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.get_json()["context"]["purpose"] == "reveal"
+    body = response.get_json()
+    assert body["context"]["purpose"] == "reveal"
+    assert body["envelope"] == {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}
 
 
 def test_rest_agent_bindings_batch_route(monkeypatch):

@@ -2036,6 +2036,7 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             meta = vault_service.get_secret_meta(conn, secret_name)
             if meta.get("protection") != "protected":
                 raise VaultApiError("reveal context is only valid for protected secrets", code="not_protected", status=409)
+            envelope = vault_service.get_protected_record_envelope(conn, secret_name)
             key = _load_or_create_vault_daemon_binding_key(conn)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
@@ -2055,7 +2056,7 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
         "display": _operation_context_display(display_request, [meta]),
         "expiresAt": _isoformat_z(expires_at),
     }
-    return {"ok": True, "context": _signed_operation_context(context, key)}
+    return {"ok": True, "context": _signed_operation_context(context, key), "envelope": _envelope_payload(envelope)}
 
 
 def get_vault_settings() -> dict:

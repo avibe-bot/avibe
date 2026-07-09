@@ -130,6 +130,20 @@ def _assert_no_unlock_material(payload: object) -> None:
     assert "wm-protected" not in encoded
 
 
+def _payload_keys(payload: object) -> set[str]:
+    if isinstance(payload, dict):
+        keys = {str(key) for key in payload}
+        for value in payload.values():
+            keys.update(_payload_keys(value))
+        return keys
+    if isinstance(payload, list):
+        keys: set[str] = set()
+        for item in payload:
+            keys.update(_payload_keys(item))
+        return keys
+    return set()
+
+
 def _verified_signed_context(context: dict) -> dict:
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -1390,6 +1404,8 @@ def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
     assert context["requestId"].startswith("vrl_")
     assert context["display"]["secrets"] == [{"name": "PROTECTED_REVEAL", "kind": "static"}]
     assert context["display"]["sessionLabel"] == "Workbench - vaults"
+    assert result["envelope"] == {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}
+    assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(result))
 
 
 def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):

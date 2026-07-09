@@ -2486,6 +2486,13 @@ def get_protected_envelope(conn: Connection, name: str) -> Sealed:
     return _row_sealed(row)
 
 
+def get_protected_record_envelope(conn: Connection, name: str) -> Sealed:
+    row = _require_row(conn, name)
+    if row.get("protection") != "protected":
+        raise UnsupportedProtectionError(f"{name} is standard-tier")
+    return _row_sealed(row)
+
+
 def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
     """Bump usage + write a value-free ``proxied`` audit row after a brokered request."""
     row = _require_row(conn, name)
