@@ -1644,39 +1644,186 @@ def _signed_agent_binding(binding: dict[str, Any], key: dict[str, str]) -> dict[
     }
 
 
-def create_vault_agent_binding(payload: dict) -> dict:
+def _isoformat_z(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _display_text(value: Any, *, max_len: int) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value))
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    if len(text) > max_len:
+        return f"{text[: max_len - 3].rstrip()}..."
+    return text
+
+
+def _display_list(values: Any, *, max_items: int = 20, max_len: int = 80) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for item in values:
+        cleaned = _display_text(item, max_len=max_len)
+        if cleaned:
+            out.append(cleaned)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _display_source(selector: Any) -> dict[str, list[str]]:
+    from storage import vault_service
+
+    if not isinstance(selector, dict):
+        return {}
+    source: dict[str, list[str]] = {}
+    env = _display_list(selector.get("env"))
+    if env:
+        source["env"] = env
+    raw_tags = selector.get("tags")
+    plain_tags: list[str] = []
+    skills: list[str] = []
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            cleaned = _display_text(tag, max_len=80)
+            if not cleaned:
+                continue
+            if cleaned.startswith(vault_service.SKILL_TAG_PREFIX):
+                skill = _display_text(cleaned[len(vault_service.SKILL_TAG_PREFIX) :], max_len=80)
+                if skill:
+                    skills.append(skill)
+            else:
+                plain_tags.append(cleaned)
+    raw_skills = selector.get("skills")
+    if isinstance(raw_skills, list):
+        skills.extend(_display_list(raw_skills))
+    if plain_tags:
+        source["tags"] = list(dict.fromkeys(plain_tags))[:20]
+    if skills:
+        source["skills"] = list(dict.fromkeys(skills))[:20]
+    return source
+
+
+def _operation_context_display(
+    request_payload: dict[str, Any] | None,
+    secret_metas: list[dict[str, Any]],
+    *,
+    grant_ttl_seconds: int | None = None,
+) -> dict[str, Any]:
+    request_payload = request_payload if isinstance(request_payload, dict) else {}
+    card = request_payload.get("card") if isinstance(request_payload.get("card"), dict) else {}
+    display: dict[str, Any] = {
+        "secrets": [
+            {
+                "name": str(meta["name"]),
+                "kind": str(meta.get("kind") or "static") if meta.get("kind") in {"static", "keypair"} else "static",
+            }
+            for meta in secret_metas
+        ]
+    }
+    session = request_payload.get("session") if isinstance(request_payload.get("session"), dict) else {}
+    session_label = _display_text(session.get("label") or card.get("session_id"), max_len=120)
+    if session_label:
+        display["sessionLabel"] = session_label
+    command = _display_text(card.get("command"), max_len=240)
+    if command:
+        display["command"] = command
+    egress = _display_text(card.get("egress"), max_len=160)
+    if egress:
+        display["egress"] = egress
+    delivery = request_payload.get("delivery") if isinstance(request_payload.get("delivery"), dict) else {}
+    source = _display_source(card.get("source_selector") or delivery.get("source_selector"))
+    if source:
+        display["source"] = source
+    if grant_ttl_seconds is not None:
+        display["grantTtlSeconds"] = int(grant_ttl_seconds)
+    return display
+
+
+def _grant_duration_value_from_payload(payload: dict[str, Any]) -> Any | None:
+    from storage import vault_service
+
+    for key in ("grant_duration", "grantDuration", "last_grant_ttl", "lastGrantTtl"):
+        if key in payload:
+            return payload[key]
+    if payload.get("one_shot") is True or payload.get("oneShot") is True:
+        return vault_service.GRANT_DURATION_ONE_TIME
+    for key in ("ttl_seconds", "ttlSecs"):
+        if key in payload:
+            value = payload[key]
+            try:
+                if int(value) == vault_service.ONE_TIME_GRANT_TTL_SECONDS:
+                    return vault_service.GRANT_DURATION_ONE_TIME
+            except (TypeError, ValueError):
+                pass
+            return value
+    return None
+
+
+def _signed_operation_context(context: dict[str, Any], key: dict[str, str]) -> dict[str, Any]:
+    return _signed_agent_binding(context, key)
+
+
+def create_vault_agent_bindings_batch(payload: dict) -> dict:
     from storage import vault_crypto, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
     request_id = str(payload.get("request_id") or payload.get("requestId") or "").strip()
-    grant_id = str(payload.get("grant_id") or payload.get("grantId") or "").strip()
-    name = str(payload.get("name") or "").strip()
-    try:
-        ttl_seconds = int(payload.get("ttl_seconds") or payload.get("ttlSecs") or 300)
-    except (TypeError, ValueError) as exc:
-        raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
-    if not request_id or not grant_id:
-        raise VaultApiError("request_id and grant_id are required", code="invalid_request", status=409)
-    if ttl_seconds < 1 or ttl_seconds > 24 * 60 * 60:
-        raise VaultApiError("ttl_seconds out of bounds", code="invalid_grant")
-    if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+    if not request_id:
+        raise VaultApiError("request_id is required", code="missing_request_id")
 
     engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request_payload = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_UI)
+            option = _grant_option_from_request(conn, request_id)
+            grant_duration_value = _grant_duration_value_from_payload(payload)
+            remember_duration = grant_duration_value is not None
+            duration = vault_service.normalize_grant_duration(
+                grant_duration_value,
+                default=option.get("default_grant_duration") or vault_service.get_vault_settings(conn)["last_grant_ttl"],
+            )
+            grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
+            protected_metas = [member for member in grantable_members if member.get("protection") == "protected"]
+            member_order = {name: index for index, name in enumerate(option["member_names"])}
+            protected_metas.sort(key=lambda item: member_order.get(str(item.get("name")), 10_000))
+            if remember_duration:
+                vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.InvalidGrantError as exc:
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+
+    if not protected_metas:
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "grant_id": option["grant_id"],
+            "grant_duration": duration["last_grant_ttl"],
+            "ttl_seconds": duration["ttl_seconds"],
+            "items": [],
+        }
+
     with engine.begin() as conn:
-        option = _grant_option_from_request(conn, request_id)
-        if grant_id != option["grant_id"]:
-            raise VaultApiError("grant id does not match the approval request", code="invalid_request", status=409)
-        if name not in set(option["member_names"]):
-            raise VaultApiError("secret is not part of the approval request", code="invalid_request", status=409)
+        key = _load_or_create_vault_daemon_binding_key(conn)
+
+    for meta in protected_metas:
+        name = str(meta.get("name") or "")
         try:
-            meta = vault_service.get_secret_meta(conn, name)
-        except vault_service.SecretNotFoundError as exc:
-            raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+            valid_name = vault_crypto.is_valid_secret_name(name)
+        except Exception:
+            valid_name = False
+        if not valid_name:
+            raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
         if meta.get("protection") != "protected":
             raise VaultApiError("agent binding is only valid for protected secrets", code="not_protected", status=409)
-        key = _load_or_create_vault_daemon_binding_key(conn)
 
     try:
         _require_avault_grant_delivery_surface("resident agent grant")
@@ -1685,44 +1832,298 @@ def create_vault_agent_binding(payload: dict) -> dict:
         raise _vault_api_error_from_avault(exc, prefix="avault agent binding failed") from exc
 
     now = datetime.now(timezone.utc)
+    ttl_seconds = int(duration["ttl_seconds"])
     expires_at = now + timedelta(seconds=ttl_seconds)
     expires_at_unix = int(expires_at.timestamp())
-    approval_nonce = list(os.urandom(16))
-    context = {
-        "purpose": "agent-deliver",
-        "name": name,
-        "grantId": grant_id,
-        "ttlSecs": ttl_seconds,
-        "approvalNonce": approval_nonce,
-        "approvalExpiresAtUnix": expires_at_unix,
-        "operationHash": _agent_deliver_operation_hash(name, ttl_seconds),
+    display = _operation_context_display(request_payload, protected_metas, grant_ttl_seconds=ttl_seconds)
+    agent = {
+        "publicKey": {
+            "public_key": str(agent_pubkey["public_key"]),
+            "fingerprint": str(agent_pubkey["fingerprint"]),
+        },
+        "fingerprint": str(agent_pubkey["fingerprint"]),
+    }
+    items: list[dict[str, Any]] = []
+    issued_items: list[dict[str, Any]] = []
+    for meta in protected_metas:
+        approval_nonce = os.urandom(16)
+        context_request_id = f"vab_{uuid.uuid4().hex}"
+        context = {
+            "v": 2,
+            "purpose": "agent-deliver",
+            "requestId": context_request_id,
+            "grantId": option["grant_id"],
+            "display": display,
+            "agent": agent,
+            "expiresAt": _isoformat_z(expires_at),
+        }
+        signed_context = _signed_operation_context(context, key)
+        approval = {
+            "nonce": _b64(approval_nonce),
+            "expires_at_unix": expires_at_unix,
+        }
+        items.append(
+            {
+                "name": str(meta["name"]),
+                "context": signed_context,
+                "approval": approval,
+            }
+        )
+        issued_items.append(
+            {
+                "name": str(meta["name"]),
+                "request_id": context_request_id,
+                "approval": approval,
+            }
+        )
+    with engine.begin() as conn:
+        vault_service.record_request_agent_binding_approvals(
+            conn,
+            request_id,
+            {
+                "grant_id": option["grant_id"],
+                "grant_duration": duration["last_grant_ttl"],
+                "ttl_seconds": ttl_seconds,
+                "agent": agent,
+                "issued_at": _isoformat_z(now),
+                "expires_at": _isoformat_z(expires_at),
+                "items": issued_items,
+            },
+        )
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "grant_id": option["grant_id"],
+        "grant_duration": duration["last_grant_ttl"],
+        "ttl_seconds": ttl_seconds,
+        "agent": {
+            "publicKey": agent["publicKey"],
+            "fingerprint": str(agent_pubkey["fingerprint"]),
+        },
+        "agent_pubkey": {
+            "public_key": str(agent_pubkey["public_key"]),
+            "fingerprint": str(agent_pubkey["fingerprint"]),
+        },
+        "items": items,
+    }
+
+
+def create_vault_agent_binding(payload: dict) -> dict:
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    request_id = str(payload.get("request_id") or payload.get("requestId") or "").strip()
+    grant_id = str(payload.get("grant_id") or payload.get("grantId") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not request_id or not grant_id:
+        raise VaultApiError("request_id and grant_id are required", code="invalid_request", status=409)
+    if not vault_crypto.is_valid_secret_name(name):
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            option = _grant_option_from_request(conn, request_id)
+            if grant_id != option["grant_id"]:
+                raise vault_service.InvalidRequestError("grant id does not match the approval request")
+            if name not in set(option["member_names"]):
+                raise vault_service.InvalidRequestError("secret is not part of the approval request")
+            grant_duration_value = _grant_duration_value_from_payload(payload)
+            remember_duration = grant_duration_value is not None
+            duration = vault_service.normalize_grant_duration(
+                grant_duration_value,
+                default=option.get("default_grant_duration") or vault_service.get_vault_settings(conn)["last_grant_ttl"],
+            )
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("protection") != "protected":
+                raise VaultApiError("agent binding is only valid for protected secrets", code="not_protected", status=409)
+            key = _load_or_create_vault_daemon_binding_key(conn)
+            if remember_duration:
+                vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.InvalidGrantError as exc:
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+
+    try:
+        _require_avault_grant_delivery_surface("resident agent grant")
+        agent_pubkey = avault_agent_pubkey()
+    except AvaultError as exc:
+        raise _vault_api_error_from_avault(exc, prefix="avault agent binding failed") from exc
+
+    ttl_seconds = int(duration["ttl_seconds"])
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+    expires_at_unix = int(expires_at.timestamp())
+    approval_nonce = os.urandom(16)
+    approval = {"nonce": _b64(approval_nonce), "expires_at_unix": expires_at_unix}
+    agent = {
+        "publicKey": {
+            "public_key": str(agent_pubkey["public_key"]),
+            "fingerprint": str(agent_pubkey["fingerprint"]),
+        },
+        "fingerprint": str(agent_pubkey["fingerprint"]),
     }
     binding = {
         "challengeId": f"vab_{uuid.uuid4().hex}",
         "requestId": request_id,
         "grantId": grant_id,
-        "agent": {
-            "publicKey": {
-                "public_key": str(agent_pubkey["public_key"]),
-                "fingerprint": str(agent_pubkey["fingerprint"]),
-            },
-            "fingerprint": str(agent_pubkey["fingerprint"]),
+        "agent": agent,
+        "context": {
+            "purpose": "agent-deliver",
+            "name": name,
+            "grantId": grant_id,
+            "ttlSecs": ttl_seconds,
+            "approvalNonce": list(approval_nonce),
+            "approvalExpiresAtUnix": expires_at_unix,
+            "operationHash": _agent_deliver_operation_hash(name, ttl_seconds),
         },
-        "context": context,
-        "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
+        "expiresAt": _isoformat_z(expires_at),
     }
+    signed_binding = _signed_agent_binding(binding, key)
+    with engine.begin() as conn:
+        vault_service.record_request_agent_binding_approvals(
+            conn,
+            request_id,
+            {
+                "grant_id": grant_id,
+                "grant_duration": duration["last_grant_ttl"],
+                "ttl_seconds": ttl_seconds,
+                "agent": agent,
+                "issued_at": _isoformat_z(now),
+                "expires_at": _isoformat_z(expires_at),
+                "items": [{"name": name, "request_id": binding["challengeId"], "approval": approval}],
+            },
+        )
     return {
         "ok": True,
+        "request_id": request_id,
+        "grant_id": grant_id,
+        "grant_duration": duration["last_grant_ttl"],
+        "ttl_seconds": ttl_seconds,
         "agent_pubkey": {
             "public_key": str(agent_pubkey["public_key"]),
             "fingerprint": str(agent_pubkey["fingerprint"]),
         },
-        "binding": _signed_agent_binding(binding, key),
-        "approval": {
-            "nonce": _b64(bytes(approval_nonce)),
-            "expires_at_unix": expires_at_unix,
-        },
+        "binding": signed_binding,
+        "approval": approval,
     }
+
+
+def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
+    from storage import vault_crypto, vault_service
+
+    secret_name = str(name or "").strip()
+    if not vault_crypto.is_valid_secret_name(secret_name):
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        ttl_seconds = int(body.get("ttl_seconds") or body.get("ttlSecs") or 120)
+    except (TypeError, ValueError) as exc:
+        raise VaultApiError("ttl_seconds must be an integer", code="invalid_request") from exc
+    ttl_seconds = max(1, min(ttl_seconds, 10 * 60))
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.get_secret_meta(conn, secret_name)
+            if meta.get("protection") != "protected":
+                raise VaultApiError("reveal context is only valid for protected secrets", code="not_protected", status=409)
+            key = _load_or_create_vault_daemon_binding_key(conn)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    display_request = {
+        "card": {
+            "command": body.get("command"),
+            "egress": body.get("egress"),
+            "session_id": body.get("session_label") or body.get("sessionLabel"),
+            "source_selector": body.get("source") if isinstance(body.get("source"), dict) else {},
+        }
+    }
+    context = {
+        "v": 2,
+        "purpose": "reveal",
+        "requestId": f"vrl_{uuid.uuid4().hex}",
+        "display": _operation_context_display(display_request, [meta]),
+        "expiresAt": _isoformat_z(expires_at),
+    }
+    return {"ok": True, "context": _signed_operation_context(context, key)}
+
+
+def get_vault_settings() -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        settings = vault_service.get_vault_settings(conn)
+    return {"ok": True, "settings": settings, "policy": vault_service.vault_session_policy(settings)}
+
+
+def save_vault_settings(payload: dict) -> dict:
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    allowed = {"unlock_window_seconds", "strict_approvals", "last_grant_ttl"}
+    extra = set(payload) - allowed
+    if extra:
+        raise VaultApiError(f"unsupported vault settings fields: {', '.join(sorted(extra))}", code="invalid_request", status=409)
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            settings = vault_service.save_vault_settings(conn, payload)
+    except vault_service.InvalidGrantError as exc:
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    return {"ok": True, "settings": settings, "policy": vault_service.vault_session_policy(settings)}
+
+
+def _request_context_expires_at(request_payload: dict[str, Any]) -> str:
+    expires_at = _parse_iso_utc(request_payload.get("expires_at"))
+    if expires_at is None:
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=30 * 60)
+    return _isoformat_z(expires_at)
+
+
+def _attach_signed_sign_operation_context(request_id: str) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request_payload = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_UI)
+            if request_payload.get("request_type") != "sign":
+                raise vault_service.InvalidRequestError("operation context can only be attached to sign requests")
+            meta = vault_service.get_secret_meta(conn, str(request_payload.get("secret_name") or ""))
+            key = _load_or_create_vault_daemon_binding_key(conn)
+            context = {
+                "v": 2,
+                "purpose": "sign",
+                "requestId": request_id,
+                "display": _operation_context_display(request_payload, [meta]),
+                "expiresAt": _request_context_expires_at(request_payload),
+            }
+            signed = _signed_operation_context(context, key)
+            return vault_service.set_request_operation_context(
+                conn,
+                request_id,
+                signed,
+                audience=vault_service.REQUEST_AUDIENCE_AGENT,
+            )
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
 
 
 def _vault_webauthn_context(origin: str | None):
@@ -2256,6 +2657,7 @@ def request_vault_sign(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
+    request = _attach_signed_sign_operation_context(str(request["id"]))
     _publish_vaults_updated(
         scope="request",
         request_id=request.get("id"),
@@ -2314,14 +2716,11 @@ def _parse_iso_utc(value: object) -> datetime | None:
 
 
 def _grant_ttl_seconds(grant: dict) -> int:
-    created_at = _parse_iso_utc(grant.get("created_at"))
     expires_at = _parse_iso_utc(grant.get("expires_at"))
     if expires_at is None:
         return 1
-    if created_at is None:
-        return 1
-    approved_lifetime = (expires_at - created_at).total_seconds()
-    return max(1, int(round(approved_lifetime)))
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    return max(1, int(round(remaining)))
 
 
 def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
@@ -2456,6 +2855,84 @@ def _resident_agent_deks_from_payload(payload: dict, *, needs_agent_deks: bool) 
     return agent_deks
 
 
+def _agent_binding_record_items(record: dict[str, Any]) -> list[dict[str, Any]]:
+    items = record.get("items")
+    return items if isinstance(items, list) else []
+
+
+def _agent_binding_record_matches_agent(record: dict[str, Any], expected_pubkey: dict[str, Any] | None) -> bool:
+    if expected_pubkey is None:
+        return False
+    agent = record.get("agent") if isinstance(record.get("agent"), dict) else {}
+    public_key = agent.get("publicKey") if isinstance(agent.get("publicKey"), dict) else {}
+    return (
+        str(public_key.get("public_key") or "") == str(expected_pubkey.get("public_key") or "")
+        and str(public_key.get("fingerprint") or agent.get("fingerprint") or "")
+        == str(expected_pubkey.get("fingerprint") or "")
+    )
+
+
+def _request_agent_binding_records(request: dict[str, Any]) -> list[dict[str, Any]]:
+    delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+    records = delivery.get("agent_binding_approvals")
+    return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
+
+
+def _validate_agent_binding_approvals(
+    request: dict[str, Any],
+    *,
+    grant_id: str,
+    agent_deks: list[dict[str, Any]],
+    expected_pubkey: dict[str, Any] | None,
+    grant_duration: Any | None,
+) -> Any | None:
+    from storage import vault_service
+
+    records = _request_agent_binding_records(request)
+    if not records:
+        raise VaultApiError("resident agent DEKs do not match an issued binding context", code="invalid_grant")
+    expected_duration = (
+        vault_service.normalize_grant_duration(grant_duration)["last_grant_ttl"] if grant_duration is not None else None
+    )
+    now = datetime.now(timezone.utc)
+    matched_durations: set[Any] = set()
+    matched_expires_at: list[datetime] = []
+    for dek in agent_deks:
+        dek_name = str(dek.get("name") or "")
+        dek_approval = dek.get("approval")
+        matched_record: dict[str, Any] | None = None
+        for record in records:
+            if str(record.get("grant_id") or "") != grant_id:
+                continue
+            if not _agent_binding_record_matches_agent(record, expected_pubkey):
+                continue
+            record_expires_at = _parse_iso_utc(record.get("expires_at"))
+            if record_expires_at is None or record_expires_at <= now:
+                continue
+            duration = record.get("grant_duration")
+            if expected_duration is not None and vault_service.normalize_grant_duration(duration)["last_grant_ttl"] != expected_duration:
+                continue
+            for item in _agent_binding_record_items(record):
+                if item.get("name") == dek_name and item.get("approval") == dek_approval:
+                    matched_record = record
+                    break
+            if matched_record is not None:
+                break
+        if matched_record is None:
+            raise VaultApiError("resident agent DEKs do not match issued binding contexts", code="invalid_grant")
+        matched_durations.add(vault_service.normalize_grant_duration(matched_record.get("grant_duration"))["last_grant_ttl"])
+        record_expires_at = _parse_iso_utc(matched_record.get("expires_at"))
+        if record_expires_at is None:
+            raise VaultApiError("resident agent DEK binding context has invalid expiry", code="invalid_grant")
+        matched_expires_at.append(record_expires_at)
+    if len(matched_durations) != 1:
+        raise VaultApiError("resident agent DEK binding contexts disagree on grant duration", code="invalid_grant")
+    return {
+        "grant_duration": next(iter(matched_durations)),
+        "expires_at": _isoformat_z(min(matched_expires_at)),
+    }
+
+
 def _access_request_secret_name(request_id: str) -> str:
     from storage import vault_service
 
@@ -2507,6 +2984,7 @@ def _grant_option_from_request(conn, request_id: str) -> dict[str, Any]:
         "source_selector": source_selector,
         "purpose": purpose,
         "one_shot": bool(option.get("one_shot")),
+        "default_grant_duration": option.get("default_grant_duration"),
     }
 
 
@@ -2570,20 +3048,23 @@ def create_vault_grant(payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
-    ttl = payload.get("ttl_seconds")
-    try:
-        ttl_seconds = int(ttl) if ttl is not None else None
-    except (TypeError, ValueError) as exc:
-        raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
+    grant_duration = _grant_duration_value_from_payload(payload)
+    if grant_duration is not None:
+        try:
+            vault_service.normalize_grant_duration(grant_duration)
+        except vault_service.InvalidGrantError as exc:
+            raise VaultApiError(str(exc), code="invalid_grant") from exc
     request_id = payload.get("request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     request_id = str(request_id)
     engine = _vault_engine()
     preflight_error: Exception | None = None
+    request_for_grant: dict[str, Any] | None = None
     with engine.begin() as conn:
         try:
             option = _grant_option_from_request(conn, request_id)
+            request_for_grant = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
             member_names = payload.get("member_names") if isinstance(payload.get("member_names"), list) else option["member_names"]
             member_names = [str(name) for name in member_names if isinstance(name, str) and name]
             source_selector = payload.get("source_selector") if isinstance(payload.get("source_selector"), dict) else option["source_selector"]
@@ -2618,6 +3099,7 @@ def create_vault_grant(payload: dict) -> dict:
         raise VaultApiError("grant has no grantable static secrets", code="not_grantable", status=409)
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
     needs_agent_deks = bool(protected_member_names)
+    binding_grant_expires_at: str | None = None
 
     agent_deks = _resident_agent_deks_from_payload(payload, needs_agent_deks=needs_agent_deks)
     provided_names = {item["name"] for item in agent_deks}
@@ -2631,6 +3113,16 @@ def create_vault_grant(payload: dict) -> dict:
             validate_avault_agent_pubkey(expected_pubkey)
         except AvaultError as exc:
             raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
+        binding = _validate_agent_binding_approvals(
+            request_for_grant or {},
+            grant_id=option["grant_id"],
+            agent_deks=agent_deks,
+            expected_pubkey=expected_pubkey,
+            grant_duration=grant_duration,
+        )
+        if grant_duration is None:
+            grant_duration = binding["grant_duration"]
+        binding_grant_expires_at = binding["expires_at"]
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:
@@ -2643,7 +3135,8 @@ def create_vault_grant(payload: dict) -> dict:
                 source_selector=source_selector,
                 purpose=purpose,
                 session_id=str(session_id) if session_id else None,
-                ttl_seconds=ttl_seconds,
+                grant_duration=grant_duration,
+                expires_at=binding_grant_expires_at,
                 request_id=request_id,
                 inherit_request_session=inherit_request_session,
                 expected_member_names=expected_member_names,
@@ -2682,7 +3175,7 @@ def create_vault_grant(payload: dict) -> dict:
             raise AvaultError("avault agent grant cached fewer DEKs than requested")
         agent_relayed = True
         with engine.begin() as conn:
-            grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]), ttl_seconds=relay_ttl)
+            grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]), expires_at=str(grant.get("expires_at") or ""))
     except (vault_service.InvalidGrantError, vault_service.GrantNotActiveError) as exc:
         if agent_relayed:
             _cleanup_failed_agent_grant(
@@ -3216,6 +3709,14 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
+
+    if protected_response is not None and isinstance(protected_response.get("request"), dict):
+        request_id_for_context = str(protected_response["request"].get("id") or "")
+        if request_id_for_context and protected_response.get("code") in {"browser_signature_required", "approval_required"}:
+            request_with_context = _attach_signed_sign_operation_context(request_id_for_context)
+            protected_response["request"] = request_with_context
+            if approval_required_request is not None and approval_required_request.get("id") == request_id_for_context:
+                approval_required_request = request_with_context
 
     if protected_response is not None:
         if protected_event is not None:

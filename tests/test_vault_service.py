@@ -321,16 +321,38 @@ def test_create_grant_stores_final_fields_and_readiness_by_grant_id(vault):
     assert release_refs == [{"grant_id": grant["id"]}]
 
 
-def test_create_grant_caps_ttl_to_approval_options(vault):
+def test_create_grant_rejects_removed_ttl_options(vault):
     _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
 
     with vault.begin() as conn:
         req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]})
-        grant = _grant_from_request(conn, req, ttl_seconds=86_400)
+
+        with pytest.raises(vs.InvalidGrantError):
+            _grant_from_request(conn, req, ttl_seconds=86_400)
+
+
+def test_create_grant_one_time_uses_short_one_shot_window(vault):
+    _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]}, requester={"session_id": "ses_1"})
+        option = req["card"]["grant_options"][0]
+        grant = vs.create_grant(
+            conn,
+            member_names=option["member_snapshot"],
+            source_selector=option["source_selector"],
+            purpose=option["purpose"],
+            request_id=req["id"],
+            grant_duration="one-time",
+        )
+        settings = vs.get_vault_settings(conn)
 
     created = datetime.fromisoformat(grant["created_at"])
     expires = datetime.fromisoformat(grant["expires_at"])
-    assert expires - created == timedelta(seconds=3600)
+    assert expires - created == timedelta(seconds=60)
+    assert grant["one_shot"] is True
+    assert grant["session_id"] == "ses_1"
+    assert settings["last_grant_ttl"] == "one-time"
 
 
 def test_sibling_approval_requires_matching_purpose(vault):
