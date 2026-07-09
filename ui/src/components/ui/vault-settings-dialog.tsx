@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi, type VaultSettings } from '@/context/ApiContext';
 import { setVaultSandboxPolicy } from '@/lib/vaultSandboxPolicy';
+import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { SegmentedRadio } from './segmented';
 import { Switch } from './switch';
@@ -28,6 +29,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const vault = useProtectedVault();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +69,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
   // the daemon rejects the change (otherwise the control would show a value that wasn't saved). The
   // daemon returns the normalized settings + policy, so mirror both back on success.
   const save = useCallback(
-    async (patch: Partial<VaultSettings>, revert: () => void) => {
+    async (patch: Partial<VaultSettings>, revert: () => void): Promise<boolean> => {
       setSaving(true);
       setError(null);
       try {
@@ -75,14 +77,16 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
         if (!res?.ok) {
           setError(res?.message || t('vaults.settings.saveFailed'));
           revert();
-          return;
+          return false;
         }
         setUnlockWindow(unlockWindowChoice(res.settings?.unlock_window_seconds));
         setStrict(Boolean(res.settings?.strict_approvals));
         setVaultSandboxPolicy(res.policy);
+        return true;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : String(err));
         revert();
+        return false;
       } finally {
         setSaving(false);
       }
@@ -99,7 +103,13 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
   const onStrictChange = (next: boolean) => {
     const prev = strict;
     setStrict(next);
-    void save({ strict_approvals: next }, () => setStrict(prev));
+    void save({ strict_approvals: next }, () => setStrict(prev)).then((ok) => {
+      // Enabling Strict must bite now, not only on the next unlock. The sandbox receives policy only
+      // at handshake/unlock (§6.5), so if the vault is currently unlocked, end that (still non-Strict)
+      // window by locking — the next protected ceremony then re-unlocks under Strict. Disabling is a
+      // relaxation and safely waits for the next unlock, so we don't force a lock in that direction.
+      if (ok && next && !prev && vault.status === 'unlocked') vault.lock();
+    });
   };
 
   return (

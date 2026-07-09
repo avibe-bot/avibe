@@ -2282,7 +2282,7 @@
       "unlockWindowHelp": "How long the vault stays unlocked in this browser after you unlock it. Applies the next time you unlock.",
       "minutes": "{{count}} min",
       "strict": "Strict approvals",
-      "strictHelp": "Ask for your passkey on every approval and reveal — not just an in-sandbox confirmation. Signing always asks regardless."
+      "strictHelp": "Ask for your passkey on every approval and reveal — not just an in-sandbox confirmation. Signing always asks regardless. Turning this on re-locks the vault so it takes effect right away."
     },
     "reveal": {
       "show": "Show value",
