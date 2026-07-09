@@ -63,15 +63,18 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
   }, [open, api, t]);
 
   // Auto-save on change — a settings dialog with two controls reads best as immediate toggles. The
-  // daemon returns the normalized settings + policy, so mirror both back into local state.
+  // control is updated optimistically for instant feedback, so `revert` restores the prior value if
+  // the daemon rejects the change (otherwise the control would show a value that wasn't saved). The
+  // daemon returns the normalized settings + policy, so mirror both back on success.
   const save = useCallback(
-    async (patch: Partial<VaultSettings>) => {
+    async (patch: Partial<VaultSettings>, revert: () => void) => {
       setSaving(true);
       setError(null);
       try {
         const res = await api.saveVaultSettings(patch);
         if (!res?.ok) {
           setError(res?.message || t('vaults.settings.saveFailed'));
+          revert();
           return;
         }
         setUnlockWindow(unlockWindowChoice(res.settings?.unlock_window_seconds));
@@ -79,6 +82,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
         setVaultSandboxPolicy(res.policy);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : String(err));
+        revert();
       } finally {
         setSaving(false);
       }
@@ -87,13 +91,15 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
   );
 
   const onUnlockWindowChange = (next: UnlockWindowChoice) => {
+    const prev = unlockWindow;
     setUnlockWindow(next);
-    void save({ unlock_window_seconds: Number(next) });
+    void save({ unlock_window_seconds: Number(next) }, () => setUnlockWindow(prev));
   };
 
   const onStrictChange = (next: boolean) => {
+    const prev = strict;
     setStrict(next);
-    void save({ strict_approvals: next });
+    void save({ strict_approvals: next }, () => setStrict(prev));
   };
 
   return (

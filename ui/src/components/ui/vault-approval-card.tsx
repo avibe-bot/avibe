@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, Globe, KeyRound, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -154,6 +154,13 @@ export const VaultApprovalCard: React.FC<{
   // Approver-chosen agent access duration (protocol v2 §7.1): the daemon remembers the last choice,
   // so seed from `GET /api/vault/settings` and default to 5 min until it loads. Access requests only.
   const [grantDuration, setGrantDuration] = useState<GrantDurationChoice>('300');
+  // Once the approver has picked a duration, the async settings seed must not clobber it if the GET
+  // happens to resolve after the click.
+  const grantTouchedRef = useRef(false);
+  const pickGrantDuration = useCallback((next: GrantDurationChoice) => {
+    grantTouchedRef.current = true;
+    setGrantDuration(next);
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
@@ -165,7 +172,7 @@ export const VaultApprovalCard: React.FC<{
     api
       .getVaultSettings()
       .then((res) => {
-        if (alive && res?.ok) setGrantDuration(grantChoiceFromLastTtl(res.settings?.last_grant_ttl));
+        if (alive && !grantTouchedRef.current && res?.ok) setGrantDuration(grantChoiceFromLastTtl(res.settings?.last_grant_ttl));
       })
       .catch(() => undefined);
     return () => {
@@ -484,7 +491,7 @@ export const VaultApprovalCard: React.FC<{
           <span className="text-[13px] font-medium text-foreground">{t('vaults.approval.grantDuration')}</span>
           <SegmentedRadio<GrantDurationChoice>
             value={grantDuration}
-            onChange={setGrantDuration}
+            onChange={pickGrantDuration}
             disabled={busy}
             ariaLabel={t('vaults.approval.grantDuration')}
             options={[
