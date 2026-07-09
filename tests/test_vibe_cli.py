@@ -1017,7 +1017,7 @@ def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
     refreshed = []
     doctor_calls = []
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
-    monkeypatch.setattr(cli, "_doctor", lambda: doctor_calls.append(True) or {"ok": True, "groups": []})
+    monkeypatch.setattr(cli, "_doctor", lambda *, deep=False: doctor_calls.append(deep) or {"ok": True, "groups": []})
 
     result = cli._repair_doctor_targets(["stale-restart-state"], dry_run=False)
 
@@ -1049,16 +1049,18 @@ def test_doctor_parser_accepts_repair_target_and_dry_run():
 def test_doctor_parser_accepts_fast_and_deep_modes():
     parser = cli.build_parser()
 
+    default_args = parser.parse_args(["doctor"])
     fast_args = parser.parse_args(["doctor", "--fast"])
     deep_args = parser.parse_args(["doctor", "--deep"])
 
+    assert default_args.doctor_deep is False
     assert fast_args.doctor_deep is False
     assert deep_args.doctor_deep is True
 
 
-def test_cmd_doctor_passes_fast_mode_to_diagnostics(monkeypatch, capsys):
+def test_cmd_doctor_passes_default_fast_mode_to_diagnostics(monkeypatch, capsys):
     parser = cli.build_parser()
-    args = parser.parse_args(["doctor", "--fast"])
+    args = parser.parse_args(["doctor"])
     calls = []
 
     monkeypatch.setattr(
@@ -1070,6 +1072,23 @@ def test_cmd_doctor_passes_fast_mode_to_diagnostics(monkeypatch, capsys):
 
     assert cli.cmd_doctor(args) == 0
     assert calls == [False]
+    capsys.readouterr()
+
+
+def test_cmd_doctor_passes_deep_mode_to_diagnostics(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "--deep"])
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *, deep=False: calls.append(deep)
+        or {"mode": "deep", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
+    )
+
+    assert cli.cmd_doctor(args) == 0
+    assert calls == [True]
     capsys.readouterr()
 
 

@@ -7924,7 +7924,7 @@ def cmd_watch_remove(watch_id: str):
     return 0
 
 
-def _doctor(*, deep: bool = True):
+def _doctor(*, deep: bool = False):
     """Run diagnostic checks and return results in UI-compatible format.
 
     Returns:
@@ -8814,7 +8814,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False) -> dict
         "results": results,
     }
     if not dry_run and any(result["status"] != "skipped" for result in results):
-        payload["doctor"] = _doctor()
+        payload["doctor"] = _doctor(deep=True)
     return payload
 
 
@@ -9945,7 +9945,7 @@ def cmd_doctor(args=None):
         _print_doctor_repair_result(result)
         return 0 if result.get("ok") else 1
 
-    deep = bool(getattr(args, "doctor_deep", True)) if args is not None else True
+    deep = bool(getattr(args, "doctor_deep", False)) if args is not None else False
     result = _doctor(deep=deep)
 
     # Terminal-friendly output
@@ -10367,7 +10367,7 @@ def build_parser():
         "--fast",
         dest="doctor_deep",
         action="store_false",
-        default=True,
+        default=False,
         help="Skip deep service process scans for a faster status-oriented diagnostic run.",
     )
     doctor_depth_group.add_argument(
