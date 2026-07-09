@@ -2065,6 +2065,8 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             key = _load_or_create_vault_daemon_binding_key(conn)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
     display_request = {
         "card": {
@@ -2161,6 +2163,15 @@ def _attach_signed_sign_operation_context(
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+
+
+def _sign_request_response_audience(request: dict[str, Any]) -> str:
+    from storage import vault_service
+
+    card = request.get("card") if isinstance(request.get("card"), dict) else {}
+    if "secret_unlock_material" in card or "unlock_material" in card:
+        return vault_service.REQUEST_AUDIENCE_UI
+    return vault_service.REQUEST_AUDIENCE_AGENT
 
 
 def _vault_webauthn_context(origin: str | None):
@@ -3752,7 +3763,7 @@ def vault_sign(payload: dict) -> dict:
         if request_id_for_context and protected_response.get("code") in {"browser_signature_required", "approval_required"}:
             request_with_context = _attach_signed_sign_operation_context(
                 request_id_for_context,
-                audience=vault_service.REQUEST_AUDIENCE_UI,
+                audience=_sign_request_response_audience(protected_response["request"]),
             )
             protected_response["request"] = request_with_context
             if approval_required_request is not None and approval_required_request.get("id") == request_id_for_context:

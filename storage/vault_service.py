@@ -2492,6 +2492,7 @@ def get_protected_record_envelope(conn: Connection, name: str) -> Sealed:
     row = _require_row(conn, name)
     if row.get("protection") != "protected":
         raise UnsupportedProtectionError(f"{name} is standard-tier")
+    _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
 
@@ -3163,6 +3164,41 @@ def set_request_operation_context(
     return _request_row_payload(dict(updated), conn=conn, audience=audience)
 
 
+def _agent_binding_record_item_names(record: dict[str, Any]) -> set[str]:
+    items = record.get("items")
+    if not isinstance(items, list):
+        return set()
+    return {str(item.get("name") or "") for item in items if isinstance(item, dict) and item.get("name")}
+
+
+def _agent_binding_record_superseded(existing_record: dict[str, Any], new_record: dict[str, Any]) -> bool:
+    existing_names = _agent_binding_record_item_names(existing_record)
+    new_names = _agent_binding_record_item_names(new_record)
+    if not existing_names or not new_names:
+        return False
+    existing_grant_id = str(existing_record.get("grant_id") or "")
+    new_grant_id = str(new_record.get("grant_id") or "")
+    if existing_grant_id and new_grant_id and existing_grant_id != new_grant_id:
+        return False
+    return existing_names.issubset(new_names)
+
+
+def _agent_binding_approval_record_cap(row_dict: dict[str, Any], new_record: dict[str, Any]) -> int:
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = delivery if isinstance(delivery, dict) else {}
+    card = delivery_payload.get("card") if isinstance(delivery_payload.get("card"), dict) else {}
+    grant_options = card.get("grant_options") if isinstance(card, dict) else []
+    member_count = 0
+    if isinstance(grant_options, list):
+        for option in grant_options:
+            if not isinstance(option, dict):
+                continue
+            members = option.get("member_snapshot")
+            if isinstance(members, list):
+                member_count = max(member_count, len([name for name in members if isinstance(name, str) and name]))
+    return max(1, member_count, len(_agent_binding_record_item_names(new_record)))
+
+
 def record_request_agent_binding_approvals(
     conn: Connection,
     request_id: str,
@@ -3178,9 +3214,16 @@ def record_request_agent_binding_approvals(
     records = delivery_payload.get("agent_binding_approvals")
     if not isinstance(records, list):
         records = []
+    records = [
+        existing
+        for existing in records
+        if isinstance(existing, dict) and not _agent_binding_record_superseded(existing, record)
+    ]
     records.append(record)
     if max_records is not None:
         records = records[-max(1, max_records) :]
+    else:
+        records = records[-_agent_binding_approval_record_cap(row_dict, record) :]
     delivery_payload["agent_binding_approvals"] = records
     conn.execute(
         vault_requests.update()

@@ -1347,6 +1347,32 @@ def test_agent_bindings_batch_rejects_mixed_duration_fields(monkeypatch):
     assert exc.value.code == "invalid_request"
 
 
+def test_agent_bindings_batch_retries_replace_stale_approval_records(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    for name in ("PROTECTED_BATCH_RETRY_A", "PROTECTED_BATCH_RETRY_B"):
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["batch-retry"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    request = api.request_vault_access(
+        {"source_selector": {"tags": ["batch-retry"]}, "session_id": "ses_batch_retry"}
+    )["request"]
+
+    for _index in range(5):
+        api.create_vault_agent_bindings_batch({"request_id": request["id"], "grant_duration": 300})
+
+    with api._vault_engine().connect() as conn:
+        stored = vault_service.get_request(conn, request["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    records = stored["delivery"]["agent_binding_approvals"]
+    assert len(records) == 1
+    assert [item["name"] for item in records[0]["items"]] == ["PROTECTED_BATCH_RETRY_A", "PROTECTED_BATCH_RETRY_B"]
+
+
 def test_legacy_agent_binding_records_all_protected_members(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
@@ -1393,6 +1419,43 @@ def test_legacy_agent_binding_records_all_protected_members(monkeypatch, avault_
     with api._vault_engine().connect() as conn:
         request = vault_service.get_request(conn, requested["request"]["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
     assert len(request["delivery"]["agent_binding_approvals"]) == 25
+
+
+def test_legacy_agent_binding_retries_replace_stale_approval_records(monkeypatch, avault_p2):
+    names = [f"PROTECTED_RETRY_{index}" for index in range(3)]
+    for name in names:
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["retry"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    requested = api.request_vault_access({"source_selector": {"tags": ["retry"]}, "session_id": "ses_retry"})
+    option = requested["request"]["card"]["grant_options"][0]
+
+    for name in names:
+        api.create_vault_agent_binding(
+            {"request_id": requested["request"]["id"], "grant_id": option["grant_id"], "name": name, "grant_duration": 300}
+        )
+    for _index in range(5):
+        api.create_vault_agent_binding(
+            {
+                "request_id": requested["request"]["id"],
+                "grant_id": option["grant_id"],
+                "name": names[0],
+                "grant_duration": 300,
+            }
+        )
+
+    with api._vault_engine().connect() as conn:
+        request = vault_service.get_request(conn, requested["request"]["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    records = request["delivery"]["agent_binding_approvals"]
+    record_names = [record["items"][0]["name"] for record in records]
+    assert len(records) == len(names)
+    assert record_names.count(names[0]) == 1
+    assert set(record_names) == set(names)
 
 
 def test_vault_settings_roundtrip_and_policy():
@@ -1447,6 +1510,26 @@ def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
         "envelopeHash": api._envelope_hash(result["envelope"]),
     }
     assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(result))
+
+
+def test_create_vault_reveal_context_rejects_protected_keypair(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REVEAL_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_reveal_context("PROTECTED_REVEAL_KEY")
+
+    assert exc.value.code == "keypair_not_value_deliverable"
 
 
 def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
@@ -3585,6 +3668,45 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
     assert context["purpose"] == "sign"
     assert context["requestId"] == result["request"]["id"]
     assert context["display"]["secrets"] == [{"name": "ETH_KEY", "kind": "keypair"}]
+
+
+def test_protected_sign_agent_audience_keeps_unlock_material_omitted(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
+    api.create_vault_secret(
+        {
+            "name": "ETH_AGENT_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct-agent", "nonce": "n-agent", "wrap_meta": "wm-agent"},
+            "public_meta": public_meta,
+        }
+    )
+    digest = "00" * 32
+
+    result = api.vault_sign(
+        {
+            "name": "ETH_AGENT_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+            "requester": {"source": "agent-cli", "session_id": "ses_agent"},
+            "delivery": {"session_id": "ses_agent"},
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "browser_signature_required"
+    assert "secret_unlock_material" not in json.dumps(result["request"])
+    assert "unlock_material" not in json.dumps(result["request"])
+    signed_context = result["request"]["delivery"]["operation_context"]
+    assert result["request"]["card"]["operation_context"] == signed_context
+    context = _verified_signed_context(signed_context)
+    assert context["purpose"] == "sign"
+    assert context["display"]["secrets"] == [{"name": "ETH_AGENT_KEY", "kind": "keypair"}]
 
 
 def test_protected_sign_request_requires_pinned_signing_public_key(monkeypatch):
