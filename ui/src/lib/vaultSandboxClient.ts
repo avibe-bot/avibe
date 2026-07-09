@@ -485,9 +485,13 @@ export class VaultSandboxClient {
     return this.request<VaultSandboxSetupResult>('setup', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 
-  unlock(payload: { wrapMeta: string }): Promise<VaultSandboxUnlockResult> {
-    // Carry the latest policy so the sandbox arms the unlock window with the configured length
-    // and Strict setting for this session (protocol v2 §6.5).
+  async unlock(payload: { wrapMeta: string }): Promise<VaultSandboxUnlockResult> {
+    // Pull the freshest daemon policy right before arming the window: a settings change made in
+    // another tab only broadcasts a lock (not the new policy), and the handshake fetch is
+    // best-effort, so the cached mirror alone can arm an unlock with stale settings. Refreshing
+    // here makes persisted window/Strict values take effect on the next unlock in every tab
+    // (protocol v2 §6.5). Best-effort — a failed refresh keeps the last-known policy.
+    await refreshVaultSandboxPolicy();
     return this.request<VaultSandboxUnlockResult>(
       'unlock',
       { wrapMeta: payload.wrapMeta, policy: getVaultSandboxPolicy() },

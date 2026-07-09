@@ -243,6 +243,12 @@ export function useProtectedVault() {
         sessionVault.status = 'needs-setup';
         vaultLockExpiresAt = null;
       }
+      // Reconciling an existing sandbox session mutates the shared module state, so wake every
+      // `subscribeVaultLock` listener (e.g. sibling VaultLockIndicators) — not just this hook's
+      // `setStatus` below. The deleted `armVaultAutoLock()` path used to do this; without it a
+      // remount that finds an already-unlocked session leaves siblings on stale lock state until
+      // the next `vault.state` event.
+      notifyVaultLockChange();
       setStatus(sessionVault.status);
     } catch (err) {
       sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
