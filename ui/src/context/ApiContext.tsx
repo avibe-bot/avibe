@@ -388,7 +388,7 @@ export type ApiContextType = {
   larkTempWsStop: () => Promise<any>;
   wechatStartLogin: () => Promise<any>;
   wechatPollLogin: (sessionKey: string, verifyCode?: string) => Promise<any>;
-  doctor: () => Promise<any>;
+  doctor: (options?: { deep?: boolean }) => Promise<any>;
   opencodeOptions: (cwd: string) => Promise<any>;
   opencodeSetupPermission: () => Promise<{ ok: boolean; message: string; config_path: string }>;
   opencodePermissionStatus: () => Promise<{ ok: boolean; permission_allowed: boolean; config_path: string }>;
@@ -2098,7 +2098,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     larkTempWsStop: () => postJson('/api/lark/temp_ws/stop', {}),
     wechatStartLogin: () => postJson('/api/wechat/qr_login/start', {}),
     wechatPollLogin: (sessionKey, verifyCode) => postJson('/api/wechat/qr_login/poll', { session_key: sessionKey, verify_code: verifyCode || undefined }),
-    doctor: () => postJson('/api/doctor', {}),
+    doctor: (options = {}) => postJson('/api/doctor', options.deep ? { deep: true } : {}),
     opencodeOptions: (cwd) => postJson('/api/opencode/options', { cwd }),
     opencodeSetupPermission: () => postJson('/api/opencode/setup-permission', {}),
     opencodePermissionStatus: () => getJson('/api/opencode/permission-status'),

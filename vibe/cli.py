@@ -616,12 +616,13 @@ def _current_cli_install_family() -> str | None:
     return None
 
 
-def _service_install_family_items() -> list[dict]:
+def _service_install_family_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     service_pids = [pid for pid in [owner_pid] if pid]
-    service_pids.extend(runtime.extra_service_process_pids(owner_pid=owner_pid))
+    if detect_extra_processes:
+        service_pids.extend(runtime.extra_service_process_pids(owner_pid=owner_pid))
 
     stale_pids: list[int] = []
     for pid in sorted(set(service_pids)):
@@ -699,7 +700,7 @@ def _restart_state_items() -> list[dict]:
     return items
 
 
-def _service_lifecycle_items() -> list[dict]:
+def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
     pid_path = paths.get_runtime_pid_path()
     recorded_pid: int | None = None
@@ -710,12 +711,6 @@ def _service_lifecycle_items() -> list[dict]:
 
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     lock_holder_pid = runtime.service_lock_holder_pid()
-    extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
-    unverified_service_pids = runtime.extra_service_process_pids(
-        owner_pid=owner_pid,
-        include_unverified=True,
-    )
-    unverified_service_pids = [pid for pid in unverified_service_pids if pid not in set(extra_service_pids)]
     status = runtime.read_status()
     status_pid = status.get("service_pid")
 
@@ -758,26 +753,41 @@ def _service_lifecycle_items() -> list[dict]:
     else:
         _add_doctor_item(items, "pass", "Runtime status service_pid is absent")
 
-    if extra_service_pids:
-        _add_doctor_item(
-            items,
-            "warn",
-            f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
-            "Run `vibe doctor repair duplicate-service-processes` to stop extra service processes.",
-            code="runtime.extra_service_process",
-            repair_target="duplicate-service-processes",
-            repair_risk="medium",
+    if detect_extra_processes:
+        extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+        unverified_service_pids = runtime.extra_service_process_pids(
+            owner_pid=owner_pid,
+            include_unverified=True,
         )
-    elif unverified_service_pids:
-        _add_doctor_item(
-            items,
-            "warn",
-            f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
-            "Inspect the process environment before starting another service.",
-            code="runtime.unverified_service_process",
-        )
+        unverified_service_pids = [pid for pid in unverified_service_pids if pid not in set(extra_service_pids)]
+        if extra_service_pids:
+            _add_doctor_item(
+                items,
+                "warn",
+                f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
+                "Run `vibe doctor repair duplicate-service-processes` to stop extra service processes.",
+                code="runtime.extra_service_process",
+                repair_target="duplicate-service-processes",
+                repair_risk="medium",
+            )
+        elif unverified_service_pids:
+            _add_doctor_item(
+                items,
+                "warn",
+                f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
+                "Inspect the process environment before starting another service.",
+                code="runtime.unverified_service_process",
+            )
+        else:
+            _add_doctor_item(items, "pass", "No extra Avibe service process detected")
     else:
-        _add_doctor_item(items, "pass", "No extra Avibe service process detected")
+        _add_doctor_item(
+            items,
+            "pass",
+            "Deep service process scan skipped in fast diagnostics",
+            "Run deep diagnostics to check duplicate service processes.",
+            code="runtime.deep_service_process_scan_skipped",
+        )
 
     return items
 
@@ -7914,11 +7924,12 @@ def cmd_watch_remove(watch_id: str):
     return 0
 
 
-def _doctor():
+def _doctor(*, deep: bool = True):
     """Run diagnostic checks and return results in UI-compatible format.
 
     Returns:
         {
+            "mode": "deep|fast",
             "groups": [{"name": "...", "items": [{"status": "pass|warn|fail", "message": "...", "action": "..."}]}],
             "summary": {"pass": 0, "warn": 0, "fail": 0},
             "ok": bool
@@ -8222,8 +8233,8 @@ def _doctor():
         summary["pass"] += 1
 
     for item in [
-        *_service_lifecycle_items(),
-        *_service_install_family_items(),
+        *_service_lifecycle_items(detect_extra_processes=deep),
+        *_service_install_family_items(detect_extra_processes=deep),
         *_restart_state_items(),
         *_runtime_architecture_items(),
     ]:
@@ -8245,6 +8256,7 @@ def _doctor():
     ok = summary["fail"] == 0
 
     result = {
+        "mode": "deep" if deep else "fast",
         "groups": groups,
         "summary": summary,
         "ok": ok,
@@ -9933,7 +9945,8 @@ def cmd_doctor(args=None):
         _print_doctor_repair_result(result)
         return 0 if result.get("ok") else 1
 
-    result = _doctor()
+    deep = bool(getattr(args, "doctor_deep", True)) if args is not None else True
+    result = _doctor(deep=deep)
 
     # Terminal-friendly output
     print("\n  Avibe Diagnostics")
@@ -10348,6 +10361,20 @@ def build_parser():
         nargs="*",
         choices=DOCTOR_REPAIR_TARGETS,
         help="Repair target(s). Defaults to all safe first-phase repair targets.",
+    )
+    doctor_depth_group = doctor_parser.add_mutually_exclusive_group()
+    doctor_depth_group.add_argument(
+        "--fast",
+        dest="doctor_deep",
+        action="store_false",
+        default=True,
+        help="Skip deep service process scans for a faster status-oriented diagnostic run.",
+    )
+    doctor_depth_group.add_argument(
+        "--deep",
+        dest="doctor_deep",
+        action="store_true",
+        help="Run full diagnostics, including duplicate service process scans.",
     )
     doctor_parser.add_argument("--fix", action="store_true", help="Alias for 'vibe doctor repair'.")
     doctor_parser.add_argument("--dry-run", action="store_true", help="Show repair actions without changing state.")

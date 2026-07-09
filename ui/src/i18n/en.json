@@ -1647,6 +1647,7 @@
     "title": "System Status",
     "copyReport": "Copy Report",
     "runChecks": "Run Checks",
+    "runDeepChecks": "Deep Diagnostics",
     "passed": "Passed",
     "warnings": "Warnings",
     "failed": "Failed"

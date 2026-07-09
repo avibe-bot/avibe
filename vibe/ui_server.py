@@ -4472,7 +4472,9 @@ async def wechat_qr_login_poll():
 def doctor_post():
     from vibe.cli import _doctor
 
-    result = _doctor()
+    payload = request.json or {}
+    deep = _parse_explicit_bool(payload.get("deep")) or _parse_explicit_bool(request.args.get("deep"))
+    result = _doctor(deep=deep)
     return jsonify(result)
 
 

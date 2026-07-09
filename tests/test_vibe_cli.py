@@ -665,6 +665,24 @@ def test_service_lifecycle_doctor_warns_when_extra_service_process_exists(monkey
     assert warning["repair"]["target"] == "duplicate-service-processes"
 
 
+def test_fast_service_lifecycle_doctor_skips_extra_process_scan(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    cli.paths.ensure_data_dirs()
+    cli.runtime.write_status("running", "healthy", 1234, None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 1234)
+
+    def fail_process_scan(*args, **kwargs):
+        raise AssertionError("fast diagnostics must not scan service processes")
+
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_process_scan)
+
+    items = cli._service_lifecycle_items(detect_extra_processes=False)
+
+    skipped = next(item for item in items if item.get("code") == "runtime.deep_service_process_scan_skipped")
+    assert skipped["status"] == "pass"
+
+
 def test_home_migration_doctor_warns_when_legacy_home_is_unmigrated(monkeypatch, tmp_path):
     home = tmp_path / "home"
     legacy_home = home / ".vibe_remote"
@@ -695,6 +713,20 @@ def test_service_install_doctor_warns_when_service_uses_legacy_package(monkeypat
 
     warning = next(item for item in items if item.get("code") == "runtime.stale_install_process")
     assert warning["repair"]["target"] == "stale-install-runtime"
+
+
+def test_fast_service_install_doctor_skips_extra_process_scan(monkeypatch):
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    def fail_process_scan(*args, **kwargs):
+        raise AssertionError("fast diagnostics must not scan service processes")
+
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_process_scan)
+
+    items = cli._service_install_family_items(detect_extra_processes=False)
+
+    assert any(item["status"] == "pass" for item in items)
 
 
 def test_tool_family_detection_resolves_uv_tool_launcher_symlink(tmp_path):
@@ -1012,6 +1044,33 @@ def test_doctor_parser_accepts_repair_target_and_dry_run():
     assert args.doctor_action == "repair"
     assert args.doctor_repair_targets == ["duplicate-service-processes"]
     assert args.dry_run is True
+
+
+def test_doctor_parser_accepts_fast_and_deep_modes():
+    parser = cli.build_parser()
+
+    fast_args = parser.parse_args(["doctor", "--fast"])
+    deep_args = parser.parse_args(["doctor", "--deep"])
+
+    assert fast_args.doctor_deep is False
+    assert deep_args.doctor_deep is True
+
+
+def test_cmd_doctor_passes_fast_mode_to_diagnostics(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "--fast"])
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *, deep=True: calls.append(deep)
+        or {"mode": "fast", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
+    )
+
+    assert cli.cmd_doctor(args) == 0
+    assert calls == [False]
+    capsys.readouterr()
 
 
 def test_doctor_bare_dry_run_does_not_request_repair():

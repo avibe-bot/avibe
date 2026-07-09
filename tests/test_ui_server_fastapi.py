@@ -77,6 +77,46 @@ def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
     assert calls == [False]
 
 
+def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
+    from vibe import cli
+
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *, deep=True: calls.append(deep)
+        or {"mode": "fast", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
+    )
+
+    client = app.test_client()
+    response = client.post("/api/doctor", json={}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert response.get_json()["mode"] == "fast"
+    assert calls == [False]
+
+
+def test_doctor_post_can_run_deep_diagnostics(monkeypatch):
+    from vibe import cli
+
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *, deep=True: calls.append(deep)
+        or {"mode": "deep", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
+    )
+
+    client = app.test_client()
+    response = client.post("/api/doctor", json={"deep": True}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert response.get_json()["mode"] == "deep"
+    assert calls == [True]
+
+
 def test_route_path_to_fastapi_converts_named_path_converter():
     assert route_path_to_fastapi("/files/<path:file_path>") == "/files/{file_path:path}"
 

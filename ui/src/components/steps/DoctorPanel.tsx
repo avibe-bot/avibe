@@ -61,16 +61,17 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const [loading, setLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState<'fast' | 'deep' | null>(null);
   const [results, setResults] = useState<any>(null);
 
-  const runDoctor = async () => {
-    setLoading(true);
+  const runDoctor = async (deep = false) => {
+    const mode = deep ? 'deep' : 'fast';
+    setLoadingMode(mode);
     try {
-      const res = await api.doctor();
+      const res = await api.doctor({ deep });
       setResults(res);
     } finally {
-      setLoading(false);
+      setLoadingMode(null);
     }
   };
 
@@ -130,8 +131,30 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
               {t('doctor.copyReport')}
             </Button>
           )}
-          <Button type="button" variant="brand" size="xs" onClick={runDoctor} disabled={loading}>
-            <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} strokeWidth={2.5} />
+          <Button
+            type="button"
+            variant="secondary"
+            size="xs"
+            onClick={() => void runDoctor(true)}
+            disabled={loadingMode !== null}
+          >
+            <RefreshCw
+              className={clsx('size-3.5', loadingMode === 'deep' && 'animate-spin')}
+              strokeWidth={2.5}
+            />
+            {t('doctor.runDeepChecks')}
+          </Button>
+          <Button
+            type="button"
+            variant="brand"
+            size="xs"
+            onClick={() => void runDoctor(false)}
+            disabled={loadingMode !== null}
+          >
+            <RefreshCw
+              className={clsx('size-3.5', loadingMode === 'fast' && 'animate-spin')}
+              strokeWidth={2.5}
+            />
             {t('doctor.runChecks')}
           </Button>
         </div>

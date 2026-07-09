@@ -1647,6 +1647,7 @@
     "title": "系统状态",
     "copyReport": "复制报告",
     "runChecks": "运行检查",
+    "runDeepChecks": "深诊断",
     "passed": "通过",
     "warnings": "警告",
     "failed": "失败"
