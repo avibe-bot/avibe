@@ -434,12 +434,21 @@ export const VaultSecretForm: React.FC<{
     setSigningAddresses(null);
   }, [protection, kind, clearStaticValue, clearSelectedFile, applySigningKey]);
 
-  // Drop a pre-generated protected keypair. Only ciphertext + public data is held, so there is no
-  // private-key material to zero — but a stale envelope (bound to an old name/kind) must never be
-  // submitted, so callers clear it whenever the name, kind, or tier changes.
+  // Monotonic token guarding the async generate: bumped on every clear/regenerate so a slow
+  // in-flight seal that resolves after the form moved on (rename, kind/tier switch, or a newer
+  // generate) is discarded instead of applied. Without it, an envelope sealed for the old name —
+  // whose AAD binds that name — could be submitted under a different name and be unopenable.
+  const keypairGenRef = useRef(0);
+
+  // Drop a pre-generated protected keypair and invalidate any in-flight generate. Only ciphertext +
+  // public data is held, so there is no private-key material to zero — but a stale envelope (bound
+  // to an old name/kind) must never be submitted, so callers clear it whenever the name, kind, or
+  // tier changes.
   const clearProtectedKeypair = useCallback(() => {
+    keypairGenRef.current += 1;
     setProtectedKeypair(null);
     setKeypairError(null);
+    setGeneratingKeypair(false);
   }, []);
 
   // Generate the protected signing key inside the sandbox (protocol v2 §7.2): the secp256k1 key is
@@ -448,17 +457,22 @@ export const VaultSecretForm: React.FC<{
   // just calls again and discards the previous envelope.
   const generateProtectedKeypair = async () => {
     if (!secretName || generatingKeypair) return;
+    const gen = (keypairGenRef.current += 1);
     setGeneratingKeypair(true);
     setKeypairError(null);
     try {
       const sealed = await protectedVault.sealValue(secretName, 'keypair');
+      // The form moved on (rename / kind or tier switch / newer generate) — discard this result so a
+      // name-bound envelope can't be submitted under a name it wasn't sealed for.
+      if (gen !== keypairGenRef.current) return;
       if (!sealed.publicKey) throw new Error(t('vaults.dialog.errors.invalidPublicKey'));
       setProtectedKeypair(sealed);
     } catch (err) {
+      if (gen !== keypairGenRef.current) return;
       setProtectedKeypair(null);
       setKeypairError(err instanceof Error ? err.message : String(err));
     } finally {
-      setGeneratingKeypair(false);
+      if (gen === keypairGenRef.current) setGeneratingKeypair(false);
     }
   };
 
