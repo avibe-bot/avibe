@@ -2788,6 +2788,14 @@ def _remaining_ttl_seconds(expires_at: datetime) -> int:
     return max(1, int(round(remaining)))
 
 
+def _binding_relay_ttl_seconds(expires_at: datetime, requested_ttl_seconds: int) -> int:
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        raise VaultApiError("resident agent DEK binding context has expired", code="invalid_grant")
+    remaining_seconds = max(1, int(remaining))
+    return min(requested_ttl_seconds, remaining_seconds)
+
+
 def _grant_ttl_seconds(grant: dict) -> int:
     expires_at = _parse_iso_utc(grant.get("expires_at"))
     if expires_at is None:
@@ -3215,11 +3223,15 @@ def create_vault_grant(payload: dict) -> dict:
             grant_duration = binding["grant_duration"]
         binding_grant_expires_at = binding["expires_at"]
         try:
-            binding_relay_ttl_seconds = int(binding["ttl_seconds"])
+            binding_requested_ttl_seconds = int(binding["ttl_seconds"])
         except (KeyError, TypeError, ValueError) as exc:
             raise VaultApiError("resident agent DEK binding context has invalid ttl", code="invalid_grant") from exc
-        if binding_relay_ttl_seconds < 1:
+        if binding_requested_ttl_seconds < 1:
             raise VaultApiError("resident agent DEK binding context has invalid ttl", code="invalid_grant")
+        binding_expires_at = _parse_iso_utc(binding_grant_expires_at)
+        if binding_expires_at is None:
+            raise VaultApiError("resident agent DEK binding context has invalid expiry", code="invalid_grant")
+        binding_relay_ttl_seconds = _binding_relay_ttl_seconds(binding_expires_at, binding_requested_ttl_seconds)
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:

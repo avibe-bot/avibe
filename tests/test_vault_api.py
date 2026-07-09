@@ -2482,7 +2482,7 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
     )
     assert created["grant"]["runtime_member_count"] == 1
     assert created["grant"]["delivery_ready"] is True
-    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
+    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 300
     assert agent_grant.call_args.kwargs["deks"] == [
         {
             "name": "GRANT_KEY",
@@ -3318,9 +3318,9 @@ def test_create_grant_api_accepts_fingerprint_only_agent_pubkey(monkeypatch, ava
     assert agent_grant.call_args.kwargs["expected_pubkey"] == {"fingerprint": issued["agent_pubkey"]["fingerprint"]}
 
 
-def test_create_grant_api_caps_grant_expiry_but_relays_issued_ttl(monkeypatch, avault_p2):
+def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 60})
     monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
     requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
@@ -3346,7 +3346,44 @@ def test_create_grant_api_caps_grant_expiry_but_relays_issued_ttl(monkeypatch, a
 
     grant_expires_at = datetime.fromisoformat(created["grant"]["expires_at"]).astimezone(timezone.utc)
     assert grant_expires_at <= binding_expires_at
-    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
+    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 60
+    assert agent_grant.call_args.kwargs["ttl_secs"] < 300
+
+
+def test_create_grant_api_rejects_expired_binding_before_claiming_request(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+    binding_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with api._vault_engine().begin() as conn:
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == requested["request"]["id"])).mappings().one()
+        delivery = json.loads(row["delivery"])
+        delivery["agent_binding_approvals"][0]["expires_at"] = api._isoformat_z(binding_expires_at)
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == requested["request"]["id"])
+            .values(delivery=json.dumps(delivery))
+        )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+                **issued,
+            }
+        )
+
+    assert exc.value.code == "invalid_grant"
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])).scalar_one()
+        grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
+    assert grants == []
 
 
 def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch, avault_p2):
