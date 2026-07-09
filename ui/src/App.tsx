@@ -31,6 +31,7 @@ import { StatusProvider } from './context/StatusContext';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import { ToastProvider } from './context/ToastContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
 import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
@@ -416,6 +417,7 @@ function App() {
     // data-theme on <html>, so the fallback still picks up the theme even from out here.
     <ErrorBoundary variant="page">
     <ThemeProvider>
+      <VaultSandboxAppearanceBridge />
       <StatusProvider>
         <ToastProvider>
           <ApiProvider>

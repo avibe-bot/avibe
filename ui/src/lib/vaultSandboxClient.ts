@@ -13,6 +13,7 @@ import {
   VAULT_SANDBOX_PINNED_MANIFEST,
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
+import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 
 const CHANNEL = 'avibe.vault.crypto';
 const VERSION = 1;
@@ -30,6 +31,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
 
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | 'handshake';
+type ParentOnlySandboxOp = 'set-appearance';
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -113,6 +115,7 @@ export class VaultSandboxError extends Error {
 
 let integrityPromise: Promise<void> | null = null;
 let singleton: Promise<VaultSandboxClient> | null = null;
+let activeClient: VaultSandboxClient | null = null;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value != null && !Array.isArray(value);
@@ -218,6 +221,7 @@ export class VaultSandboxClient {
   private pending = new Map<string, PendingRequest>();
   private readyPromise: Promise<ReadyMessage>;
   private interactiveDepth = 0;
+  private handshaken = false;
 
   private constructor(iframe: HTMLIFrameElement) {
     this.iframe = iframe;
@@ -257,6 +261,7 @@ export class VaultSandboxClient {
     iframe.src = VAULT_SANDBOX_IFRAME_URL;
     document.body.appendChild(iframe);
     await client.handshake();
+    activeClient = client;
     return client;
   }
 
@@ -349,9 +354,31 @@ export class VaultSandboxClient {
         parentOrigin: window.location.origin,
         nonce: randomId(),
         expectedBuildHash: VAULT_SANDBOX_EXPECTED_BUILD_HASH,
+        appearance: getVaultSandboxAppearance(),
       },
       { timeoutMs: DEFAULT_TIMEOUT_MS },
     );
+    this.handshaken = true;
+    this.setAppearance(getVaultSandboxAppearance());
+  }
+
+  setAppearance(appearance: VaultSandboxAppearance): void {
+    if (!this.handshaken) return;
+    try {
+      this.target.postMessage(
+        {
+          channel: CHANNEL,
+          version: VERSION,
+          id: randomId(),
+          op: 'set-appearance' satisfies ParentOnlySandboxOp,
+          payload: appearance,
+        },
+        VAULT_SANDBOX_ORIGIN,
+      );
+    } catch {
+      // The iframe may be mid-navigation or already removed; the next real
+      // sandbox request will surface availability errors if the client is stale.
+    }
   }
 
   private async request<T>(
@@ -463,8 +490,13 @@ export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
   if (!singleton) {
     singleton = VaultSandboxClient.create().catch((err) => {
       singleton = null;
+      activeClient = null;
       throw err;
     });
   }
   return singleton;
+}
+
+export function getActiveVaultSandboxClient(): VaultSandboxClient | null {
+  return activeClient;
 }
