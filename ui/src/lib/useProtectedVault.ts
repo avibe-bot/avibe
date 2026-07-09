@@ -175,6 +175,19 @@ function commitUnlocked(
   armVaultAutoLock(expiresAt);
 }
 
+function commitLocked(wrapMeta: string): void {
+  if (vaultAutoLockTimer) {
+    clearTimeout(vaultAutoLockTimer);
+    vaultAutoLockTimer = null;
+  }
+  vaultLockExpiresAt = null;
+  sessionVault.wrapMeta = baseVmkWrapMeta(wrapMeta);
+  sessionVault.status = 'locked';
+  sessionVault.freshSetup = false;
+  sessionVault.authzFactorRegistration = null;
+  notifyVaultLockChange();
+}
+
 export function webauthnAvailable(): boolean {
   return typeof window !== 'undefined' && typeof crypto !== 'undefined' && Boolean(crypto.subtle);
 }
@@ -324,26 +337,46 @@ export function useProtectedVault() {
     sessionVault.authzFactorRegistration = null;
   }, []);
 
+  const syncProtectedOperationStatus = useCallback(async (wrapMeta: string) => {
+    const sandbox = await getVaultSandboxClient();
+    const baseWrapMeta = baseVmkWrapMeta(wrapMeta);
+    const sandboxStatus = await sandbox.status(baseWrapMeta);
+    if (sandboxStatus.state === 'unlocked') {
+      commitUnlocked(baseWrapMeta, false, sandboxStatus.expiresAt);
+      setStatus('unlocked');
+      setError(null);
+      return;
+    }
+    commitLocked(wrapMeta);
+    setStatus('locked');
+  }, []);
+
   const signProtectedRequest = useCallback(
     async (
       material: ProtectedUnlockMaterial,
       signingContext: VaultSandboxSigningContext,
       scheme: SignatureScheme,
     ): Promise<SignatureResult> => {
-      if (!enforceAutoLock()) throw new Error('vault-locked');
-      armVaultAutoLock();
-      return (await getVaultSandboxClient()).sign({ material, scheme, signingContext });
+      const sandbox = await getVaultSandboxClient();
+      try {
+        return await sandbox.sign({ material, scheme, signingContext });
+      } finally {
+        void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
+      }
     },
-    [],
+    [syncProtectedOperationStatus],
   );
 
   const releaseProtectedDelivery = useCallback(
     async (material: ProtectedUnlockMaterial, agentBinding: DaemonAgentBinding): Promise<BlindBox> => {
-      if (!enforceAutoLock()) throw new Error('vault-locked');
-      armVaultAutoLock();
-      return (await getVaultSandboxClient()).releaseDEK({ material, agentBinding });
+      const sandbox = await getVaultSandboxClient();
+      try {
+        return await sandbox.releaseDEK({ material, agentBinding });
+      } finally {
+        void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
+      }
     },
-    [],
+    [syncProtectedOperationStatus],
   );
 
   const lock = useCallback(() => {
