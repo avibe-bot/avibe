@@ -24,6 +24,7 @@ import {
   Search,
   SquareTerminal,
   Trash2,
+  Undo2,
   Upload,
   X,
   type LucideIcon,
@@ -37,6 +38,7 @@ import {
   contentUrl,
   deletePath,
   downloadFile,
+  undoDelete,
   fileBrowserErrorMessage,
   fileMeta,
   FilesApiError,
@@ -59,6 +61,7 @@ import {
   type NameHit,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
+import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { FilePreview } from '../ui/file-preview';
 import { InlineNameInput } from '../ui/inline-name-input';
@@ -422,21 +425,95 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     [refreshAll, t],
   );
 
-  const removeItem = useCallback(
-    async (item: RowItem) => {
-      setMenu(null);
-      if (!window.confirm(t('apps.fileBrowser.confirmDelete', { name: item.entry.name }))) return;
-      try {
-        await deletePath(item.full, item.entry.kind === 'dir');
-        setError(null);
-        setSelected((s) => (s === item.full ? null : s));
-        refreshAll();
-      } catch (e: unknown) {
-        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.deleteFailed')));
-      }
+  // ---- Undo bar (delete + drag-move) -------------------------------------------------------------
+  // One entry at a time: a new undoable action replaces the bar (the previous action simply ages out
+  // of its window — matching the backend's bounded staging). Delete reverts via the backend token;
+  // move reverts with a plain reverse move. The bar auto-dismisses; dismissal ≠ token expiry (the
+  // backend keeps staged deletes far longer), it just keeps the UI calm.
+  type UndoEntry =
+    | { kind: 'delete'; label: string; token: string }
+    | { kind: 'move'; label: string; from: string; to: string };
+  const [undoEntry, setUndoEntry] = useState<UndoEntry | null>(null);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const undoTimerRef = useRef<number | null>(null);
+  const showUndo = useCallback((entry: UndoEntry) => {
+    if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+    setUndoEntry(entry);
+    undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
     },
-    [t, refreshAll],
+    [],
   );
+  const performUndo = useCallback(async () => {
+    const entry = undoEntry;
+    if (!entry || undoBusy) return;
+    if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+    setUndoBusy(true);
+    try {
+      if (entry.kind === 'delete') await undoDelete(entry.token);
+      else await movePath(entry.from, entry.to);
+      setError(null);
+      refreshAll();
+      // Only clear OUR entry: a slow in-flight undo must not wipe the bar of a NEWER action the
+      // user performed meanwhile (that entry's own timer still governs it).
+      setUndoEntry((cur) => (cur === entry ? null : cur));
+    } catch (e: unknown) {
+      // exists → the original spot is occupied again; expired → the staged copy is gone. Both land
+      // in the standard error strip via the shared code→message mapping.
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.undoFailed')));
+      const code = e instanceof FilesApiError ? e.code : null;
+      if (code === 'exists' || code === 'expired') {
+        // Terminal: the revert can never succeed — drop the bar.
+        setUndoEntry((cur) => (cur === entry ? null : cur));
+      } else {
+        // Transient (network etc.): the staged copy / reverse move is still viable — keep the bar
+        // for a retry, with a fresh dismiss window (the original timer was cleared above).
+        setUndoEntry((cur) => {
+          if (cur !== entry) return cur;
+          undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
+          return cur;
+        });
+      }
+    } finally {
+      setUndoBusy(false);
+    }
+  }, [undoEntry, undoBusy, refreshAll, t]);
+
+  // ---- Delete (product ConfirmDialog + post-delete Undo) ----------------------------------------
+  // The context menu only REQUESTS the delete; the destructive ConfirmDialog performs it. When the
+  // backend staged the entry (undo_token non-null) the undo bar offers a short revert window; a
+  // permanent delete (cross-device / oversized) simply shows no bar.
+  const [pendingDelete, setPendingDelete] = useState<RowItem | null>(null);
+  const removeItem = useCallback((item: RowItem) => {
+    setMenu(null);
+    setPendingDelete(item);
+  }, []);
+  const performDelete = useCallback(async () => {
+    const item = pendingDelete;
+    if (!item) return;
+    try {
+      const result = await deletePath(item.full, item.entry.kind === 'dir');
+      setError(null);
+      setSelected((s) => (s === item.full ? null : s));
+      if (result.undo_token) {
+        showUndo({ kind: 'delete', label: item.entry.name, token: result.undo_token });
+      } else {
+        // Permanent delete: any older bar now describes a stale world (its target may be the very
+        // entry that just vanished) — the newest action owns the bar, and it has nothing to offer.
+        if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+        setUndoEntry(null);
+      }
+      refreshAll();
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.deleteFailed')));
+    } finally {
+      setPendingDelete(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingDelete, t, refreshAll]);
 
   // ---- Context menu ----------------------------------------------------------------------------
   // `item` is null for blank space (offers New File/Folder only).
@@ -462,13 +539,18 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       // a folder into its own subtree, which surfaces as an error below.
       if (!item || item.dir === destDir || item.full === destDir) return;
       try {
-        await movePath(item.full, joinPath(destDir, item.entry.name));
+        const moved = joinPath(destDir, item.entry.name);
+        await movePath(item.full, moved);
         setError(null);
+        // A mis-drop is easy (drop targets are everywhere), so offer a short revert: the reverse
+        // move needs no backend support — just move it back where it came from.
+        showUndo({ kind: 'move', label: item.entry.name, from: moved, to: item.full });
         refreshAll();
       } catch (e: unknown) {
         setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.moveFailed')));
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [t, refreshAll],
   );
   // Drop-target props for any folder (row / rail / breadcrumb). Only active while a drag is in flight
@@ -485,6 +567,41 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       void moveInto(destDir);
     },
   });
+
+  // Promise-bridged replace prompt: the upload workers are async, so the dialog answer comes back
+  // as a promise. Prompts are CHAINED — with parallel workers, two simultaneous name clashes must
+  // not overwrite each other's pending dialog; each waits for the previous answer.
+  const [replaceAsk, setReplaceAsk] = useState<{ name: string; resolve: (ok: boolean) => void } | null>(null);
+  const askChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  // Unmount (window closed mid-question) must not hang the upload workers: the CURRENT pending ask
+  // resolves `false` from the cleanup below, and QUEUED asks short-circuit to `false` instead of
+  // setState-ing an unmounted component (which would leave their promises forever pending).
+  const unmountedRef = useRef(false);
+  const pendingAskRef = useRef<{ resolve: (ok: boolean) => void } | null>(null);
+  useEffect(() => {
+    pendingAskRef.current = replaceAsk;
+  }, [replaceAsk]);
+  useEffect(
+    () => () => {
+      unmountedRef.current = true;
+      pendingAskRef.current?.resolve(false);
+    },
+    [],
+  );
+  const confirmReplace = useCallback((name: string) => {
+    const next = askChainRef.current.then(() =>
+      unmountedRef.current ? false : new Promise<boolean>((resolve) => setReplaceAsk({ name, resolve })),
+    );
+    askChainRef.current = next.catch(() => false);
+    return next;
+  }, []);
+  const answerReplace = useCallback(
+    (ok: boolean) => {
+      replaceAsk?.resolve(ok);
+      setReplaceAsk(null);
+    },
+    [replaceAsk],
+  );
 
   // ---- Upload (toolbar button + OS drag-drop) --------------------------------------------------
   // Files land in the folder that was current when the upload STARTED (`dest`), uploaded with a
@@ -528,8 +645,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           refreshAllRef.current();
         } catch (e) {
           if (e instanceof FilesApiError && e.code === 'exists') {
-            // Name clash: ask (the codebase's window.confirm pattern) and retry with overwrite on yes.
-            if (window.confirm(t('apps.fileBrowser.uploadReplace', { name: file.name }))) {
+            // Name clash: ask via the product ConfirmDialog and retry with overwrite on yes.
+            if (await confirmReplace(file.name)) {
               try {
                 await uploadFile(dest, file, { overwrite: true });
                 refreshAllRef.current();
@@ -557,7 +674,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setUploadProgress(null);
       setError(failures.length ? failures.join(' · ') : null);
     },
-    [cwd, t],
+    [cwd, t, confirmReplace],
   );
 
   const onUploadPick = useCallback(
@@ -902,6 +1019,35 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </div>
         </div>
 
+        {/* Undo bar: one recent revertible action (delete via backend token / move via reverse
+            move). Auto-dismisses; doesn't steal focus from the listing. */}
+        {undoEntry && (
+          <div className="flex items-center gap-2 border-t border-border bg-surface-2/80 px-3 py-1.5 text-[12px]">
+            <span className="min-w-0 flex-1 truncate text-muted">
+              {t(undoEntry.kind === 'delete' ? 'apps.fileBrowser.deletedNotice' : 'apps.fileBrowser.movedNotice', { name: undoEntry.label })}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-6 shrink-0 gap-1 px-2 text-[12px] text-cyan"
+              disabled={undoBusy}
+              onClick={() => void performUndo()}
+            >
+              {undoBusy ? <Loader2 className="size-3 animate-spin" /> : <Undo2 className="size-3" />}
+              {t('apps.fileBrowser.undo')}
+            </Button>
+            <button
+              type="button"
+              aria-label={t('common.close')}
+              onClick={() => setUndoEntry(null)}
+              className="shrink-0 text-muted transition hover:text-foreground"
+            >
+              <X className="size-3" strokeWidth={2.5} />
+            </button>
+          </div>
+        )}
+
         {/* Status bar: item count + selection, with the hidden-files toggle. */}
         <div className="flex items-center gap-3 border-t border-border bg-surface-2/60 px-3 py-1.5 text-[11px] text-muted">
           <label className="flex items-center gap-1.5">
@@ -956,6 +1102,32 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </div>
         </div>
       )}
+
+      {/* Destructive delete confirmation (product dialog; replaces window.confirm). The wording
+          stays neutral about undoability — whether the backend could stage the entry is only known
+          after the call, and the undo bar communicates it. */}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+        title={t('apps.fileBrowser.deleteTitle', { name: pendingDelete?.entry.name ?? '' })}
+        description={pendingDelete?.entry.kind === 'dir' ? t('apps.fileBrowser.deleteDirHint') : undefined}
+        confirmLabel={t('apps.fileBrowser.delete')}
+        destructive
+        onConfirm={performDelete}
+      />
+
+      {/* Upload name-clash replace prompt (promise-bridged from the async upload workers). */}
+      <ConfirmDialog
+        open={replaceAsk !== null}
+        onOpenChange={(open) => {
+          if (!open) answerReplace(false);
+        }}
+        title={t('apps.fileBrowser.uploadReplace', { name: replaceAsk?.name ?? '' })}
+        confirmLabel={t('apps.fileBrowser.replace')}
+        onConfirm={() => answerReplace(true)}
+      />
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} itemCount={menuItemCount}>

@@ -27,6 +27,12 @@ export interface ConfirmDialogProps {
   confirmDisabled?: boolean;
   /** Runs on confirm; while it's pending a spinner shows and the dialog can't be dismissed. */
   onConfirm: () => void | Promise<void>;
+  /**
+   * Re-cascade a fixed theme onto the dialog subtree. The dialog PORTALS to <body>, so inside a
+   * theme-locked surface (e.g. the dark Editor window) it would otherwise render with the global
+   * theme and clash with its opener.
+   */
+  dataTheme?: 'dark';
 }
 
 /**
@@ -46,6 +52,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   holdSeconds = 0,
   confirmDisabled = false,
   onConfirm,
+  dataTheme,
 }) => {
   const { t } = useTranslation();
   const [remaining, setRemaining] = React.useState(0);
@@ -91,7 +98,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         if (!busy) onOpenChange(next);
       }}
     >
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md" data-theme={dataTheme}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}

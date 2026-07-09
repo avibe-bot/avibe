@@ -29,6 +29,7 @@ import {
   writeFile,
   type FsEntry,
 } from '../../lib/filesApi';
+import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { InlineNameInput } from '../ui/inline-name-input';
 
@@ -329,22 +330,28 @@ export const FileTree: React.FC<{
   }, []);
   const closeMenu = useCallback(() => setMenu(null), []);
 
-  const removeEntry = useCallback(
-    async (dir: string, entry: FsEntry) => {
-      setMenu(null);
-      if (!window.confirm(t('apps.fileBrowser.confirmDelete', { name: entry.name }))) return;
-      const full = joinPath(dir, entry.name);
-      try {
-        await deletePath(full, entry.kind === 'dir');
-        setError(null);
-        bump(dir);
-        onEntryDeleted?.(full);
-      } catch (e: unknown) {
-        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.deleteFailed')));
-      }
-    },
-    [t, bump, onEntryDeleted],
-  );
+  // The menu only REQUESTS the delete; the destructive ConfirmDialog performs it. (The staged-undo
+  // bar lives in the Files app; the editor explorer keeps plain confirmed deletes for now.)
+  const [pendingDelete, setPendingDelete] = useState<{ dir: string; entry: FsEntry } | null>(null);
+  const removeEntry = useCallback((dir: string, entry: FsEntry) => {
+    setMenu(null);
+    setPendingDelete({ dir, entry });
+  }, []);
+  const performDelete = useCallback(async () => {
+    const pending = pendingDelete;
+    if (!pending) return;
+    const full = joinPath(pending.dir, pending.entry.name);
+    try {
+      await deletePath(full, pending.entry.kind === 'dir');
+      setError(null);
+      bump(pending.dir);
+      onEntryDeleted?.(full);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.deleteFailed')));
+    } finally {
+      setPendingDelete(null);
+    }
+  }, [pendingDelete, t, bump, onEntryDeleted]);
 
   const ctx = useMemo<TreeCtx>(
     () => ({ activePath, showHidden, onOpenFile, versionOf, edit, startEdit, cancelEdit, commitEdit, openMenu }),
@@ -425,6 +432,21 @@ export const FileTree: React.FC<{
           )}
         </ContextMenu>
       )}
+
+      {/* Destructive delete confirmation. dataTheme keeps the portaled dialog dark inside the
+          dark-locked Editor window instead of picking up the global theme. */}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+        title={t('apps.fileBrowser.deleteTitle', { name: pendingDelete?.entry.name ?? '' })}
+        description={pendingDelete?.entry.kind === 'dir' ? t('apps.fileBrowser.deleteDirHint') : undefined}
+        confirmLabel={t('apps.fileBrowser.delete')}
+        destructive
+        dataTheme="dark"
+        onConfirm={performDelete}
+      />
     </Ctx.Provider>
   );
 };
