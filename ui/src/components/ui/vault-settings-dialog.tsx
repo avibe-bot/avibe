@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi, type VaultSettings } from '@/context/ApiContext';
 import { setVaultSandboxPolicy } from '@/lib/vaultSandboxPolicy';
-import { resetVaultSandboxClient } from '@/lib/vaultSandboxClient';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { SegmentedRadio } from './segmented';
@@ -36,10 +35,11 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
   const [error, setError] = useState<string | null>(null);
   const [unlockWindow, setUnlockWindow] = useState<UnlockWindowChoice>('600');
   const [strict, setStrict] = useState(false);
-  // Monotonic save token: if two changes race (e.g. window + Strict fired before `saving` disables
-  // the controls), only the newest PATCH's response is applied to state + the policy mirror, so a
-  // slower older response can't overwrite the newer settings.
-  const saveGenRef = useRef(0);
+  // Serialize autosaves: only one PATCH in flight at a time. The controls are `disabled` while
+  // saving, but this synchronous ref also blocks the sub-frame race (two changes fired before the
+  // disable renders), so responses never interleave — a stale failure can't leave an optimistic
+  // value displayed, and a slow response can't overwrite a newer one.
+  const saveInFlightRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -75,14 +75,11 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
   // daemon returns the normalized settings + policy, so mirror both back on success.
   const save = useCallback(
     async (patch: Partial<VaultSettings>, revert: () => void): Promise<boolean> => {
-      const gen = (saveGenRef.current += 1);
+      saveInFlightRef.current = true;
       setSaving(true);
       setError(null);
       try {
         const res = await api.saveVaultSettings(patch);
-        // A newer save started while this one was in flight — let the newest response own the
-        // controls + policy mirror, and don't clear `saving` out from under it.
-        if (gen !== saveGenRef.current) return Boolean(res?.ok);
         if (!res?.ok) {
           setError(res?.message || t('vaults.settings.saveFailed'));
           revert();
@@ -93,37 +90,38 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
         setVaultSandboxPolicy(res.policy);
         return true;
       } catch (err: unknown) {
-        if (gen !== saveGenRef.current) return false;
         setError(err instanceof Error ? err.message : String(err));
         revert();
         return false;
       } finally {
-        if (gen === saveGenRef.current) setSaving(false);
+        setSaving(false);
+        saveInFlightRef.current = false;
       }
     },
     [api, t],
   );
 
   const onUnlockWindowChange = (next: UnlockWindowChoice) => {
+    // Ignore a change that races an in-flight save (controls are also `disabled` while saving); the
+    // controlled value stays put, so nothing optimistic is left unsaved.
+    if (saveInFlightRef.current) return;
     const prev = unlockWindow;
     setUnlockWindow(next);
     void save({ unlock_window_seconds: Number(next) }, () => setUnlockWindow(prev));
   };
 
   const onStrictChange = (next: boolean) => {
+    if (saveInFlightRef.current) return;
     const prev = strict;
     setStrict(next);
     void save({ strict_approvals: next }, () => setStrict(prev)).then((ok) => {
       if (!(ok && next && !prev)) return;
-      // Enabling Strict must bite immediately, everywhere — not only on the next explicit unlock.
-      // `vault.lock()` ends this tab's active window and broadcasts a lock to sibling tabs so none
-      // keeps an unlocked non-Strict window. But the sandbox pins its enforced policy at handshake
-      // and its internal auto-unlock (a protected op run while locked) reuses that pinned policy, so
-      // locking alone isn't enough — force a fresh handshake (resetVaultSandboxClient) so the next
-      // client re-pins the new Strict policy and every unlock path honors it. Disabling is a
-      // relaxation and safely waits for the next unlock, so we don't force this in that direction.
-      vault.lock();
-      resetVaultSandboxClient();
+      // Enabling Strict must bite immediately, in every tab — not only on the next explicit unlock.
+      // The sandbox pins its enforced policy at handshake and its internal auto-unlock reuses that
+      // pin, so `lockAndResetForPolicyChange` broadcasts a reset that makes every tab drop its
+      // sandbox client and re-handshake under the new Strict policy (a plain lock would leave
+      // siblings re-unlocking stale). Disabling is a relaxation and safely waits for the next unlock.
+      vault.lockAndResetForPolicyChange();
     });
   };
 

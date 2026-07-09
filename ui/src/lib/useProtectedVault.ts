@@ -8,6 +8,7 @@ import {
 } from '@/context/ApiContext';
 import {
   getVaultSandboxClient,
+  resetVaultSandboxClient,
   subscribeVaultStateEvents,
   type ApproveReleaseItem,
   type VaultSandboxSealResult,
@@ -61,6 +62,10 @@ function getVaultLockChannel(): BroadcastChannel | null {
   vaultLockChannel = new BroadcastChannel('avibe-vault-lock');
   vaultLockChannel.onmessage = (event: MessageEvent) => {
     if (event.data === 'lock') void lockVault(false);
+    // A policy tightening (enabling Strict) in another tab: lock AND drop this tab's sandbox client
+    // so it re-handshakes under the new policy — a plain lock would leave this tab's client pinned
+    // to the stale policy, and its next auto-unlock would run non-Strict.
+    else if (event.data === 'reset') applyPolicyResetLock();
   };
   return vaultLockChannel;
 }
@@ -138,6 +143,23 @@ async function lockVault(broadcast = false): Promise<void> {
   } catch {
     // Local parent state is already locked; a best-effort sandbox lock failure remains fail-closed.
   }
+}
+
+// Lock this tab AND discard its sandbox client so the next ceremony re-handshakes under the fresh
+// policy. Used for a policy tightening (enabling Strict): the sandbox pins policy at handshake and
+// its internal auto-unlock reuses that pin, so locking alone would let this tab re-unlock stale.
+function applyPolicyResetLock(): void {
+  clearUnlockState();
+  notifyVaultLockChange();
+  resetVaultSandboxClient();
+}
+
+// Broadcast a policy reset to every tab (including this one): all drop their pinned sandbox client
+// and re-handshake under the new policy on the next ceremony. This is the cross-tab counterpart to
+// the local reset — a plain `lock` broadcast would leave siblings re-unlocking under stale policy.
+function lockAndResetAllTabs(): void {
+  getVaultLockChannel()?.postMessage('reset');
+  applyPolicyResetLock();
 }
 
 function baseVmkWrapMeta(wrapMeta: string): string {
@@ -404,6 +426,14 @@ export function useProtectedVault() {
     setStatus(vaultStatusNow());
   }, []);
 
+  // Lock + force a sandbox re-handshake across ALL tabs. Used when a policy tightening (Strict)
+  // must take effect immediately everywhere: the sandbox pins policy at handshake, so every tab
+  // must drop its client and re-handshake under the new policy, not merely lock.
+  const lockAndResetForPolicyChange = useCallback(() => {
+    lockAndResetAllTabs();
+    setStatus(vaultStatusNow());
+  }, []);
+
   const discardAndRefresh = useCallback(async () => {
     clearUnlockState();
     sessionVault.wrapMeta = null;
@@ -430,6 +460,7 @@ export function useProtectedVault() {
     revealProtectedValue,
     afterCreated,
     lock,
+    lockAndResetForPolicyChange,
     discardAndRefresh,
     hasPasskey,
     passkeyUsableHere,
