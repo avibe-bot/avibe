@@ -75,6 +75,15 @@ def _signing_context_json(digest: str) -> str:
     )
 
 
+def _assert_cli_sign_operation_context(request: dict, *, name: str) -> None:
+    signed_context = request["delivery"]["operation_context"]
+    assert request["card"]["operation_context"] == signed_context
+    assert signed_context["purpose"] == "sign"
+    assert signed_context["requestId"] == request["id"]
+    assert signed_context["display"]["secrets"] == [{"name": name, "kind": "keypair"}]
+    assert signed_context["signature"]["alg"] == "ed25519"
+
+
 def _create_standard_secret(name: str, *, sealed: Sealed | None = None, **kwargs):
     with cli._open_vault_engine().begin() as conn:
         return vault_service.create_secret(conn, name=name, sealed=sealed or _sealed(), **kwargs)
@@ -577,6 +586,7 @@ def test_sign_request_and_await_cli_reads_approved_signature_for_always_ask_stan
     request_payload = json.loads(capfd.readouterr().out)
     assert request_payload["kind"] == "vault_sign_request"
     assert "signature" not in request_payload
+    _assert_cli_sign_operation_context(request_payload["request"], name="ETH_KEY")
     request_id = request_payload["request_id"]
     with cli._open_vault_engine().connect() as conn:
         row = conn.execute(vault_requests.select().where(vault_requests.c.id == request_id)).mappings().one()
@@ -634,6 +644,7 @@ def test_sign_request_cli_requires_context_for_protected_keypair(capfd):
     assert payload["request"]["card"]["protection"] == "protected"
     assert payload["request"]["card"]["grant_options"] == []
     assert payload["request"]["delivery"]["signing_context"] == json.loads(_signing_context_json("00" * 32))
+    _assert_cli_sign_operation_context(payload["request"], name="PROTECTED_ETH_KEY")
 
 
 def test_vault_await_wait_treats_failed_request_as_terminal(capfd):
