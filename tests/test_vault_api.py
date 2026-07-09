@@ -1515,17 +1515,15 @@ def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
     assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(result))
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "PROTECTED_REVEAL")
-        audit_row = conn.execute(
+        audit_rows = conn.execute(
             select(vault_audit.c.request_id, vault_audit.c.delivery).where(
                 vault_audit.c.secret_name == "PROTECTED_REVEAL",
                 vault_audit.c.event == "revealed",
             )
-        ).mappings().one()
-    assert meta["use_count"] == 1
-    assert meta["last_used_at"] is not None
-    assert audit_row["request_id"] == context["requestId"]
-    assert json.loads(audit_row["delivery"]) == {"mode": "reveal-context"}
-    assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(dict(audit_row)))
+        ).mappings().all()
+    assert meta["use_count"] == 0
+    assert meta["last_used_at"] is None
+    assert audit_rows == []
 
 
 def test_create_vault_reveal_context_rejects_protected_keypair(monkeypatch):
@@ -3298,9 +3296,31 @@ def test_create_grant_api_rejects_binding_duration_mismatch(monkeypatch, avault_
     agent_grant.assert_not_called()
 
 
-def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, avault_p2):
+def test_create_grant_api_accepts_fingerprint_only_agent_pubkey(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 60})
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+            "agent_pubkey": {"fingerprint": issued["agent_pubkey"]["fingerprint"]},
+            "deks": issued["deks"],
+        }
+    )
+
+    assert created["grant"]["status"] == "active"
+    agent_grant.assert_called_once()
+    assert agent_grant.call_args.kwargs["expected_pubkey"] == {"fingerprint": issued["agent_pubkey"]["fingerprint"]}
+
+
+def test_create_grant_api_caps_grant_expiry_but_relays_issued_ttl(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
     monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
     requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
@@ -3326,8 +3346,7 @@ def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, av
 
     grant_expires_at = datetime.fromisoformat(created["grant"]["expires_at"]).astimezone(timezone.utc)
     assert grant_expires_at <= binding_expires_at
-    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 60
-    assert agent_grant.call_args.kwargs["ttl_secs"] < 300
+    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
 
 
 def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch, avault_p2):

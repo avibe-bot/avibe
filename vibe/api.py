@@ -2088,13 +2088,6 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
                 "expiresAt": _isoformat_z(expires_at),
             }
             signed_context = _signed_operation_context(context, key)
-            vault_service.record_reveal_use(
-                conn,
-                secret_name,
-                requester={"source": "api"},
-                delivery={"mode": "reveal-context"},
-                request_id=context_request_id,
-            )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
@@ -2944,11 +2937,17 @@ def _agent_binding_record_matches_agent(record: dict[str, Any], expected_pubkey:
         return False
     agent = record.get("agent") if isinstance(record.get("agent"), dict) else {}
     public_key = agent.get("publicKey") if isinstance(agent.get("publicKey"), dict) else {}
-    return (
-        str(public_key.get("public_key") or "") == str(expected_pubkey.get("public_key") or "")
-        and str(public_key.get("fingerprint") or agent.get("fingerprint") or "")
-        == str(expected_pubkey.get("fingerprint") or "")
-    )
+    expected_public_key = str(expected_pubkey.get("public_key") or "")
+    expected_fingerprint = str(expected_pubkey.get("fingerprint") or "")
+    if not expected_public_key and not expected_fingerprint:
+        return False
+    record_public_key = str(public_key.get("public_key") or "")
+    record_fingerprint = str(public_key.get("fingerprint") or agent.get("fingerprint") or "")
+    if expected_public_key and record_public_key != expected_public_key:
+        return False
+    if expected_fingerprint and record_fingerprint != expected_fingerprint:
+        return False
+    return True
 
 
 def _request_agent_binding_records(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3215,10 +3214,12 @@ def create_vault_grant(payload: dict) -> dict:
         if grant_duration is None:
             grant_duration = binding["grant_duration"]
         binding_grant_expires_at = binding["expires_at"]
-        binding_expires_at = _parse_iso_utc(binding_grant_expires_at)
-        if binding_expires_at is None:
-            raise VaultApiError("resident agent DEK binding context has invalid expiry", code="invalid_grant")
-        binding_relay_ttl_seconds = _remaining_ttl_seconds(binding_expires_at)
+        try:
+            binding_relay_ttl_seconds = int(binding["ttl_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VaultApiError("resident agent DEK binding context has invalid ttl", code="invalid_grant") from exc
+        if binding_relay_ttl_seconds < 1:
+            raise VaultApiError("resident agent DEK binding context has invalid ttl", code="invalid_grant")
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:
