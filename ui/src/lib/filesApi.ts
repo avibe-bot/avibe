@@ -261,12 +261,29 @@ export async function uploadFile(
   return parse<UploadResult>(await apiFetch('/api/files/upload', { method: 'POST', body: form }));
 }
 
-export async function deletePath(path: string, recursive = false): Promise<{ ok: true }> {
+// Delete stages the entry for a short undo window when the backend can (same-filesystem, within
+// size caps): `undo_token` is non-null then. Cross-device / oversized entries delete permanently
+// (token null) — the UI only offers Undo when a token came back.
+export type DeleteResult = { ok: true; undo_token: string | null; undo_expires_seconds: number | null };
+
+export async function deletePath(path: string, recursive = false): Promise<DeleteResult> {
   return parse(
     await apiFetch('/api/files/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, recursive }),
+    }),
+  );
+}
+
+// Restore a staged delete. 409 `exists` = the original path is occupied again; 410 `expired` =
+// the token is unknown/expired/purged. Both surface through the standard FilesApiError shape.
+export async function undoDelete(token: string): Promise<{ restored_path: string }> {
+  return parse(
+    await apiFetch('/api/files/delete/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
     }),
   );
 }
