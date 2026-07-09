@@ -59,8 +59,11 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
       .then((res) => {
         if (!alive) return;
         if (res?.ok && hasValidPolicy(res)) {
-          setUnlockWindow(unlockWindowChoice(res.settings?.unlock_window_seconds));
-          setStrict(Boolean(res.settings?.strict_approvals));
+          // Derive the controls from the validated `policy`, not the unvalidated `settings` — a
+          // skewed deploy could return a valid policy with a missing/malformed `settings` block,
+          // and reading `settings` would default the controls to relaxed values.
+          setUnlockWindow(unlockWindowChoice(res.policy.windowSeconds));
+          setStrict(res.policy.strictApprovals);
           setVaultSandboxPolicy(res.policy);
         } else {
           setError(res?.message || t('vaults.settings.loadFailed'));

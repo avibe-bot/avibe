@@ -231,13 +231,15 @@ export function useProtectedVault() {
   const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.status);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(
-    () =>
-      subscribeVaultLock(() => {
-        setStatus((prev) => (prev === 'checking' || prev === 'error' ? prev : vaultStatusNow()));
-      }),
-    [],
-  );
+  useEffect(() => {
+    // Initialize the cross-tab lock channel as soon as any vault UI mounts, so this tab receives
+    // `reset`/`lock` broadcasts regardless of which path later creates a sandbox client (reveal,
+    // approve, sign, and seal all acquire the client directly, not only refresh()). Idempotent.
+    getVaultLockChannel();
+    return subscribeVaultLock(() => {
+      setStatus((prev) => (prev === 'checking' || prev === 'error' ? prev : vaultStatusNow()));
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     if (sessionVault.status === 'unlocked') {

@@ -43,6 +43,8 @@ type GrantOption = {
   grant_id: string;
   default_ttl_seconds?: number;
   session_binding_default?: boolean;
+  /** The grant is consumed after a single delivery — the agent never gets a timed window. */
+  one_shot?: boolean;
   member_count?: number;
   member_snapshot?: string[];
   source_selector?: VaultSourceSelector;
@@ -67,6 +69,8 @@ type ApprovalCard = {
   default_ttl_seconds?: number;
   /** The fixed protected grant. */
   grant_options?: GrantOption[];
+  /** The whole request is one-shot (a single delivery, no timed window). */
+  one_shot?: boolean;
   /** Hydrated for UI audience when the requested secret is protected. */
   secret_unlock_material?: ProtectedUnlockMaterial | null;
 };
@@ -130,6 +134,10 @@ export const VaultApprovalCard: React.FC<{
   // A grant covers a fixed protected set — there is no scope picker.
   const grantOptions = useMemo(() => card?.grant_options ?? [], [card]);
   const option = useMemo(() => grantOptions[0], [grantOptions]);
+  // A one-shot request is consumed after a single delivery — the agent never gets a timed window,
+  // so the duration control is forced to and locked on "one-time" (showing 5/15 min would promise
+  // a window the agent won't receive).
+  const isOneShot = Boolean(option?.one_shot || card?.one_shot);
   const materials = useMemo(() => option?.unlock_material ?? [], [option]);
   const memberNames = useMemo(() => {
     if (isSign) return card?.secret_name ? [card.secret_name] : [];
@@ -161,13 +169,18 @@ export const VaultApprovalCard: React.FC<{
     grantTouchedRef.current = true;
     setGrantDuration(next);
   }, []);
+  // A one-shot grant is always one-time regardless of the picker; everything downstream (submit,
+  // persistence, the rendered control) reads this rather than the raw picker state.
+  const effectiveGrantDuration: GrantDurationChoice = isOneShot ? 'one-time' : grantDuration;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   const [copiedDigest, setCopiedDigest] = useState(false);
 
   useEffect(() => {
-    if (isSign) return;
+    // Skip the remembered-choice seed for sign requests and one-shot grants (one-shot is forced to
+    // one-time, so seeding a remembered 5/15 min would be misleading and pointless).
+    if (isSign || isOneShot) return;
     let alive = true;
     api
       .getVaultSettings()
@@ -178,7 +191,7 @@ export const VaultApprovalCard: React.FC<{
     return () => {
       alive = false;
     };
-  }, [api, isSign]);
+  }, [api, isSign, isOneShot]);
 
   // Sign approvals: fetch the key's derived addresses (best-effort) so the human sees which
   // on-chain identity is about to sign — not just an opaque digest. Addresses are public.
@@ -246,7 +259,7 @@ export const VaultApprovalCard: React.FC<{
       // without UI-audience hydration — fail clearly instead of taking the standard path
       // (which the daemon rejects for a protected secret anyway).
       if (isProtected && materials.length === 0) throw new Error(t('vaults.approval.errors.missingMaterial'));
-      const durationValue = grantDurationApiValue(grantDuration);
+      const durationValue = grantDurationApiValue(effectiveGrantDuration);
       if (materials.length === 0) {
         // No protected members (a hidden always-ask standard case) — metadata-only grant, no DEK.
         failIfNotOk(
@@ -284,9 +297,10 @@ export const VaultApprovalCard: React.FC<{
           }),
         );
       }
-      // Remember the approver's choice as next time's default. Best-effort: the daemon also persists
-      // it on the grant/binding, so a failed PATCH never loses the preference or blocks the approval.
-      void api.saveVaultSettings({ last_grant_ttl: durationValue }).catch(() => undefined);
+      // Remember the approver's choice as next time's default — but not for one-shot, where the
+      // duration was forced to one-time (not chosen), so persisting it would wrongly bias the next
+      // approval. Best-effort: the daemon also persists a real choice on the grant/binding.
+      if (!isOneShot) void api.saveVaultSettings({ last_grant_ttl: durationValue }).catch(() => undefined);
       onResolved({ kind: 'approved', requestType: 'access' });
     });
 
@@ -499,9 +513,9 @@ export const VaultApprovalCard: React.FC<{
         <div className="flex flex-col gap-1.5">
           <span className="text-[13px] font-medium text-foreground">{t('vaults.approval.grantDuration')}</span>
           <SegmentedRadio<GrantDurationChoice>
-            value={grantDuration}
+            value={effectiveGrantDuration}
             onChange={pickGrantDuration}
-            disabled={busy}
+            disabled={busy || isOneShot}
             ariaLabel={t('vaults.approval.grantDuration')}
             options={[
               { id: 'one-time', label: t('vaults.approval.grantOneTime') },
@@ -510,7 +524,11 @@ export const VaultApprovalCard: React.FC<{
             ]}
           />
           <span className="text-[11px] text-muted-foreground">
-            {grantDuration === 'one-time' ? t('vaults.approval.grantOneTimeHelp') : t('vaults.approval.grantDurationHelp')}
+            {isOneShot
+              ? t('vaults.approval.grantOneShotHelp')
+              : effectiveGrantDuration === 'one-time'
+                ? t('vaults.approval.grantOneTimeHelp')
+                : t('vaults.approval.grantDurationHelp')}
           </span>
         </div>
       ) : null}

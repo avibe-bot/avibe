@@ -2452,6 +2452,7 @@
       "grantMinutes": "{{count}} min",
       "grantDurationHelp": "How long the agent may use the secret after you approve.",
       "grantOneTimeHelp": "The agent completes this one delivery, then access ends.",
+      "grantOneShotHelp": "This request is one-time only — the agent gets a single delivery, so the duration is fixed.",
       "thisSessionOnly": "This session only",
       "sessionBound": "Bound to this session",
       "approve": "Approve",

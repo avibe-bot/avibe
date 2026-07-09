@@ -2452,6 +2452,7 @@
       "grantMinutes": "{{count}} 分钟",
       "grantDurationHelp": "批准后 Agent 可以使用该保护档的时长。",
       "grantOneTimeHelp": "Agent 完成这一次投递后,访问即结束。",
+      "grantOneShotHelp": "此请求为一次性——Agent 只获得单次投递,时长固定。",
       "thisSessionOnly": "仅限本会话",
       "sessionBound": "绑定到此会话",
       "approve": "批准",
