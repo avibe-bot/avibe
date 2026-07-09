@@ -482,10 +482,9 @@ export class VaultSandboxClient {
     authzCreationOptions?: unknown;
     rootMetadata?: unknown;
   }): Promise<VaultSandboxSetupResult> {
-    // Symmetric with unlock(): refresh the daemon policy and pass it, so the first-ever unlocked
-    // session (the setup ceremony) reflects a window/Strict change made after this client
-    // handshaked but before setup, rather than the handshake-time snapshot. See unlock() for the
-    // sandbox-pin caveat.
+    // Symmetric with unlock(): refresh the daemon policy and pass it so the first-ever unlocked
+    // session (the setup ceremony) reflects a window/Strict change made after handshake but before
+    // setup. The sandbox applies the passed policy on setup (protocol v2 §6.5).
     await refreshVaultSandboxPolicy();
     return this.request<VaultSandboxSetupResult>(
       'setup',
@@ -497,11 +496,11 @@ export class VaultSandboxClient {
   async unlock(payload: { wrapMeta: string }): Promise<VaultSandboxUnlockResult> {
     // Pull the freshest daemon policy and pass it (protocol v2 §6.5): a settings change made in
     // another tab only broadcasts a lock, not the new policy, and the handshake fetch is
-    // best-effort, so the cached mirror alone can carry stale settings. Best-effort — a failed
-    // refresh keeps the last-known policy. Caveat: the sandbox currently *pins* the policy at the
-    // first handshake and reads that for unlock/setup, so a mid-session change fully lands on the
-    // next handshake (page reload / new client); passing it here keeps the frontend correct and
-    // forward-compatible for when the sandbox honors the per-op policy.
+    // best-effort, so the cached mirror alone can carry stale settings. The sandbox applies the
+    // passed policy on unlock. Note this covers *explicit* unlocks; the sandbox's internal
+    // auto-unlock (a protected op run while locked) still uses the policy pinned at handshake, so a
+    // policy tightening like enabling Strict forces a fresh handshake (resetVaultSandboxClient) to
+    // re-pin — see the settings dialog. Best-effort: a failed refresh fails closed (strict).
     await refreshVaultSandboxPolicy();
     return this.request<VaultSandboxUnlockResult>(
       'unlock',
@@ -548,6 +547,23 @@ export class VaultSandboxClient {
   approveRelease(payload: { items: ApproveReleaseItem[] }): Promise<{ blindBoxes: BlindBox[] }> {
     return this.request<{ blindBoxes: BlindBox[] }>('approveRelease', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
+
+  /**
+   * Tear down this client: stop listening, collapse the modal, drop the iframe, and fail any
+   * in-flight request. Used by resetVaultSandboxClient() to force a fresh handshake (e.g. after a
+   * policy tightening) — the sandbox pins its enforced policy at handshake, so a new client is how
+   * a Strict change reaches the internal auto-unlock path immediately.
+   */
+  destroy(): void {
+    window.removeEventListener('message', this.handleMessage);
+    for (const [, pending] of this.pending) {
+      window.clearTimeout(pending.timer);
+      pending.reject(new VaultSandboxError('sandbox_reset', 'Sandbox client was reset', true));
+    }
+    this.pending.clear();
+    this.setModalVisible(false);
+    this.iframe.remove();
+  }
 }
 
 type ProtectedUnlockMaterialLike = {
@@ -565,6 +581,20 @@ export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
     });
   }
   return singleton;
+}
+
+/**
+ * Discard the current sandbox client so the next {@link getVaultSandboxClient} builds a fresh one
+ * and re-handshakes. The sandbox pins its enforced session policy at the first handshake, so this
+ * is how a policy tightening (enabling Strict) takes effect immediately on *every* path — including
+ * the sandbox's internal auto-unlock — rather than only on the next explicit unlock. The caller is
+ * responsible for reflecting the resulting locked state in the parent (see the settings dialog).
+ */
+export function resetVaultSandboxClient(): void {
+  const client = activeClient;
+  singleton = null;
+  activeClient = null;
+  client?.destroy();
 }
 
 export function getActiveVaultSandboxClient(): VaultSandboxClient | null {
