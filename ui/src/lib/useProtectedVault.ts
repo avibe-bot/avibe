@@ -16,6 +16,7 @@ import {
   type VaultStateEvent,
 } from './vaultSandboxClient';
 import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult, type SignatureScheme } from './vaultCrypto';
+import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
 
 /**
  * Value-free protected material hydrated into UI approval cards. The parent app brokers it to the
@@ -151,6 +152,9 @@ async function lockVault(broadcast = false): Promise<void> {
 function applyPolicyResetLock(): void {
   clearUnlockState();
   notifyVaultLockChange();
+  // Invalidate the parent policy mirror too: the reset is a tightening, so if the next handshake's
+  // settings fetch fails we must fail closed (strict) rather than re-pin the old confirmed policy.
+  invalidateVaultSandboxPolicy();
   resetVaultSandboxClient();
 }
 

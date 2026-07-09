@@ -587,11 +587,19 @@ type ProtectedUnlockMaterialLike = {
 
 export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
   if (!singleton) {
-    singleton = VaultSandboxClient.create().catch((err) => {
-      singleton = null;
-      activeClient = null;
+    const pending: Promise<VaultSandboxClient> = VaultSandboxClient.create().catch((err) => {
+      // Only clear the globals if they still refer to THIS attempt. A reset may have already
+      // replaced `singleton` with a newer create and `activeClient` with a live client; clearing
+      // them here unconditionally would orphan that client's iframe (leaving its session state
+      // behind while a fresh client is built on the next call). create() already destroyed its own
+      // client on the reset-throw path, so there's nothing else to clean up here.
+      if (singleton === pending) {
+        singleton = null;
+        activeClient = null;
+      }
       throw err;
     });
+    singleton = pending;
   }
   return singleton;
 }

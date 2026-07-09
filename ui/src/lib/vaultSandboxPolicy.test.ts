@@ -9,6 +9,7 @@ import {
   DEFAULT_VAULT_SESSION_POLICY,
   STRICT_FALLBACK_VAULT_SESSION_POLICY,
   getVaultSandboxPolicy,
+  invalidateVaultSandboxPolicy,
   normalizeVaultSessionPolicy,
   refreshVaultSandboxPolicy,
   resetVaultSandboxPolicyForTests,
@@ -105,5 +106,15 @@ describe('refreshVaultSandboxPolicy — fail closed', () => {
     // ...so a transient failure keeps it instead of forcing the strict fallback.
     expect(policy.windowSeconds).toBe(1800);
     expect(policy.strictApprovals).toBe(false);
+  });
+
+  it('invalidate drops confirmation so a post-reset fetch failure fails closed (tightening)', async () => {
+    // A relaxed policy was confirmed, then a policy reset (Strict enabled elsewhere) invalidates it.
+    setVaultSandboxPolicy({ windowSeconds: 1800, strictApprovals: false, parentValueSealAllowed: true });
+    invalidateVaultSandboxPolicy();
+    expect(getVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
+    mockedApiFetch.mockRejectedValue(new Error('offline'));
+    // The next handshake's fetch fails — must stay strict, not re-pin the old relaxed policy.
+    expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
   });
 });

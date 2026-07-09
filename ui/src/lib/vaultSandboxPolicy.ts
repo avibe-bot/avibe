@@ -105,6 +105,17 @@ export async function refreshVaultSandboxPolicy(): Promise<VaultSessionPolicy> {
   }
 }
 
+/**
+ * Invalidate the mirror after a policy reset (a tab enabled Strict / shortened the window). Drops
+ * the confirmed flag and falls back to the strict posture so that if the next handshake's settings
+ * fetch fails, we don't re-pin the old *confirmed* (relaxed) policy — the reset was a tightening,
+ * so failing closed is correct. A successful refresh at the next handshake replaces this.
+ */
+export function invalidateVaultSandboxPolicy(): void {
+  currentPolicy = { ...STRICT_FALLBACK_VAULT_SESSION_POLICY };
+  policyConfirmed = false;
+}
+
 /** Reset the shared mirror for tests (both the value and the confirmed flag). */
 export function resetVaultSandboxPolicyForTests(): void {
   currentPolicy = { ...DEFAULT_VAULT_SESSION_POLICY };
