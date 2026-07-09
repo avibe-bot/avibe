@@ -475,22 +475,33 @@ export class VaultSandboxClient {
     return this.request<VaultSandboxStatusResult>('status', wrapMeta ? { wrapMeta } : {});
   }
 
-  setup(payload: {
+  async setup(payload: {
     vaultUserHandle: string;
     displayName: string;
     existingProtectedVault: boolean;
     authzCreationOptions?: unknown;
     rootMetadata?: unknown;
   }): Promise<VaultSandboxSetupResult> {
-    return this.request<VaultSandboxSetupResult>('setup', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    // Symmetric with unlock(): refresh the daemon policy and pass it, so the first-ever unlocked
+    // session (the setup ceremony) reflects a window/Strict change made after this client
+    // handshaked but before setup, rather than the handshake-time snapshot. See unlock() for the
+    // sandbox-pin caveat.
+    await refreshVaultSandboxPolicy();
+    return this.request<VaultSandboxSetupResult>(
+      'setup',
+      { ...payload, policy: getVaultSandboxPolicy() },
+      { timeoutMs: INTERACTIVE_TIMEOUT_MS },
+    );
   }
 
   async unlock(payload: { wrapMeta: string }): Promise<VaultSandboxUnlockResult> {
-    // Pull the freshest daemon policy right before arming the window: a settings change made in
-    // another tab only broadcasts a lock (not the new policy), and the handshake fetch is
-    // best-effort, so the cached mirror alone can arm an unlock with stale settings. Refreshing
-    // here makes persisted window/Strict values take effect on the next unlock in every tab
-    // (protocol v2 §6.5). Best-effort — a failed refresh keeps the last-known policy.
+    // Pull the freshest daemon policy and pass it (protocol v2 §6.5): a settings change made in
+    // another tab only broadcasts a lock, not the new policy, and the handshake fetch is
+    // best-effort, so the cached mirror alone can carry stale settings. Best-effort — a failed
+    // refresh keeps the last-known policy. Caveat: the sandbox currently *pins* the policy at the
+    // first handshake and reads that for unlock/setup, so a mid-session change fully lands on the
+    // next handshake (page reload / new client); passing it here keeps the frontend correct and
+    // forward-compatible for when the sandbox honors the per-op policy.
     await refreshVaultSandboxPolicy();
     return this.request<VaultSandboxUnlockResult>(
       'unlock',

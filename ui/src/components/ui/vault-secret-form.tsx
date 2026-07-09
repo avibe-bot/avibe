@@ -371,6 +371,9 @@ export const VaultSecretForm: React.FC<{
     ? !submitting
     : Boolean(secretName && valueReady) &&
       !submitting &&
+      // Block submit while a protected keypair is (re)generating in the sandbox, so the user can't
+      // submit the previous envelope mid-ceremony and persist a key they're actively replacing.
+      !generatingKeypair &&
       ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const clearSelectedFile = useCallback(() => {

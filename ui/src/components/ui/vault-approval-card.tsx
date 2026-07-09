@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, Globe, KeyRound, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
+import { Check, Copy, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -224,6 +224,13 @@ export const VaultApprovalCard: React.FC<{
     [],
   );
 
+  // Protected access is always bound to the request's session: the daemon-signed contexts the
+  // sandbox consents to carry that session's label, and the batch endpoint mints them from the
+  // request scope (it takes no session-scope choice). Granting any-session there would authorize a
+  // wider scope than the session-labeled card the user approved, so the "This session only" toggle
+  // is offered for standard access only, and protected access forces session binding.
+  const sessionBound = needsProtectedApproval ? true : thisSessionOnly;
+
   const failIfNotOk = (res: { ok: boolean; code?: string; message?: string }) => {
     if (!res.ok) throw new Error(res.message || res.code || t('vaults.approval.errors.failed'));
   };
@@ -245,7 +252,7 @@ export const VaultApprovalCard: React.FC<{
             request_id: request.id,
             grant_id: grantId,
             grant_duration: durationValue,
-            this_session_only: thisSessionOnly,
+            this_session_only: sessionBound,
           }),
         );
       } else {
@@ -269,7 +276,7 @@ export const VaultApprovalCard: React.FC<{
           await api.fulfillVaultAccessRequest(request.id, {
             grant_id: grantId,
             grant_duration: durationValue,
-            this_session_only: thisSessionOnly,
+            this_session_only: sessionBound,
             agent_pubkey: issued.agent_pubkey,
             deks,
           }),
@@ -514,7 +521,7 @@ export const VaultApprovalCard: React.FC<{
 
       {/* Footer */}
       <div className="flex items-center gap-3">
-        {!isSign ? (
+        {!isSign && !needsProtectedApproval ? (
           <label className="flex items-center gap-2 text-xs font-medium text-muted">
             <Switch
               checked={thisSessionOnly}
@@ -524,6 +531,14 @@ export const VaultApprovalCard: React.FC<{
             />
             {t('vaults.approval.thisSessionOnly')}
           </label>
+        ) : null}
+        {!isSign && needsProtectedApproval ? (
+          // Protected access is session-bound (see `sessionBound`); show it read-only so the scope
+          // the approver is granting matches the session on the sandbox consent card.
+          <span className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            <Link2 className="size-3.5 shrink-0" />
+            {t('vaults.approval.sessionBound')}
+          </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
           <Button type="button" variant="outline" onClick={deny} disabled={busy}>

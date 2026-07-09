@@ -2453,6 +2453,7 @@
       "grantDurationHelp": "How long the agent may use the secret after you approve.",
       "grantOneTimeHelp": "The agent completes this one delivery, then access ends.",
       "thisSessionOnly": "This session only",
+      "sessionBound": "Bound to this session",
       "approve": "Approve",
       "sign": "Sign",
       "deny": "Deny",
