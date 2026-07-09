@@ -5864,10 +5864,16 @@ def _require_avault_p2_surface(feature: str) -> None:
 
 
 def _require_avault_grant_delivery_surface(feature: str) -> None:
+    # Both call sites are protected-only (agent binding rejects non-protected
+    # secrets; agent grant gates this only when protected DEKs are needed), so the
+    # preflight must enforce the full Vaults-ready floor: the grant-id protocol AND
+    # the protected-record v2 AAD open fix. A binary that clears only the old
+    # protocol minimum still fails protected open ("open failed"), so gate delivery
+    # on the same floor as readiness instead of the protocol minimum alone.
     _require_avault_min_version(
         feature,
-        AVAULT_GRANT_DELIVERY_MIN_VERSION,
-        managed_available=_managed_avault_release_satisfies_grant_delivery(),
+        _avault_ready_min_version(),
+        managed_available=_managed_avault_release_satisfies_ready_minimum(),
     )
 
 
