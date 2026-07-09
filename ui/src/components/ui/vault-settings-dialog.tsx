@@ -104,11 +104,13 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
     const prev = strict;
     setStrict(next);
     void save({ strict_approvals: next }, () => setStrict(prev)).then((ok) => {
-      // Enabling Strict must bite now, not only on the next unlock. The sandbox receives policy only
-      // at handshake/unlock (§6.5), so if the vault is currently unlocked, end that (still non-Strict)
-      // window by locking — the next protected ceremony then re-unlocks under Strict. Disabling is a
-      // relaxation and safely waits for the next unlock, so we don't force a lock in that direction.
-      if (ok && next && !prev && vault.status === 'unlocked') vault.lock();
+      // Enabling Strict must bite now, everywhere — not only on the next unlock, and not only in this
+      // tab. The sandbox receives policy only at handshake/unlock (§6.5), so end any active unlocked
+      // window by locking. Do it regardless of THIS tab's local state: `vault.lock()` broadcasts the
+      // lock across tabs, so a sibling tab holding an unlocked non-Strict window can't keep approving
+      // without the passkey until it expires. Disabling is a relaxation and safely waits for the next
+      // unlock, so we don't force a lock in that direction.
+      if (ok && next && !prev) vault.lock();
     });
   };
 

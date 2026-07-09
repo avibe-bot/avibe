@@ -252,6 +252,10 @@ export const VaultSecretForm: React.FC<{
   }, [api]);
 
   const protectedVault = useProtectedVault();
+  // The vault status the current protected keypair was generated under. A transition away from
+  // 'unlocked' (manual/auto lock, or an abandoned fresh setup that discards the VMK) means the
+  // held envelope is sealed to a VMK that's no longer active — see the render-phase reset below.
+  const [keypairSessionStatus, setKeypairSessionStatus] = useState(protectedVault.status);
   useEffect(() => {
     if (protection === 'protected') void protectedVault.refresh();
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
@@ -475,6 +479,18 @@ export const VaultSecretForm: React.FC<{
       if (gen === keypairGenRef.current) setGeneratingKeypair(false);
     }
   };
+
+  // React-sanctioned "adjust state during render": when the vault leaves the unlocked session the
+  // keypair was sealed under, discard the envelope. Critically this covers the first-ever protected
+  // secret — if the user generates a keypair, then locks/auto-locks before submit, the unpersisted
+  // fresh-setup VMK is dropped; re-setting-up mints a NEW VMK, and submitting the old envelope would
+  // bind the first persisted key to the abandoned VMK (unopenable). Runs once per transition (the
+  // `setKeypairSessionStatus` update makes the guard false on the next render), and `clearProtected-
+  // Keypair` bumps the generation token so any in-flight generate is invalidated too.
+  if (keypairSessionStatus !== protectedVault.status) {
+    setKeypairSessionStatus(protectedVault.status);
+    if (protectedVault.status !== 'unlocked') clearProtectedKeypair();
+  }
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
