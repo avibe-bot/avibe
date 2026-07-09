@@ -3456,6 +3456,11 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
     assert result["code"] == "browser_signature_required"
     assert result["request"]["card"]["request_type"] == "sign"
     assert result["request"]["card"]["grant_options"] == []
+    assert result["request"]["card"]["secret_unlock_material"] == {
+        "name": "ETH_KEY",
+        "kind": "keypair",
+        "envelope": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+    }
     assert result["request"]["delivery"]["signing_context"] == _signing_context(digest)
     signed_context = result["request"]["delivery"]["operation_context"]
     assert result["request"]["card"]["operation_context"] == signed_context

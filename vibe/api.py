@@ -2093,9 +2093,14 @@ def _request_context_expires_at(request_payload: dict[str, Any]) -> str:
     return _isoformat_z(expires_at)
 
 
-def _attach_signed_sign_operation_context(request_id: str) -> dict:
+def _attach_signed_sign_operation_context(
+    request_id: str,
+    *,
+    audience: str | None = None,
+) -> dict:
     from storage import vault_service
 
+    response_audience = audience or vault_service.REQUEST_AUDIENCE_AGENT
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
@@ -2116,7 +2121,7 @@ def _attach_signed_sign_operation_context(request_id: str) -> dict:
                 conn,
                 request_id,
                 signed,
-                audience=vault_service.REQUEST_AUDIENCE_AGENT,
+                audience=response_audience,
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
@@ -3713,7 +3718,10 @@ def vault_sign(payload: dict) -> dict:
     if protected_response is not None and isinstance(protected_response.get("request"), dict):
         request_id_for_context = str(protected_response["request"].get("id") or "")
         if request_id_for_context and protected_response.get("code") in {"browser_signature_required", "approval_required"}:
-            request_with_context = _attach_signed_sign_operation_context(request_id_for_context)
+            request_with_context = _attach_signed_sign_operation_context(
+                request_id_for_context,
+                audience=vault_service.REQUEST_AUDIENCE_UI,
+            )
             protected_response["request"] = request_with_context
             if approval_required_request is not None and approval_required_request.get("id") == request_id_for_context:
                 approval_required_request = request_with_context
