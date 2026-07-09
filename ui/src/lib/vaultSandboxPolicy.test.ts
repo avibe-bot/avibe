@@ -1,15 +1,29 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The policy module fetches `/api/vault/settings` via apiFetch; mock it so the fail-closed path is
+// deterministic (the fetch outcome is controlled per test rather than depending on the environment).
+vi.mock('./apiFetch', () => ({ apiFetch: vi.fn() }));
+
+import { apiFetch } from './apiFetch';
 import {
   DEFAULT_VAULT_SESSION_POLICY,
+  STRICT_FALLBACK_VAULT_SESSION_POLICY,
   getVaultSandboxPolicy,
   normalizeVaultSessionPolicy,
+  refreshVaultSandboxPolicy,
+  resetVaultSandboxPolicyForTests,
   setVaultSandboxPolicy,
 } from './vaultSandboxPolicy';
 
+const mockedApiFetch = vi.mocked(apiFetch);
+
+beforeEach(() => {
+  resetVaultSandboxPolicyForTests();
+  mockedApiFetch.mockReset();
+});
+
 afterEach(() => {
-  // The module holds a shared mirror; reset it so tests don't leak policy into each other.
-  setVaultSandboxPolicy(DEFAULT_VAULT_SESSION_POLICY);
+  resetVaultSandboxPolicyForTests();
 });
 
 describe('normalizeVaultSessionPolicy', () => {
@@ -50,5 +64,40 @@ describe('policy mirror', () => {
     expect(a).not.toBe(b);
     a.strictApprovals = false;
     expect(getVaultSandboxPolicy().strictApprovals).toBe(true);
+  });
+});
+
+describe('refreshVaultSandboxPolicy — fail closed', () => {
+  it('adopts the daemon policy on a successful fetch', async () => {
+    mockedApiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ policy: { windowSeconds: 1800, strictApprovals: true, parentValueSealAllowed: true } }),
+    } as unknown as Response);
+    const policy = await refreshVaultSandboxPolicy();
+    expect(policy).toEqual({ windowSeconds: 1800, strictApprovals: true, parentValueSealAllowed: true });
+  });
+
+  it('fails closed to the strict fallback when the fetch fails before any confirmation', async () => {
+    mockedApiFetch.mockRejectedValue(new Error('offline'));
+    const policy = await refreshVaultSandboxPolicy();
+    // Not the permissive default — a fetch failure on a fresh tab must not relax Strict/window.
+    expect(policy).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
+    expect(policy.strictApprovals).toBe(true);
+    expect(policy.windowSeconds).toBe(300);
+  });
+
+  it('fails closed on a non-ok response too', async () => {
+    mockedApiFetch.mockResolvedValue({ ok: false, json: async () => ({}) } as unknown as Response);
+    expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
+  });
+
+  it('keeps a previously-confirmed policy on a later fetch failure (no over-restriction)', async () => {
+    // A prior successful set confirms the real (relaxed) policy...
+    setVaultSandboxPolicy({ windowSeconds: 1800, strictApprovals: false, parentValueSealAllowed: true });
+    mockedApiFetch.mockRejectedValue(new Error('offline'));
+    const policy = await refreshVaultSandboxPolicy();
+    // ...so a transient failure keeps it instead of forcing the strict fallback.
+    expect(policy.windowSeconds).toBe(1800);
+    expect(policy.strictApprovals).toBe(false);
   });
 });

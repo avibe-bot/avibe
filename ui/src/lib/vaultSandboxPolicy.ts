@@ -43,6 +43,24 @@ export function normalizeVaultSessionPolicy(value: unknown): VaultSessionPolicy 
 // and unlock without threading it through every call site. The settings UI updates it after a
 // successful PATCH so the next unlock already runs under the new window/strict values.
 let currentPolicy: VaultSessionPolicy = { ...DEFAULT_VAULT_SESSION_POLICY };
+// Whether the mirror has ever been confirmed from the daemon (a successful GET, or an explicit set
+// from the settings dialog). Until it has, a settings-fetch failure fails closed rather than trust
+// the permissive default (see refreshVaultSandboxPolicy).
+let policyConfirmed = false;
+
+/**
+ * The strictest posture, used as a fail-closed fallback when the daemon settings can't be fetched
+ * before the real policy has ever been confirmed: shortest window + a passkey on every
+ * approval/reveal. This ensures a settings-fetch failure on a fresh tab can never silently relax a
+ * configured Strict/short-window policy down to the permissive default. `parentValueSealAllowed`
+ * stays true — it gates protected static *creation* (#842), not approval posture, so failing it
+ * closed would only block creation without tightening any authorization.
+ */
+export const STRICT_FALLBACK_VAULT_SESSION_POLICY: VaultSessionPolicy = {
+  windowSeconds: 300,
+  strictApprovals: true,
+  parentValueSealAllowed: true,
+};
 
 export function getVaultSandboxPolicy(): VaultSessionPolicy {
   return { ...currentPolicy };
@@ -50,22 +68,38 @@ export function getVaultSandboxPolicy(): VaultSessionPolicy {
 
 export function setVaultSandboxPolicy(value: unknown): VaultSessionPolicy {
   currentPolicy = normalizeVaultSessionPolicy(value);
+  policyConfirmed = true;
+  return getVaultSandboxPolicy();
+}
+
+// On a settings-fetch failure: keep a previously-confirmed policy (we already know the user's real
+// settings, so don't over-restrict on a transient blip), but if the real policy has never been
+// confirmed, assume the strict fallback instead of the permissive default so the failure can't
+// quietly weaken Strict/window on a fresh tab.
+function failClosedVaultSandboxPolicy(): VaultSessionPolicy {
+  if (!policyConfirmed) currentPolicy = { ...STRICT_FALLBACK_VAULT_SESSION_POLICY };
   return getVaultSandboxPolicy();
 }
 
 /**
- * Best-effort refresh of the parent's policy mirror from the daemon (`GET /api/vault/settings`).
- * Called by the sandbox client at handshake so the very first ceremony already runs under the
- * configured window/strict values. A failure keeps the last-known (or default) policy — the
- * sandbox enforces its own copy regardless, so this is only about display + unlock hints.
+ * Refresh the parent's policy mirror from the daemon (`GET /api/vault/settings`). Called by the
+ * sandbox client at handshake/unlock/setup so the ceremony runs under the configured window/strict
+ * values. On failure it fails **closed** (strict fallback) until a real policy is confirmed, then
+ * keeps the last-confirmed policy — a fetch failure must never relax the configured posture.
  */
 export async function refreshVaultSandboxPolicy(): Promise<VaultSessionPolicy> {
   try {
     const res = await apiFetch('/api/vault/settings');
-    if (!res.ok) return getVaultSandboxPolicy();
+    if (!res.ok) return failClosedVaultSandboxPolicy();
     const body = (await res.json()) as { policy?: unknown };
     return setVaultSandboxPolicy(body.policy);
   } catch {
-    return getVaultSandboxPolicy();
+    return failClosedVaultSandboxPolicy();
   }
+}
+
+/** Reset the shared mirror for tests (both the value and the confirmed flag). */
+export function resetVaultSandboxPolicyForTests(): void {
+  currentPolicy = { ...DEFAULT_VAULT_SESSION_POLICY };
+  policyConfirmed = false;
 }
