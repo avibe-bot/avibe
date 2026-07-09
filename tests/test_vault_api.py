@@ -1510,6 +1510,19 @@ def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
         "envelopeHash": api._envelope_hash(result["envelope"]),
     }
     assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(result))
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "PROTECTED_REVEAL")
+        audit_row = conn.execute(
+            select(vault_audit.c.request_id, vault_audit.c.delivery).where(
+                vault_audit.c.secret_name == "PROTECTED_REVEAL",
+                vault_audit.c.event == "revealed",
+            )
+        ).mappings().one()
+    assert meta["use_count"] == 1
+    assert meta["last_used_at"] is not None
+    assert audit_row["request_id"] == context["requestId"]
+    assert json.loads(audit_row["delivery"]) == {"mode": "reveal-context"}
+    assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(dict(audit_row)))
 
 
 def test_create_vault_reveal_context_rejects_protected_keypair(monkeypatch):
@@ -3280,6 +3293,8 @@ def test_create_grant_api_uses_issued_binding_absolute_expiry(monkeypatch, avaul
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
     monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    remaining_ttl = Mock(return_value=1)
+    monkeypatch.setattr(api, "_grant_ttl_seconds", remaining_ttl)
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
     requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
     issued = _issued_agent_dek_payload(requested["request"]["id"])
@@ -3296,7 +3311,8 @@ def test_create_grant_api_uses_issued_binding_absolute_expiry(monkeypatch, avaul
     )
 
     assert datetime.fromisoformat(created["grant"]["expires_at"]) == datetime.fromisoformat(issued_expires_at.replace("Z", "+00:00"))
-    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 300
+    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
+    remaining_ttl.assert_not_called()
 
 
 def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch, avault_p2):

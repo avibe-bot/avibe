@@ -2056,6 +2056,8 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_request") from exc
     ttl_seconds = max(1, min(ttl_seconds, 10 * 60))
     engine = _vault_engine()
+    context_request_id = f"vrl_{uuid.uuid4().hex}"
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
     try:
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, secret_name)
@@ -2063,32 +2065,41 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
                 raise VaultApiError("reveal context is only valid for protected secrets", code="not_protected", status=409)
             envelope = vault_service.get_protected_record_envelope(conn, secret_name)
             key = _load_or_create_vault_daemon_binding_key(conn)
+            envelope_payload = _envelope_payload(envelope)
+            context = {
+                "v": 2,
+                "purpose": "reveal",
+                "requestId": context_request_id,
+                "display": _operation_context_display(
+                    {
+                        "card": {
+                            "command": body.get("command"),
+                            "egress": body.get("egress"),
+                            "session_id": body.get("session_label") or body.get("sessionLabel"),
+                            "source_selector": body.get("source") if isinstance(body.get("source"), dict) else {},
+                        }
+                    },
+                    [meta],
+                ),
+                "release": {
+                    "name": secret_name,
+                    "envelopeHash": _envelope_hash(envelope_payload),
+                },
+                "expiresAt": _isoformat_z(expires_at),
+            }
+            signed_context = _signed_operation_context(context, key)
+            vault_service.record_reveal_use(
+                conn,
+                secret_name,
+                requester={"source": "api"},
+                delivery={"mode": "reveal-context"},
+                request_id=context_request_id,
+            )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-    display_request = {
-        "card": {
-            "command": body.get("command"),
-            "egress": body.get("egress"),
-            "session_id": body.get("session_label") or body.get("sessionLabel"),
-            "source_selector": body.get("source") if isinstance(body.get("source"), dict) else {},
-        }
-    }
-    envelope_payload = _envelope_payload(envelope)
-    context = {
-        "v": 2,
-        "purpose": "reveal",
-        "requestId": f"vrl_{uuid.uuid4().hex}",
-        "display": _operation_context_display(display_request, [meta]),
-        "release": {
-            "name": secret_name,
-            "envelopeHash": _envelope_hash(envelope_payload),
-        },
-        "expiresAt": _isoformat_z(expires_at),
-    }
-    return {"ok": True, "context": _signed_operation_context(context, key), "envelope": envelope_payload}
+    return {"ok": True, "context": signed_context, "envelope": envelope_payload}
 
 
 def get_vault_settings() -> dict:
@@ -2944,6 +2955,7 @@ def _validate_agent_binding_approvals(
     )
     now = datetime.now(timezone.utc)
     matched_durations: set[Any] = set()
+    matched_ttl_seconds: set[int] = set()
     matched_expires_at: list[datetime] = []
     for dek in agent_deks:
         dek_name = str(dek.get("name") or "")
@@ -2968,15 +2980,26 @@ def _validate_agent_binding_approvals(
                 break
         if matched_record is None:
             raise VaultApiError("resident agent DEKs do not match issued binding contexts", code="invalid_grant")
-        matched_durations.add(vault_service.normalize_grant_duration(matched_record.get("grant_duration"))["last_grant_ttl"])
+        normalized_duration = vault_service.normalize_grant_duration(matched_record.get("grant_duration"))
+        matched_durations.add(normalized_duration["last_grant_ttl"])
+        try:
+            issued_ttl_seconds = int(matched_record.get("ttl_seconds", normalized_duration["ttl_seconds"]))
+        except (TypeError, ValueError) as exc:
+            raise VaultApiError("resident agent DEK binding context has invalid TTL", code="invalid_grant") from exc
+        if issued_ttl_seconds < 1:
+            raise VaultApiError("resident agent DEK binding context has invalid TTL", code="invalid_grant")
+        matched_ttl_seconds.add(issued_ttl_seconds)
         record_expires_at = _parse_iso_utc(matched_record.get("expires_at"))
         if record_expires_at is None:
             raise VaultApiError("resident agent DEK binding context has invalid expiry", code="invalid_grant")
         matched_expires_at.append(record_expires_at)
     if len(matched_durations) != 1:
         raise VaultApiError("resident agent DEK binding contexts disagree on grant duration", code="invalid_grant")
+    if len(matched_ttl_seconds) != 1:
+        raise VaultApiError("resident agent DEK binding contexts disagree on grant TTL", code="invalid_grant")
     return {
         "grant_duration": next(iter(matched_durations)),
+        "ttl_seconds": next(iter(matched_ttl_seconds)),
         "expires_at": _isoformat_z(min(matched_expires_at)),
     }
 
@@ -3148,6 +3171,7 @@ def create_vault_grant(payload: dict) -> dict:
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
     needs_agent_deks = bool(protected_member_names)
     binding_grant_expires_at: str | None = None
+    binding_relay_ttl_seconds: int | None = None
 
     agent_deks = _resident_agent_deks_from_payload(payload, needs_agent_deks=needs_agent_deks)
     provided_names = {item["name"] for item in agent_deks}
@@ -3171,6 +3195,7 @@ def create_vault_grant(payload: dict) -> dict:
         if grant_duration is None:
             grant_duration = binding["grant_duration"]
         binding_grant_expires_at = binding["expires_at"]
+        binding_relay_ttl_seconds = int(binding["ttl_seconds"])
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:
@@ -3211,7 +3236,7 @@ def create_vault_grant(payload: dict) -> dict:
         return {"ok": True, "grant": grant}
     agent_relayed = False
     try:
-        relay_ttl = _grant_ttl_seconds(grant)
+        relay_ttl = binding_relay_ttl_seconds if binding_relay_ttl_seconds is not None else _grant_ttl_seconds(grant)
         agent_result = avault_agent_grant(
             grant_id=str(grant["id"]),
             purpose=str(grant.get("purpose") or purpose),

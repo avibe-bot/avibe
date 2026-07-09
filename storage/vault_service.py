@@ -2525,6 +2525,24 @@ def record_signing_use(
     audit(conn, "signed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
 
 
+def record_reveal_use(
+    conn: Connection,
+    name: str,
+    *,
+    requester: Any = None,
+    delivery: Any = None,
+    request_id: str | None = None,
+) -> None:
+    """Bump revealed secret usage + write a value-free ``revealed`` audit row."""
+    _require_row(conn, name)
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == name)
+        .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
+    )
+    audit(conn, "revealed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
+
+
 def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     """Return the stored envelopes for the requested secrets (standard tier; no decrypt).
 
