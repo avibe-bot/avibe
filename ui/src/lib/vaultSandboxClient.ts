@@ -126,6 +126,10 @@ export class VaultSandboxError extends Error {
 let integrityPromise: Promise<void> | null = null;
 let singleton: Promise<VaultSandboxClient> | null = null;
 let activeClient: VaultSandboxClient | null = null;
+// Bumped on every reset. A create() that started before a reset checks this after its handshake:
+// if it advanced, the client handshook under the pre-reset (stale) policy and is discarded instead
+// of being adopted, so a reset takes effect even for an in-flight client creation.
+let clientGeneration = 0;
 
 // Module-level so subscribers survive client recreation (a singleton reset on error) and can
 // register before any client exists — the active client forwards every `vault.state` event here.
@@ -277,6 +281,8 @@ export class VaultSandboxClient {
   }
 
   static async create(): Promise<VaultSandboxClient> {
+    // Snapshot the reset generation so we can discard this client if a reset lands mid-creation.
+    const generation = clientGeneration;
     // Gated during pre-launch iteration — see VAULT_SANDBOX_INTEGRITY_ENFORCED. When off, the
     // parent still origin-isolates the sandbox; it just doesn't fail-closed on a manifest mismatch.
     if (VAULT_SANDBOX_INTEGRITY_ENFORCED) await verifyVaultSandboxIntegrity();
@@ -308,6 +314,13 @@ export class VaultSandboxClient {
     iframe.src = VAULT_SANDBOX_IFRAME_URL;
     document.body.appendChild(iframe);
     await client.handshake();
+    if (generation !== clientGeneration) {
+      // A reset (e.g. Strict enabled) landed while we were handshaking — this client pinned the
+      // pre-reset policy. Discard it and fail so the caller re-acquires a fresh, correctly-pinned
+      // client instead of proceeding under the stale policy.
+      client.destroy();
+      throw new VaultSandboxError('sandbox_reset', 'Sandbox client was reset during creation', true);
+    }
     activeClient = client;
     return client;
   }
@@ -591,6 +604,8 @@ export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
  * responsible for reflecting the resulting locked state in the parent (see the settings dialog).
  */
 export function resetVaultSandboxClient(): void {
+  // Advance the generation first so any in-flight create() discards itself on completion.
+  clientGeneration += 1;
   const client = activeClient;
   singleton = null;
   activeClient = null;

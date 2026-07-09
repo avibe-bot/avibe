@@ -248,6 +248,9 @@ export function useProtectedVault() {
       const res = await api.getVaultVmk();
       if (!res?.ok) throw new Error('vmk-discovery-failed');
       const sandbox = await getVaultSandboxClient();
+      // A sandbox client now exists for this tab (even while locked); make sure the cross-tab lock
+      // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
+      getVaultLockChannel();
       if (res.exists && res.wrap_meta) {
         sessionVault.wrapMeta = baseVmkWrapMeta(res.wrap_meta);
         const sandboxStatus = await sandbox.status(sessionVault.wrapMeta);
@@ -255,7 +258,6 @@ export function useProtectedVault() {
           sessionVault.status = 'unlocked';
           vaultLockExpiresAt =
             typeof sandboxStatus.expiresAt === 'number' && Number.isFinite(sandboxStatus.expiresAt) ? sandboxStatus.expiresAt : null;
-          getVaultLockChannel();
         } else {
           sessionVault.status = 'locked';
           vaultLockExpiresAt = null;

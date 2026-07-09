@@ -17,6 +17,13 @@ function unlockWindowChoice(seconds: number | undefined): UnlockWindowChoice {
   return '600';
 }
 
+// A response's `policy` must be a real object before we confirm it into the sandbox mirror. An
+// `ok:true` payload that omits/malforms `policy` (skewed deploy, partial failure) must be treated
+// as a load/save failure — never confirmed — so it can't bypass the fail-closed handshake path.
+function hasPolicyObject(res: { policy?: unknown } | null | undefined): boolean {
+  return typeof res?.policy === 'object' && res.policy !== null;
+}
+
 /**
  * Vault session settings (protocol v2 §8): the unlock-window length and the Strict-approvals
  * toggle, persisted daemon-side via `GET/PATCH /api/vault/settings`. Saving also refreshes the
@@ -50,7 +57,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
       .getVaultSettings()
       .then((res) => {
         if (!alive) return;
-        if (res?.ok) {
+        if (res?.ok && hasPolicyObject(res)) {
           setUnlockWindow(unlockWindowChoice(res.settings?.unlock_window_seconds));
           setStrict(Boolean(res.settings?.strict_approvals));
           setVaultSandboxPolicy(res.policy);
@@ -80,7 +87,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
       setError(null);
       try {
         const res = await api.saveVaultSettings(patch);
-        if (!res?.ok) {
+        if (!res?.ok || !hasPolicyObject(res)) {
           setError(res?.message || t('vaults.settings.saveFailed'));
           revert();
           return false;
@@ -107,7 +114,12 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
     if (saveInFlightRef.current) return;
     const prev = unlockWindow;
     setUnlockWindow(next);
-    void save({ unlock_window_seconds: Number(next) }, () => setUnlockWindow(prev));
+    void save({ unlock_window_seconds: Number(next) }, () => setUnlockWindow(prev)).then((ok) => {
+      // Shortening the window is a tightening (the vault locks sooner) — force the same cross-tab
+      // re-handshake as enabling Strict so it applies on every unlock path immediately, not just on
+      // the next explicit unlock. Lengthening is a relaxation and safely waits for the next unlock.
+      if (ok && Number(next) < Number(prev)) vault.lockAndResetForPolicyChange();
+    });
   };
 
   const onStrictChange = (next: boolean) => {
