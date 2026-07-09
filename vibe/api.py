@@ -5341,9 +5341,13 @@ AVAULT_P2_MIN_VERSION = "0.1.3"
 # next avault release so upgraded Avibe installs fail closed instead of sending
 # new frames to an incompatible resident agent.
 AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
-# Installer pin must reference a published manifest-pinned release. v0.1.5 is
-# the first managed release carrying the final grant_id resident delivery frames.
-AVAULT_VERSION = "0.1.5"
+# Protected-record open requires avault's v2 canonical-JSON record AAD (v0.1.6).
+# Older binaries cannot open browser-sealed protected values and fail with
+# "open failed for <name>", so protected Vaults must not treat them as ready.
+AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
+# Installer pin must reference a published manifest-pinned release. v0.1.6 adds the
+# protected-record v2 AAD fix so agent delivery can open browser-sealed protected values.
+AVAULT_VERSION = "0.1.6"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
@@ -5383,9 +5387,11 @@ def _avault_p2_release_unavailable_result(
 
 
 def _avault_ready_min_version() -> str:
-    # Avibe-managed avault readiness follows the resident delivery protocol now
-    # that the managed pin includes grant-id frames. Older P2 binaries can still
-    # seal/sign, but they are not safe as the default dependency for Vaults.
+    # Managed avault readiness must satisfy both the resident grant-id delivery
+    # protocol and the protected-record v2 AAD open fix; take the higher floor so
+    # stale binaries (e.g. 0.1.5) are upgraded/blocked before protected delivery.
+    if _version_at_least(AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION):
+        return AVAULT_PROTECTED_RECORD_MIN_VERSION
     return AVAULT_GRANT_DELIVERY_MIN_VERSION
 
 
@@ -5858,6 +5864,27 @@ def _require_avault_p2_surface(feature: str) -> None:
 
 
 def _require_avault_grant_delivery_surface(feature: str) -> None:
+    # Guards protected grant/deliver operations that OPEN a protected record via
+    # avault (resident-agent grant, agent binding, deliver run/fetch/inject; all
+    # protected-only). These need the full Vaults-ready floor -- the grant-id
+    # protocol AND the protected-record v2 AAD open fix -- since a binary that
+    # clears only the old protocol minimum still fails protected open
+    # ("open failed"). Release/revoke does NOT open a record and stays on
+    # _require_avault_grant_protocol_surface() to avoid destructive cleanup.
+    _require_avault_min_version(
+        feature,
+        _avault_ready_min_version(),
+        managed_available=_managed_avault_release_satisfies_ready_minimum(),
+    )
+
+
+def _require_avault_grant_protocol_surface(feature: str) -> None:
+    # Grant-lifecycle operations that do NOT open a protected record (release /
+    # revoke) only need the grant-id delivery protocol, not the protected-record
+    # v2 AAD fix. Gating them on the 0.1.6 floor would reject the release frame on
+    # a host still on 0.1.4/0.1.5 and push cleanup into the destructive
+    # release-failure path (resetting the resident agent + expiring active grants)
+    # instead of revoking just the requested grant.
     _require_avault_min_version(
         feature,
         AVAULT_GRANT_DELIVERY_MIN_VERSION,
@@ -6159,7 +6186,7 @@ def avault_agent_release(*, grant_id: str) -> dict:
     """Drop a resident-agent protected grant if present."""
     from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
 
-    _require_avault_grant_delivery_surface("resident agent release")
+    _require_avault_grant_protocol_surface("resident agent release")
     try:
         return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(grant_id=grant_id)
     except AvaultAgentError as exc:
