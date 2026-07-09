@@ -11,7 +11,6 @@ import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Badge } from './badge';
 import { Button } from './button';
 import { Switch } from './switch';
-import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultRequestSessionLink, vaultRequestSessionDisplay } from './vault-request-session-link';
 
 /**
@@ -173,16 +172,15 @@ export const VaultApprovalCard: React.FC<{
   const schemeAddresses = useMemo(() => addressesForScheme(delivery.scheme, signAddresses), [delivery.scheme, signAddresses]);
   const hasSchemeAddress = Object.values(schemeAddresses).some(Boolean);
 
-  // A request needs the browser VMK unlocked when it touches protected key material:
-  // a protected sign, or an access whose fixed set includes protected members.
-  const needsUnlock = isSign ? isProtected : protectedNames.length > 0;
-  const unlocked = vault.status === 'unlocked';
+  // A request needs the sandbox protected-approval ceremony when it touches protected
+  // key material: a protected sign, or an access whose fixed set includes protected members.
+  const needsProtectedApproval = isSign ? isProtected : protectedNames.length > 0;
 
   useEffect(() => {
-    if (needsUnlock) void vault.refresh();
-    // vault.refresh is stable (useCallback); only re-check when unlock becomes required.
+    if (needsProtectedApproval) void vault.refresh();
+    // vault.refresh is stable (useCallback); only re-check when protected handling becomes required.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsUnlock]);
+  }, [needsProtectedApproval]);
 
   const finish = useCallback(
     (run: () => Promise<void>) => {
@@ -303,7 +301,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || (needsUnlock && !unlocked) || (!isSign && !option);
+  const approveDisabled = busy || (!isSign && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -450,10 +448,9 @@ export const VaultApprovalCard: React.FC<{
         </div>
       ) : null}
 
-      {/* Protected gating: show the browser-unlock panel while locked (it carries its own
-          factor note); once unlocked, show only the design's mint operation note. */}
-      {needsUnlock && !unlocked ? <VaultProtectedUnlock vault={vault} /> : null}
-      {needsUnlock && unlocked ? (
+      {/* Protected approval: the sandbox performs any required passkey ceremony as part
+          of the approval operation, so this card only shows the design's operation note. */}
+      {needsProtectedApproval ? (
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
           <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint" />
           {isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
