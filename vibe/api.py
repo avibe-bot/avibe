@@ -1628,6 +1628,14 @@ def _agent_deliver_operation_hash(name: str, ttl_seconds: int) -> str:
     ).hexdigest()
 
 
+def _envelope_hash(envelope_payload: dict[str, Any]) -> dict[str, str]:
+    canonical = json.dumps(envelope_payload, sort_keys=True, separators=(",", ":"))
+    return {
+        "alg": "sha256",
+        "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+
+
 def _signed_agent_binding(binding: dict[str, Any], key: dict[str, str]) -> dict[str, Any]:
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -2066,14 +2074,19 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             "source_selector": body.get("source") if isinstance(body.get("source"), dict) else {},
         }
     }
+    envelope_payload = _envelope_payload(envelope)
     context = {
         "v": 2,
         "purpose": "reveal",
         "requestId": f"vrl_{uuid.uuid4().hex}",
         "display": _operation_context_display(display_request, [meta]),
+        "release": {
+            "name": secret_name,
+            "envelopeHash": _envelope_hash(envelope_payload),
+        },
         "expiresAt": _isoformat_z(expires_at),
     }
-    return {"ok": True, "context": _signed_operation_context(context, key), "envelope": _envelope_payload(envelope)}
+    return {"ok": True, "context": _signed_operation_context(context, key), "envelope": envelope_payload}
 
 
 def get_vault_settings() -> dict:

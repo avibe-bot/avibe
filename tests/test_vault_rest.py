@@ -240,6 +240,10 @@ def test_rest_reveal_context_route(monkeypatch):
     body = response.get_json()
     assert body["context"]["purpose"] == "reveal"
     assert body["envelope"] == {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}
+    assert body["context"]["release"] == {
+        "name": "PROTECTED_REST_REVEAL",
+        "envelopeHash": api._envelope_hash(body["envelope"]),
+    }
 
 
 def test_rest_agent_bindings_batch_route(monkeypatch):

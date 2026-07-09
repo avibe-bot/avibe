@@ -1442,6 +1442,10 @@ def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
     assert context["display"]["secrets"] == [{"name": "PROTECTED_REVEAL", "kind": "static"}]
     assert context["display"]["sessionLabel"] == "Workbench - vaults"
     assert result["envelope"] == {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}
+    assert context["release"] == {
+        "name": "PROTECTED_REVEAL",
+        "envelopeHash": api._envelope_hash(result["envelope"]),
+    }
     assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(result))
 
 
