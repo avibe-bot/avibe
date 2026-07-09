@@ -5864,16 +5864,31 @@ def _require_avault_p2_surface(feature: str) -> None:
 
 
 def _require_avault_grant_delivery_surface(feature: str) -> None:
-    # Both call sites are protected-only (agent binding rejects non-protected
-    # secrets; agent grant gates this only when protected DEKs are needed), so the
-    # preflight must enforce the full Vaults-ready floor: the grant-id protocol AND
-    # the protected-record v2 AAD open fix. A binary that clears only the old
-    # protocol minimum still fails protected open ("open failed"), so gate delivery
-    # on the same floor as readiness instead of the protocol minimum alone.
+    # Guards protected grant/deliver operations that OPEN a protected record via
+    # avault (resident-agent grant, agent binding, deliver run/fetch/inject; all
+    # protected-only). These need the full Vaults-ready floor -- the grant-id
+    # protocol AND the protected-record v2 AAD open fix -- since a binary that
+    # clears only the old protocol minimum still fails protected open
+    # ("open failed"). Release/revoke does NOT open a record and stays on
+    # _require_avault_grant_protocol_surface() to avoid destructive cleanup.
     _require_avault_min_version(
         feature,
         _avault_ready_min_version(),
         managed_available=_managed_avault_release_satisfies_ready_minimum(),
+    )
+
+
+def _require_avault_grant_protocol_surface(feature: str) -> None:
+    # Grant-lifecycle operations that do NOT open a protected record (release /
+    # revoke) only need the grant-id delivery protocol, not the protected-record
+    # v2 AAD fix. Gating them on the 0.1.6 floor would reject the release frame on
+    # a host still on 0.1.4/0.1.5 and push cleanup into the destructive
+    # release-failure path (resetting the resident agent + expiring active grants)
+    # instead of revoking just the requested grant.
+    _require_avault_min_version(
+        feature,
+        AVAULT_GRANT_DELIVERY_MIN_VERSION,
+        managed_available=_managed_avault_release_satisfies_grant_delivery(),
     )
 
 
@@ -6171,7 +6186,7 @@ def avault_agent_release(*, grant_id: str) -> dict:
     """Drop a resident-agent protected grant if present."""
     from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
 
-    _require_avault_grant_delivery_surface("resident agent release")
+    _require_avault_grant_protocol_surface("resident agent release")
     try:
         return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(grant_id=grant_id)
     except AvaultAgentError as exc:
