@@ -438,7 +438,6 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   const undoTimerRef = useRef<number | null>(null);
   const showUndo = useCallback((entry: UndoEntry) => {
     if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
-    setUndoBusy(false);
     setUndoEntry(entry);
     undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
   }, []);
@@ -464,7 +463,9 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.undoFailed')));
     } finally {
       setUndoBusy(false);
-      setUndoEntry(null);
+      // Only clear OUR entry: a slow in-flight undo must not wipe the bar of a NEWER action the
+      // user performed meanwhile (that entry's own timer still governs it).
+      setUndoEntry((cur) => (cur === entry ? null : cur));
     }
   }, [undoEntry, undoBusy, refreshAll, t]);
 
@@ -554,6 +555,18 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // not overwrite each other's pending dialog; each waits for the previous answer.
   const [replaceAsk, setReplaceAsk] = useState<{ name: string; resolve: (ok: boolean) => void } | null>(null);
   const askChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  // Mirror of the pending ask, so an unmount (window closed mid-question) can resolve it `false`
+  // instead of hanging that upload worker — and, via the chain, every later clash — forever.
+  const pendingAskRef = useRef<{ resolve: (ok: boolean) => void } | null>(null);
+  useEffect(() => {
+    pendingAskRef.current = replaceAsk;
+  }, [replaceAsk]);
+  useEffect(
+    () => () => {
+      pendingAskRef.current?.resolve(false);
+    },
+    [],
+  );
   const confirmReplace = useCallback((name: string) => {
     const next = askChainRef.current.then(
       () => new Promise<boolean>((resolve) => setReplaceAsk({ name, resolve })),
