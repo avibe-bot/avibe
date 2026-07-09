@@ -5341,9 +5341,9 @@ AVAULT_P2_MIN_VERSION = "0.1.3"
 # next avault release so upgraded Avibe installs fail closed instead of sending
 # new frames to an incompatible resident agent.
 AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
-# Installer pin must reference a published manifest-pinned release. v0.1.5 is
-# the first managed release carrying the final grant_id resident delivery frames.
-AVAULT_VERSION = "0.1.5"
+# Installer pin must reference a published manifest-pinned release. v0.1.6 adds the
+# protected-record v2 AAD fix so agent delivery can open browser-sealed protected values.
+AVAULT_VERSION = "0.1.6"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
