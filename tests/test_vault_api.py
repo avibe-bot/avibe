@@ -1483,6 +1483,9 @@ def test_vault_settings_roundtrip_and_policy():
     assert saved["policy"]["windowSeconds"] == 1800
     assert saved["policy"]["strictApprovals"] is True
     assert api.get_vault_settings()["settings"] == saved["settings"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.save_vault_settings({"strict_approvals": "false"})
+    assert exc.value.code == "invalid_request"
 
 
 def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
@@ -2366,7 +2369,13 @@ def test_agent_sign_request_accepts_protected_browser_signature(monkeypatch):
 
     assert requested["ok"] is True
     assert requested["request"]["card"]["protection"] == "protected"
+    assert requested["request"]["card"]["secret_unlock_material"] == {
+        "name": "PROTECTED_ETH_KEY",
+        "kind": "keypair",
+        "envelope": {"ciphertext": "ct-key", "nonce": "n-key", "wrap_meta": "wm-key"},
+    }
     assert requested["request"]["delivery"]["signing_context"] == _signing_context(digest)
+    assert requested["request"]["delivery"]["operation_context"] == requested["request"]["card"]["operation_context"]
     assert completed["ok"] is True
     assert completed["signature"] == signature
     assert api.get_vault_request(requested["request"]["id"])["result"] == {"type": "signature", "signature": signature}
@@ -3289,18 +3298,23 @@ def test_create_grant_api_rejects_binding_duration_mismatch(monkeypatch, avault_
     agent_grant.assert_not_called()
 
 
-def test_create_grant_api_uses_issued_binding_absolute_expiry(monkeypatch, avault_p2):
+def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 60})
     monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
-    remaining_ttl = Mock(return_value=1)
-    monkeypatch.setattr(api, "_grant_ttl_seconds", remaining_ttl)
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
     requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
     issued = _issued_agent_dek_payload(requested["request"]["id"])
-    with api._vault_engine().connect() as conn:
-        request = vault_service.get_request(conn, requested["request"]["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
-    issued_expires_at = request["delivery"]["agent_binding_approvals"][0]["expires_at"]
+    binding_expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+    with api._vault_engine().begin() as conn:
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == requested["request"]["id"])).mappings().one()
+        delivery = json.loads(row["delivery"])
+        delivery["agent_binding_approvals"][0]["expires_at"] = api._isoformat_z(binding_expires_at)
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == requested["request"]["id"])
+            .values(delivery=json.dumps(delivery))
+        )
 
     created = api.create_vault_grant(
         {
@@ -3310,9 +3324,10 @@ def test_create_grant_api_uses_issued_binding_absolute_expiry(monkeypatch, avaul
         }
     )
 
-    assert datetime.fromisoformat(created["grant"]["expires_at"]) == datetime.fromisoformat(issued_expires_at.replace("Z", "+00:00"))
-    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
-    remaining_ttl.assert_not_called()
+    grant_expires_at = datetime.fromisoformat(created["grant"]["expires_at"]).astimezone(timezone.utc)
+    assert grant_expires_at <= binding_expires_at
+    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 60
+    assert agent_grant.call_args.kwargs["ttl_secs"] < 300
 
 
 def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch, avault_p2):

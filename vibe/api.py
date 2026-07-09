@@ -2601,6 +2601,19 @@ def _vault_requester_payload(payload: dict) -> dict:
     return out
 
 
+def _vault_ui_requester_payload(payload: dict) -> dict:
+    requester = payload.get("requester") if isinstance(payload.get("requester"), dict) else {}
+    session_id = str(payload.get("session_id") or requester.get("session_id") or "").strip()
+    out = dict(requester)
+    if session_id:
+        out["session_id"] = session_id
+    if payload.get("run_id"):
+        out["run_id"] = str(payload["run_id"])
+    if payload.get("skill"):
+        out["skill"] = str(payload["skill"])
+    return out
+
+
 def _vault_delivery_payload(payload: dict) -> dict:
     delivery = dict(payload.get("delivery") if isinstance(payload.get("delivery"), dict) else {})
     for key in ("session_id", "skill", "command", "egress", "mode"):
@@ -2706,7 +2719,7 @@ def request_vault_sign(payload: dict) -> dict:
                 digest=digest,
                 scheme=scheme,
                 signing_context=signing_context,
-                requester=_vault_requester_payload(payload),
+                requester=_vault_ui_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
             )
@@ -2716,7 +2729,10 @@ def request_vault_sign(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
-    request = _attach_signed_sign_operation_context(str(request["id"]))
+    request = _attach_signed_sign_operation_context(
+        str(request["id"]),
+        audience=_sign_request_response_audience(request),
+    )
     _publish_vaults_updated(
         scope="request",
         request_id=request.get("id"),
@@ -2774,12 +2790,16 @@ def _parse_iso_utc(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _remaining_ttl_seconds(expires_at: datetime) -> int:
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    return max(1, int(round(remaining)))
+
+
 def _grant_ttl_seconds(grant: dict) -> int:
     expires_at = _parse_iso_utc(grant.get("expires_at"))
     if expires_at is None:
         return 1
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
-    return max(1, int(round(remaining)))
+    return _remaining_ttl_seconds(expires_at)
 
 
 def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
@@ -3195,7 +3215,10 @@ def create_vault_grant(payload: dict) -> dict:
         if grant_duration is None:
             grant_duration = binding["grant_duration"]
         binding_grant_expires_at = binding["expires_at"]
-        binding_relay_ttl_seconds = int(binding["ttl_seconds"])
+        binding_expires_at = _parse_iso_utc(binding_grant_expires_at)
+        if binding_expires_at is None:
+            raise VaultApiError("resident agent DEK binding context has invalid expiry", code="invalid_grant")
+        binding_relay_ttl_seconds = _remaining_ttl_seconds(binding_expires_at)
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:

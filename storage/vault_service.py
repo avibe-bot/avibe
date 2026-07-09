@@ -351,13 +351,19 @@ def _normalize_last_grant_ttl(value: Any) -> str | int:
     return normalize_grant_duration(value)["last_grant_ttl"]
 
 
+def _normalize_strict_approvals(value: Any) -> bool:
+    if type(value) is not bool:
+        raise VaultServiceError("strict_approvals must be a boolean")
+    return value
+
+
 def _normalize_vault_settings(raw: Any) -> dict[str, Any]:
     settings = _default_vault_settings()
     if isinstance(raw, dict):
         if "unlock_window_seconds" in raw:
             settings["unlock_window_seconds"] = _normalize_unlock_window_seconds(raw["unlock_window_seconds"])
         if "strict_approvals" in raw:
-            settings["strict_approvals"] = bool(raw["strict_approvals"])
+            settings["strict_approvals"] = _normalize_strict_approvals(raw["strict_approvals"])
         if "last_grant_ttl" in raw:
             settings["last_grant_ttl"] = _normalize_last_grant_ttl(raw["last_grant_ttl"])
     return settings
@@ -378,7 +384,7 @@ def save_vault_settings(conn: Connection, payload: dict[str, Any]) -> dict[str, 
     if "unlock_window_seconds" in payload:
         updates["unlock_window_seconds"] = _normalize_unlock_window_seconds(payload["unlock_window_seconds"])
     if "strict_approvals" in payload:
-        updates["strict_approvals"] = bool(payload["strict_approvals"])
+        updates["strict_approvals"] = _normalize_strict_approvals(payload["strict_approvals"])
     if "last_grant_ttl" in payload:
         updates["last_grant_ttl"] = _normalize_last_grant_ttl(payload["last_grant_ttl"])
     next_settings = _normalize_vault_settings({**current, **updates})

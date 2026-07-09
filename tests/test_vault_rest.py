@@ -217,6 +217,13 @@ def test_rest_vault_settings_roundtrip():
         "last_grant_ttl": 900,
     }
     assert saved.get_json()["policy"]["windowSeconds"] == 300
+    rejected = client.patch(
+        "/api/vault/settings",
+        json={"strict_approvals": "false"},
+        headers=csrf_headers(client),
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["code"] == "invalid_request"
 
 
 def test_rest_reveal_context_route(monkeypatch):
