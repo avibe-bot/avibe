@@ -10,6 +10,7 @@ import {
   STRICT_FALLBACK_VAULT_SESSION_POLICY,
   getVaultSandboxPolicy,
   invalidateVaultSandboxPolicy,
+  isValidVaultSessionPolicyShape,
   normalizeVaultSessionPolicy,
   refreshVaultSandboxPolicy,
   resetVaultSandboxPolicyForTests,
@@ -98,6 +99,12 @@ describe('refreshVaultSandboxPolicy — fail closed', () => {
     expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
   });
 
+  it('fails closed on a 200 whose policy object is missing/misnamed fields', async () => {
+    // A policy object that lacks the security fields would normalize to relaxed — must fail closed.
+    mockedApiFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: true, policy: { windowSeconds: 300 } }) } as unknown as Response);
+    expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
+  });
+
   it('keeps a previously-confirmed policy on a later fetch failure (no over-restriction)', async () => {
     // A prior successful set confirms the real (relaxed) policy...
     setVaultSandboxPolicy({ windowSeconds: 1800, strictApprovals: false, parentValueSealAllowed: true });
@@ -116,5 +123,18 @@ describe('refreshVaultSandboxPolicy — fail closed', () => {
     mockedApiFetch.mockRejectedValue(new Error('offline'));
     // The next handshake's fetch fails — must stay strict, not re-pin the old relaxed policy.
     expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
+  });
+});
+
+describe('isValidVaultSessionPolicyShape', () => {
+  it('accepts a complete well-formed policy and rejects partial/malformed ones', () => {
+    expect(isValidVaultSessionPolicyShape({ windowSeconds: 600, strictApprovals: true, parentValueSealAllowed: true })).toBe(true);
+    expect(isValidVaultSessionPolicyShape({ windowSeconds: 300, strictApprovals: false, parentValueSealAllowed: false })).toBe(true);
+    // Missing / wrong-typed / out-of-set fields → invalid (would otherwise normalize to relaxed).
+    expect(isValidVaultSessionPolicyShape({ windowSeconds: 300 })).toBe(false);
+    expect(isValidVaultSessionPolicyShape({ windowSeconds: 999, strictApprovals: true, parentValueSealAllowed: true })).toBe(false);
+    expect(isValidVaultSessionPolicyShape({ strictApprovals: 'yes', windowSeconds: 600, parentValueSealAllowed: true })).toBe(false);
+    expect(isValidVaultSessionPolicyShape(null)).toBe(false);
+    expect(isValidVaultSessionPolicyShape(undefined)).toBe(false);
   });
 });

@@ -3,7 +3,7 @@ import { Loader2, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useApi, type VaultSettings } from '@/context/ApiContext';
-import { setVaultSandboxPolicy } from '@/lib/vaultSandboxPolicy';
+import { isValidVaultSessionPolicyShape, setVaultSandboxPolicy } from '@/lib/vaultSandboxPolicy';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { SegmentedRadio } from './segmented';
@@ -17,11 +17,12 @@ function unlockWindowChoice(seconds: number | undefined): UnlockWindowChoice {
   return '600';
 }
 
-// A response's `policy` must be a real object before we confirm it into the sandbox mirror. An
-// `ok:true` payload that omits/malforms `policy` (skewed deploy, partial failure) must be treated
-// as a load/save failure — never confirmed — so it can't bypass the fail-closed handshake path.
-function hasPolicyObject(res: { policy?: unknown } | null | undefined): boolean {
-  return typeof res?.policy === 'object' && res.policy !== null;
+// A response's `policy` must be a complete, well-formed policy before we confirm it into the
+// sandbox mirror. An `ok:true` payload that omits/malforms `policy` (skewed deploy, partial
+// failure) must be treated as a load/save failure — never confirmed — so it can't bypass the
+// fail-closed handshake path (a policy object with missing fields would normalize to relaxed).
+function hasValidPolicy(res: { policy?: unknown } | null | undefined): boolean {
+  return isValidVaultSessionPolicyShape(res?.policy);
 }
 
 /**
@@ -57,7 +58,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
       .getVaultSettings()
       .then((res) => {
         if (!alive) return;
-        if (res?.ok && hasPolicyObject(res)) {
+        if (res?.ok && hasValidPolicy(res)) {
           setUnlockWindow(unlockWindowChoice(res.settings?.unlock_window_seconds));
           setStrict(Boolean(res.settings?.strict_approvals));
           setVaultSandboxPolicy(res.policy);
@@ -87,7 +88,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
       setError(null);
       try {
         const res = await api.saveVaultSettings(patch);
-        if (!res?.ok || !hasPolicyObject(res)) {
+        if (!res?.ok || !hasValidPolicy(res)) {
           setError(res?.message || t('vaults.settings.saveFailed'));
           revert();
           return false;

@@ -26,6 +26,23 @@ function normalizeWindowSeconds(value: unknown): 300 | 600 | 1800 {
   return value === 300 || value === 600 || value === 1800 ? value : DEFAULT_VAULT_SESSION_POLICY.windowSeconds;
 }
 
+/**
+ * Whether a value is a *complete, well-formed* daemon policy — every field present with a valid
+ * value. This is stricter than "is an object": it must be validated before confirming so a
+ * malformed HTTP-200 payload (missing/misnamed fields during a skewed deploy) can't slip through
+ * `normalizeVaultSessionPolicy`, which would silently default the missing security fields to the
+ * relaxed values (non-strict / 10 min). A malformed policy must fail closed, not be trusted.
+ */
+export function isValidVaultSessionPolicyShape(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (record.windowSeconds === 300 || record.windowSeconds === 600 || record.windowSeconds === 1800) &&
+    typeof record.strictApprovals === 'boolean' &&
+    typeof record.parentValueSealAllowed === 'boolean'
+  );
+}
+
 /** Coerce any daemon/settings-shaped value into a complete, safe policy object. */
 export function normalizeVaultSessionPolicy(value: unknown): VaultSessionPolicy {
   if (typeof value !== 'object' || value == null) return { ...DEFAULT_VAULT_SESSION_POLICY };
@@ -92,11 +109,11 @@ export async function refreshVaultSandboxPolicy(): Promise<VaultSessionPolicy> {
     const res = await apiFetch('/api/vault/settings');
     if (!res.ok) return failClosedVaultSandboxPolicy();
     const body = (await res.json()) as { ok?: unknown; policy?: unknown };
-    // Require a genuine success payload carrying a policy object before trusting it. A malformed or
-    // application-level failure returned as HTTP 200 (ok:false / no policy) must fail closed — not
-    // confirm the permissive default via normalize(), which would silently relax a configured
-    // Strict/short-window posture on a fresh tab.
-    if (body?.ok === false || typeof body?.policy !== 'object' || body.policy === null) {
+    // Require a genuine success payload carrying a *complete, well-formed* policy before trusting
+    // it. An application-level failure or a malformed policy returned as HTTP 200 (ok:false, or a
+    // policy object missing/misnaming fields) must fail closed — not confirm a default via
+    // normalize(), which would silently relax a configured Strict/short-window posture.
+    if (body?.ok === false || !isValidVaultSessionPolicyShape(body?.policy)) {
       return failClosedVaultSandboxPolicy();
     }
     return setVaultSandboxPolicy(body.policy);
