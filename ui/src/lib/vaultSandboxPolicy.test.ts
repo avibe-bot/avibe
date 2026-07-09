@@ -91,6 +91,12 @@ describe('refreshVaultSandboxPolicy — fail closed', () => {
     expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
   });
 
+  it('fails closed on a 200 that carries no policy (malformed / app-level failure)', async () => {
+    // HTTP 200 but no policy object — must not confirm the permissive default.
+    mockedApiFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: false }) } as unknown as Response);
+    expect(await refreshVaultSandboxPolicy()).toEqual(STRICT_FALLBACK_VAULT_SESSION_POLICY);
+  });
+
   it('keeps a previously-confirmed policy on a later fetch failure (no over-restriction)', async () => {
     // A prior successful set confirms the real (relaxed) policy...
     setVaultSandboxPolicy({ windowSeconds: 1800, strictApprovals: false, parentValueSealAllowed: true });

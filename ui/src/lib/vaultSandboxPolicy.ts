@@ -91,7 +91,14 @@ export async function refreshVaultSandboxPolicy(): Promise<VaultSessionPolicy> {
   try {
     const res = await apiFetch('/api/vault/settings');
     if (!res.ok) return failClosedVaultSandboxPolicy();
-    const body = (await res.json()) as { policy?: unknown };
+    const body = (await res.json()) as { ok?: unknown; policy?: unknown };
+    // Require a genuine success payload carrying a policy object before trusting it. A malformed or
+    // application-level failure returned as HTTP 200 (ok:false / no policy) must fail closed — not
+    // confirm the permissive default via normalize(), which would silently relax a configured
+    // Strict/short-window posture on a fresh tab.
+    if (body?.ok === false || typeof body?.policy !== 'object' || body.policy === null) {
+      return failClosedVaultSandboxPolicy();
+    }
     return setVaultSandboxPolicy(body.policy);
   } catch {
     return failClosedVaultSandboxPolicy();
