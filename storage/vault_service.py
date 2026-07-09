@@ -3159,7 +3159,7 @@ def record_request_agent_binding_approvals(
     request_id: str,
     record: dict[str, Any],
     *,
-    max_records: int = 20,
+    max_records: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise InvalidRequestError("agent binding approval record must be an object")
@@ -3170,7 +3170,9 @@ def record_request_agent_binding_approvals(
     if not isinstance(records, list):
         records = []
     records.append(record)
-    delivery_payload["agent_binding_approvals"] = records[-max(1, max_records) :]
+    if max_records is not None:
+        records = records[-max(1, max_records) :]
+    delivery_payload["agent_binding_approvals"] = records
     conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id)
@@ -3774,18 +3776,6 @@ def create_grant(
                 raise InvalidRequestError("grant session does not match the approval request")
             session_id = requested_session_id
     resident_cache_ready = cache_ready and any(live_rows_by_name[name].get("protection") == "protected" for name in members)
-    decided_at = _now()
-    claim = conn.execute(
-        vault_requests.update()
-        .where(
-            vault_requests.c.id == request_id,
-            vault_requests.c.request_type == "access",
-            vault_requests.c.status == "pending",
-        )
-        .values(status="approved", decided_at=decided_at, callback_status="pending")
-    )
-    if claim.rowcount != 1:
-        raise InvalidRequestError("grant approval request is not pending")
     ttl = int(duration["ttl_seconds"])
     ttl = max(1, min(ttl, approval.ttl_cap_seconds))
     now_dt = datetime.now(timezone.utc)
@@ -3798,6 +3788,18 @@ def create_grant(
             raise InvalidGrantError("grant binding has expired")
         expires_at_dt = min(expires_at_dt, issued_expires_at)
     expires_at = expires_at_dt.isoformat()
+    decided_at = _now()
+    claim = conn.execute(
+        vault_requests.update()
+        .where(
+            vault_requests.c.id == request_id,
+            vault_requests.c.request_type == "access",
+            vault_requests.c.status == "pending",
+        )
+        .values(status="approved", decided_at=decided_at, callback_status="pending")
+    )
+    if claim.rowcount != 1:
+        raise InvalidRequestError("grant approval request is not pending")
     grant_id = approval.grant_id
     grant_values = {
         "member_snapshot": json.dumps(members),

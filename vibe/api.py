@@ -1789,6 +1789,7 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
             grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
             protected_metas = [member for member in grantable_members if member.get("protection") == "protected"]
             member_order = {name: index for index, name in enumerate(option["member_names"])}
+            grantable_members.sort(key=lambda item: member_order.get(str(item.get("name")), 10_000))
             protected_metas.sort(key=lambda item: member_order.get(str(item.get("name")), 10_000))
             if remember_duration:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
@@ -1835,7 +1836,7 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
     ttl_seconds = int(duration["ttl_seconds"])
     expires_at = now + timedelta(seconds=ttl_seconds)
     expires_at_unix = int(expires_at.timestamp())
-    display = _operation_context_display(request_payload, protected_metas, grant_ttl_seconds=ttl_seconds)
+    display = _operation_context_display(request_payload, grantable_members, grant_ttl_seconds=ttl_seconds)
     agent = {
         "publicKey": {
             "public_key": str(agent_pubkey["public_key"]),

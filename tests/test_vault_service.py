@@ -58,7 +58,14 @@ def _establish_protected_secret(conn, name: str, credential: WebAuthnTestCredent
     return credential, dict(factor)
 
 
-def _grant_from_request(conn, request: dict, *, cache_ready: bool = True, ttl_seconds: int | None = None) -> dict:
+def _grant_from_request(
+    conn,
+    request: dict,
+    *,
+    cache_ready: bool = True,
+    ttl_seconds: int | None = None,
+    expires_at: str | None = None,
+) -> dict:
     option = request["card"]["grant_options"][0]
     return vs.create_grant(
         conn,
@@ -67,6 +74,7 @@ def _grant_from_request(conn, request: dict, *, cache_ready: bool = True, ttl_se
         purpose=option["purpose"],
         request_id=request["id"],
         ttl_seconds=ttl_seconds,
+        expires_at=expires_at,
         cache_ready=cache_ready,
     )
 
@@ -637,6 +645,23 @@ def test_multi_member_one_shot_grant_is_consumed_once(vault):
     assert reserved["status"] == "reserved"
     assert row["status"] == "expired"
     assert releases == [{"grant_id": grant["id"]}]
+
+
+def test_create_grant_rejects_expired_binding_without_claiming_request(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "PROTECTED_KEY", requester={"session_id": "ses_1"})
+
+        with pytest.raises(vs.InvalidGrantError, match="grant binding has expired"):
+            _grant_from_request(conn, req, expires_at=expired_at)
+
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == req["id"])).mappings().one()
+        grants = conn.execute(select(vault_grants).where(vault_grants.c.request_id == req["id"])).mappings().all()
+
+    assert row["status"] == "pending"
+    assert grants == []
 
 
 def test_selector_request_expires_when_member_rotates(vault):

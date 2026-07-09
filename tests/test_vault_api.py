@@ -1242,6 +1242,7 @@ def test_create_vault_agent_bindings_batch_signs_value_free_contexts(monkeypatch
 def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
     for name in ("PROTECTED_A", "PROTECTED_B"):
         api.create_vault_secret(
             {
@@ -1251,6 +1252,14 @@ def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(mon
                 "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
             }
         )
+    api.create_vault_secret(
+        {
+            "name": "STANDARD_ASK",
+            "tags": ["deploy"],
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "policy": {"always_ask": True},
+        }
+    )
     request = api.request_vault_access(
         {
             "source_selector": {"tags": ["deploy"]},
@@ -1270,6 +1279,7 @@ def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(mon
     assert result["grant_duration"] == "one-time"
     assert result["ttl_seconds"] == 60
     assert [item["name"] for item in result["items"]] == ["PROTECTED_A", "PROTECTED_B"]
+    assert request["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_A", "PROTECTED_B", "STANDARD_ASK"]
     contexts = [_verified_signed_context(item["context"]) for item in result["items"]]
     assert len({context["requestId"] for context in contexts}) == 2
     assert all(context["requestId"].startswith("vab_") for context in contexts)
@@ -1277,12 +1287,61 @@ def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(mon
         assert context["display"]["secrets"] == [
             {"name": "PROTECTED_A", "kind": "static"},
             {"name": "PROTECTED_B", "kind": "static"},
+            {"name": "STANDARD_ASK", "kind": "static"},
         ]
         assert context["display"]["command"] == "deploy prod"
         assert context["display"]["egress"] == "api.github.com"
         assert context["display"]["source"] == {"tags": ["deploy"]}
         assert context["display"]["grantTtlSeconds"] == 60
     assert api.get_vault_settings()["settings"]["last_grant_ttl"] == "one-time"
+
+
+def test_legacy_agent_binding_records_all_protected_members(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    agent_grant = Mock(return_value={"granted": 25, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    names = [f"PROTECTED_BULK_{index:02d}" for index in range(25)]
+    for name in names:
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["bulk"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    requested = api.request_vault_access({"source_selector": {"tags": ["bulk"]}, "session_id": "ses_bulk"})
+    option = requested["request"]["card"]["grant_options"][0]
+
+    deks = []
+    agent_pubkey = None
+    for name in option["member_snapshot"]:
+        binding = api.create_vault_agent_binding(
+            {
+                "request_id": requested["request"]["id"],
+                "grant_id": option["grant_id"],
+                "name": name,
+                "grant_duration": 300,
+            }
+        )
+        agent_pubkey = binding["agent_pubkey"]
+        deks.append({"name": name, "dek_blindbox": _agent_dek_blindbox(enc=f"enc-{name}"), "approval": binding["approval"]})
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_bulk",
+            "request_id": requested["request"]["id"],
+            "agent_pubkey": agent_pubkey,
+            "deks": deks,
+        }
+    )
+
+    assert created["grant"]["member_snapshot"] == names
+    assert agent_grant.call_count == 1
+    with api._vault_engine().connect() as conn:
+        request = vault_service.get_request(conn, requested["request"]["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    assert len(request["delivery"]["agent_binding_approvals"]) == 25
 
 
 def test_vault_settings_roundtrip_and_policy():
