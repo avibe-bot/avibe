@@ -5341,6 +5341,10 @@ AVAULT_P2_MIN_VERSION = "0.1.3"
 # next avault release so upgraded Avibe installs fail closed instead of sending
 # new frames to an incompatible resident agent.
 AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
+# Protected-record open requires avault's v2 canonical-JSON record AAD (v0.1.6).
+# Older binaries cannot open browser-sealed protected values and fail with
+# "open failed for <name>", so protected Vaults must not treat them as ready.
+AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
 # Installer pin must reference a published manifest-pinned release. v0.1.6 adds the
 # protected-record v2 AAD fix so agent delivery can open browser-sealed protected values.
 AVAULT_VERSION = "0.1.6"
@@ -5383,9 +5387,11 @@ def _avault_p2_release_unavailable_result(
 
 
 def _avault_ready_min_version() -> str:
-    # Avibe-managed avault readiness follows the resident delivery protocol now
-    # that the managed pin includes grant-id frames. Older P2 binaries can still
-    # seal/sign, but they are not safe as the default dependency for Vaults.
+    # Managed avault readiness must satisfy both the resident grant-id delivery
+    # protocol and the protected-record v2 AAD open fix; take the higher floor so
+    # stale binaries (e.g. 0.1.5) are upgraded/blocked before protected delivery.
+    if _version_at_least(AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION):
+        return AVAULT_PROTECTED_RECORD_MIN_VERSION
     return AVAULT_GRANT_DELIVERY_MIN_VERSION
 
 

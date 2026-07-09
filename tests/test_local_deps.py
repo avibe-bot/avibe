@@ -459,7 +459,7 @@ def test_avault_resolves_path_fallback_when_configured_path_missing(monkeypatch)
 def test_ensure_avault_idempotent_when_present(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
-    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_GRANT_DELIVERY_MIN_VERSION)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api._avault_ready_min_version())
     flag = {"installed": False}
     monkeypatch.setattr(api, "install_avault", lambda force=False: flag.__setitem__("installed", True) or {"ok": True})
 
@@ -470,7 +470,7 @@ def test_ensure_avault_idempotent_when_present(monkeypatch):
         "installed": True,
         "changed": False,
         "path": "/usr/local/bin/avault",
-        "version": api.AVAULT_GRANT_DELIVERY_MIN_VERSION,
+        "version": api._avault_ready_min_version(),
     }
     assert flag["installed"] is False
 
@@ -495,7 +495,7 @@ def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_ol
     monkeypatch.setattr(api, "_managed_avault_release_satisfies_ready_minimum", lambda: False)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
-    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_GRANT_DELIVERY_MIN_VERSION)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api._avault_ready_min_version())
     monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not downgrade avault"))
 
     out = api.ensure_avault_installed(force=True)
@@ -505,7 +505,7 @@ def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_ol
         "installed": True,
         "changed": False,
         "path": "/usr/local/bin/avault",
-        "version": api.AVAULT_GRANT_DELIVERY_MIN_VERSION,
+        "version": api._avault_ready_min_version(),
     }
 
 
@@ -622,12 +622,12 @@ def test_avault_status_present_parses_version(monkeypatch):
 
     class _R:
         returncode = 0
-        stdout = f"avault {api.AVAULT_GRANT_DELIVERY_MIN_VERSION}\n"
+        stdout = f"avault {api._avault_ready_min_version()}\n"
         stderr = ""
 
     monkeypatch.setattr(api.subprocess, "run", lambda *a, **k: _R())
     s = api.avault_status()
-    assert s["installed"] and s["version"] == api.AVAULT_GRANT_DELIVERY_MIN_VERSION and s["status"] == "ready"
+    assert s["installed"] and s["version"] == api._avault_ready_min_version() and s["status"] == "ready"
 
 
 def test_avault_status_marks_p2_only_version_upgrade_required(monkeypatch):
