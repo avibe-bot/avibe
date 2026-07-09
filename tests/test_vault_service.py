@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -11,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 
 from storage import vault_service as vs, vault_webauthn
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_auth_factors, vault_grants, vault_requests, vault_secrets
+from storage.models import metadata, state_meta, vault_auth_factors, vault_grants, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 
@@ -361,6 +363,24 @@ def test_create_grant_one_time_uses_short_one_shot_window(vault):
     assert grant["one_shot"] is True
     assert grant["session_id"] == "ses_1"
     assert settings["last_grant_ttl"] == "one-time"
+
+
+def test_save_vault_settings_first_write_is_atomic_under_concurrency(vault):
+    barrier = threading.Barrier(6)
+
+    def save_settings(index: int) -> dict:
+        with vault.begin() as conn:
+            barrier.wait(timeout=5)
+            return vs.save_vault_settings(conn, {"last_grant_ttl": 300 if index % 2 else 900})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(save_settings, range(6)))
+
+    with vault.connect() as conn:
+        rows = list(conn.execute(select(state_meta).where(state_meta.c.key == vs.VAULT_SETTINGS_META_KEY)).mappings())
+
+    assert len(rows) == 1
+    assert {result["last_grant_ttl"] for result in results}.issubset({300, 900})
 
 
 def test_sibling_approval_requires_matching_purpose(vault):

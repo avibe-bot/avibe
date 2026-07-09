@@ -1251,6 +1251,13 @@ def test_create_vault_agent_bindings_batch_signs_value_free_contexts(monkeypatch
     assert context["display"]["secrets"] == [{"name": "PROTECTED_BINDING", "kind": "static"}]
     assert context["display"]["sessionLabel"] == "fix-ci-flake"
     assert context["display"]["grantTtlSeconds"] == 300
+    assert context["release"] == {
+        "name": "PROTECTED_BINDING",
+        "ttlSecs": 300,
+        "approvalNonce": list(base64.b64decode(item["approval"]["nonce"])),
+        "approvalExpiresAtUnix": item["approval"]["expires_at_unix"],
+        "operationHash": api._agent_deliver_operation_hash("PROTECTED_BINDING", 300),
+    }
 
 
 def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(monkeypatch):
@@ -1307,7 +1314,37 @@ def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(mon
         assert context["display"]["egress"] == "api.github.com"
         assert context["display"]["source"] == {"tags": ["deploy"]}
         assert context["display"]["grantTtlSeconds"] == 60
+        assert context["release"]["ttlSecs"] == 60
+        assert context["release"]["operationHash"] == api._agent_deliver_operation_hash(
+            context["release"]["name"],
+            60,
+        )
     assert api.get_vault_settings()["settings"]["last_grant_ttl"] == "one-time"
+
+
+def test_agent_bindings_batch_rejects_mixed_duration_fields(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_MIXED_TTL",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        request = vault_service.create_access_request(conn, "PROTECTED_MIXED_TTL")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_agent_bindings_batch(
+            {
+                "request_id": request["id"],
+                "grant_duration": 300,
+                "ttl_seconds": 900,
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
 
 
 def test_legacy_agent_binding_records_all_protected_members(monkeypatch, avault_p2):

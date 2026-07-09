@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
@@ -383,19 +384,20 @@ def save_vault_settings(conn: Connection, payload: dict[str, Any]) -> dict[str, 
     next_settings = _normalize_vault_settings({**current, **updates})
     value_json = json.dumps(next_settings, sort_keys=True)
     now = _now()
-    result = conn.execute(
-        state_meta.update()
-        .where(state_meta.c.key == VAULT_SETTINGS_META_KEY)
-        .values(value_json=value_json, updated_at=now)
+    stmt = sqlite_insert(state_meta).values(
+        key=VAULT_SETTINGS_META_KEY,
+        value_json=value_json,
+        updated_at=now,
     )
-    if result.rowcount != 1:
-        conn.execute(
-            state_meta.insert().values(
-                key=VAULT_SETTINGS_META_KEY,
-                value_json=value_json,
-                updated_at=now,
-            )
+    conn.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[state_meta.c.key],
+            set_={
+                "value_json": value_json,
+                "updated_at": now,
+            },
         )
+    )
     return next_settings
 
 

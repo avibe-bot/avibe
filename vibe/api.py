@@ -1745,12 +1745,20 @@ def _operation_context_display(
 def _grant_duration_value_from_payload(payload: dict[str, Any]) -> Any | None:
     from storage import vault_service
 
-    for key in ("grant_duration", "grantDuration", "last_grant_ttl", "lastGrantTtl"):
+    grant_duration_keys = ("grant_duration", "grantDuration", "last_grant_ttl", "lastGrantTtl")
+    ttl_keys = ("ttl_seconds", "ttlSecs")
+    has_grant_duration = any(key in payload for key in grant_duration_keys)
+    has_one_shot = payload.get("one_shot") is True or payload.get("oneShot") is True
+    has_legacy_ttl = any(key in payload for key in ttl_keys)
+    if (has_grant_duration or has_one_shot) and has_legacy_ttl:
+        raise VaultApiError("use grant_duration or ttl_seconds, not both", code="invalid_request", status=409)
+
+    for key in grant_duration_keys:
         if key in payload:
             return payload[key]
-    if payload.get("one_shot") is True or payload.get("oneShot") is True:
+    if has_one_shot:
         return vault_service.GRANT_DURATION_ONE_TIME
-    for key in ("ttl_seconds", "ttlSecs"):
+    for key in ttl_keys:
         if key in payload:
             value = payload[key]
             try:
@@ -1847,14 +1855,23 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
     items: list[dict[str, Any]] = []
     issued_items: list[dict[str, Any]] = []
     for meta in protected_metas:
+        name = str(meta["name"])
         approval_nonce = os.urandom(16)
         context_request_id = f"vab_{uuid.uuid4().hex}"
+        release = {
+            "name": name,
+            "ttlSecs": ttl_seconds,
+            "approvalNonce": list(approval_nonce),
+            "approvalExpiresAtUnix": expires_at_unix,
+            "operationHash": _agent_deliver_operation_hash(name, ttl_seconds),
+        }
         context = {
             "v": 2,
             "purpose": "agent-deliver",
             "requestId": context_request_id,
             "grantId": option["grant_id"],
             "display": display,
+            "release": release,
             "agent": agent,
             "expiresAt": _isoformat_z(expires_at),
         }
@@ -1865,14 +1882,14 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
         }
         items.append(
             {
-                "name": str(meta["name"]),
+                "name": name,
                 "context": signed_context,
                 "approval": approval,
             }
         )
         issued_items.append(
             {
-                "name": str(meta["name"]),
+                "name": name,
                 "request_id": context_request_id,
                 "approval": approval,
             }
