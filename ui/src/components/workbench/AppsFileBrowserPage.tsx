@@ -457,15 +457,28 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       else await movePath(entry.from, entry.to);
       setError(null);
       refreshAll();
+      // Only clear OUR entry: a slow in-flight undo must not wipe the bar of a NEWER action the
+      // user performed meanwhile (that entry's own timer still governs it).
+      setUndoEntry((cur) => (cur === entry ? null : cur));
     } catch (e: unknown) {
       // exists → the original spot is occupied again; expired → the staged copy is gone. Both land
       // in the standard error strip via the shared code→message mapping.
       setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.undoFailed')));
+      const code = e instanceof FilesApiError ? e.code : null;
+      if (code === 'exists' || code === 'expired') {
+        // Terminal: the revert can never succeed — drop the bar.
+        setUndoEntry((cur) => (cur === entry ? null : cur));
+      } else {
+        // Transient (network etc.): the staged copy / reverse move is still viable — keep the bar
+        // for a retry, with a fresh dismiss window (the original timer was cleared above).
+        setUndoEntry((cur) => {
+          if (cur !== entry) return cur;
+          undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
+          return cur;
+        });
+      }
     } finally {
       setUndoBusy(false);
-      // Only clear OUR entry: a slow in-flight undo must not wipe the bar of a NEWER action the
-      // user performed meanwhile (that entry's own timer still governs it).
-      setUndoEntry((cur) => (cur === entry ? null : cur));
     }
   }, [undoEntry, undoBusy, refreshAll, t]);
 
@@ -487,6 +500,11 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setSelected((s) => (s === item.full ? null : s));
       if (result.undo_token) {
         showUndo({ kind: 'delete', label: item.entry.name, token: result.undo_token });
+      } else {
+        // Permanent delete: any older bar now describes a stale world (its target may be the very
+        // entry that just vanished) — the newest action owns the bar, and it has nothing to offer.
+        if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+        setUndoEntry(null);
       }
       refreshAll();
     } catch (e: unknown) {
@@ -555,21 +573,24 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // not overwrite each other's pending dialog; each waits for the previous answer.
   const [replaceAsk, setReplaceAsk] = useState<{ name: string; resolve: (ok: boolean) => void } | null>(null);
   const askChainRef = useRef<Promise<unknown>>(Promise.resolve());
-  // Mirror of the pending ask, so an unmount (window closed mid-question) can resolve it `false`
-  // instead of hanging that upload worker — and, via the chain, every later clash — forever.
+  // Unmount (window closed mid-question) must not hang the upload workers: the CURRENT pending ask
+  // resolves `false` from the cleanup below, and QUEUED asks short-circuit to `false` instead of
+  // setState-ing an unmounted component (which would leave their promises forever pending).
+  const unmountedRef = useRef(false);
   const pendingAskRef = useRef<{ resolve: (ok: boolean) => void } | null>(null);
   useEffect(() => {
     pendingAskRef.current = replaceAsk;
   }, [replaceAsk]);
   useEffect(
     () => () => {
+      unmountedRef.current = true;
       pendingAskRef.current?.resolve(false);
     },
     [],
   );
   const confirmReplace = useCallback((name: string) => {
-    const next = askChainRef.current.then(
-      () => new Promise<boolean>((resolve) => setReplaceAsk({ name, resolve })),
+    const next = askChainRef.current.then(() =>
+      unmountedRef.current ? false : new Promise<boolean>((resolve) => setReplaceAsk({ name, resolve })),
     );
     askChainRef.current = next.catch(() => false);
     return next;
