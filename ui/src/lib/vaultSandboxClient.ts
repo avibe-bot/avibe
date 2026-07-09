@@ -1,5 +1,6 @@
 import type {
   SigningAddresses,
+  VaultSignedOperationContext,
   VaultWebAuthnRegistrationPayload,
 } from '@/context/ApiContext';
 import type { BlindBox, ProtectedRecordEnvelope, SignatureResult, SignatureScheme } from './vaultCrypto';
@@ -14,20 +15,15 @@ import {
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
+import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
 
 const CHANNEL = 'avibe.vault.crypto';
-const VERSION = 1;
-const REQUIRED_OPS = [
-  'status',
-  'setup',
-  'unlock',
-  'lock',
-  'seal',
-  'unseal',
-  'sign',
-  'releaseDEK',
-] as const;
+const VERSION = 2;
+// Protocol v2 operation surface (vault-sandbox #9): `unseal`→`reveal`, `releaseDEK`→`approveRelease`.
+const REQUIRED_OPS = ['status', 'setup', 'unlock', 'lock', 'seal', 'reveal', 'sign', 'approveRelease'] as const;
 const DEFAULT_TIMEOUT_MS = 15_000;
+// Ops that may raise an in-sandbox card (confirm / passkey / plaintext display) can sit open for
+// as long as the user takes to act, so they get the long ceremony timeout regardless of tier.
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
 
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | 'handshake';
@@ -36,7 +32,6 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer: number;
-  interactive: boolean;
 };
 
 type SandboxBuild = {
@@ -56,12 +51,32 @@ type TerminalMessage =
   | { channel: typeof CHANNEL; version: typeof VERSION; id: string; ok: true; result: unknown }
   | { channel: typeof CHANNEL; version: typeof VERSION; id: string; ok: false; error: { code?: string; message?: string; retryable?: boolean } | string };
 
+/** Sandbox→parent one-way notification (protocol v2 §6.4). */
+type EventMessage = {
+  channel: typeof CHANNEL;
+  version: typeof VERSION;
+  kind: 'event';
+  event: 'vault.state' | 'ui.show' | 'ui.hide';
+  payload?: unknown;
+};
+
 export type VaultSandboxState = 'needs-setup' | 'locked' | 'unlocked';
+
+export type VaultStateReason = 'unlock' | 'renew' | 'manual-lock' | 'auto-lock' | 'unload';
+
+/** The `vault.state` event payload — the single clock the parent mirrors (protocol v2 §6.4). */
+export type VaultStateEvent = {
+  state: VaultSandboxState;
+  expiresAt?: number | null;
+  reason: VaultStateReason;
+};
 
 export type VaultSandboxStatusResult = {
   state: VaultSandboxState;
   expiresAt?: number | null;
   freshSetup?: boolean;
+  policy?: VaultSessionPolicy;
+  session?: { expiresAt?: number; strict?: boolean };
 };
 
 export type VaultSandboxSetupResult = {
@@ -71,12 +86,14 @@ export type VaultSandboxSetupResult = {
   authzRegistration?: VaultWebAuthnRegistrationPayload;
   state: 'unlocked';
   expiresAt?: number;
+  policy?: VaultSessionPolicy;
 };
 
 export type VaultSandboxUnlockResult = {
   state: 'unlocked';
   expiresAt?: number;
   wrapMeta?: string;
+  policy?: VaultSessionPolicy;
 };
 
 export type VaultSandboxSealResult = {
@@ -86,17 +103,10 @@ export type VaultSandboxSealResult = {
   addresses?: SigningAddresses;
 };
 
-export type DaemonAgentBinding = {
-  challengeId: string;
-  requestId: string;
-  grantId: string;
-  agent: {
-    publicKey: { public_key: string; fingerprint?: string };
-    fingerprint: string;
-  };
-  context: Record<string, unknown>;
-  expiresAt: string;
-  signature: { alg: 'ed25519'; keyId: string; value: string };
+/** One member of a batch `approveRelease` — the sandbox releases one blind box per item. */
+export type ApproveReleaseItem = {
+  material: ProtectedUnlockMaterialLike;
+  context: VaultSignedOperationContext;
 };
 
 export type VaultSandboxSigningContext = Record<string, unknown>;
@@ -116,6 +126,22 @@ export class VaultSandboxError extends Error {
 let integrityPromise: Promise<void> | null = null;
 let singleton: Promise<VaultSandboxClient> | null = null;
 let activeClient: VaultSandboxClient | null = null;
+
+// Module-level so subscribers survive client recreation (a singleton reset on error) and can
+// register before any client exists — the active client forwards every `vault.state` event here.
+const vaultStateListeners = new Set<(event: VaultStateEvent) => void>();
+
+/**
+ * Subscribe to sandbox `vault.state` events (unlock / renew / lock transitions). This is the
+ * single clock the parent renders off of — {@link useProtectedVault} wires one listener that
+ * mirrors state + `expiresAt`. Returns an unsubscribe function.
+ */
+export function subscribeVaultStateEvents(listener: (event: VaultStateEvent) => void): () => void {
+  vaultStateListeners.add(listener);
+  return () => {
+    vaultStateListeners.delete(listener);
+  };
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value != null && !Array.isArray(value);
@@ -215,13 +241,34 @@ function parseTerminalMessage(data: unknown): TerminalMessage | null {
   return null;
 }
 
+function parseEventMessage(data: unknown): EventMessage | null {
+  if (!isObject(data)) return null;
+  if (data.channel !== CHANNEL || data.version !== VERSION || data.kind !== 'event') return null;
+  if (data.event !== 'vault.state' && data.event !== 'ui.show' && data.event !== 'ui.hide') return null;
+  return data as EventMessage;
+}
+
+function parseVaultStateEvent(payload: unknown): VaultStateEvent | null {
+  if (!isObject(payload)) return null;
+  const state = payload.state;
+  if (state !== 'needs-setup' && state !== 'locked' && state !== 'unlocked') return null;
+  const reason = payload.reason;
+  const validReason =
+    reason === 'unlock' || reason === 'renew' || reason === 'manual-lock' || reason === 'auto-lock' || reason === 'unload';
+  return {
+    state,
+    reason: validReason ? reason : 'manual-lock',
+    expiresAt: typeof payload.expiresAt === 'number' && Number.isFinite(payload.expiresAt) ? payload.expiresAt : null,
+  };
+}
+
 export class VaultSandboxClient {
   private iframe: HTMLIFrameElement;
   private backdrop: HTMLDivElement | null = null;
   private pending = new Map<string, PendingRequest>();
   private readyPromise: Promise<ReadyMessage>;
-  private interactiveDepth = 0;
   private handshaken = false;
+  private modalVisible = false;
 
   private constructor(iframe: HTMLIFrameElement) {
     this.iframe = iframe;
@@ -250,8 +297,8 @@ export class VaultSandboxClient {
     iframe.style.boxShadow = 'none';
     // At rest the sandbox is a headless RPC worker: keep it in the DOM (so
     // postMessage works) but 0-sized + hidden so it never covers the app. It
-    // only expands to a centered modal while an interactive ceremony is
-    // active — see setInteractive().
+    // only expands to a centered modal while the sandbox asks for its slot via
+    // a `ui.show` event — see setModalVisible().
     iframe.style.width = '0';
     iframe.style.height = '0';
     iframe.style.visibility = 'hidden';
@@ -285,23 +332,22 @@ export class VaultSandboxClient {
     return backdrop;
   }
 
-  private setInteractive(active: boolean): void {
-    this.interactiveDepth += active ? 1 : -1;
-    this.interactiveDepth = Math.max(0, this.interactiveDepth);
-    const interactive = this.interactiveDepth > 0;
-    if (interactive) {
+  // Expand to a lightweight centered modal while the sandbox holds its slot (`ui.show`), otherwise
+  // collapse to a hidden 0-size worker (`ui.hide`) so silent R1/R2 ops never cover the app. Driven
+  // by sandbox events, not per-call flags — a silent operation emits no `ui.show` and stays hidden.
+  private setModalVisible(visible: boolean): void {
+    this.modalVisible = visible;
+    if (visible) {
       this.ensureBackdrop();
     } else {
       this.backdrop?.remove();
       this.backdrop = null;
     }
-    // Expand to a lightweight centered modal only while a ceremony is active;
-    // otherwise collapse to a hidden 0-size worker so the sandbox never covers the app.
-    this.iframe.style.width = interactive ? 'min(440px, 92vw)' : '0';
-    this.iframe.style.height = interactive ? 'min(640px, 88vh)' : '0';
-    this.iframe.style.visibility = interactive ? 'visible' : 'hidden';
-    this.iframe.style.pointerEvents = interactive ? 'auto' : 'none';
-    this.iframe.style.boxShadow = interactive ? '0 24px 80px rgba(15, 23, 42, 0.38)' : 'none';
+    this.iframe.style.width = visible ? 'min(440px, 92vw)' : '0';
+    this.iframe.style.height = visible ? 'min(640px, 88vh)' : '0';
+    this.iframe.style.visibility = visible ? 'visible' : 'hidden';
+    this.iframe.style.pointerEvents = visible ? 'auto' : 'none';
+    this.iframe.style.boxShadow = visible ? '0 24px 80px rgba(15, 23, 42, 0.38)' : 'none';
   }
 
   private waitForReady(): Promise<ReadyMessage> {
@@ -332,13 +378,20 @@ export class VaultSandboxClient {
 
   private handleMessage = (event: MessageEvent): void => {
     if (event.origin !== VAULT_SANDBOX_ORIGIN || event.source !== this.iframe.contentWindow) return;
+    const eventMessage = parseEventMessage(event.data);
+    if (eventMessage) {
+      this.handleEvent(eventMessage);
+      return;
+    }
     const reply = parseTerminalMessage(event.data);
     if (!reply) return;
     const pending = this.pending.get(reply.id);
     if (!pending) return;
     this.pending.delete(reply.id);
     window.clearTimeout(pending.timer);
-    if (pending.interactive) this.setInteractive(false);
+    // Safety net: if the sandbox errored out of a card without emitting `ui.hide`, collapse once
+    // the last in-flight request settles so a stale modal can't strand the app behind a backdrop.
+    if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
     if (reply.ok) {
       pending.resolve(reply.result);
     } else {
@@ -346,8 +399,25 @@ export class VaultSandboxClient {
     }
   };
 
+  private handleEvent(message: EventMessage): void {
+    if (message.event === 'ui.show') {
+      this.setModalVisible(true);
+      return;
+    }
+    if (message.event === 'ui.hide') {
+      this.setModalVisible(false);
+      return;
+    }
+    const state = parseVaultStateEvent(message.payload);
+    if (!state) return;
+    for (const listener of [...vaultStateListeners]) listener(state);
+  }
+
   private async handshake(): Promise<void> {
     await this.readyPromise;
+    // Pull the daemon-persisted policy so the very first ceremony runs under the configured
+    // window/strict values; best-effort — a failure leaves the default policy in place.
+    await refreshVaultSandboxPolicy();
     await this.request(
       'handshake',
       {
@@ -355,6 +425,7 @@ export class VaultSandboxClient {
         nonce: randomId(),
         expectedBuildHash: VAULT_SANDBOX_EXPECTED_BUILD_HASH,
         appearance: getVaultSandboxAppearance(),
+        policy: getVaultSandboxPolicy(),
       },
       { timeoutMs: DEFAULT_TIMEOUT_MS },
     );
@@ -381,26 +452,19 @@ export class VaultSandboxClient {
     }
   }
 
-  private async request<T>(
-    op: VaultSandboxOp,
-    payload?: unknown,
-    options: { timeoutMs?: number; interactive?: boolean } = {},
-  ): Promise<T> {
+  private async request<T>(op: VaultSandboxOp, payload?: unknown, options: { timeoutMs?: number } = {}): Promise<T> {
     await this.readyPromise;
     const id = randomId();
-    const interactive = Boolean(options.interactive);
-    if (interactive) this.setInteractive(true);
     const promise = new Promise<T>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
-        if (interactive) this.setInteractive(false);
+        if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
         reject(new VaultSandboxError('sandbox_request_timeout', `Sandbox ${op} request timed out`, true));
       }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
         timer,
-        interactive,
       });
     });
     this.target.postMessage({ channel: CHANNEL, version: VERSION, id, op, payload: payload ?? {} }, VAULT_SANDBOX_ORIGIN);
@@ -418,65 +482,56 @@ export class VaultSandboxClient {
     authzCreationOptions?: unknown;
     rootMetadata?: unknown;
   }): Promise<VaultSandboxSetupResult> {
-    return this.request<VaultSandboxSetupResult>('setup', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
+    return this.request<VaultSandboxSetupResult>('setup', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 
   unlock(payload: { wrapMeta: string }): Promise<VaultSandboxUnlockResult> {
-    return this.request<VaultSandboxUnlockResult>('unlock', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
+    // Carry the latest policy so the sandbox arms the unlock window with the configured length
+    // and Strict setting for this session (protocol v2 §6.5).
+    return this.request<VaultSandboxUnlockResult>(
+      'unlock',
+      { wrapMeta: payload.wrapMeta, policy: getVaultSandboxPolicy() },
+      { timeoutMs: INTERACTIVE_TIMEOUT_MS },
+    );
   }
 
-  lock(): Promise<{ ok?: boolean }> {
-    return this.request<{ ok?: boolean }>('lock', {}, { timeoutMs: DEFAULT_TIMEOUT_MS });
+  lock(): Promise<{ ok?: boolean; state?: VaultSandboxState }> {
+    return this.request<{ ok?: boolean; state?: VaultSandboxState }>('lock', {}, { timeoutMs: DEFAULT_TIMEOUT_MS });
   }
 
-  seal(payload: {
-    name: string;
-    kind: 'static' | 'keypair';
-    inputMode: 'sandbox-entry' | 'parent-value';
-    value?: string;
-    wrapMeta?: string | null;
-  }): Promise<VaultSandboxSealResult> {
-    return this.request<VaultSandboxSealResult>('seal', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
+  seal(
+    payload:
+      | { name: string; kind: 'static'; value: string; wrapMeta?: string | null }
+      | { name: string; kind: 'keypair'; wrapMeta?: string | null },
+  ): Promise<VaultSandboxSealResult> {
+    // Static = parent-typed value handed in for sealing (the #842 concession). Keypair = generated
+    // entirely inside the sandbox (generate-only, no input) returning ciphertext + public material.
+    const wire =
+      payload.kind === 'static'
+        ? { name: payload.name, kind: 'static', inputMode: 'parent-value', value: payload.value, wrapMeta: payload.wrapMeta }
+        : { name: payload.name, kind: 'keypair', wrapMeta: payload.wrapMeta };
+    return this.request<VaultSandboxSealResult>('seal', wire, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 
-  unseal(payload: {
-    material: ProtectedUnlockMaterialLike;
-    mode: 'sandbox-display' | 'sandbox-copy';
-  }): Promise<{ completed: boolean }> {
-    return this.request<{ completed: boolean }>('unseal', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
+  reveal(payload: { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }): Promise<{ completed: boolean }> {
+    return this.request<{ completed: boolean }>('reveal', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 
   sign(payload: {
     material: ProtectedUnlockMaterialLike;
     scheme: SignatureScheme;
     signingContext: VaultSandboxSigningContext;
+    context: VaultSignedOperationContext;
   }): Promise<SignatureResult> {
-    return this.request<SignatureResult>('sign', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
+    return this.request<SignatureResult>('sign', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 
-  releaseDEK(payload: {
-    material: ProtectedUnlockMaterialLike;
-    agentBinding: DaemonAgentBinding;
-  }): Promise<BlindBox> {
-    return this.request<BlindBox>('releaseDEK', payload, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
-      interactive: true,
-    });
+  /**
+   * Batch DEK release: one confirm card lists every member, then the sandbox emits one HPKE blind
+   * box per item (order matches `items`). Replaces v1 `releaseDEK`'s per-secret ceremony.
+   */
+  approveRelease(payload: { items: ApproveReleaseItem[] }): Promise<{ blindBoxes: BlindBox[] }> {
+    return this.request<{ blindBoxes: BlindBox[] }>('approveRelease', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 }
 

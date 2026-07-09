@@ -2270,7 +2270,27 @@
     "lock": {
       "unlocked": "Unlocked",
       "lockNow": "Lock now",
-      "autoLockHint": "Auto-locks after 10 minutes idle — the key is wiped from this browser. Lock now to wipe it immediately."
+      "windowTooltip": "Unlock window — while unlocked, approvals don't re-ask for your passkey; signing always does. Lock now to wipe the key from this browser."
+    },
+    "settings": {
+      "title": "Vault settings",
+      "subtitle": "How long the vault stays unlocked, and how strictly approvals ask.",
+      "loading": "Loading settings…",
+      "loadFailed": "Couldn't load vault settings.",
+      "saveFailed": "Couldn't save vault settings.",
+      "unlockWindow": "Unlock window",
+      "unlockWindowHelp": "How long the vault stays unlocked in this browser after you unlock it. Applies the next time you unlock.",
+      "minutes": "{{count}} min",
+      "strict": "Strict approvals",
+      "strictHelp": "Ask for your passkey on every approval and reveal — not just an in-sandbox confirmation. Signing always asks regardless."
+    },
+    "reveal": {
+      "show": "Show value",
+      "copy": "Copy value",
+      "errors": {
+        "contextFailed": "Couldn't prepare the reveal. Please try again.",
+        "unavailable": "Reveal isn't available for this secret yet."
+      }
     },
     "saved": "Updated {{name}}",
     "editSecret": "Edit info",
@@ -2334,6 +2354,8 @@
       "kindKeypairHelp": "A signing key generated in your browser.",
       "nameHint": "Start with a letter or underscore; then use letters, numbers, or underscore · case preserved",
       "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed in your browser — standard keys are signed by avault locally, protected keys are signed in your browser — and only the public key is stored in the clear.",
+      "signingKeyProtectedHelp": "A new secp256k1 signing key is generated inside the sandbox and sealed there. Only the ciphertext and public addresses reach Avibe — the private key never leaves the sandbox.",
+      "signingKeyProtectedBornHint": "The private key was born inside the sandbox and never entered this app.",
       "signingGenerate": "Generate",
       "signingImport": "Import",
       "signingGenerateCta": "Generate signing key",
@@ -2425,6 +2447,11 @@
       "protectedSecrets": "Protected",
       "duration": "Duration",
       "durationValue": "Access lasts {{time}}",
+      "grantDuration": "Agent access duration",
+      "grantOneTime": "One-time",
+      "grantMinutes": "{{count}} min",
+      "grantDurationHelp": "How long the agent may use the secret after you approve.",
+      "grantOneTimeHelp": "The agent completes this one delivery, then access ends.",
       "thisSessionOnly": "This session only",
       "approve": "Approve",
       "sign": "Sign",

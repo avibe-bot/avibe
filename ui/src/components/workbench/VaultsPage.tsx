@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Copy, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -19,6 +19,8 @@ import { SigningAddressList } from '../ui/signing-address-list';
 import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
 import { VaultRequestSessionLink, vaultRequestSessionDisplay } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
+import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
+import { useProtectedVault } from '../../lib/useProtectedVault';
 
 const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
@@ -31,11 +33,19 @@ const proxyHosts = (s: VaultSecret): string[] => {
   return Array.isArray(hosts) ? hosts : [];
 };
 
-const SecretRow: React.FC<{ secret: VaultSecret; onEdit: (secret: VaultSecret) => void; onDelete: (secret: VaultSecret) => void }> = ({ secret: s, onEdit, onDelete }) => {
+const SecretRow: React.FC<{
+  secret: VaultSecret;
+  onEdit: (secret: VaultSecret) => void;
+  onDelete: (secret: VaultSecret) => void;
+  onReveal: (secret: VaultSecret) => void;
+}> = ({ secret: s, onEdit, onDelete, onReveal }) => {
   const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
+  // Reveal is only meaningful for a protected static secret: its plaintext lives sealed and can be
+  // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
+  const canReveal = isProtected && !isKeypair;
   // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
   const { tags, skills } = useMemo(() => partitionTags(s.tags), [s.tags]);
   return (
@@ -93,6 +103,38 @@ const SecretRow: React.FC<{ secret: VaultSecret; onEdit: (secret: VaultSecret) =
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-44 p-1" role="menu">
+            {canReveal ? (
+              <>
+                {/* Reveal opens the value inside the sandbox frame; the plaintext is never returned
+                    to Avibe. "Copy value" leads to the same sandbox card, where copying is the
+                    sandbox's own explicit action (protocol v2 §7.4). */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onReveal(s);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                >
+                  <Eye className="size-4 text-muted" />
+                  {t('vaults.reveal.show')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onReveal(s);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                >
+                  <Copy className="size-4 text-muted" />
+                  {t('vaults.reveal.copy')}
+                </button>
+                <div className="my-1 h-px bg-border" />
+              </>
+            ) : null}
             <button
               type="button"
               role="menuitem"
@@ -501,12 +543,14 @@ export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const vault = useProtectedVault();
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
   const [activeTags, setActiveTags] = useState<string[]>([]);
@@ -679,6 +723,30 @@ export const VaultsPage: React.FC = () => {
   const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const onEdit = (secret: VaultSecret) => setEditTarget(secret);
+
+  // Reveal a protected static value inside the sandbox frame (protocol v2 §7.4): fetch a signed
+  // reveal context + the sealed envelope, then let the sandbox open + display it. Plaintext never
+  // returns to Avibe; the sandbox performs the in-frame confirm (and passkey when locked/Strict).
+  const revealSecret = useCallback(
+    async (secret: VaultSecret) => {
+      try {
+        const res = await api.createVaultRevealContext(secret.name, { session_label: t('vaults.title') });
+        if (!res?.ok || !res.context) throw new Error(res?.message || t('vaults.reveal.errors.contextFailed'));
+        // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
+        // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
+        if (!res.envelope) throw new Error(t('vaults.reveal.errors.unavailable'));
+        const wrapMeta =
+          typeof res.envelope.wrap_meta === 'string' ? res.envelope.wrap_meta : JSON.stringify(res.envelope.wrap_meta);
+        await vault.revealProtectedValue(
+          { name: secret.name, kind: 'static', envelope: { ciphertext: res.envelope.ciphertext, nonce: res.envelope.nonce, wrap_meta: wrapMeta } },
+          res.context,
+        );
+      } catch (err: unknown) {
+        showToast(messageFromError(err), 'warning');
+      }
+    },
+    [api, vault, showToast, t],
+  );
   const confirmDelete = async () => {
     const secret = deleteTarget;
     if (!secret) return;
@@ -720,6 +788,14 @@ export const VaultsPage: React.FC = () => {
             <VaultLockIndicator />
             <Button variant={showAudit ? 'secondary' : 'ghost'} size="icon" onClick={toggleAudit} aria-label={t('vaults.history')}>
               <History className="size-4" />
+            </Button>
+            <Button
+              variant={showSettings ? 'secondary' : 'ghost'}
+              size="icon"
+              onClick={() => setShowSettings(true)}
+              aria-label={t('vaults.settings.title')}
+            >
+              <Settings className="size-4" />
             </Button>
             <Button variant="ghost" size="icon" onClick={refresh} aria-label={t('vaults.refresh')}>
               <RefreshCw className="size-4" />
@@ -794,7 +870,7 @@ export const VaultsPage: React.FC = () => {
       ) : (
         <div className="flex flex-col gap-2">
           {visibleSecrets.map((s) => (
-            <SecretRow key={s.name} secret={s} onEdit={onEdit} onDelete={onDelete} />
+            <SecretRow key={s.name} secret={s} onEdit={onEdit} onDelete={onDelete} onReveal={revealSecret} />
           ))}
         </div>
       )}
@@ -816,6 +892,7 @@ export const VaultsPage: React.FC = () => {
           )}
         </div>
       )}
+      <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} />
       <VaultSecretDialog
         open={adding}
         onOpenChange={(o) => {
