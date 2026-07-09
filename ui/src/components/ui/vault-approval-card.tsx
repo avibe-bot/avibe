@@ -224,12 +224,14 @@ export const VaultApprovalCard: React.FC<{
     [],
   );
 
-  // Protected access is always bound to the request's session: the daemon-signed contexts the
-  // sandbox consents to carry that session's label, and the batch endpoint mints them from the
-  // request scope (it takes no session-scope choice). Granting any-session there would authorize a
-  // wider scope than the session-labeled card the user approved, so the "This session only" toggle
-  // is offered for standard access only, and protected access forces session binding.
-  const sessionBound = needsProtectedApproval ? true : thisSessionOnly;
+  // Protected access with a session is bound to it: the daemon-signed contexts the sandbox consents
+  // to carry that session's label, and the batch endpoint mints them from the request scope (no
+  // session-scope choice), so granting any-session would exceed the session-labeled card the user
+  // approved. But a session-less request (e.g. a CLI ask with no session) has nothing to bind to —
+  // the daemon records session_id=None (unscoped) regardless — so don't force or claim binding
+  // there. The "This session only" toggle is offered for standard access only.
+  const hasRequestSession = Boolean(requestSession);
+  const sessionBound = needsProtectedApproval && hasRequestSession ? true : thisSessionOnly;
 
   const failIfNotOk = (res: { ok: boolean; code?: string; message?: string }) => {
     if (!res.ok) throw new Error(res.message || res.code || t('vaults.approval.errors.failed'));
@@ -532,9 +534,10 @@ export const VaultApprovalCard: React.FC<{
             {t('vaults.approval.thisSessionOnly')}
           </label>
         ) : null}
-        {!isSign && needsProtectedApproval ? (
-          // Protected access is session-bound (see `sessionBound`); show it read-only so the scope
-          // the approver is granting matches the session on the sandbox consent card.
+        {!isSign && needsProtectedApproval && hasRequestSession ? (
+          // Protected access with a session is session-bound (see `sessionBound`); show it read-only
+          // so the scope the approver grants matches the session on the sandbox consent card. Hidden
+          // for session-less requests, where the grant is unscoped and claiming binding would lie.
           <span className="flex items-center gap-1.5 text-xs font-medium text-muted">
             <Link2 className="size-3.5 shrink-0" />
             {t('vaults.approval.sessionBound')}
