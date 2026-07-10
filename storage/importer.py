@@ -254,40 +254,44 @@ def _backup_json_state(state_dir: Path) -> Path:
         backup_path = backups_dir / f"{prefix}-{suffix}"
     backup_path.mkdir(parents=True)
 
-    manifest: dict[str, Any] = {
-        "schema_version": BACKUP_MANIFEST_VERSION,
-        "managed_by": "avibe",
-        "kind": "json-state-migration",
-        "created_at": _utc_now_iso(),
-        "files": {},
-    }
-    for name in (
-        "settings.json",
-        "sessions.json",
-        "discovered_chats.json",
-        "scheduled_tasks.json",
-        "watches.json",
-    ):
-        source = state_dir / name
-        if not source.exists():
-            manifest["files"][name] = {"present": False}
-            continue
-        target = backup_path / name
-        shutil.copy2(source, target)
-        stat = source.stat()
-        manifest["files"][name] = {
-            "present": True,
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
+    try:
+        manifest: dict[str, Any] = {
+            "schema_version": BACKUP_MANIFEST_VERSION,
+            "managed_by": "avibe",
+            "kind": "json-state-migration",
+            "created_at": _utc_now_iso(),
+            "files": {},
         }
-    task_requests = state_dir / "task_requests"
-    if task_requests.exists():
-        shutil.copytree(task_requests, backup_path / "task_requests")
-        manifest["files"]["task_requests"] = {"present": True}
-    else:
-        manifest["files"]["task_requests"] = {"present": False}
+        for name in (
+            "settings.json",
+            "sessions.json",
+            "discovered_chats.json",
+            "scheduled_tasks.json",
+            "watches.json",
+        ):
+            source = state_dir / name
+            if not source.exists():
+                manifest["files"][name] = {"present": False}
+                continue
+            target = backup_path / name
+            shutil.copy2(source, target)
+            stat = source.stat()
+            manifest["files"][name] = {
+                "present": True,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        task_requests = state_dir / "task_requests"
+        if task_requests.exists():
+            shutil.copytree(task_requests, backup_path / "task_requests")
+            manifest["files"]["task_requests"] = {"present": True}
+        else:
+            manifest["files"]["task_requests"] = {"present": False}
 
-    (backup_path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        (backup_path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        shutil.rmtree(backup_path, ignore_errors=True)
+        raise
     return backup_path
 
 

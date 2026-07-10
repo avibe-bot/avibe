@@ -94,21 +94,26 @@ def copy_bounded_log(
 
     max_bytes = max(1, max_bytes)
     chunk_bytes = max(1, chunk_bytes)
-    lock = MigrationFileLock(path.with_name(f".{path.name}.sink.lock"), timeout_seconds=30.0)
+    lock = MigrationFileLock(path.with_name(f".{path.name}.sink.lock"), timeout_seconds=0.25)
     lock_ready = threading.Event()
+    lock_stop = threading.Event()
     lock_acquired = False
 
     def _acquire_lock() -> None:
         nonlocal lock_acquired
-        try:
-            lock.acquire()
-            lock_acquired = True
-        except (MigrationLockTimeout, OSError):
-            pass
-        finally:
-            lock_ready.set()
+        while not lock_stop.is_set():
+            try:
+                lock.acquire()
+                lock_acquired = True
+                break
+            except MigrationLockTimeout:
+                continue
+            except OSError:
+                break
+        lock_ready.set()
 
-    threading.Thread(target=_acquire_lock, name=f"log-sink-lock-{path.name}", daemon=True).start()
+    lock_thread = threading.Thread(target=_acquire_lock, name=f"log-sink-lock-{path.name}", daemon=True)
+    lock_thread.start()
     pending = bytearray()
     source_eof = False
     try:
@@ -154,6 +159,8 @@ def copy_bounded_log(
             _drain(source, chunk_bytes)
         return False
     finally:
+        lock_stop.set()
+        lock_thread.join(timeout=1.0)
         if lock_acquired:
             lock.release()
 

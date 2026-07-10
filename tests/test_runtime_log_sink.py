@@ -62,6 +62,7 @@ def test_copy_bounded_log_drains_while_waiting_for_previous_sink(tmp_path: Path)
         while source.tell() < len(source.getvalue()) and time.monotonic() < deadline:
             time.sleep(0.01)
         assert source.tell() == len(source.getvalue())
+        time.sleep(0.35)
         assert thread.is_alive()
     finally:
         lock.release()

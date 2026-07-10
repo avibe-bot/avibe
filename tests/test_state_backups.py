@@ -140,6 +140,21 @@ def test_json_backup_creation_applies_retention(tmp_path: Path) -> None:
     assert all(json.loads((path / "manifest.json").read_text(encoding="utf-8"))["managed_by"] == "avibe" for path in backups)
 
 
+def test_failed_json_backup_removes_its_incomplete_directory(monkeypatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "settings.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "storage.importer.shutil.copy2",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("full")),
+    )
+
+    with pytest.raises(OSError, match="full"):
+        _backup_json_state(state_dir)
+
+    assert list((state_dir / "backups").iterdir()) == []
+
+
 def test_failed_sqlite_backup_keeps_existing_rollback_window(monkeypatch, tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     backups_dir = state_dir / "backups"
