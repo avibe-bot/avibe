@@ -54,7 +54,13 @@ from vibe.upgrade import (
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
-from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
+from vibe import backend_model_catalog
+from vibe.claude_model_catalog import (
+    DEFAULT_CLAUDE_MODEL_ALIASES,
+    infer_bundle_path_from_cli,
+    infer_models_from_bundle,
+    load_catalog_models,
+)
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     agent_backend_catalog_payload,
@@ -80,6 +86,11 @@ logger = logging.getLogger(__name__)
 # Cache per cwd: { cwd: { "data": ..., "updated_at": ... } }
 _OPENCODE_OPTIONS_CACHE: dict[str, dict] = {}
 _OPENCODE_OPTIONS_TTL_SECONDS = 30.0
+_CODEX_LIVE_MODEL_CATALOG_CACHE: dict[str, Any] = {}
+_CODEX_LIVE_MODEL_CATALOG_LOCK = threading.Lock()
+_CODEX_LIVE_MODEL_CATALOG_TTL_SECONDS = 300.0
+_CODEX_LIVE_MODEL_CATALOG_FAILURE_TTL_SECONDS = 60.0
+_CODEX_LIVE_MODEL_CATALOG_TIMEOUT_SECONDS = 5.0
 
 
 _PLATFORM_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
@@ -4717,52 +4728,70 @@ def claude_models() -> dict:
 
     Claude Code does not expose a stable `list models` CLI subcommand.
     We merge suggestions from:
-    - The repository-owned Claude model catalog
+    - The GitHub-hosted backend model catalog, refreshed in the background
+    - The package-bundled backend/Claude model catalogs
+    - Locally installed Claude Code bundle hints
     - ~/.claude/settings.json model/env values
     """
 
-    def _append_unique(options: list[str], seen: set[str], value: object) -> None:
-        if not isinstance(value, str):
-            return
-        model = value.strip()
-        if not model or model in seen:
-            return
-        seen.add(model)
-        options.append(model)
+    def _append_catalog_entries(catalog: dict) -> None:
+        for entry in backend_model_catalog.backend_model_entries("claude", catalog):
+            model = _append_unique_model(options, seen, backend_model_catalog.model_id(entry))
+            if not model:
+                continue
+            label = backend_model_catalog.model_label(entry)
+            if label:
+                model_labels[model] = label
+            efforts = backend_model_catalog.reasoning_efforts(entry)
+            if efforts:
+                reasoning_efforts[model] = efforts
 
     options: list[str] = []
     seen: set[str] = set()
+    model_labels: dict[str, str] = {}
+    reasoning_efforts: dict[str, list[str]] = {}
+
+    _append_catalog_entries(backend_model_catalog.load_cached_remote_catalog())
+    _append_catalog_entries(backend_model_catalog.load_bundled_catalog())
 
     for model in load_catalog_models():
-        _append_unique(options, seen, model)
+        _append_unique_model(options, seen, model)
+
+    try:
+        bundle_path = infer_bundle_path_from_cli(resolve_cli_path("claude"))
+        if bundle_path is not None:
+            for model in infer_models_from_bundle(bundle_path):
+                _append_unique_model(options, seen, model)
+    except Exception as exc:
+        logger.debug("Failed to infer Claude models from local bundle: %s", exc, exc_info=True)
 
     for model in DEFAULT_CLAUDE_MODEL_ALIASES:
-        _append_unique(options, seen, model)
+        _append_unique_model(options, seen, model)
 
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
         if settings_path.exists() and settings_path.is_file():
             data = json.loads(settings_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                _append_unique(options, seen, data.get("model"))
+                _append_unique_model(options, seen, data.get("model"))
                 env = data.get("env")
                 if isinstance(env, dict):
                     for key in (
                         "ANTHROPIC_MODEL",
                         "ANTHROPIC_SMALL_FAST_MODEL",
                     ):
-                        _append_unique(options, seen, env.get(key))
+                        _append_unique_model(options, seen, env.get(key))
     except Exception as exc:
         logger.warning("Failed to read Claude settings.json: %s", exc, exc_info=True)
 
     from modules.agents.opencode.utils import build_claude_reasoning_options, format_claude_model_label
 
     reasoning_options = {"": build_claude_reasoning_options(None)}
-    model_labels = {}
     for model in options:
-        reasoning_options[model] = build_claude_reasoning_options(model)
+        efforts = reasoning_efforts.get(model)
+        reasoning_options[model] = build_claude_reasoning_options(model, efforts)
         label = format_claude_model_label(model)
-        if label != model:
+        if model not in model_labels and label != model:
             model_labels[model] = label
     return {
         "ok": True,
@@ -4959,9 +4988,9 @@ def agent_model_options(
             "backend": "codex",
             "default_model": default_model,
             "models": _flat_catalog_models(data, default_model),
-            "source": "codex built-in list + ~/.codex caches",
-            "live": False,
-            "notes": ["Codex CLI has no stable list-models command; this is a best-effort merged list."],
+            "source": data.get("source") or "codex built-in list + ~/.codex caches",
+            "live": bool(data.get("live")),
+            "notes": data.get("notes") or None,
         }
     else:
         result = _opencode_model_options(provider=provider, cwd=cwd, config=config)
@@ -9833,80 +9862,243 @@ def set_opencode_default_provider(payload: dict) -> dict:
     return {"ok": True, "default_provider": provider_id}
 
 
+_CODEX_BUILT_IN_MODEL_OPTIONS: list[str] = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1",
+    "gpt-5",
+]
+
+_HIDDEN_CODEX_MODEL_VISIBILITIES = {"hide", "hidden"}
+
+
+def _append_unique_model(options: list[str], seen: set[str], value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    model = value.strip()
+    if not model:
+        return None
+    if model not in seen:
+        seen.add(model)
+        options.append(model)
+    return model
+
+
+def _codex_model_visible(item: dict) -> bool:
+    visibility = item.get("visibility")
+    if not isinstance(visibility, str):
+        return True
+    return visibility.strip().lower() not in _HIDDEN_CODEX_MODEL_VISIBILITIES
+
+
+def _codex_reasoning_efforts_from_catalog_item(item: dict) -> list[str]:
+    raw_levels = item.get("reasoning_efforts") or item.get("supported_reasoning_levels")
+    if not isinstance(raw_levels, list):
+        return []
+    efforts: list[str] = []
+    seen: set[str] = set()
+    for level in raw_levels:
+        if isinstance(level, dict):
+            effort = level.get("effort")
+        else:
+            effort = level
+        if not isinstance(effort, str):
+            continue
+        effort = effort.strip()
+        if not effort or effort in seen:
+            continue
+        seen.add(effort)
+        efforts.append(effort)
+    return efforts
+
+
+def _sorted_codex_catalog_items(data: object) -> list[dict]:
+    if isinstance(data, dict):
+        raw_models = data.get("models")
+    else:
+        raw_models = data
+    if not isinstance(raw_models, list):
+        return []
+
+    visible_models: list[tuple[int, int, dict]] = []
+    for index, item in enumerate(raw_models):
+        if not isinstance(item, dict) or not _codex_model_visible(item):
+            continue
+        slug = item.get("slug") or item.get("id")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        priority = item.get("priority")
+        if not isinstance(priority, int):
+            priority = 10**9
+        visible_models.append((priority, index, item))
+    return [item for _, _, item in sorted(visible_models, key=lambda entry: (entry[0], entry[1]))]
+
+
+def _append_codex_catalog_models(
+    data: object,
+    *,
+    options: list[str],
+    seen: set[str],
+    model_labels: dict[str, str],
+    reasoning_efforts: dict[str, list[str]],
+) -> None:
+    for item in _sorted_codex_catalog_items(data):
+        model_id = _append_unique_model(options, seen, item.get("slug") or item.get("id"))
+        if not model_id:
+            continue
+        display_name = item.get("display_name") or item.get("label")
+        if isinstance(display_name, str) and display_name.strip():
+            model_labels[model_id] = display_name.strip()
+        efforts = _codex_reasoning_efforts_from_catalog_item(item)
+        if efforts:
+            reasoning_efforts[model_id] = efforts
+
+
+def _read_codex_live_model_catalog() -> tuple[object | None, str | None]:
+    now = time.time()
+    with _CODEX_LIVE_MODEL_CATALOG_LOCK:
+        cached_at = _CODEX_LIVE_MODEL_CATALOG_CACHE.get("cached_at")
+        if isinstance(cached_at, (int, float)):
+            ttl = (
+                _CODEX_LIVE_MODEL_CATALOG_TTL_SECONDS
+                if _CODEX_LIVE_MODEL_CATALOG_CACHE.get("data") is not None
+                else _CODEX_LIVE_MODEL_CATALOG_FAILURE_TTL_SECONDS
+            )
+            if now - cached_at < ttl:
+                return _CODEX_LIVE_MODEL_CATALOG_CACHE.get("data"), _CODEX_LIVE_MODEL_CATALOG_CACHE.get("error")
+
+    codex_path = resolve_cli_path("codex")
+    if not codex_path:
+        error = "codex CLI not found"
+        data = None
+    else:
+        try:
+            result = subprocess.run(
+                [codex_path, "debug", "models"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=_CODEX_LIVE_MODEL_CATALOG_TIMEOUT_SECONDS,
+                env=_command_env_for(codex_path if os.path.isabs(codex_path) else None),
+                **isolated_subprocess_kwargs(),
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                error = f"codex debug models failed with exit code {result.returncode}"
+                if stderr:
+                    error = f"{error}: {stderr.splitlines()[-1]}"
+                data = None
+            else:
+                parsed = json.loads(result.stdout or "{}")
+                if isinstance(parsed, dict) and isinstance(parsed.get("models"), list):
+                    data = {"models": parsed["models"]}
+                else:
+                    data = parsed
+                error = None
+        except subprocess.TimeoutExpired:
+            error = "codex debug models timed out"
+            data = None
+        except (FileNotFoundError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            error = f"codex debug models unavailable: {exc}"
+            data = None
+
+    if error:
+        logger.debug("Failed to read live Codex model catalog: %s", error)
+    with _CODEX_LIVE_MODEL_CATALOG_LOCK:
+        _CODEX_LIVE_MODEL_CATALOG_CACHE.clear()
+        _CODEX_LIVE_MODEL_CATALOG_CACHE.update({"cached_at": now, "data": data, "error": error})
+    return data, error
+
+
 def codex_models() -> dict:
     """Best-effort merged list of Codex model options.
 
-    Codex CLI does not expose a stable `list models` command.
-    We merge suggestions from:
-    - Built-in known model ids
-    - ~/.codex/models_cache.json (maintained by Codex CLI)
-    - ~/.codex/config.toml (user-selected model and migration hints)
+    Prefer the current Codex CLI model catalog, then merge fallback suggestions
+    from built-in known model ids, ~/.codex/models_cache.json, and
+    ~/.codex/config.toml (user-selected model and migration hints).
     """
 
-    def _append_unique(options: list[str], seen: set[str], value: object) -> None:
-        if not isinstance(value, str):
-            return
-        model = value.strip()
-        if not model or model in seen:
-            return
-        seen.add(model)
-        options.append(model)
-
-    def _result(model_options: list[str]) -> dict:
-        # Codex reasoning-effort levels are static (model-independent). Surface
-        # them per-model so the shape matches claude_models(), letting a single
-        # caller (agent_model_options / the UI) treat both backends uniformly.
+    def _result(
+        model_options: list[str],
+        *,
+        model_labels: dict[str, str],
+        reasoning_efforts: dict[str, list[str]],
+        live_catalog_error: str | None,
+    ) -> dict:
         from modules.agents.opencode.utils import build_codex_reasoning_options
 
-        codex_reasoning = build_codex_reasoning_options()
-        reasoning_options = {"": codex_reasoning}
+        default_reasoning = build_codex_reasoning_options()
+        reasoning_options = {"": default_reasoning}
         for model_id in model_options:
-            reasoning_options[model_id] = codex_reasoning
-        return {"ok": True, "models": model_options, "reasoning_options": reasoning_options}
-
-    built_in_options: list[str] = [
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-        "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-max",
-        "gpt-5.1-codex-mini",
-        "gpt-5.1",
-        "gpt-5",
-    ]
+            efforts = reasoning_efforts.get(model_id)
+            reasoning_options[model_id] = build_codex_reasoning_options(efforts) if efforts else default_reasoning
+        result = {
+            "ok": True,
+            "models": model_options,
+            "reasoning_options": reasoning_options,
+            "model_labels": model_labels,
+            "live": live_catalog_error is None,
+            "source": "github backend model catalog + codex debug models + built-in fallbacks",
+        }
+        if live_catalog_error:
+            result["notes"] = [live_catalog_error]
+        return result
 
     options: list[str] = []
     seen: set[str] = set()
+    model_labels: dict[str, str] = {}
+    reasoning_efforts: dict[str, list[str]] = {}
     codex_home = Path.home() / ".codex"
     models_cache_path = codex_home / "models_cache.json"
     config_path = codex_home / "config.toml"
 
-    for model in built_in_options:
-        _append_unique(options, seen, model)
+    for catalog in (
+        backend_model_catalog.load_cached_remote_catalog(),
+        backend_model_catalog.load_bundled_catalog(),
+    ):
+        _append_codex_catalog_models(
+            {"models": backend_model_catalog.backend_model_entries("codex", catalog)},
+            options=options,
+            seen=seen,
+            model_labels=model_labels,
+            reasoning_efforts=reasoning_efforts,
+        )
+
+    live_catalog, live_catalog_error = _read_codex_live_model_catalog()
+    if live_catalog is not None:
+        _append_codex_catalog_models(
+            live_catalog,
+            options=options,
+            seen=seen,
+            model_labels=model_labels,
+            reasoning_efforts=reasoning_efforts,
+        )
+
+    for model in _CODEX_BUILT_IN_MODEL_OPTIONS:
+        _append_unique_model(options, seen, model)
 
     try:
         if models_cache_path.exists() and models_cache_path.is_file():
             cache_data = json.loads(models_cache_path.read_text(encoding="utf-8"))
-            models = cache_data.get("models")
-            if isinstance(models, list):
-                visible_models: list[tuple[int, int, str]] = []
-                for index, item in enumerate(models):
-                    if not isinstance(item, dict):
-                        continue
-                    slug = item.get("slug")
-                    if not isinstance(slug, str) or not slug.strip():
-                        continue
-                    priority = item.get("priority")
-                    if not isinstance(priority, int):
-                        priority = 10**9
-                    visible_models.append((priority, index, slug.strip()))
-
-                for _, _, slug in sorted(visible_models):
-                    _append_unique(options, seen, slug)
+            _append_codex_catalog_models(
+                cache_data,
+                options=options,
+                seen=seen,
+                model_labels=model_labels,
+                reasoning_efforts=reasoning_efforts,
+            )
     except Exception as exc:
         logger.warning("Failed to read Codex models_cache.json: %s", exc, exc_info=True)
 
@@ -9918,22 +10110,32 @@ def codex_models() -> dict:
                 tomllib = None
 
             if tomllib is None:
-                return _result(options)
+                return _result(
+                    options,
+                    model_labels=model_labels,
+                    reasoning_efforts=reasoning_efforts,
+                    live_catalog_error=live_catalog_error,
+                )
 
             data = tomllib.loads(config_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                _append_unique(options, seen, data.get("model"))
+                _append_unique_model(options, seen, data.get("model"))
                 notice = data.get("notice")
                 if isinstance(notice, dict):
                     migrations = notice.get("model_migrations")
                     if isinstance(migrations, dict):
                         for k, v in migrations.items():
-                            _append_unique(options, seen, k)
-                            _append_unique(options, seen, v)
+                            _append_unique_model(options, seen, k)
+                            _append_unique_model(options, seen, v)
     except Exception as exc:
         logger.warning("Failed to read Codex config.toml: %s", exc, exc_info=True)
 
-    return _result(options)
+    return _result(
+        options,
+        model_labels=model_labels,
+        reasoning_efforts=reasoning_efforts,
+        live_catalog_error=live_catalog_error,
+    )
 
 
 def _lark_api_base(domain: str = "feishu") -> str:

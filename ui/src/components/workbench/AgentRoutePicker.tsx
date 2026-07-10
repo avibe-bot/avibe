@@ -83,10 +83,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const [open, setOpen] = useState(false);
   const [modelsByBackend, setModelsByBackend] = useState<Record<string, string[]>>({});
   const [modelLabelsByBackend, setModelLabelsByBackend] = useState<Record<string, Record<string, string>>>({});
-  // Claude reasoning efforts are MODEL-specific (newer Opus/Sonnet add xhigh/max),
-  // so the backend returns them keyed by model. Cached so the effort column offers
-  // exactly the efforts the selected model supports.
-  const [claudeReasoning, setClaudeReasoning] = useState<Record<string, { value: string; label: string }[]>>({});
+  // Some backends expose model-specific reasoning efforts. Cache the active
+  // backend's map so the effort column offers exactly what the selected model
+  // supports.
+  const [reasoningByBackend, setReasoningByBackend] = useState<Record<string, Record<string, { value: string; label: string }[]>>>({});
   const [loadingModels, setLoadingModels] = useState(false);
   const [patching, setPatching] = useState(false);
   // Free-text filter for the model column — long backends (OpenCode) list dozens.
@@ -189,7 +189,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       try {
         const { models, modelLabels, reasoningOptions } = await fetchBackendModels(api, backend);
         if (!cancelled) {
-          if (reasoningOptions) setClaudeReasoning(reasoningOptions);
+          setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
           setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
           setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
         }
@@ -211,6 +211,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
   const models = modelsByBackend[backend] ?? [];
   const modelLabels = modelLabelsByBackend[backend] ?? {};
+  const backendReasoning = reasoningByBackend[backend] ?? {};
   // Show the search field only when the list is long enough to warrant it, so
   // claude/codex (a handful of models) stay uncluttered.
   const showModelSearch = models.length > 8;
@@ -223,8 +224,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       )
     : models;
   const effortOptions = useMemo(
-    () => resolveEffortOptions(backend, currentModel, claudeReasoning),
-    [backend, currentModel, claudeReasoning],
+    () => resolveEffortOptions(backend, currentModel, backendReasoning),
+    [backend, currentModel, backendReasoning],
   );
 
   return (
@@ -387,11 +388,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   disabled={patching}
                   onClick={() => {
                     const patch: AgentRoutePatch = { model };
-                    // Switching to a Claude model whose effort set no longer includes
+                    // Switching to a model whose effort set no longer includes
                     // the current effort: clear it in the same patch so the displayed
                     // route matches what dispatches.
-                    if (backend === 'claude' && currentEffort) {
-                      const opts = claudeReasoning[model];
+                    if (currentEffort) {
+                      const opts = backendReasoning[model];
                       if (opts && !opts.some((o) => o.value === currentEffort)) patch.reasoning_effort = null;
                     }
                     void applyPatch(patch);
@@ -408,7 +409,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             )}
           </RouteColumn>
 
-          {/* Column 3 — Effort (Claude: model-specific; others: backend superset) */}
+          {/* Column 3 — Effort (uses per-model catalog entries when available) */}
           <RouteColumn title={t('chat.picker.effort')}>
             {effortOptions.map((opt) => (
               <RouteItem

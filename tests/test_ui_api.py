@@ -1917,6 +1917,9 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
             "claude-opus-4-5",
         ],
     )
+    monkeypatch.setattr(api.backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    monkeypatch.setattr(api.backend_model_catalog, "load_bundled_catalog", lambda: {})
+    monkeypatch.setattr(api, "infer_bundle_path_from_cli", lambda cli_path: None)
 
     result = api.claude_models()
 
@@ -1949,6 +1952,136 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
     ]
 
 
+def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api, "load_catalog_models", lambda: ["claude-opus-4-6"])
+    monkeypatch.setattr(api, "infer_bundle_path_from_cli", lambda cli_path: None)
+    monkeypatch.setattr(
+        api.backend_model_catalog,
+        "load_cached_remote_catalog",
+        lambda **kwargs: {
+            "backends": {
+                "claude": {
+                    "models": [
+                        {
+                            "id": "claude-fable-6",
+                            "label": "Claude Fable 6",
+                            "reasoning_efforts": ["low", "medium", "ultra"],
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(api.backend_model_catalog, "load_bundled_catalog", lambda: {})
+
+    result = api.claude_models()
+
+    assert result["ok"] is True
+    assert result["models"][:2] == ["claude-fable-6", "claude-opus-4-6"]
+    assert result["model_labels"]["claude-fable-6"] == "Claude Fable 6"
+    assert [item["value"] for item in result["reasoning_options"]["claude-fable-6"]] == [
+        "__default__",
+        "low",
+        "medium",
+        "ultra",
+    ]
+
+
+def _disable_remote_backend_catalog(monkeypatch):
+    monkeypatch.setattr(api.backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    monkeypatch.setattr(api.backend_model_catalog, "load_bundled_catalog", lambda: {})
+
+
+def _disable_live_codex_catalog(monkeypatch):
+    api._CODEX_LIVE_MODEL_CATALOG_CACHE.clear()
+    monkeypatch.setattr(api, "resolve_cli_path", lambda binary: None if binary == "codex" else binary)
+
+
+def test_codex_models_prefers_live_catalog_and_model_reasoning(monkeypatch, tmp_path):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    (codex_dir / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "stale-codex-model", "visibility": "list", "priority": 1},
+                    {"slug": "codex-auto-review", "visibility": "hide", "priority": 2},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_catalog = {
+        "models": [
+            {
+                "slug": "gpt-5.6-terra",
+                "display_name": "GPT-5.6-Terra",
+                "visibility": "list",
+                "priority": 2,
+                "supported_reasoning_levels": [
+                    {"effort": "low"},
+                    {"effort": "medium"},
+                    {"effort": "high"},
+                    {"effort": "xhigh"},
+                    {"effort": "max"},
+                    {"effort": "ultra"},
+                ],
+            },
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "visibility": "list",
+                "priority": 1,
+                "supported_reasoning_levels": [
+                    {"effort": "low"},
+                    {"effort": "medium"},
+                    {"effort": "high"},
+                    {"effort": "xhigh"},
+                    {"effort": "max"},
+                    {"effort": "ultra"},
+                ],
+            },
+            {"slug": "hidden-live-model", "visibility": "hide", "priority": 0},
+        ]
+    }
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["/usr/local/bin/codex", "debug", "models"]
+        assert kwargs["timeout"] == api._CODEX_LIVE_MODEL_CATALOG_TIMEOUT_SECONDS
+        return api.subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(live_catalog), stderr="")
+
+    api._CODEX_LIVE_MODEL_CATALOG_CACHE.clear()
+    monkeypatch.setattr(api.backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda binary: "/usr/local/bin/codex" if binary == "codex" else binary)
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    result = api.codex_models()
+
+    assert result["ok"] is True
+    assert result["live"] is True
+    assert result["models"][:4] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+    ]
+    assert "hidden-live-model" not in result["models"]
+    assert "codex-auto-review" not in result["models"]
+    assert "stale-codex-model" in result["models"]
+    assert result["model_labels"]["gpt-5.6-sol"] == "GPT-5.6-Sol"
+    assert [o["value"] for o in result["reasoning_options"]["gpt-5.6-sol"]] == [
+        "__default__",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+
+
 def test_codex_models_prefers_cli_cache_and_filters_hidden_models(monkeypatch, tmp_path):
     codex_dir = tmp_path / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
@@ -1977,12 +2110,18 @@ def test_codex_models_prefers_cli_cache_and_filters_hidden_models(monkeypatch, t
         encoding="utf-8",
     )
 
+    _disable_live_codex_catalog(monkeypatch)
+    _disable_remote_backend_catalog(monkeypatch)
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
 
     result = api.codex_models()
 
     assert result["ok"] is True
-    assert result["models"][:4] == [
+    assert result["live"] is False
+    assert result["models"][:7] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5.5",
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -2009,12 +2148,22 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
+    _disable_live_codex_catalog(monkeypatch)
+    _disable_remote_backend_catalog(monkeypatch)
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
 
     result = api.codex_models()
 
     assert result["ok"] is True
-    assert result["models"][:4] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]
+    assert result["models"][:7] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+    ]
     assert "custom-codex-model" in result["models"]
     assert "legacy-codex" in result["models"]
     assert "gpt-5.1-codex-max" in result["models"]
@@ -2022,10 +2171,12 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
 
 
 def test_codex_models_includes_static_reasoning(monkeypatch, tmp_path):
+    _disable_live_codex_catalog(monkeypatch)
+    _disable_remote_backend_catalog(monkeypatch)
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
     result = api.codex_models()
     assert result["ok"] is True
-    expected = ["__default__", "minimal", "low", "medium", "high", "xhigh"]
+    expected = ["__default__", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
     # static set, surfaced under the default "" key and per-model
     assert [o["value"] for o in result["reasoning_options"][""]] == expected
     first_model = result["models"][0]

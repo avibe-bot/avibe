@@ -5,7 +5,7 @@ export interface BackendModels {
   models: string[];
   /** Optional display labels keyed by model identifier; values remain raw ids. */
   modelLabels?: Record<string, string>;
-  /** Per-model reasoning-effort option sets (Claude only); undefined elsewhere. */
+  /** Per-model reasoning-effort option sets; undefined when a backend has none. */
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
 }
 
@@ -40,7 +40,11 @@ export async function fetchBackendModels(
   }
   if (backend === 'codex') {
     const res = await api.codexModels();
-    return { models: res.ok && res.models ? res.models : [] };
+    return {
+      models: res.ok && res.models ? res.models : [],
+      modelLabels: res.model_labels,
+      reasoningOptions: res.reasoning_options,
+    };
   }
   if (backend === 'opencode') {
     const res = await api.getOpencodeProviders();

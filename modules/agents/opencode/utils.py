@@ -15,7 +15,7 @@ _REASONING_FALLBACK_OPTIONS = [
     {"value": "high", "label": "High"},
 ]
 
-_REASONING_VARIANT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+_REASONING_VARIANT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 _REASONING_VARIANT_LABELS = {
     "none": "None",
@@ -25,6 +25,7 @@ _REASONING_VARIANT_LABELS = {
     "high": "High",
     "xhigh": "Extra High",
     "max": "Max",
+    "ultra": "Ultra",
 }
 
 _UTILITY_MODEL_KEYWORDS = ["embedding", "tts", "whisper", "ada", "davinci", "turbo-instruct"]
@@ -439,7 +440,7 @@ def build_reasoning_effort_options(
 # (which derives options from live model metadata), these are static.
 # Defined here so that every IM module shares a single source of truth.
 
-_CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
+_CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 _CLAUDE_REASONING_EFFORTS = ["low", "medium", "high"]
 _CLAUDE_1M_CONTEXT_LABEL = "[1M]"
 _CLAUDE_OPUS_ALIASES = {"opus", "opus[1m]"}
@@ -501,7 +502,7 @@ def format_claude_model_label(model: object) -> str:
     return model_id
 
 
-def build_codex_reasoning_options() -> List[Dict[str, str]]:
+def build_codex_reasoning_options(reasoning_efforts: Optional[List[str]] = None) -> List[Dict[str, str]]:
     """Return the canonical Codex reasoning-effort option list.
 
     The returned format mirrors ``build_reasoning_effort_options`` so that
@@ -509,7 +510,14 @@ def build_codex_reasoning_options() -> List[Dict[str, str]]:
     helper logic.
     """
     options: List[Dict[str, str]] = [{"value": "__default__", "label": "(Default)"}]
-    for effort in _CODEX_REASONING_EFFORTS:
+    seen: set[str] = set()
+    for effort in reasoning_efforts if reasoning_efforts is not None else _CODEX_REASONING_EFFORTS:
+        if not isinstance(effort, str):
+            continue
+        effort = effort.strip()
+        if not effort or effort in seen:
+            continue
+        seen.add(effort)
         options.append(
             {
                 "value": effort,
@@ -519,7 +527,10 @@ def build_codex_reasoning_options() -> List[Dict[str, str]]:
     return options
 
 
-def build_claude_reasoning_options(target_model: Optional[str]) -> List[Dict[str, str]]:
+def build_claude_reasoning_options(
+    target_model: Optional[str],
+    reasoning_efforts: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
     """Return the canonical Claude reasoning-effort option list for a model.
 
     Claude currently supports `low` / `medium` / `high` broadly. Newer
@@ -527,14 +538,22 @@ def build_claude_reasoning_options(target_model: Optional[str]) -> List[Dict[str
     4.7, 4.6, Sonnet 5, and Sonnet 4.6 also support `max`.
     """
 
-    efforts = list(_CLAUDE_REASONING_EFFORTS)
-    if _supports_claude_xhigh_reasoning(target_model):
-        efforts.append("xhigh")
-    if _supports_claude_max_reasoning(target_model):
-        efforts.append("max")
+    efforts = list(reasoning_efforts) if reasoning_efforts is not None else list(_CLAUDE_REASONING_EFFORTS)
+    if reasoning_efforts is None:
+        if _supports_claude_xhigh_reasoning(target_model):
+            efforts.append("xhigh")
+        if _supports_claude_max_reasoning(target_model):
+            efforts.append("max")
 
     options: List[Dict[str, str]] = [{"value": "__default__", "label": "(Default)"}]
+    seen: set[str] = set()
     for effort in efforts:
+        if not isinstance(effort, str):
+            continue
+        effort = effort.strip()
+        if not effort or effort in seen:
+            continue
+        seen.add(effort)
         options.append(
             {
                 "value": effort,

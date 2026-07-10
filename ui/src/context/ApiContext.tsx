@@ -395,7 +395,13 @@ export type ApiContextType = {
   claudeAgents: (cwd?: string) => Promise<{ ok: boolean; agents?: { id: string; name: string; path: string; source?: string }[]; error?: string }>;
   claudeModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; error?: string }>;
   codexAgents: (cwd?: string) => Promise<{ ok: boolean; agents?: { id: string; name: string; path: string; source?: string; description?: string }[]; error?: string }>;
-  codexModels: () => Promise<{ ok: boolean; models?: string[]; error?: string }>;
+  codexModels: () => Promise<{
+    ok: boolean;
+    models?: string[];
+    reasoning_options?: Record<string, { value: string; label: string }[]>;
+    model_labels?: Record<string, string>;
+    error?: string;
+  }>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
   getVersion: () => Promise<VersionInfo>;
   doUpgrade: () => Promise<UpgradeResult>;
