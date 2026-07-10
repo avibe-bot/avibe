@@ -497,6 +497,25 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
     ]
 
 
+def test_gather_routing_modal_data_runs_codex_model_probe_in_worker_thread() -> None:
+    handler, server = _make_routing_handler()
+    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="slack")
+    models_result = {"ok": True, "models": ["gpt-5.4"]}
+
+    with patch("vibe.api.codex_models") as codex_models, patch(
+        "vibe.api.codex_agents", return_value={"ok": True, "agents": []}
+    ), patch(
+        "core.handlers.settings_handler.asyncio.to_thread",
+        new=AsyncMock(return_value=models_result),
+    ) as to_thread:
+        data = asyncio.run(handler._gather_routing_modal_data(context, selected_backend="codex"))
+
+    to_thread.assert_awaited_once_with(codex_models)
+    codex_models.assert_not_called()
+    assert data.codex_models == ["gpt-5.4"]
+    assert server.calls == []
+
+
 def test_gather_routing_modal_data_hides_disabled_backends() -> None:
     handler, server = _make_routing_handler()
     handler.config.claude.enabled = False

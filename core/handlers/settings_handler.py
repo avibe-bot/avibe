@@ -1,5 +1,6 @@
 """Settings and configuration handlers"""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -479,7 +480,7 @@ class SettingsHandler(BaseHandler):
             try:
                 from vibe.api import codex_agents as get_codex_agents, codex_models as get_codex_models
 
-                models_result = get_codex_models()
+                models_result = await asyncio.to_thread(get_codex_models)
                 if models_result.get("ok"):
                     codex_models = models_result.get("models", [])
                 cwd = self.controller.get_cwd(context)
