@@ -59,6 +59,7 @@ from vibe.claude_model_catalog import (
     DEFAULT_CLAUDE_MODEL_ALIASES,
     infer_bundle_path_from_cli,
     infer_models_from_bundle,
+    is_public_catalog_model,
     load_catalog_models,
 )
 from vibe.i18n import t as backend_t
@@ -5366,7 +5367,10 @@ def claude_models() -> dict:
 
     def _append_catalog_entries(catalog: dict) -> None:
         for entry in backend_model_catalog.backend_model_entries("claude", catalog):
-            model = _append_unique_model(options, seen, backend_model_catalog.model_id(entry))
+            catalog_model = backend_model_catalog.model_id(entry)
+            if not catalog_model or not is_public_catalog_model(catalog_model):
+                continue
+            model = _append_unique_model(options, seen, catalog_model)
             if not model:
                 continue
             label = backend_model_catalog.model_label(entry)

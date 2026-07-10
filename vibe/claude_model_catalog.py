@@ -74,13 +74,13 @@ def infer_models_from_bundle(bundle_path: Path) -> list[str]:
     with bundle_path.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
         for match in _CLAUDE_MODEL_PATTERN.finditer(mapped):
             model = match.group(0).decode("utf-8")
-            if _is_public_catalog_model(model):
+            if is_public_catalog_model(model):
                 matches.add(model)
     return sort_catalog_models(matches)
 
 
 def sort_catalog_models(models: Iterable[str]) -> list[str]:
-    normalized = [model for model in _dedupe_str_values(models) if _is_public_catalog_model(model)]
+    normalized = [model for model in _dedupe_str_values(models) if is_public_catalog_model(model)]
 
     def sort_key(model: str) -> tuple[int, tuple[int, ...], str]:
         parts = model.split("-")
@@ -119,7 +119,7 @@ def _dedupe_str_values(values: Iterable[str]) -> list[str]:
     return normalized
 
 
-def _is_public_catalog_model(model: str) -> bool:
+def is_public_catalog_model(model: str) -> bool:
     parts = model.split("-")
     if len(parts) >= 4 and parts[-1].isdigit() and len(parts[-1]) == 8:
         major = _int_or_none(parts[2])
@@ -129,6 +129,9 @@ def _is_public_catalog_model(model: str) -> bool:
         if major is not None and minor is not None and (major, minor) >= (4, 6):
             return False
     return True
+
+
+_is_public_catalog_model = is_public_catalog_model
 
 
 def _int_or_none(value: str) -> int | None:

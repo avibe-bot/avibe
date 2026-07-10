@@ -1994,7 +1994,12 @@ def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch,
                             "id": "claude-fable-6",
                             "label": "Claude Fable 6",
                             "reasoning_efforts": ["low", "medium", "ultra"],
-                        }
+                        },
+                        {
+                            "id": "claude-fable-6-20260710",
+                            "label": "Internal dated model",
+                            "reasoning_efforts": ["low"],
+                        },
                     ]
                 }
             }
@@ -2022,6 +2027,7 @@ def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch,
 
     assert result["ok"] is True
     assert result["models"][:2] == ["claude-fable-6", "claude-opus-4-6"]
+    assert "claude-fable-6-20260710" not in result["models"]
     assert result["model_labels"]["claude-fable-6"] == "Claude Fable 6"
     assert [item["value"] for item in result["reasoning_options"]["claude-fable-6"]] == [
         "__default__",
@@ -2236,11 +2242,35 @@ def test_codex_models_includes_static_reasoning(monkeypatch, tmp_path):
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
     result = api.codex_models()
     assert result["ok"] is True
-    expected = ["__default__", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+    expected = ["__default__", "minimal", "low", "medium", "high", "xhigh"]
     # static set, surfaced under the default "" key and per-model
     assert [o["value"] for o in result["reasoning_options"][""]] == expected
     first_model = result["models"][0]
     assert [o["value"] for o in result["reasoning_options"][first_model]] == expected
+
+
+def test_codex_models_bundled_catalog_uses_model_supported_reasoning(monkeypatch, tmp_path):
+    _disable_live_codex_catalog(monkeypatch)
+    monkeypatch.setattr(api.backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+
+    result = api.codex_models()
+
+    assert [o["value"] for o in result["reasoning_options"]["gpt-5.6-sol"]] == [
+        "__default__",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert [o["value"] for o in result["reasoning_options"]["gpt-5.5"]] == [
+        "__default__",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
 
 
 def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch):

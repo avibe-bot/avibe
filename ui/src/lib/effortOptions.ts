@@ -1,12 +1,12 @@
 // Single source of truth for reasoning-effort options, shared by ChatPage, the
 // Agents detail panel, and the New Agent dialog. Mirrors the backend lists in
-// modules/agents/opencode/utils.py: Codex is minimal..ultra, Claude is
+// modules/agents/opencode/utils.py: Codex falls back to minimal..xhigh, Claude is
 // low/medium/high (+ xhigh/max on models that support it), OpenCode uses the
-// broad superset.
+// broad superset. Codex/Claude model catalogs override these fallbacks.
 export const EFFORT_BY_BACKEND: Record<string, string[]> = {
   claude: ['low', 'medium', 'high'],
-  codex: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  opencode: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+  opencode: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const DEFAULT_EFFORTS = ['low', 'medium', 'high'];

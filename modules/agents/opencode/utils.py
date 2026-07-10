@@ -440,7 +440,7 @@ def build_reasoning_effort_options(
 # (which derives options from live model metadata), these are static.
 # Defined here so that every IM module shares a single source of truth.
 
-_CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+_CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 _CLAUDE_REASONING_EFFORTS = ["low", "medium", "high"]
 _CLAUDE_1M_CONTEXT_LABEL = "[1M]"
 _CLAUDE_OPUS_ALIASES = {"opus", "opus[1m]"}

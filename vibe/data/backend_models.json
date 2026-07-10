@@ -83,13 +83,13 @@
           "id": "gpt-5.6-sol",
           "label": "GPT-5.6-Sol",
           "priority": 1,
-          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]
+          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]
         },
         {
           "id": "gpt-5.6-terra",
           "label": "GPT-5.6-Terra",
           "priority": 2,
-          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]
+          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]
         },
         {
           "id": "gpt-5.6-luna",
@@ -101,25 +101,25 @@
           "id": "gpt-5.5",
           "label": "GPT-5.5",
           "priority": 7,
-          "reasoning_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"]
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"]
         },
         {
           "id": "gpt-5.4",
           "label": "GPT-5.4",
           "priority": 16,
-          "reasoning_efforts": ["minimal", "low", "medium", "high", "xhigh"]
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"]
         },
         {
           "id": "gpt-5.4-mini",
           "label": "GPT-5.4-Mini",
           "priority": 23,
-          "reasoning_efforts": ["minimal", "low", "medium", "high"]
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"]
         },
         {
           "id": "gpt-5.2",
           "label": "GPT-5.2",
           "priority": 29,
-          "reasoning_efforts": ["minimal", "low", "medium", "high", "xhigh"]
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"]
         }
       ]
     }
