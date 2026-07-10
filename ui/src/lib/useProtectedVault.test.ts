@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { webauthnAvailable } from './useProtectedVault';
+import { vaultFreshSetup, vaultUnlocked, vaultUnlockExpiresAt, webauthnAvailable } from './useProtectedVault';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
   VAULT_SANDBOX_IFRAME_URL,
@@ -23,5 +23,15 @@ describe('protected vault sandbox cutover', () => {
 
   it('fails closed outside a browser context', () => {
     expect(webauthnAvailable()).toBe(false);
+  });
+});
+
+describe('event-driven lock state (parent shadow clock removed)', () => {
+  it('starts locked with no mirrored expiry — nothing unlocks without a sandbox vault.state event', () => {
+    // The parent no longer owns an auto-lock timer or a default window; lock state is derived only
+    // from sandbox events and status results (protocol v2 §8), so the module boots fully locked.
+    expect(vaultUnlocked()).toBe(false);
+    expect(vaultUnlockExpiresAt()).toBeNull();
+    expect(vaultFreshSetup()).toBe(false);
   });
 });

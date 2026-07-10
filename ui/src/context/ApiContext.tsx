@@ -2,6 +2,7 @@ import React, { createContext, useContext, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
+import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 
 // One backend's *global* instructions file, surfaced by the Global Prompts
 // editor. ``backend`` is an agent backend id (claude / opencode / codex).
@@ -134,7 +135,8 @@ type VaultBlindBox = {
 export type VaultAccessFulfillmentPayload = {
   grant_id?: string;
   session_id?: string | null;
-  ttl_seconds?: number;
+  /** Approver-chosen agent access duration (protocol v2 §7.1); supersedes the old fixed ttl. */
+  grant_duration?: VaultGrantDuration;
   this_session_only?: boolean;
   agent_pubkey?: { public_key?: string; fingerprint?: string };
   deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
@@ -151,22 +153,79 @@ export type VaultSandboxRootMetadataResult = {
   message?: string;
 };
 
-export type VaultAgentBindingResult = {
-  ok: boolean;
-  agent_pubkey: { public_key: string; fingerprint: string };
-  binding: {
-    challengeId: string;
-    requestId: string;
-    grantId: string;
-    agent: {
-      publicKey: { public_key: string; fingerprint?: string };
-      fingerprint: string;
-    };
-    context: Record<string, unknown>;
-    expiresAt: string;
-    signature: { alg: 'ed25519'; keyId: string; value: string };
+/** Approver-chosen agent access duration (protocol v2 §7.1). `'one-time'` = a single delivery. */
+export type VaultGrantDuration = 'one-time' | number;
+
+/**
+ * The ed25519-signed operation context the daemon issues and the sandbox renders verbatim
+ * (protocol v2 §6.2). Everything a human authorizes — the covered secrets, session, command,
+ * egress, source, and agent access duration — travels inside the signed `display` block so a
+ * compromised parent can't rewrite the consent story.
+ */
+export type VaultSignedOperationContext = {
+  v: 2;
+  purpose: 'agent-deliver' | 'sign' | 'reveal';
+  requestId: string;
+  grantId?: string;
+  display: {
+    secrets: Array<{ name: string; kind: 'static' | 'keypair' }>;
+    sessionLabel?: string;
+    command?: string;
+    egress?: string;
+    source?: { env?: string[]; tags?: string[]; skills?: string[] };
+    grantTtlSeconds?: number;
   };
-  approval: { nonce: string; expires_at_unix: number };
+  agent?: { publicKey: { public_key: string; fingerprint?: string }; fingerprint: string };
+  expiresAt: string;
+  signature: { alg: 'ed25519'; keyId: string; value: string };
+};
+
+/**
+ * One `POST /api/vault/agent-bindings:batch` call returns per-secret signed contexts sharing one
+ * display block (protocol v2 §7.1) — the parent brokers all members to the sandbox in a single
+ * `approveRelease`, then submits the resulting blind boxes with the matching `approval` handles.
+ */
+export type VaultAgentBindingsBatchResult = {
+  ok: boolean;
+  request_id?: string;
+  grant_id?: string;
+  grant_duration?: VaultGrantDuration;
+  ttl_seconds?: number;
+  agent?: { publicKey: { public_key: string; fingerprint?: string }; fingerprint: string };
+  agent_pubkey: { public_key: string; fingerprint: string };
+  items: Array<{
+    name: string;
+    context: VaultSignedOperationContext;
+    approval: { nonce: string; expires_at_unix: number };
+  }>;
+  code?: string;
+  message?: string;
+};
+
+/** Persisted vault session settings (daemon side). Mirrors `GET/PATCH /api/vault/settings`. */
+export type VaultSettings = {
+  unlock_window_seconds: number;
+  strict_approvals: boolean;
+  last_grant_ttl: VaultGrantDuration;
+};
+
+export type VaultSettingsResult = {
+  ok: boolean;
+  settings: VaultSettings;
+  policy: VaultSessionPolicy;
+  code?: string;
+  message?: string;
+};
+
+/**
+ * `POST /api/vault/secrets/<name>/reveal-context`. The daemon signs a `reveal` context naming the
+ * secret; the sandbox renders it and displays the plaintext in-frame. The protected record
+ * `envelope` is relayed alongside so the sandbox can open it (the parent only holds ciphertext).
+ */
+export type VaultRevealContextResult = {
+  ok: boolean;
+  context?: VaultSignedOperationContext;
+  envelope?: VaultSealedEnvelope;
   code?: string;
   message?: string;
 };
@@ -487,12 +546,17 @@ export type ApiContextType = {
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultSandboxRootMetadata: () => Promise<VaultSandboxRootMetadataResult>;
-  createVaultAgentBinding: (payload: {
+  /** One batch of signed agent-delivery contexts for every protected member of a request (§7.1). */
+  createVaultAgentBindingsBatch: (payload: {
     request_id: string;
-    grant_id: string;
-    name: string;
-    ttl_seconds?: number;
-  }) => Promise<VaultAgentBindingResult>;
+    grant_duration?: VaultGrantDuration;
+  }) => Promise<VaultAgentBindingsBatchResult>;
+  getVaultSettings: () => Promise<VaultSettingsResult>;
+  saveVaultSettings: (payload: Partial<VaultSettings>) => Promise<VaultSettingsResult>;
+  createVaultRevealContext: (
+    name: string,
+    payload?: { session_label?: string },
+  ) => Promise<VaultRevealContextResult>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultAuthzWebAuthnOptions: () => Promise<VaultWebAuthnRegistrationOptions>;
   registerVaultAuthzWebAuthnFactor: (
@@ -2292,8 +2356,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),
-    createVaultAgentBinding: (payload) =>
-      postJson('/api/vault/agent-binding', payload, { handleError: false }),
+    createVaultAgentBindingsBatch: (payload) =>
+      postJson('/api/vault/agent-bindings:batch', payload, { handleError: false }),
+    getVaultSettings: () => getJson('/api/vault/settings', { handleError: false }),
+    saveVaultSettings: (payload) => patchJson('/api/vault/settings', payload, { handleError: false }),
+    createVaultRevealContext: (name, payload) =>
+      postJson(`/api/vault/secrets/${encodeURIComponent(name)}/reveal-context`, payload ?? {}, { handleError: false }),
     deriveSigningAddresses: (publicKey) =>
       postJson('/api/vault/signing-addresses', { public_key: publicKey }, { handleError: false }),
     createVaultAuthzWebAuthnOptions: () => postJson('/api/vault/authz/factors/webauthn/options', {}),

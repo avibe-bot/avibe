@@ -2271,7 +2271,27 @@
     "lock": {
       "unlocked": "已解锁",
       "lockNow": "立即锁定",
-      "autoLockHint": "闲置 10 分钟后自动锁定——密钥会从浏览器内存中抹除。点「立即锁定」可马上抹除。"
+      "windowTooltip": "解锁窗口——解锁期间，授权不会再次要求 passkey；签名始终需要。点「立即锁定」可立刻从浏览器抹除密钥。"
+    },
+    "settings": {
+      "title": "保护档设置",
+      "subtitle": "保险库保持解锁的时长，以及授权提示的严格程度。",
+      "loading": "正在加载设置…",
+      "loadFailed": "无法加载保护档设置。",
+      "saveFailed": "无法保存保护档设置。",
+      "unlockWindow": "解锁窗口",
+      "unlockWindowHelp": "解锁后保险库在此浏览器中保持解锁的时长。下次解锁时生效。",
+      "minutes": "{{count}} 分钟",
+      "strict": "严格授权",
+      "strictHelp": "每次授权和查看都要求 passkey，而不仅是沙箱内确认。签名无论如何都会要求。开启时会重新锁定保险库，使其立即生效。"
+    },
+    "reveal": {
+      "show": "查看值",
+      "copy": "复制值",
+      "errors": {
+        "contextFailed": "无法准备查看，请重试。",
+        "unavailable": "此保护档暂不支持查看。"
+      }
     },
     "saved": "已更新 {{name}}",
     "editSecret": "编辑信息",
@@ -2335,6 +2355,8 @@
       "kindKeypairHelp": "在你浏览器里生成的签名私钥。",
       "nameHint": "首字符必须是字母或下划线；后续可用字母、数字、下划线 · 保留大小写",
       "signingKeyHelp": "会在你的浏览器里新生成一把 secp256k1 签名密钥。私钥在浏览器中封存——标准密钥由本机 avault 签名,保护层密钥在浏览器中签名——只有公钥明文保存。",
+      "signingKeyProtectedHelp": "在沙箱内新生成一把 secp256k1 签名密钥并就地封存。只有密文和公开地址会到达 Avibe——私钥绝不离开沙箱。",
+      "signingKeyProtectedBornHint": "私钥在沙箱内生成,从未进入本应用。",
       "signingGenerate": "生成",
       "signingImport": "导入",
       "signingGenerateCta": "生成签名密钥",
@@ -2426,7 +2448,14 @@
       "protectedSecrets": "保护档",
       "duration": "时长",
       "durationValue": "访问持续 {{time}}",
+      "grantDuration": "Agent 授权时长",
+      "grantOneTime": "一次性",
+      "grantMinutes": "{{count}} 分钟",
+      "grantDurationHelp": "批准后 Agent 可以使用该保护档的时长。",
+      "grantOneTimeHelp": "Agent 完成这一次投递后,访问即结束。",
+      "grantOneShotHelp": "此请求为一次性——Agent 只获得单次投递,时长固定。",
       "thisSessionOnly": "仅限本会话",
+      "sessionBound": "绑定到此会话",
       "approve": "批准",
       "sign": "签名",
       "deny": "拒绝",

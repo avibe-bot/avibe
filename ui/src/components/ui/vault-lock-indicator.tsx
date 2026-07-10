@@ -14,8 +14,11 @@ function formatRemaining(ms: number): string {
 }
 
 /**
- * Shown while the protected vault is unlocked: a pill with the time left before the plaintext
- * key auto-locks, plus a one-tap "Lock now". Renders nothing while the vault is locked.
+ * The **unlock window** pill (解锁窗口 / Unlock window, protocol v2 §8): shown while the vault is
+ * unlocked, it renders the time left in this browser session — a pure countdown off the sandbox's
+ * `expiresAt`, never a parent-owned clock. Its tooltip explains what the window buys: approvals
+ * skip the passkey, signing always asks. Distinct from an agent's grant duration, which is only
+ * ever shown inside approval/consent cards. Renders nothing while the vault is locked.
  */
 export function VaultLockIndicator({ className }: { className?: string }) {
   const { t } = useTranslation();
@@ -24,7 +27,7 @@ export function VaultLockIndicator({ className }: { className?: string }) {
   return (
     <div
       className={cn('flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-3 pr-1', className)}
-      title={t('vaults.lock.autoLockHint')}
+      title={t('vaults.lock.windowTooltip')}
     >
       <Unlock className="size-3.5 shrink-0 text-mint" />
       <span className="text-xs font-medium text-foreground">
