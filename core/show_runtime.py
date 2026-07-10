@@ -495,7 +495,7 @@ class ShowRuntimeManager:
         kept_previous = 0
         for path in rollback_candidates:
             path_resolved = resolved_install_dirs[path]
-            if any(path_resolved == item or path_resolved in item.parents for item in protected):
+            if self._install_dir_overlaps_protected(path_resolved, protected):
                 continue
             if kept_previous < keep_previous:
                 kept_previous += 1
@@ -504,7 +504,7 @@ class ShowRuntimeManager:
         removable_install_dirs = [
             path
             for path, path_resolved in resolved_install_dirs.items()
-            if not any(path_resolved == item or path_resolved in item.parents for item in protected)
+            if not self._install_dir_overlaps_protected(path_resolved, protected)
         ]
         removable_resolved_install_dirs = {resolved_install_dirs[path] for path in removable_install_dirs}
         safe_removable_install_dirs = [
@@ -523,6 +523,13 @@ class ShowRuntimeManager:
             removed.append(str(path))
         self._prune_empty_manifest_version_dirs(versions_dir)
         return removed
+
+    @staticmethod
+    def _install_dir_overlaps_protected(path_resolved: Path, protected: set[Path]) -> bool:
+        return any(
+            path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
+            for item in protected
+        )
 
     def _manifest_install_dirs(self, versions_dir: Path, *, manifest_source: str | None = None) -> set[Path]:
         install_dirs: set[Path] = set()

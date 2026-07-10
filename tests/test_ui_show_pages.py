@@ -1903,6 +1903,37 @@ def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkey
     assert old_install.exists() is False
 
 
+def test_show_runtime_prepare_preserves_descendants_of_current_legacy_parent(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
+    current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
+    _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
+    current_child, current_child_cli = _write_cached_runtime_install_at(
+        current_parent / "current-fingerprint",
+        "current-child",
+        mtime=300,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(parent_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_parent.exists() is True
+    assert parent_cli.exists() is True
+    assert current_child.exists() is True
+    assert current_child_cli.exists() is True
+    assert previous_install.exists() is True
+    assert old_install.exists() is False
+
+
 def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=20)
