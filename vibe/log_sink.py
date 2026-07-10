@@ -4,6 +4,7 @@ import argparse
 import os
 import stat
 import sys
+import threading
 from pathlib import Path
 from typing import BinaryIO
 
@@ -50,6 +51,37 @@ def _compact_log(log_file: BinaryIO, *, max_bytes: int, retain_bytes: int) -> No
     log_file.truncate()
 
 
+def _write_bounded_chunk(
+    log_file: BinaryIO,
+    chunk: bytes,
+    *,
+    max_bytes: int,
+    retain_bytes: int,
+) -> None:
+    if len(chunk) >= max_bytes:
+        marker = RUNTIME_LOG_TRUNCATION_MARKER
+        bounded = (
+            marker + chunk[-(max_bytes - len(marker)) :]
+            if max_bytes > len(marker)
+            else chunk[-max_bytes:]
+        )
+        log_file.seek(0)
+        log_file.write(bounded)
+        log_file.truncate()
+        return
+    log_file.seek(0, os.SEEK_END)
+    threshold = max_bytes - len(chunk)
+    if log_file.tell() > threshold:
+        _compact_log(log_file, max_bytes=threshold, retain_bytes=retain_bytes)
+    log_file.seek(0, os.SEEK_END)
+    log_file.write(chunk)
+
+
+def _drain(source: BinaryIO, chunk_bytes: int) -> None:
+    while source.read(chunk_bytes):
+        pass
+
+
 def copy_bounded_log(
     source: BinaryIO,
     path: Path,
@@ -63,30 +95,67 @@ def copy_bounded_log(
     max_bytes = max(1, max_bytes)
     chunk_bytes = max(1, chunk_bytes)
     lock = MigrationFileLock(path.with_name(f".{path.name}.sink.lock"), timeout_seconds=30.0)
-    try:
-        with lock:
-            log_file = _open_regular_log(path)
-            if log_file is None:
-                raise OSError(f"runtime log path is not a regular file: {path}")
-            with log_file:
-                _compact_log(log_file, max_bytes=max_bytes, retain_bytes=retain_bytes)
-                while chunk := source.read(chunk_bytes):
-                    if len(chunk) >= max_bytes:
-                        log_file.seek(0)
-                        log_file.write(chunk[-max_bytes:])
-                        log_file.truncate()
-                        continue
-                    log_file.seek(0, os.SEEK_END)
-                    threshold = max_bytes - len(chunk)
-                    if log_file.tell() > threshold:
-                        _compact_log(log_file, max_bytes=threshold, retain_bytes=retain_bytes)
-                    log_file.seek(0, os.SEEK_END)
-                    log_file.write(chunk)
-        return True
-    except (MigrationLockTimeout, OSError):
-        while source.read(chunk_bytes):
+    lock_ready = threading.Event()
+    lock_acquired = False
+
+    def _acquire_lock() -> None:
+        nonlocal lock_acquired
+        try:
+            lock.acquire()
+            lock_acquired = True
+        except (MigrationLockTimeout, OSError):
             pass
+        finally:
+            lock_ready.set()
+
+    threading.Thread(target=_acquire_lock, name=f"log-sink-lock-{path.name}", daemon=True).start()
+    pending = bytearray()
+    source_eof = False
+    try:
+        read_chunk = getattr(source, "read1", source.read)
+        while not lock_ready.is_set():
+            chunk = read_chunk(chunk_bytes)
+            if not chunk:
+                source_eof = True
+                break
+            pending.extend(chunk)
+            if len(pending) > max_bytes:
+                del pending[:-max_bytes]
+        if source_eof and not lock_ready.is_set():
+            lock_ready.wait(timeout=31.0)
+        if not lock_acquired:
+            if not source_eof:
+                _drain(source, chunk_bytes)
+            return False
+
+        log_file = _open_regular_log(path)
+        if log_file is None:
+            raise OSError(f"runtime log path is not a regular file: {path}")
+        with log_file:
+            _compact_log(log_file, max_bytes=max_bytes, retain_bytes=retain_bytes)
+            if pending:
+                _write_bounded_chunk(
+                    log_file,
+                    bytes(pending),
+                    max_bytes=max_bytes,
+                    retain_bytes=retain_bytes,
+                )
+            if not source_eof:
+                while chunk := source.read(chunk_bytes):
+                    _write_bounded_chunk(
+                        log_file,
+                        chunk,
+                        max_bytes=max_bytes,
+                        retain_bytes=retain_bytes,
+                    )
+        return True
+    except OSError:
+        if not source_eof:
+            _drain(source, chunk_bytes)
         return False
+    finally:
+        if lock_acquired:
+            lock.release()
 
 
 def main(argv: list[str] | None = None) -> int:

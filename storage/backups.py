@@ -164,8 +164,8 @@ def _remove_candidate(candidate: _BackupCandidate) -> bool:
 def prune_state_backups(
     backups_dir: Path,
     *,
-    json_retention: int = JSON_STATE_BACKUP_RETENTION,
-    sqlite_retention: int = SQLITE_BACKUP_RETENTION,
+    json_retention: int | None = JSON_STATE_BACKUP_RETENTION,
+    sqlite_retention: int | None = SQLITE_BACKUP_RETENTION,
 ) -> list[Path]:
     """Keep a bounded rollback window of backups created by Avibe.
 
@@ -173,7 +173,11 @@ def prune_state_backups(
     recognized manifest are intentionally left untouched.
     """
 
-    limits = {"json": max(0, json_retention), "sqlite": max(0, sqlite_retention)}
+    limits = {
+        kind: max(0, retention)
+        for kind, retention in (("json", json_retention), ("sqlite", sqlite_retention))
+        if retention is not None
+    }
     candidates = _managed_candidates(backups_dir)
     removed: list[Path] = []
     for kind, limit in limits.items():
@@ -243,5 +247,4 @@ def create_sqlite_migration_backup(
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
 
-    prune_state_backups(target_root)
     return backup_dir

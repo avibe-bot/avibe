@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from config.paths import ensure_data_dirs, get_logs_dir
+from vibe.logging_config import APPLICATION_LOG_BACKUP_COUNT, APPLICATION_LOG_MAX_BYTES
 from vibe.runtime import (
     ServiceAlreadyRunningError,
     acquire_service_instance_lock,
@@ -16,10 +17,6 @@ from vibe.runtime import (
     release_service_instance_lock,
     shutdown_intent_required,
 )
-
-
-APPLICATION_LOG_MAX_BYTES = 20 * 1024 * 1024
-APPLICATION_LOG_BACKUP_COUNT = 5
 
 
 def _build_logging_handlers(logs_dir: str) -> list[logging.Handler]:

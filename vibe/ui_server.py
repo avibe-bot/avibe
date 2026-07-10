@@ -17,7 +17,7 @@ import socket
 import subprocess
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +48,7 @@ from core.show_session_events import show_event_payload_session_mismatch
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
+from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 
@@ -2225,17 +2226,22 @@ def renew_remote_access_cookie(response: Response) -> Response:
 
 
 def _read_log_entries(log_path: Path, source_key: str, lines: int) -> tuple[list[dict[str, Any]], int]:
-    if not log_path.exists():
+    log_paths = application_log_paths(log_path) if source_key == "service" else [log_path]
+    existing_paths = [path for path in log_paths if path.exists()]
+    if not existing_paths:
         return [], 0
 
-    with log_path.open("r", encoding="utf-8", errors="replace") as f:
-        all_lines = f.readlines()
-    recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
-    file_sort_ns = log_path.stat().st_mtime_ns
-    first_recent_line_index = len(all_lines) - len(recent_lines)
+    recent_lines: deque[tuple[str, int, int]] = deque(maxlen=lines)
+    total_lines = 0
+    for path in existing_paths:
+        file_sort_ns = path.stat().st_mtime_ns
+        with path.open("r", encoding="utf-8", errors="replace") as log_file:
+            for raw_line in log_file:
+                recent_lines.append((raw_line, file_sort_ns, total_lines))
+                total_lines += 1
 
     logs_list: list[dict[str, Any]] = []
-    for line_offset, raw_line in enumerate(recent_lines):
+    for raw_line, file_sort_ns, line_index in recent_lines:
         line = raw_line.rstrip("\n")
         match = STRUCTURED_LOG_PATTERN.match(line)
         if match:
@@ -2248,7 +2254,7 @@ def _read_log_entries(log_path: Path, source_key: str, lines: int) -> tuple[list
                     "message": match.group(4),
                     "source": source_key,
                     "_sort_ns": _timestamp_to_sort_ns(parsed_timestamp) or file_sort_ns,
-                    "_sort_index": first_recent_line_index + line_offset,
+                    "_sort_index": line_index,
                 }
             )
             continue
@@ -2262,10 +2268,10 @@ def _read_log_entries(log_path: Path, source_key: str, lines: int) -> tuple[list
 
         fallback_entry = _fallback_log_entry(line, source_key)
         fallback_entry["_sort_ns"] = file_sort_ns
-        fallback_entry["_sort_index"] = first_recent_line_index + line_offset
+        fallback_entry["_sort_index"] = line_index
         logs_list.append(fallback_entry)
 
-    return logs_list, len(all_lines)
+    return logs_list, total_lines
 
 
 def _resolve_log_sources() -> list[dict[str, Any]]:
@@ -2279,12 +2285,13 @@ def _resolve_log_sources() -> list[dict[str, Any]]:
     ]
     for key, filename, path_factory in LOG_SOURCES:
         path = path_factory()
+        exists = any(candidate.exists() for candidate in application_log_paths(path)) if key == "service" else path.exists()
         resolved.append(
             {
                 "key": key,
                 "filename": filename,
                 "path": str(path),
-                "exists": path.exists(),
+                "exists": exists,
             }
         )
     return resolved

@@ -114,7 +114,7 @@ def test_create_sqlite_migration_backup_is_consistent_without_copying_live_sidec
         assert manifest["kind"] == "sqlite-migration"
         assert manifest["from_revisions"] == ["old"]
         assert manifest["to_revisions"] == ["new"]
-        assert not oldest.exists()
+        assert oldest.exists()
         assert previous.exists()
         assert not (backup_dir / "vibe.sqlite-wal").exists()
         assert not (backup_dir / "vibe.sqlite-shm").exists()
@@ -131,6 +131,9 @@ def test_json_backup_creation_applies_retention(tmp_path: Path) -> None:
 
     for _ in range(5):
         _backup_json_state(state_dir)
+
+    assert len(list((state_dir / "backups").glob("sqlite-state-migration-*"))) == 5
+    ensure_sqlite_state(db_path=state_dir / "vibe.sqlite", state_dir=state_dir)
 
     backups = sorted((state_dir / "backups").glob("sqlite-state-migration-*"))
     assert len(backups) == 3
@@ -192,6 +195,46 @@ def test_startup_keeps_json_rollbacks_when_new_snapshot_fails(monkeypatch, tmp_p
 
     with pytest.raises(OSError, match="full"):
         ensure_sqlite_state(db_path=state_dir / "vibe.sqlite", state_dir=state_dir)
+
+    assert all(path.exists() for path in existing)
+
+
+def test_startup_keeps_json_rollbacks_when_import_after_snapshot_fails(monkeypatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    backups_dir = state_dir / "backups"
+    backups_dir.mkdir(parents=True)
+    existing = [
+        _legacy_json_backup(backups_dir, f"2026070{day}T010000Z")
+        for day in range(1, 6)
+    ]
+    monkeypatch.setattr(
+        "storage.importer._parse_json_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid import")),
+    )
+
+    with pytest.raises(ValueError, match="invalid import"):
+        ensure_sqlite_state(db_path=state_dir / "vibe.sqlite", state_dir=state_dir)
+
+    assert all(path.exists() for path in existing)
+
+
+def test_failed_schema_upgrade_keeps_existing_sqlite_rollbacks(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    db_path.parent.mkdir()
+    run_migrations(db_path, revision="20260627_0025")
+    backups_dir = db_path.parent / "backups"
+    backups_dir.mkdir()
+    existing = [
+        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-2026070{day}T020000Z.sqlite")
+        for day in (7, 8, 9)
+    ]
+    monkeypatch.setattr(
+        "storage.migrations.command.upgrade",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("upgrade failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="upgrade failed"):
+        run_migrations(db_path)
 
     assert all(path.exists() for path in existing)
 

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import sys
+import threading
 import time
 from pathlib import Path
 
+from storage.lock import MigrationFileLock
 from vibe import runtime
 from vibe.log_sink import RUNTIME_LOG_TRUNCATION_MARKER, copy_bounded_log
 
@@ -41,6 +43,32 @@ def test_copy_bounded_log_skips_symlink_and_drains_input(tmp_path: Path) -> None
     assert copy_bounded_log(source, link, max_bytes=80, retain_bytes=40) is False
     assert source.tell() == len(b"new output")
     assert target.read_bytes() == b"outside\n" * 100
+
+
+def test_copy_bounded_log_drains_while_waiting_for_previous_sink(tmp_path: Path) -> None:
+    path = tmp_path / "ui_stdout.log"
+    lock = MigrationFileLock(path.with_name(f".{path.name}.sink.lock"))
+    lock.acquire()
+    source = io.BytesIO(b"noisy replacement startup\n" * 100)
+    result: list[bool] = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            copy_bounded_log(source, path, max_bytes=512, retain_bytes=256, chunk_bytes=64)
+        )
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2
+        while source.tell() < len(source.getvalue()) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert source.tell() == len(source.getvalue())
+        assert thread.is_alive()
+    finally:
+        lock.release()
+    thread.join(timeout=5)
+
+    assert result == [True]
+    assert path.read_bytes().endswith(b"noisy replacement startup\n")
 
 
 def test_spawned_process_output_is_continuously_bounded(monkeypatch, tmp_path: Path) -> None:
