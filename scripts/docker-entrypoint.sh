@@ -18,14 +18,15 @@ start_ui_process() {
     local ui_stderr="$runtime_dir/ui_stderr.log"
 
     echo "Starting UI server on 0.0.0.0:${VIBE_UI_PORT:-5123}..." >&2
-    python -c "
+    (
+        exec python -c "
 from vibe.ui_server import run_ui_server
 run_ui_server('0.0.0.0', ${VIBE_UI_PORT:-5123})
-" > >(python -m vibe.log_sink "$ui_stdout") 2> >(python -m vibe.log_sink "$ui_stderr") &
+" > >(python -m vibe.log_sink "$ui_stdout") 2> >(python -m vibe.log_sink "$ui_stderr")
+    ) >/dev/null 2>&1 &
 
-    local ui_pid=$!
-    echo "$ui_pid" > "$runtime_dir/vibe-ui.pid"
-    echo "$ui_pid"
+    UI_PID=$!
+    echo "$UI_PID" > "$runtime_dir/vibe-ui.pid"
 }
 
 resolve_runtime_dir() {
@@ -198,7 +199,7 @@ run_ui_server('0.0.0.0', ${VIBE_UI_PORT:-5123})
         mkdir -p "$RUNTIME_DIR"
         echo "$SERVICE_PID" > "$RUNTIME_DIR/vibe.pid"
 
-        UI_PID="$(start_ui_process "$RUNTIME_DIR")"
+        start_ui_process "$RUNTIME_DIR"
 
         write_runtime_status "running" "started" "$SERVICE_PID" "$UI_PID"
 
@@ -211,7 +212,7 @@ run_ui_server('0.0.0.0', ${VIBE_UI_PORT:-5123})
             SERVICE_PID="$(ensure_service_pid "$RUNTIME_DIR" "${SERVICE_PID:-}" "${CURRENT_UI_PID:-$UI_PID}")"
 
             if [ -z "$CURRENT_UI_PID" ]; then
-                UI_PID="$(start_ui_process "$RUNTIME_DIR")"
+                start_ui_process "$RUNTIME_DIR"
                 CURRENT_STATE="$(read_runtime_state "$RUNTIME_DIR" 2>/dev/null || true)"
                 if [ -z "$CURRENT_STATE" ]; then
                     if [ -n "${SERVICE_PID:-}" ]; then
@@ -225,7 +226,7 @@ run_ui_server('0.0.0.0', ${VIBE_UI_PORT:-5123})
                 UI_EXIT_CODE=0
                 wait "$CURRENT_UI_PID" 2>/dev/null || UI_EXIT_CODE=$?
                 echo "UI server exited unexpectedly (code: ${UI_EXIT_CODE:-unknown}), restarting..."
-                UI_PID="$(start_ui_process "$RUNTIME_DIR")"
+                start_ui_process "$RUNTIME_DIR"
                 CURRENT_STATE="$(read_runtime_state "$RUNTIME_DIR" 2>/dev/null || true)"
                 if [ -z "$CURRENT_STATE" ]; then
                     if [ -n "${SERVICE_PID:-}" ]; then

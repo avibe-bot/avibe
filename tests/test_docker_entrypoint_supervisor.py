@@ -39,6 +39,10 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
                     if args and args[0] == "main.py":
                         sys.exit(42)
 
+                    if len(args) >= 2 and args[:2] == ["-m", "vibe.log_sink"]:
+                        sys.stdin.buffer.read()
+                        sys.exit(0)
+
                     if len(args) >= 2 and args[0] == "-c":
                         code = args[1]
                         if "get_runtime_dir" in code:
