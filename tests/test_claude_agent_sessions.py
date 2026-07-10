@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from modules.agents.base import BaseAgent
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
-from modules.claude_sdk_compat import AssistantMessage, TextBlock
+from modules.claude_sdk_compat import TextBlock
 
 
 class _StubSessions:
@@ -1417,10 +1417,18 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
 
         controller.emit_agent_message = AsyncMock(side_effect=_emit)
-        replacement_message = AssistantMessage(
-            content=[TextBlock(text="replacement answer")],
-            model="claude-opus-4-8",
-        )
+        replacement_block = TextBlock.__new__(TextBlock)
+        replacement_block.text = "replacement answer"
+        replacement_message = type(
+            "AssistantMessage",
+            (),
+            {
+                "content": [replacement_block],
+                "model": "claude-opus-4-8",
+                "usage": None,
+                "error": None,
+            },
+        )()
         fallback_message = type(
             "ModelRefusalFallbackMessage",
             (),

@@ -70,6 +70,23 @@ def _one_result_client():
     return _Client()
 
 
+def _fallback_client(data):
+    class ModelRefusalFallbackMessage:
+        subtype = "model_refusal_fallback"
+
+        def __init__(self):
+            self.data = data
+
+    class _Client:
+        def receive_messages(self):
+            async def _iterate():
+                yield ModelRefusalFallbackMessage()
+
+            return _iterate()
+
+    return _Client()
+
+
 def _build_agent(*, running_calls=None, mark_idle_calls=None, active_calls=None):
     mark_idle_calls = mark_idle_calls if mark_idle_calls is not None else []
     controller = SimpleNamespace(
@@ -217,6 +234,79 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_actionable_fallback_does_not_open_agent_initiated_turn(self):
+        active_calls: list[str] = []
+        agent, service = _build_agent(active_calls=active_calls)
+        composite_key = "session-fallback:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "OLD",
+                "agent_session_id": "sess-fallback",
+            },
+        )
+
+        await agent._receive_messages(
+            _fallback_client(
+                {
+                    "direction": "declined",
+                    "original_model": "claude-fable-5",
+                    "fallback_model": "claude-opus-4-8",
+                }
+            ),
+            "session-fallback",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        gate = service._get_turn_gate(composite_key)
+        self.assertFalse(gate.lock.locked())
+        self.assertEqual(gate.token, "")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        self.assertEqual(active_calls, [])
+        agent.controller.emit_agent_message.assert_not_awaited()
+
+    async def test_fallback_notice_is_dropped_when_agent_initiated_turn_is_contended(self):
+        agent, service = _build_agent()
+        composite_key = "session-fallback:/tmp/work"
+        gate = service._get_turn_gate(composite_key)
+        await gate.lock.acquire()
+        gate.token = "USER-TURN"
+        gate.backend = "claude"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "OLD",
+                "agent_session_id": "sess-fallback",
+            },
+        )
+        try:
+            await agent._receive_messages(
+                _fallback_client(
+                    {
+                        "originalModel": "claude-fable-5",
+                        "fallbackModel": "claude-opus-4-8",
+                    }
+                ),
+                "session-fallback",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        finally:
+            gate.lock.release()
+
+        self.assertEqual(gate.token, "USER-TURN")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        agent.controller.emit_agent_message.assert_not_awaited()
+
     async def test_unsolicited_reply_is_delivered_not_dropped(self):
         running_calls: list = []
         mark_idle_calls: list[str] = []

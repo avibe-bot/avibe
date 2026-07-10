@@ -559,16 +559,21 @@ class ClaudeAgent(BaseAgent):
                     message_type = self._detect_message_type(message)
                     formatter = self._get_formatter(context)
                     is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
+                    model_refusal_fallback_notice = (
+                        self._parse_model_refusal_fallback_notice(message)
+                        if is_model_refusal_fallback
+                        else None
+                    )
 
                     # Unsolicited backend output (a background-task completion or
                     # a ScheduleWakeup re-invoked the agent inside this SDK
                     # process) reaches this long-lived receiver with no Avibe turn
                     # open. Open an agent-initiated turn so the reply is persisted
                     # + delivered + notified instead of dropped by the outbound
-                    # active-turn guard. A refusal-fallback system frame is the one
-                    # user-facing system exception: it precedes the replacement
-                    # assistant response and must open the same turn first.
-                    if message_type in ("assistant", "result") or is_model_refusal_fallback:
+                    # active-turn guard. An actionable refusal-fallback frame is
+                    # the one user-facing system exception: it belongs to the
+                    # replacement run and must use that run's turn.
+                    if message_type in ("assistant", "result") or model_refusal_fallback_notice is not None:
                         await self._maybe_begin_agent_initiated_turn(
                             context,
                             composite_key,
@@ -703,10 +708,19 @@ class ClaudeAgent(BaseAgent):
                     # current SDK's generic SystemMessage class. A future SDK may
                     # promote this event to a dedicated typed message.
                     if is_model_refusal_fallback:
+                        if model_refusal_fallback_notice is None:
+                            logger.debug("Ignoring non-actionable Claude refusal fallback for %s", composite_key)
+                            continue
+                        if not self._has_pending_requests(composite_key):
+                            logger.info(
+                                "Dropping Claude refusal fallback for %s without an active turn",
+                                composite_key,
+                            )
+                            continue
                         await self._handle_model_refusal_fallback(
                             context,
                             composite_key,
-                            message,
+                            model_refusal_fallback_notice,
                         )
                         continue
 
@@ -1338,38 +1352,39 @@ class ClaudeAgent(BaseAgent):
     def _is_model_refusal_fallback_message(message) -> bool:
         return (getattr(message, "subtype", "") or "").strip().lower() == "model_refusal_fallback"
 
-    async def _handle_model_refusal_fallback(
-        self,
-        context: MessageContext,
-        composite_key: str,
-        message,
-    ) -> None:
-        """Surface Claude's structured safety fallback without ending the turn."""
+    @staticmethod
+    def _parse_model_refusal_fallback_notice(message) -> Optional[tuple[str, str, str]]:
         data = getattr(message, "data", None)
         if not isinstance(data, dict):
-            logger.warning("Claude refusal fallback for %s had no structured payload", composite_key)
-            return
+            return None
 
         direction = str(data.get("direction") or "").strip().lower()
         if direction and direction != "retry":
-            logger.info(
-                "Ignoring legacy Claude refusal fallback direction %r for %s",
-                direction,
-                composite_key,
-            )
-            return
-
-        # Claude Code can write this marker after the fallback assistant row. Do
-        # not infer retraction order from the marker alone: the result path may
-        # still need that assistant text when ResultMessage.result is empty.
-        pending_requests = self._pending_requests.get(composite_key) or []
-        self._adopt_pending_turn_token(context, pending_requests[0] if pending_requests else None)
+            return None
 
         original_value = data.get("original_model") or data.get("originalModel") or ""
         fallback_value = data.get("fallback_model") or data.get("fallbackModel") or ""
         original_model = " ".join(str(original_value).split())[:160]
         fallback_model = " ".join(str(fallback_value).split())[:160]
         provider_content = str(data.get("content") or "").strip()
+        if not provider_content and not (original_model and fallback_model):
+            return None
+        return original_model, fallback_model, provider_content
+
+    async def _handle_model_refusal_fallback(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        notice: tuple[str, str, str],
+    ) -> None:
+        """Surface Claude's structured safety fallback without ending the turn."""
+        # Claude Code can write this marker after the fallback assistant row. Do
+        # not infer retraction order from the marker alone: the result path may
+        # still need that assistant text when ResultMessage.result is empty.
+        pending_requests = self._pending_requests.get(composite_key) or []
+        self._adopt_pending_turn_token(context, pending_requests[0] if pending_requests else None)
+
+        original_model, fallback_model, provider_content = notice
 
         text = ""
         translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
