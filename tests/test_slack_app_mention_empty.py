@@ -230,6 +230,42 @@ class SlackRoutingModalTests(unittest.TestCase):
         self.assertEqual(model_select["initial_option"]["value"], "__default__")
         self.assertEqual(reasoning_select["initial_option"]["value"], "__default__")
 
+    def test_codex_reasoning_uses_shared_catalog_options(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        current_routing = SimpleNamespace(
+            agent_backend="codex",
+            model="gpt-5.6-terra",
+            reasoning_effort=None,
+            codex_agent=None,
+            codex_model=None,
+            codex_reasoning_effort=None,
+        )
+
+        view = slack._build_routing_modal_view(
+            channel_id="C123",
+            registered_backends=["codex"],
+            current_backend="codex",
+            current_routing=current_routing,
+            opencode_agents=[],
+            opencode_models={},
+            opencode_default_config={},
+            codex_models=["gpt-5.6-terra"],
+            backend_reasoning_options={
+                "codex": {
+                    "gpt-5.6-terra": [
+                        {"value": "__default__", "label": "(Default)"},
+                        {"value": "ultra", "label": "Ultra"},
+                    ]
+                }
+            },
+        )
+
+        reasoning_select = self._find_select(view, "codex_reasoning_block")
+        self.assertEqual(
+            [option["value"] for option in reasoning_select["options"]],
+            ["__default__", "ultra"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

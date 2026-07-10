@@ -33,6 +33,7 @@ from modules.agents.opencode.utils import (
     build_codex_reasoning_options,
     format_claude_model_label,
     build_reasoning_effort_options,
+    resolve_model_reasoning_options,
     resolve_opencode_allowed_providers,
     resolve_opencode_provider_preferences,
 )
@@ -3310,6 +3311,7 @@ class SlackBot(BaseIMClient):
         claude_models: list = None,
         codex_agents: list = None,
         codex_models: list = None,
+        backend_reasoning_options: dict = None,
         selected_backend: object = _UNSET,
         selected_opencode_agent: object = _UNSET,
         selected_opencode_model: object = _UNSET,
@@ -3676,7 +3678,11 @@ class SlackBot(BaseIMClient):
                 "initial_option": initial_cl_model,
             }
 
-            cl_reasoning_entries = build_claude_reasoning_options(current_cl_model)
+            cl_reasoning_entries = resolve_model_reasoning_options(
+                (backend_reasoning_options or {}).get("claude"),
+                current_cl_model,
+                build_claude_reasoning_options(current_cl_model),
+            )
             selected_cl_reasoning = (
                 current_cl_reasoning if current_cl_reasoning not in (None, "__default__") else "__default__"
             )
@@ -3843,7 +3849,11 @@ class SlackBot(BaseIMClient):
             }
 
             # Build reasoning effort options from centralized Codex definition
-            codex_reasoning_entries = build_codex_reasoning_options()
+            codex_reasoning_entries = resolve_model_reasoning_options(
+                (backend_reasoning_options or {}).get("codex"),
+                current_cx_model,
+                build_codex_reasoning_options(),
+            )
             selected_cx_reasoning = (
                 current_cx_reasoning if current_cx_reasoning not in (None, "__default__") else "__default__"
             )
@@ -4100,6 +4110,7 @@ class SlackBot(BaseIMClient):
         claude_models: list = None,
         codex_agents: list = None,
         codex_models: list = None,
+        backend_reasoning_options: dict = None,
     ):
         """Open a modal dialog for agent/model routing settings"""
         self._ensure_clients()
@@ -4116,6 +4127,7 @@ class SlackBot(BaseIMClient):
             claude_models=claude_models,
             codex_agents=codex_agents,
             codex_models=codex_models,
+            backend_reasoning_options=backend_reasoning_options,
         )
 
         try:
@@ -4139,6 +4151,7 @@ class SlackBot(BaseIMClient):
         claude_models: list = None,
         codex_agents: list = None,
         codex_models: list = None,
+        backend_reasoning_options: dict = None,
         selected_backend: Optional[str] = None,
         selected_opencode_agent: Optional[str] = None,
         selected_opencode_model: Optional[str] = None,
@@ -4165,6 +4178,7 @@ class SlackBot(BaseIMClient):
             claude_models=claude_models,
             codex_agents=codex_agents,
             codex_models=codex_models,
+            backend_reasoning_options=backend_reasoning_options,
             selected_backend=selected_backend,
             selected_opencode_agent=selected_opencode_agent,
             selected_opencode_model=selected_opencode_model,

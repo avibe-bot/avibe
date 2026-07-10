@@ -12,6 +12,7 @@ from .utils import (
     build_claude_reasoning_options,
     build_codex_reasoning_options,
     build_reasoning_effort_options,
+    resolve_model_reasoning_options,
 )
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "build_claude_reasoning_options",
     "build_codex_reasoning_options",
     "build_reasoning_effort_options",
+    "resolve_model_reasoning_options",
 ]
 
 

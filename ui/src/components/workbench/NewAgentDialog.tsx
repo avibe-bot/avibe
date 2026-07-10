@@ -5,7 +5,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull } from '../../context/ApiContext';
-import { fetchBackendModels, modelOptionLabel } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { Combobox } from '../ui/combobox';
@@ -77,26 +77,20 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // freshly-released model IDs can still be typed in.
   useEffect(() => {
     if (!open) return;
-    let cancelled = false;
-    async function loadModels() {
-      try {
-        const { models, modelLabels, reasoningOptions: opts } = await fetchBackendModels(api, backend);
-        if (!cancelled) {
-          setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
-          setReasoningOptions(opts ?? {});
-          // Clear model when the backend changes if the previous choice
-          // isn't in the new catalog — avoids silently mismatched pairs.
-          if (model && !models.includes(model)) setModel('');
+    return loadBackendModelsWithRefresh(
+      api,
+      backend,
+      ({ models, modelLabels, reasoningOptions: opts, catalogRefreshPending }) => {
+        setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
+        setReasoningOptions(opts ?? {});
+        if (!catalogRefreshPending) {
+          setModel((currentModel) =>
+            currentModel && !models.includes(currentModel) ? '' : currentModel,
+          );
         }
-      } catch {
-        if (!cancelled) setModelOptions([]);
-      }
-    }
-    loadModels();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      },
+      () => setModelOptions([]),
+    );
   }, [backend, open, api]);
 
   const modelComboboxOptions = useMemo(() => modelOptions, [modelOptions]);
@@ -198,7 +192,14 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                 <button
                   key={opt.key}
                   type="button"
-                  onClick={() => setBackend(opt.key)}
+                  onClick={() => {
+                    if (backend === opt.key) return;
+                    setBackend(opt.key);
+                    setModel('');
+                    setEffort('medium');
+                    setModelOptions([]);
+                    setReasoningOptions({});
+                  }}
                   className={clsx(
                     'flex flex-col items-center justify-center gap-1.5 rounded-lg border-2 px-3 py-3.5 transition',
                     active ? `${cc.border} ${cc.bg}` : 'border-border-strong bg-surface-2 hover:bg-foreground/[0.04]',

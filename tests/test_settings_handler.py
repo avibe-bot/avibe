@@ -477,9 +477,19 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
     context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="telegram")
 
     with patch("vibe.api.claude_agents", return_value={"ok": True, "agents": [{"id": "reviewer"}]}), patch(
-        "vibe.api.claude_models", return_value={"ok": True, "models": ["claude-sonnet-4-6"]}
+        "vibe.api.claude_models",
+        return_value={
+            "ok": True,
+            "models": ["claude-sonnet-4-6"],
+            "reasoning_options": {"claude-sonnet-4-6": [{"value": "max", "label": "Max"}]},
+        },
     ), patch("vibe.api.codex_agents", return_value={"ok": True, "agents": [{"id": "builder"}]}), patch(
-        "vibe.api.codex_models", return_value={"ok": True, "models": ["gpt-5.4"]}
+        "vibe.api.codex_models",
+        return_value={
+            "ok": True,
+            "models": ["gpt-5.4"],
+            "reasoning_options": {"gpt-5.4": [{"value": "ultra", "label": "Ultra"}]},
+        },
     ):
         data = asyncio.run(handler._gather_routing_modal_data(context, include_all_backend_data=True))
 
@@ -489,6 +499,10 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
     assert data.claude_models == ["claude-sonnet-4-6"]
     assert data.codex_agents == [{"id": "builder"}]
     assert data.codex_models == ["gpt-5.4"]
+    assert data.backend_reasoning_options == {
+        "claude": {"claude-sonnet-4-6": [{"value": "max", "label": "Max"}]},
+        "codex": {"gpt-5.4": [{"value": "ultra", "label": "Ultra"}]},
+    }
     assert server.calls == [
         "ensure_running",
         "agents:/tmp/workspace",

@@ -56,6 +56,37 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
                 return element
         raise AssertionError(f"select_static {field_name} not found")
 
+    async def test_codex_reasoning_uses_shared_catalog_options(self):
+        bot = self._make_bot()
+        current_routing = SimpleNamespace(
+            codex_agent=None,
+            codex_model="gpt-5.6-terra",
+            codex_reasoning_effort=None,
+        )
+        card = bot._build_routing_backend_options_card(
+            "chat",
+            "codex",
+            current_routing=current_routing,
+            draft_routing=bot._routing_draft_from_current(current_routing, "codex"),
+            codex_agents=[],
+            codex_models=["gpt-5.6-terra"],
+            backend_reasoning_options={
+                "codex": {
+                    "gpt-5.6-terra": [
+                        {"value": "__default__", "label": "(Default)"},
+                        {"value": "ultra", "label": "Ultra"},
+                    ]
+                }
+            },
+            _user_id="user",
+        )
+
+        reasoning_select = self._find_select(card, "codex_reasoning")
+        self.assertEqual(
+            [option["value"] for option in reasoning_select["options"]],
+            ["__default__", "ultra"],
+        )
+
     async def test_claude_model_change_refreshes_reasoning_options(self):
         bot = self._make_bot()
         bot._patch_card_message = AsyncMock()

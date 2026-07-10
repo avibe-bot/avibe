@@ -28,6 +28,7 @@ from modules.agents.opencode.utils import (
     format_claude_model_label,
     build_opencode_model_option_items,
     build_reasoning_effort_options,
+    resolve_model_reasoning_options,
     resolve_opencode_allowed_providers,
     resolve_opencode_provider_preferences,
 )
@@ -2514,6 +2515,7 @@ class FeishuBot(BaseIMClient):
             "claude_models": kwargs.get("claude_models", []),
             "codex_agents": kwargs.get("codex_agents", []),
             "codex_models": kwargs.get("codex_models", []),
+            "backend_reasoning_options": kwargs.get("backend_reasoning_options", {}),
         }
 
         # --- Backend selector options ---
@@ -2601,6 +2603,7 @@ class FeishuBot(BaseIMClient):
         claude_models = kwargs.get("claude_models", [])
         codex_agents = kwargs.get("codex_agents", [])
         codex_models = kwargs.get("codex_models", [])
+        backend_reasoning_options = kwargs.get("backend_reasoning_options", {})
 
         def _routing_value(field_name: str) -> Optional[str]:
             if field_name in draft_routing:
@@ -2738,7 +2741,13 @@ class FeishuBot(BaseIMClient):
                 )
 
             cl_current_re = _routing_value("claude_reasoning_effort")
-            cl_re_defs = build_claude_reasoning_options(cl_current_model)
+            cl_re_defs = resolve_model_reasoning_options(
+                backend_reasoning_options.get("claude"),
+                cl_current_model,
+                build_claude_reasoning_options(cl_current_model),
+            )
+            if cl_current_re not in {item["value"] for item in cl_re_defs}:
+                cl_current_re = None
             cl_re_options = []
             for item in cl_re_defs:
                 cl_re_options.append({"text": {"tag": "plain_text", "content": item["label"]}, "value": item["value"]})
@@ -2790,11 +2799,18 @@ class FeishuBot(BaseIMClient):
                     }
                 )
 
-            codex_re_defs = build_codex_reasoning_options()
+            cx_current_model = _routing_value("codex_model")
+            codex_re_defs = resolve_model_reasoning_options(
+                backend_reasoning_options.get("codex"),
+                cx_current_model,
+                build_codex_reasoning_options(),
+            )
             cx_re_options = []
             for item in codex_re_defs:
                 cx_re_options.append({"text": {"tag": "plain_text", "content": item["label"]}, "value": item["value"]})
             cx_current_re = _routing_value("codex_reasoning_effort")
+            if cx_current_re not in {item["value"] for item in codex_re_defs}:
+                cx_current_re = None
             form_elements.append({"tag": "markdown", "content": t("modal.routing.codexReasoningEffort")})
             form_elements.append(
                 {

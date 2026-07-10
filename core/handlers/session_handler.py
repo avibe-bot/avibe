@@ -34,6 +34,7 @@ from core.caller_context import caller_env_for_platform_payload
 from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+from vibe import backend_model_catalog
 
 from .base import BaseHandler
 
@@ -813,7 +814,11 @@ class SessionHandler(BaseHandler):
         effective_model = explicit_model or agent_model or self.config.claude.default_model
         from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
-        effective_effort = normalize_claude_reasoning_effort(effective_model, explicit_effort)
+        effective_effort = normalize_claude_reasoning_effort(
+            effective_model,
+            explicit_effort,
+            backend_model_catalog.catalog_reasoning_efforts_for_model("claude", effective_model),
+        )
 
         # Determine final system prompt: agent prompt takes precedence over config.
         # Always append avibe system prompt injection so transport

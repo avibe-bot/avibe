@@ -970,6 +970,66 @@ def test_routing_state_marks_current_backend_in_first_row() -> None:
     assert keyboard.buttons[0][1].text.startswith("☑️ ")
 
 
+def test_routing_codex_reasoning_uses_shared_catalog_options() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    state = SimpleNamespace(
+        picker_field="codex_reasoning_effort",
+        codex_model="gpt-5.6-terra",
+        backend_reasoning_options={
+            "codex": {
+                "gpt-5.6-terra": [
+                    {"value": "__default__", "label": "(Default)"},
+                    {"value": "ultra", "label": "Ultra"},
+                ]
+            }
+        },
+    )
+
+    assert bot._routing_picker_options(state) == [
+        (bot._t("common.default"), None),
+        ("Ultra", "ultra"),
+    ]
+
+
+def test_open_routing_modal_clears_stale_catalog_effort() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        message_id="88",
+        platform="telegram",
+        platform_specific={"is_dm": False},
+    )
+    current_routing = SimpleNamespace(
+        model="gpt-5.6-terra",
+        reasoning_effort="minimal",
+        codex_agent=None,
+    )
+
+    with patch.object(bot, "send_message_with_buttons", new=AsyncMock(return_value="99")):
+        asyncio.run(
+            bot.open_routing_modal(
+                context,
+                context.channel_id,
+                current_routing=current_routing,
+                current_backend="codex",
+                registered_backends=["codex"],
+                codex_models=["gpt-5.6-terra"],
+                backend_reasoning_options={
+                    "codex": {
+                        "gpt-5.6-terra": [
+                            {"value": "__default__", "label": "(Default)"},
+                            {"value": "ultra", "label": "Ultra"},
+                        ]
+                    }
+                },
+            )
+        )
+
+    state = bot._routing_states[bot._interaction_scope_key(context)]
+    assert state.codex_reasoning_effort is None
+
+
 def test_routing_callback_backend_switches_without_nested_picker() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(

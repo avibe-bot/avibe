@@ -51,6 +51,7 @@ class _TelegramRoutingState:
     claude_agents: list[Any]
     claude_models: list[Any]
     codex_models: list[Any]
+    backend_reasoning_options: dict[str, dict[str, list[dict[str, str]]]]
     backend: str
     opencode_agent: Optional[str] = None
     opencode_model: Optional[str] = None
@@ -1500,6 +1501,7 @@ class TelegramBot(BaseIMClient):
             claude_agents=list(kwargs.get("claude_agents") or []),
             claude_models=list(kwargs.get("claude_models") or []),
             codex_models=list(kwargs.get("codex_models") or []),
+            backend_reasoning_options=dict(kwargs.get("backend_reasoning_options") or {}),
             backend=backend,
             opencode_agent=getattr(current_routing, "opencode_agent", None),
             opencode_model=current_model if backend == "opencode" else None,
@@ -1510,6 +1512,30 @@ class TelegramBot(BaseIMClient):
             codex_model=current_model if backend == "codex" else None,
             codex_reasoning_effort=current_effort if backend == "codex" else None,
         )
+        if backend in {"claude", "codex"}:
+            from modules.agents.opencode.utils import (
+                build_claude_reasoning_options,
+                build_codex_reasoning_options,
+                resolve_model_reasoning_options,
+            )
+
+            target_model = state.claude_model if backend == "claude" else state.codex_model
+            fallback = (
+                build_claude_reasoning_options(target_model)
+                if backend == "claude"
+                else build_codex_reasoning_options()
+            )
+            available_efforts = {
+                entry.get("value")
+                for entry in resolve_model_reasoning_options(
+                    state.backend_reasoning_options.get(backend),
+                    target_model,
+                    fallback,
+                )
+            }
+            effort_field = f"{backend}_reasoning_effort"
+            if getattr(state, effort_field) not in available_efforts:
+                setattr(state, effort_field, None)
         text, keyboard = self._render_routing_state(state)
         message_id = await self.send_message_with_buttons(context, text, keyboard)
         state.message_id = message_id
@@ -1737,6 +1763,7 @@ class TelegramBot(BaseIMClient):
             build_codex_reasoning_options,
             build_opencode_model_option_items,
             build_reasoning_effort_options,
+            resolve_model_reasoning_options,
             resolve_opencode_allowed_providers,
             resolve_opencode_default_model,
             resolve_opencode_provider_preferences,
@@ -1805,7 +1832,11 @@ class TelegramBot(BaseIMClient):
                     self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
                     None if entry.get("value") == "__default__" else str(entry.get("value")),
                 )
-                for entry in build_claude_reasoning_options(state.claude_model)
+                for entry in resolve_model_reasoning_options(
+                    state.backend_reasoning_options.get("claude"),
+                    state.claude_model,
+                    build_claude_reasoning_options(state.claude_model),
+                )
                 if entry.get("value")
             ]
         if field == "codex_model":
@@ -1813,10 +1844,17 @@ class TelegramBot(BaseIMClient):
         if field == "codex_reasoning_effort":
             return [
                 (
-                    self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
+                    self._option_label(
+                        None if entry.get("value") == "__default__" else str(entry.get("value")),
+                        str(entry.get("label") or entry.get("value") or ""),
+                    ),
                     None if entry.get("value") == "__default__" else str(entry.get("value")),
                 )
-                for entry in build_codex_reasoning_options()
+                for entry in resolve_model_reasoning_options(
+                    state.backend_reasoning_options.get("codex"),
+                    state.codex_model,
+                    build_codex_reasoning_options(),
+                )
                 if entry.get("value")
             ]
         return []
@@ -1830,6 +1868,8 @@ class TelegramBot(BaseIMClient):
             state.claude_reasoning_effort = None
         if field == "claude_model" and value is not None:
             state.claude_reasoning_effort = None
+        if field == "codex_model":
+            state.codex_reasoning_effort = None
         state.picker_field = None
         state.picker_page = 0
 

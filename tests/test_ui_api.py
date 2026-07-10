@@ -19,7 +19,7 @@ from config.v2_config import (
 from config import paths
 from core.vibe_agents import VibeAgentStore
 from core import chat_discovery
-from vibe import api
+from vibe import api, backend_model_catalog
 from vibe.opencode_config import parse_jsonc_object
 
 
@@ -1906,27 +1906,13 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(
-        api,
-        "load_catalog_models",
-        lambda: [
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5",
-            "claude-opus-4-5",
-        ],
-    )
+    monkeypatch.setattr(backend_model_catalog.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
 
-    result = api.claude_models()
+    result = api.claude_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:4] == [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-        "claude-opus-4-5",
-    ]
+    assert result["models"][0] == "claude-fable-5"
     assert "opus" in result["models"]
     assert "sonnet" in result["models"]
     assert "haiku" in result["models"]
@@ -1949,7 +1935,7 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
     ]
 
 
-def test_codex_models_prefers_cli_cache_and_filters_hidden_models(monkeypatch, tmp_path):
+def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tmp_path):
     codex_dir = tmp_path / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     (codex_dir / "models_cache.json").write_text(
@@ -1977,20 +1963,17 @@ def test_codex_models_prefers_cli_cache_and_filters_hidden_models(monkeypatch, t
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
 
-    result = api.codex_models()
+    result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:4] == [
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-    ]
+    assert result["models"][:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    assert result["models"].index("gpt-5.4") < result["models"].index("gpt-5.4-mini")
     assert "gpt-5.3-codex-spark" in result["models"]
     assert "gpt-5.1-codex-mini" in result["models"]
-    assert "gpt-5.1" in result["models"]
+    assert "gpt-5.1" not in result["models"]
     assert "gpt-5.2" in result["models"]
     assert result["models"].count("gpt-5.4") == 1
 
@@ -2009,12 +1992,13 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
 
-    result = api.codex_models()
+    result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:4] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]
+    assert result["models"][:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
     assert "custom-codex-model" in result["models"]
     assert "legacy-codex" in result["models"]
     assert "gpt-5.1-codex-max" in result["models"]
@@ -2022,14 +2006,14 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
 
 
 def test_codex_models_includes_static_reasoning(monkeypatch, tmp_path):
-    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
-    result = api.codex_models()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    result = api.codex_models(schedule_refresh=False)
     assert result["ok"] is True
     expected = ["__default__", "minimal", "low", "medium", "high", "xhigh"]
     # static set, surfaced under the default "" key and per-model
     assert [o["value"] for o in result["reasoning_options"][""]] == expected
-    first_model = result["models"][0]
-    assert [o["value"] for o in result["reasoning_options"][first_model]] == expected
+    assert [o["value"] for o in result["reasoning_options"]["gpt-5.1-codex-max"]] == expected
 
 
 def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch):

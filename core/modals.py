@@ -22,6 +22,7 @@ class RoutingModalData:
     claude_models: list[str]
     codex_agents: list[str]
     codex_models: list[str]
+    backend_reasoning_options: dict[str, dict[str, list[dict[str, str]]]]
 
     def as_kwargs(self) -> dict[str, Any]:
         return {
@@ -35,6 +36,7 @@ class RoutingModalData:
             "claude_models": self.claude_models,
             "codex_agents": self.codex_agents,
             "codex_models": self.codex_models,
+            "backend_reasoning_options": self.backend_reasoning_options,
         }
 
 

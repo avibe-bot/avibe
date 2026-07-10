@@ -20,6 +20,7 @@ _utils = _load_utils_module()
 build_claude_reasoning_options = _utils.build_claude_reasoning_options
 format_claude_model_label = _utils.format_claude_model_label
 normalize_claude_reasoning_effort = _utils.normalize_claude_reasoning_effort
+resolve_model_reasoning_options = _utils.resolve_model_reasoning_options
 
 
 def test_claude_reasoning_options_default_to_low_medium_high() -> None:
@@ -88,6 +89,29 @@ def test_claude_reasoning_options_add_xhigh_for_opus_aliases() -> None:
         "xhigh",
         "max",
     ]
+
+
+def test_catalog_efforts_support_future_models_without_code_changes() -> None:
+    options = build_claude_reasoning_options("claude-future-6", ["low", "ultra"])
+
+    assert [item["value"] for item in options] == ["__default__", "low", "ultra"]
+    assert normalize_claude_reasoning_effort("claude-future-6", "ultra", ["low", "ultra"]) == "ultra"
+
+
+def test_model_reasoning_resolver_does_not_leak_another_model_map() -> None:
+    fallback = build_claude_reasoning_options(None)
+    reasoning_options = {
+        "future-model": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "ultra", "label": "Ultra"},
+        ]
+    }
+
+    assert [
+        item["value"]
+        for item in resolve_model_reasoning_options(reasoning_options, "future-model", fallback)
+    ] == ["__default__", "ultra"]
+    assert resolve_model_reasoning_options(reasoning_options, "other-model", fallback) == fallback
 
 
 def test_normalize_claude_reasoning_effort_drops_invalid_efforts() -> None:

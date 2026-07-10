@@ -54,7 +54,7 @@ from vibe.upgrade import (
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
-from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
+from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     agent_backend_catalog_payload,
@@ -5349,64 +5349,9 @@ def codex_agents(cwd: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def claude_models() -> dict:
-    """Best-effort merged list of Claude Code model options.
-
-    Claude Code does not expose a stable `list models` CLI subcommand.
-    We merge suggestions from:
-    - The repository-owned Claude model catalog
-    - ~/.claude/settings.json model/env values
-    """
-
-    def _append_unique(options: list[str], seen: set[str], value: object) -> None:
-        if not isinstance(value, str):
-            return
-        model = value.strip()
-        if not model or model in seen:
-            return
-        seen.add(model)
-        options.append(model)
-
-    options: list[str] = []
-    seen: set[str] = set()
-
-    for model in load_catalog_models():
-        _append_unique(options, seen, model)
-
-    for model in DEFAULT_CLAUDE_MODEL_ALIASES:
-        _append_unique(options, seen, model)
-
-    settings_path = Path.home() / ".claude" / "settings.json"
-    try:
-        if settings_path.exists() and settings_path.is_file():
-            data = json.loads(settings_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _append_unique(options, seen, data.get("model"))
-                env = data.get("env")
-                if isinstance(env, dict):
-                    for key in (
-                        "ANTHROPIC_MODEL",
-                        "ANTHROPIC_SMALL_FAST_MODEL",
-                    ):
-                        _append_unique(options, seen, env.get(key))
-    except Exception as exc:
-        logger.warning("Failed to read Claude settings.json: %s", exc, exc_info=True)
-
-    from modules.agents.opencode.utils import build_claude_reasoning_options, format_claude_model_label
-
-    reasoning_options = {"": build_claude_reasoning_options(None)}
-    model_labels = {}
-    for model in options:
-        reasoning_options[model] = build_claude_reasoning_options(model)
-        label = format_claude_model_label(model)
-        if label != model:
-            model_labels[model] = label
-    return {
-        "ok": True,
-        "models": options,
-        "reasoning_options": reasoning_options,
-        "model_labels": model_labels,
-    }
+def claude_models(*, schedule_refresh: bool = True) -> dict:
+    """Return the immediate shared Claude model-catalog snapshot."""
+    return backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=schedule_refresh)
 
 
 def _effort_values(reasoning_entries: object) -> list[str]:
@@ -5582,9 +5527,10 @@ def agent_model_options(
             "backend": "claude",
             "default_model": default_model,
             "models": _flat_catalog_models(data, default_model),
-            "source": "claude model catalog + ~/.claude/settings.json",
-            "live": False,
-            "notes": ["Claude Code has no stable list-models command; this is a best-effort merged list."],
+            "source": data.get("source"),
+            "live": bool(data.get("live")),
+            "notes": data.get("notes"),
+            "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
     elif normalized_backend == "codex":
         data = codex_models()
@@ -5596,9 +5542,10 @@ def agent_model_options(
             "backend": "codex",
             "default_model": default_model,
             "models": _flat_catalog_models(data, default_model),
-            "source": "codex built-in list + ~/.codex caches",
-            "live": False,
-            "notes": ["Codex CLI has no stable list-models command; this is a best-effort merged list."],
+            "source": data.get("source"),
+            "live": bool(data.get("live")),
+            "notes": data.get("notes"),
+            "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
     else:
         result = _opencode_model_options(provider=provider, cwd=cwd, config=config)
@@ -10470,107 +10417,9 @@ def set_opencode_default_provider(payload: dict) -> dict:
     return {"ok": True, "default_provider": provider_id}
 
 
-def codex_models() -> dict:
-    """Best-effort merged list of Codex model options.
-
-    Codex CLI does not expose a stable `list models` command.
-    We merge suggestions from:
-    - Built-in known model ids
-    - ~/.codex/models_cache.json (maintained by Codex CLI)
-    - ~/.codex/config.toml (user-selected model and migration hints)
-    """
-
-    def _append_unique(options: list[str], seen: set[str], value: object) -> None:
-        if not isinstance(value, str):
-            return
-        model = value.strip()
-        if not model or model in seen:
-            return
-        seen.add(model)
-        options.append(model)
-
-    def _result(model_options: list[str]) -> dict:
-        # Codex reasoning-effort levels are static (model-independent). Surface
-        # them per-model so the shape matches claude_models(), letting a single
-        # caller (agent_model_options / the UI) treat both backends uniformly.
-        from modules.agents.opencode.utils import build_codex_reasoning_options
-
-        codex_reasoning = build_codex_reasoning_options()
-        reasoning_options = {"": codex_reasoning}
-        for model_id in model_options:
-            reasoning_options[model_id] = codex_reasoning
-        return {"ok": True, "models": model_options, "reasoning_options": reasoning_options}
-
-    built_in_options: list[str] = [
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-        "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-max",
-        "gpt-5.1-codex-mini",
-        "gpt-5.1",
-        "gpt-5",
-    ]
-
-    options: list[str] = []
-    seen: set[str] = set()
-    codex_home = Path.home() / ".codex"
-    models_cache_path = codex_home / "models_cache.json"
-    config_path = codex_home / "config.toml"
-
-    for model in built_in_options:
-        _append_unique(options, seen, model)
-
-    try:
-        if models_cache_path.exists() and models_cache_path.is_file():
-            cache_data = json.loads(models_cache_path.read_text(encoding="utf-8"))
-            models = cache_data.get("models")
-            if isinstance(models, list):
-                visible_models: list[tuple[int, int, str]] = []
-                for index, item in enumerate(models):
-                    if not isinstance(item, dict):
-                        continue
-                    slug = item.get("slug")
-                    if not isinstance(slug, str) or not slug.strip():
-                        continue
-                    priority = item.get("priority")
-                    if not isinstance(priority, int):
-                        priority = 10**9
-                    visible_models.append((priority, index, slug.strip()))
-
-                for _, _, slug in sorted(visible_models):
-                    _append_unique(options, seen, slug)
-    except Exception as exc:
-        logger.warning("Failed to read Codex models_cache.json: %s", exc, exc_info=True)
-
-    try:
-        if config_path.exists() and config_path.is_file():
-            try:
-                import tomllib  # py3.11+
-            except Exception:  # pragma: no cover
-                tomllib = None
-
-            if tomllib is None:
-                return _result(options)
-
-            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _append_unique(options, seen, data.get("model"))
-                notice = data.get("notice")
-                if isinstance(notice, dict):
-                    migrations = notice.get("model_migrations")
-                    if isinstance(migrations, dict):
-                        for k, v in migrations.items():
-                            _append_unique(options, seen, k)
-                            _append_unique(options, seen, v)
-    except Exception as exc:
-        logger.warning("Failed to read Codex config.toml: %s", exc, exc_info=True)
-
-    return _result(options)
+def codex_models(*, schedule_refresh: bool = True) -> dict:
+    """Return the immediate shared Codex model-catalog snapshot."""
+    return backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=schedule_refresh)
 
 
 def _lark_api_base(domain: str = "feishu") -> str:

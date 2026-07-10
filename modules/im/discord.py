@@ -26,6 +26,7 @@ from modules.agents.opencode.utils import (
     build_codex_reasoning_options,
     format_claude_model_label,
     build_reasoning_effort_options,
+    resolve_model_reasoning_options,
     resolve_opencode_allowed_providers,
     resolve_opencode_default_model,
     resolve_opencode_provider_preferences,
@@ -1457,6 +1458,7 @@ class DiscordBot(BaseIMClient):
         claude_models: list,
         codex_agents: list,
         codex_models: list,
+        backend_reasoning_options: Optional[dict] = None,
     ):
         interaction = trigger_id if isinstance(trigger_id, discord.Interaction) else None
 
@@ -1783,8 +1785,13 @@ class DiscordBot(BaseIMClient):
                     model_select.callback = claude_model_callback
                     self.add_item(model_select)
 
-                    claude_reasoning_entries = build_claude_reasoning_options(
+                    target_claude_model = (
                         self.claude_model if self.claude_model not in (None, "__default__") else None
+                    )
+                    claude_reasoning_entries = resolve_model_reasoning_options(
+                        (backend_reasoning_options or {}).get("claude"),
+                        target_claude_model,
+                        build_claude_reasoning_options(target_claude_model),
                     )
                     selected_cl_reasoning = (
                         self.claude_reasoning if self.claude_reasoning not in (None, "__default__") else "__default__"
@@ -1792,6 +1799,7 @@ class DiscordBot(BaseIMClient):
                     available_cl_reasoning = {entry.get("value") for entry in claude_reasoning_entries}
                     if selected_cl_reasoning not in available_cl_reasoning:
                         selected_cl_reasoning = "__default__"
+                        self.claude_reasoning = None
                     reasoning_options = []
                     for entry in claude_reasoning_entries:
                         value = entry.get("value")
@@ -1884,18 +1892,32 @@ class DiscordBot(BaseIMClient):
                     async def codex_model_callback(select_interaction: discord.Interaction):
                         if model_select.values:
                             self.codex_model = model_select.values[0]
-                        await select_interaction.response.defer()
+                            self.codex_reasoning = None
+                        self._render()
+                        updated_embed = discord.Embed(
+                            title=self._content(),
+                            description=self.outer._t("discord.routingSubtitle"),
+                        )
+                        await select_interaction.response.edit_message(embed=updated_embed, view=self)
 
                     model_select.callback = codex_model_callback
                     self.add_item(model_select)
 
-                    codex_reasoning_entries = build_codex_reasoning_options()
+                    target_codex_model = (
+                        self.codex_model if self.codex_model not in (None, "__default__") else None
+                    )
+                    codex_reasoning_entries = resolve_model_reasoning_options(
+                        (backend_reasoning_options or {}).get("codex"),
+                        target_codex_model,
+                        build_codex_reasoning_options(),
+                    )
                     selected_cx_reasoning = (
                         self.codex_reasoning if self.codex_reasoning not in (None, "__default__") else "__default__"
                     )
                     available_cx_reasoning = {entry.get("value") for entry in codex_reasoning_entries}
                     if selected_cx_reasoning not in available_cx_reasoning:
                         selected_cx_reasoning = "__default__"
+                        self.codex_reasoning = None
                     reasoning_options = []
                     for entry in codex_reasoning_entries:
                         value = entry.get("value")
