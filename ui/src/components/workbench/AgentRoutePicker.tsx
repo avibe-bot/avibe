@@ -418,7 +418,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 disabled={patching}
                 onClick={() => void applyPatch({ reasoning_effort: opt })}
               >
-                <span className="flex-1 capitalize">{t(`chat.picker.effortOptions.${opt}`)}</span>
+                <span className="flex-1 capitalize">
+                  {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
+                </span>
               </RouteItem>
             ))}
           </RouteColumn>

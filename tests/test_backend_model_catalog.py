@@ -73,6 +73,9 @@ def test_refresh_remote_catalog_persists_state_cache(monkeypatch, tmp_path):
     assert cached_payload["catalog"]["backends"]["claude"]["models"][0]["id"] == "claude-fable-6"
     assert cached_payload["error"] is None
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
+    reloaded = backend_model_catalog.load_cached_remote_catalog(schedule_refresh=False)
+    assert backend_model_catalog.backend_model_entries("claude", reloaded)[0]["id"] == "claude-fable-6"
+    backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
 
 
 def test_failed_refresh_with_stale_catalog_uses_failure_ttl():

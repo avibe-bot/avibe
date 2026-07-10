@@ -3994,8 +3994,25 @@ def _normalize_backend_routing_payload(routing_payload: dict) -> dict:
         routing.reasoning_effort = normalize_claude_reasoning_effort(
             routing.model,
             routing.reasoning_effort,
+            _catalog_reasoning_efforts_for_model("claude", routing.model),
         )
     return _routing_to_dict(routing)
+
+
+def _catalog_reasoning_efforts_for_model(backend: str, model: Optional[str]) -> Optional[list[str]]:
+    if not model:
+        return None
+    for catalog in (
+        backend_model_catalog.load_cached_remote_catalog(schedule_refresh=False),
+        backend_model_catalog.load_bundled_catalog(),
+    ):
+        for entry in backend_model_catalog.backend_model_entries(backend, catalog):
+            if backend_model_catalog.model_id(entry) != model:
+                continue
+            efforts = backend_model_catalog.reasoning_efforts(entry)
+            if efforts:
+                return efforts
+    return None
 
 
 def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
@@ -5354,10 +5371,10 @@ def claude_models() -> dict:
                 continue
             label = backend_model_catalog.model_label(entry)
             if label:
-                model_labels[model] = label
+                model_labels.setdefault(model, label)
             efforts = backend_model_catalog.reasoning_efforts(entry)
             if efforts:
-                reasoning_efforts[model] = efforts
+                reasoning_efforts.setdefault(model, efforts)
 
     options: list[str] = []
     seen: set[str] = set()
@@ -10565,6 +10582,7 @@ def _append_codex_catalog_models(
     seen: set[str],
     model_labels: dict[str, str],
     reasoning_efforts: dict[str, list[str]],
+    overwrite_metadata: bool = False,
 ) -> None:
     for item in _sorted_codex_catalog_items(data):
         model_id = _append_unique_model(options, seen, item.get("slug") or item.get("id"))
@@ -10572,10 +10590,12 @@ def _append_codex_catalog_models(
             continue
         display_name = item.get("display_name") or item.get("label")
         if isinstance(display_name, str) and display_name.strip():
-            model_labels[model_id] = display_name.strip()
+            if overwrite_metadata or model_id not in model_labels:
+                model_labels[model_id] = display_name.strip()
         efforts = _codex_reasoning_efforts_from_catalog_item(item)
         if efforts:
-            reasoning_efforts[model_id] = efforts
+            if overwrite_metadata or model_id not in reasoning_efforts:
+                reasoning_efforts[model_id] = efforts
 
 
 def _read_codex_live_model_catalog() -> tuple[object | None, str | None]:
@@ -10697,6 +10717,7 @@ def codex_models() -> dict:
             seen=seen,
             model_labels=model_labels,
             reasoning_efforts=reasoning_efforts,
+            overwrite_metadata=True,
         )
 
     for model in _CODEX_BUILT_IN_MODEL_OPTIONS:

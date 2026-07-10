@@ -113,7 +113,7 @@ def _cached_remote_payload() -> dict[str, Any]:
         if _REMOTE_MEMORY_CACHE:
             return dict(_REMOTE_MEMORY_CACHE)
 
-    payload = _read_catalog(get_cached_catalog_path()) or {}
+    payload = _read_cached_remote_payload(get_cached_catalog_path())
     if isinstance(payload, dict):
         with _REMOTE_LOCK:
             _REMOTE_MEMORY_CACHE.clear()
@@ -154,6 +154,28 @@ def _read_catalog(path: Path) -> dict[str, Any] | None:
     except Exception:
         return None
     return _normalize_catalog(payload)
+
+
+def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    raw_catalog = payload.get("catalog")
+    if isinstance(raw_catalog, dict):
+        normalized["catalog"] = _normalize_catalog(raw_catalog)
+    for key in ("fetched_at", "failed_at"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            normalized[key] = value
+    error = payload.get("error")
+    if isinstance(error, str) or error is None:
+        normalized["error"] = error
+    return normalized
 
 
 def _write_cached_remote_payload(payload: dict[str, Any]) -> None:

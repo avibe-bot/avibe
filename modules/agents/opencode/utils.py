@@ -563,10 +563,14 @@ def build_claude_reasoning_options(
     return options
 
 
-def normalize_claude_reasoning_effort(target_model: Optional[str], effort: Optional[str]) -> Optional[str]:
+def normalize_claude_reasoning_effort(
+    target_model: Optional[str],
+    effort: Optional[str],
+    reasoning_efforts: Optional[List[str]] = None,
+) -> Optional[str]:
     """Return a Claude effort only when it is valid for the target model."""
 
     if not effort:
         return None
-    allowed = {item["value"] for item in build_claude_reasoning_options(target_model)}
+    allowed = {item["value"] for item in build_claude_reasoning_options(target_model, reasoning_efforts)}
     return effort if effort in allowed else None

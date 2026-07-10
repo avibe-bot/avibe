@@ -1119,6 +1119,33 @@ def test_normalize_backend_routing_payload_prefers_canonical_claude_overrides() 
     assert result["claude_reasoning_effort"] is None
 
 
+def test_normalize_backend_routing_payload_accepts_remote_claude_effort(monkeypatch) -> None:
+    monkeypatch.setattr(
+        api.backend_model_catalog,
+        "load_cached_remote_catalog",
+        lambda **kwargs: {
+            "backends": {
+                "claude": {
+                    "models": [
+                        {"id": "claude-future", "reasoning_efforts": ["low", "ultra"]},
+                    ]
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(api.backend_model_catalog, "load_bundled_catalog", lambda: {})
+
+    result = api._normalize_backend_routing_payload(
+        {
+            "agent_name": "claude",
+            "model": "claude-future",
+            "reasoning_effort": "ultra",
+        }
+    )
+
+    assert result["reasoning_effort"] == "ultra"
+
+
 def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_aliases() -> None:
     result = api._normalize_backend_routing_payload(
         {
@@ -1973,7 +2000,23 @@ def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch,
             }
         },
     )
-    monkeypatch.setattr(api.backend_model_catalog, "load_bundled_catalog", lambda: {})
+    monkeypatch.setattr(
+        api.backend_model_catalog,
+        "load_bundled_catalog",
+        lambda: {
+            "backends": {
+                "claude": {
+                    "models": [
+                        {
+                            "id": "claude-fable-6",
+                            "label": "Stale bundled label",
+                            "reasoning_efforts": ["low", "medium"],
+                        }
+                    ]
+                }
+            }
+        },
+    )
 
     result = api.claude_models()
 
@@ -2053,6 +2096,23 @@ def test_codex_models_prefers_live_catalog_and_model_reasoning(monkeypatch, tmp_
 
     api._CODEX_LIVE_MODEL_CATALOG_CACHE.clear()
     monkeypatch.setattr(api.backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    monkeypatch.setattr(
+        api.backend_model_catalog,
+        "load_bundled_catalog",
+        lambda: {
+            "backends": {
+                "codex": {
+                    "models": [
+                        {
+                            "id": "gpt-5.6-sol",
+                            "label": "Stale bundled label",
+                            "reasoning_efforts": ["low"],
+                        }
+                    ]
+                }
+            }
+        },
+    )
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(api, "resolve_cli_path", lambda binary: "/usr/local/bin/codex" if binary == "codex" else binary)
     monkeypatch.setattr(api.subprocess, "run", fake_run)
