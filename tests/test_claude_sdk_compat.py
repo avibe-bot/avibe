@@ -53,21 +53,41 @@ def test_receive_messages_skips_unknown_types_returning_none():
 
 
 @requires_claude_sdk
-def test_receive_messages_preserves_model_refusal_fallback_payload():
-    payload = {
-        "type": "system",
-        "subtype": "model_refusal_fallback",
-        "trigger": "refusal",
-        "direction": "retry",
-        "original_model": "claude-fable-5",
-        "fallback_model": "claude-opus-4-8",
-        "request_id": "req_test",
-        "api_refusal_category": "cyber",
-        "content": "Fable 5 safeguards flagged this message. Switched to Opus 4.8.",
-        "uuid": "msg_test",
-        "session_id": "session_test",
-    }
-
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {
+                "type": "system",
+                "subtype": "model_refusal_fallback",
+                "trigger": "refusal",
+                "direction": "retry",
+                "original_model": "claude-fable-5",
+                "fallback_model": "claude-opus-4-8",
+                "request_id": "req_test",
+                "api_refusal_category": "cyber",
+                "content": "Fable 5 safeguards flagged this request. Switched to Opus 4.8.",
+                "uuid": "msg_test",
+                "session_id": "session_test",
+            },
+            id="sdk",
+        ),
+        pytest.param(
+            {
+                "type": "system",
+                "subtype": "model_refusal_fallback",
+                "level": "warning",
+                "trigger": "refusal",
+                "originalModel": "claude-fable-5[1m]",
+                "fallbackModel": "claude-opus-4-8",
+                "apiRefusalCategory": None,
+                "apiRefusalExplanation": None,
+            },
+            id="legacy-transcript",
+        ),
+    ],
+)
+def test_receive_messages_preserves_model_refusal_fallback_payload(payload):
     messages = asyncio.run(_collect_messages([payload]))
 
     assert len(messages) == 1

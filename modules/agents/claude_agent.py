@@ -1351,7 +1351,7 @@ class ClaudeAgent(BaseAgent):
             return
 
         direction = str(data.get("direction") or "").strip().lower()
-        if direction != "retry":
+        if direction and direction != "retry":
             logger.info(
                 "Ignoring legacy Claude refusal fallback direction %r for %s",
                 direction,
@@ -1359,18 +1359,16 @@ class ClaudeAgent(BaseAgent):
             )
             return
 
-        # The refusal event retracts the primary model's partial response before
-        # Claude retries on the fallback model. Avibe buffers the latest assistant
-        # text until the next assistant/result frame, so discard that buffer now
-        # instead of emitting a response Claude explicitly withdrew.
-        self._pending_assistant_message.pop(composite_key, None)
-        self._last_assistant_text.pop(composite_key, None)
-
+        # Claude Code can write this marker after the fallback assistant row. Do
+        # not infer retraction order from the marker alone: the result path may
+        # still need that assistant text when ResultMessage.result is empty.
         pending_requests = self._pending_requests.get(composite_key) or []
         self._adopt_pending_turn_token(context, pending_requests[0] if pending_requests else None)
 
-        original_model = " ".join(str(data.get("original_model") or "").split())[:160]
-        fallback_model = " ".join(str(data.get("fallback_model") or "").split())[:160]
+        original_value = data.get("original_model") or data.get("originalModel") or ""
+        fallback_value = data.get("fallback_model") or data.get("fallbackModel") or ""
+        original_model = " ".join(str(original_value).split())[:160]
+        fallback_model = " ".join(str(fallback_value).split())[:160]
         provider_content = str(data.get("content") or "").strip()
 
         text = ""
