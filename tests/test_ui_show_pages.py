@@ -1814,6 +1814,42 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
     assert local_bin.exists() is True
 
 
+def test_show_runtime_prepare_does_not_remove_parent_of_retained_rollback(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=50)
+    current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    rollback_parent = runtime_dir / "versions" / "rollback" / _runtime_platform_tag()
+    rollback_cli = rollback_parent / "fingerprint" / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    rollback_cli.parent.mkdir(parents=True)
+    rollback_cli.write_text("rollback\n", encoding="utf-8")
+    metadata = {
+        "provider": "manifest-cache",
+        "manifest_source": "package:show_runtime_manifest.json",
+        "runtime_version": "rollback",
+        "platform": _runtime_platform_tag(),
+    }
+    (rollback_parent / ".vibe-show-runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (rollback_parent / "fingerprint" / ".vibe-show-runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
+    os.utime(rollback_parent, (100, 100))
+    os.utime(rollback_parent / "fingerprint", (200, 200))
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert rollback_cli.exists() is True
+    assert rollback_parent.exists() is True
+    assert old_install.exists() is False
+
+
 def test_show_runtime_prepare_with_explicit_command_does_not_clean_managed_installs(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     install_dirs = [

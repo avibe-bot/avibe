@@ -480,7 +480,6 @@ class ShowRuntimeManager:
             protected.add(current_install_dir)
         install_dirs = self._manifest_install_dirs(versions_dir, manifest_source=manifest_source)
         sorted_install_dirs = sorted(install_dirs, key=lambda path: path.stat().st_mtime, reverse=True)
-        removed: list[str] = []
         kept_previous = 0
         for path in sorted_install_dirs:
             path_resolved = path.resolve()
@@ -488,6 +487,11 @@ class ShowRuntimeManager:
                 continue
             if kept_previous < keep_previous:
                 kept_previous += 1
+                protected.add(path_resolved)
+        removed: list[str] = []
+        for path in sorted_install_dirs:
+            path_resolved = path.resolve()
+            if any(path_resolved == item or path_resolved in item.parents for item in protected):
                 continue
             shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
