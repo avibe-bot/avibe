@@ -1112,21 +1112,7 @@ def _spawn_background(
     stdout_name: str = "service_stdout.log",
     stderr_name: str = "service_stderr.log",
 ):
-    stdout_path = paths.get_runtime_dir() / stdout_name
-    stderr_path = paths.get_runtime_dir() / stderr_name
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    stdout = stdout_path.open("ab")
-    stderr = stderr_path.open("ab")
-    process = subprocess.Popen(
-        args,
-        stdout=stdout,
-        stderr=stderr,
-        start_new_session=True,
-    )
-    stdout.close()
-    stderr.close()
-    pid_path.write_text(str(process.pid), encoding="utf-8")
-    return process.pid
+    return runtime.spawn_background(args, pid_path, stdout_name, stderr_name)
 
 
 def _stop_process(pid_path):

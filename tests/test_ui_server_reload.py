@@ -45,6 +45,11 @@ class _NoopThread:
         return None
 
 
+class _ImmediateThread(_NoopThread):
+    def start(self) -> None:
+        self._target(*self._args, **self._kwargs)
+
+
 def test_ui_reload_overrides_bind_host_when_tunnel_enabled(monkeypatch):
     captured_calls: list[dict] = []
     original = runtime.effective_ui_bind_host
@@ -128,3 +133,33 @@ def test_ui_reload_uses_requested_host_when_tunnel_disabled(monkeypatch):
     assert response.status_code == 200
     assert captured["requested_host"] == "192.168.1.5"
     assert captured["enabled"] is False
+
+
+def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(
+        "core.services.settings.load_config",
+        lambda *a, **k: _config_with_tunnel(enabled=False),
+    )
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
+    monkeypatch.setattr(runtime, "write_status", lambda *args: captured.setdefault("status", args))
+
+    def fake_spawn(args, pid_path, stdout_name, stderr_name, env=None):
+        captured["spawn"] = (args, pid_path, stdout_name, stderr_name, env)
+        return 222
+
+    monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert captured["spawn"][1] == runtime.paths.get_runtime_ui_pid_path()
+    assert captured["spawn"][2:4] == ("ui_stdout.log", "ui_stderr.log")
+    assert captured["status"][-1] == 222

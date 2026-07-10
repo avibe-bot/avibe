@@ -4179,33 +4179,22 @@ def ui_reload():
 
     def _restart():
         global _server
-        import subprocess
         import sys
         import time
         from config import paths as config_paths
 
-        working_dir = get_working_dir()
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
-        stdout_path = config_paths.get_runtime_dir() / "ui_stdout.log"
-        stderr_path = config_paths.get_runtime_dir() / "ui_stderr.log"
-        stdout = stdout_path.open("ab")
-        stderr = stderr_path.open("ab")
-        process = subprocess.Popen(
+        pid = runtime.spawn_background(
             [sys.executable, "-c", command],
-            stdout=stdout,
-            stderr=stderr,
-            start_new_session=True,
-            cwd=str(working_dir),
-            close_fds=True,
+            config_paths.get_runtime_ui_pid_path(),
+            "ui_stdout.log",
+            "ui_stderr.log",
         )
-        stdout.close()
-        stderr.close()
-        config_paths.get_runtime_ui_pid_path().write_text(str(process.pid), encoding="utf-8")
         runtime.write_status(
             status.get("state", "running"),
             status.get("detail"),
             status.get("service_pid"),
-            process.pid,
+            pid,
         )
         time.sleep(0.2)
         # Shutdown the old server to release the port

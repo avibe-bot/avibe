@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from config.paths import ensure_data_dirs, get_logs_dir
@@ -17,8 +18,18 @@ from vibe.runtime import (
 )
 
 
+APPLICATION_LOG_MAX_BYTES = 20 * 1024 * 1024
+APPLICATION_LOG_BACKUP_COUNT = 5
+
+
 def _build_logging_handlers(logs_dir: str) -> list[logging.Handler]:
-    handlers: list[logging.Handler] = [logging.FileHandler(f"{logs_dir}/vibe_remote.log")]
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(
+            f"{logs_dir}/vibe_remote.log",
+            maxBytes=APPLICATION_LOG_MAX_BYTES,
+            backupCount=APPLICATION_LOG_BACKUP_COUNT,
+        )
+    ]
     if os.environ.get("VIBE_DISABLE_STDOUT_LOGGING", "").lower() not in {"1", "true", "yes"}:
         handlers.insert(0, logging.StreamHandler(sys.stdout))
     return handlers

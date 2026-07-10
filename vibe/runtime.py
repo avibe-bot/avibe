@@ -27,6 +27,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
 logger = logging.getLogger(__name__)
@@ -782,19 +783,56 @@ def _log_path(name: str) -> Path:
     return paths.get_runtime_dir() / name
 
 
+def _spawn_runtime_log_sink(path: Path) -> subprocess.Popen:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "vibe.log_sink",
+            str(path),
+            "--max-bytes",
+            str(RUNTIME_LOG_MAX_BYTES),
+            "--retain-bytes",
+            str(RUNTIME_LOG_RETAIN_BYTES),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        cwd=str(get_working_dir()),
+        close_fds=True,
+    )
+
+
+def _spawn_runtime_log_sinks(stdout_path: Path, stderr_path: Path) -> tuple[subprocess.Popen, subprocess.Popen]:
+    stdout_sink = _spawn_runtime_log_sink(stdout_path)
+    try:
+        stderr_sink = _spawn_runtime_log_sink(stderr_path)
+    except Exception:
+        if stdout_sink.stdin is not None:
+            stdout_sink.stdin.close()
+        raise
+    if stdout_sink.stdin is None or stderr_sink.stdin is None:
+        if stdout_sink.stdin is not None:
+            stdout_sink.stdin.close()
+        if stderr_sink.stdin is not None:
+            stderr_sink.stdin.close()
+        raise RuntimeError("Failed to create runtime log sink pipes")
+    return stdout_sink, stderr_sink
+
+
 def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: dict[str, str] | None = None):
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    stdout = stdout_path.open("ab")
-    stderr = stderr_path.open("ab")
+    stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
     stdin = open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
             stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=stdout_sink.stdin,
+            stderr=stderr_sink.stdin,
             start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
@@ -802,8 +840,8 @@ def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: di
         )
     finally:
         stdin.close()
-        stdout.close()
-        stderr.close()
+        stdout_sink.stdin.close()
+        stderr_sink.stdin.close()
     pid_path.write_text(str(process.pid), encoding="utf-8")
     return process.pid
 
@@ -817,15 +855,14 @@ def spawn_service_background_process(
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    stdout = stdout_path.open("ab")
-    stderr = stderr_path.open("ab")
+    stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
     stdin = open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
             stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=stdout_sink.stdin,
+            stderr=stderr_sink.stdin,
             start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
@@ -833,8 +870,8 @@ def spawn_service_background_process(
         )
     finally:
         stdin.close()
-        stdout.close()
-        stderr.close()
+        stdout_sink.stdin.close()
+        stderr_sink.stdin.close()
     return process
 
 

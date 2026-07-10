@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import main
@@ -18,7 +19,9 @@ def test_build_logging_handlers_excludes_stdout_when_disabled(monkeypatch, tmp_p
     handlers = main._build_logging_handlers(str(tmp_path))
 
     assert len(handlers) == 1
-    assert isinstance(handlers[0], logging.FileHandler)
+    assert isinstance(handlers[0], RotatingFileHandler)
+    assert handlers[0].maxBytes == main.APPLICATION_LOG_MAX_BYTES
+    assert handlers[0].backupCount == main.APPLICATION_LOG_BACKUP_COUNT
 
 
 def test_build_logging_handlers_keeps_stdout_by_default(monkeypatch, tmp_path):
@@ -28,7 +31,24 @@ def test_build_logging_handlers_keeps_stdout_by_default(monkeypatch, tmp_path):
 
     assert len(handlers) == 2
     assert isinstance(handlers[0], logging.StreamHandler)
-    assert isinstance(handlers[1], logging.FileHandler)
+    assert isinstance(handlers[1], RotatingFileHandler)
+
+
+def test_application_log_rotates_at_configured_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "APPLICATION_LOG_MAX_BYTES", 128)
+    monkeypatch.setattr(main, "APPLICATION_LOG_BACKUP_COUNT", 2)
+    monkeypatch.setenv("VIBE_DISABLE_STDOUT_LOGGING", "1")
+    handler = main._build_logging_handlers(str(tmp_path))[0]
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    record = logging.LogRecord("rotation-test", logging.INFO, __file__, 1, "x" * 80, (), None)
+    try:
+        for _ in range(10):
+            handler.emit(record)
+    finally:
+        handler.close()
+
+    assert (tmp_path / "vibe_remote.log.1").exists()
+    assert len(list(tmp_path.glob("vibe_remote.log*"))) == 3
 
 
 def test_start_service_disables_stdout_logging_for_background_process(monkeypatch, tmp_path):
@@ -63,8 +83,19 @@ def test_start_service_disables_stdout_logging_for_background_process(monkeypatc
 
 def test_spawn_background_detaches_stdin(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
+    sink_paths: list[Path] = []
 
     monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
+
+    class FakeSink:
+        def __init__(self, path: Path):
+            self.stdin = path.open("wb")
+
+    def fake_sinks(stdout_path: Path, stderr_path: Path):
+        sink_paths.extend((stdout_path, stderr_path))
+        return FakeSink(tmp_path / "stdout.pipe"), FakeSink(tmp_path / "stderr.pipe")
+
+    monkeypatch.setattr(runtime, "_spawn_runtime_log_sinks", fake_sinks)
 
     class FakePopen:
         pid = 12345
@@ -82,6 +113,9 @@ def test_spawn_background_detaches_stdin(monkeypatch, tmp_path):
     assert stdin.name == os.devnull
     assert stdin.closed is True
     assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stdout"].closed is True
+    assert captured["kwargs"]["stderr"].closed is True
+    assert sink_paths == [tmp_path / "stdout.log", tmp_path / "stderr.log"]
 
 
 def test_main_import_does_not_load_controller() -> None:

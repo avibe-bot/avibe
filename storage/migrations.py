@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import logging
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from config import paths
+from storage.backups import create_sqlite_migration_backup
 from storage.db import create_sqlite_engine, sqlite_url
+
+
+logger = logging.getLogger(__name__)
 
 INITIAL_REVISION = "20260501_0001"
 LATEST_SCHEMA_REVISION = "20260622_0023"
@@ -130,13 +136,43 @@ def alembic_config(db_path: Path | None = None) -> Config:
 
 
 def run_migrations(db_path: Path | None = None, *, revision: str = "head") -> None:
-    target_db = db_path or paths.get_sqlite_state_path()
+    target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     guard_source_checkout_default_state_migration(target_db)
     cfg = alembic_config(target_db)
+    backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
+    if backup_revisions is not None:
+        current_revisions, target_revisions = backup_revisions
+        backup_path = create_sqlite_migration_backup(
+            target_db,
+            from_revisions=current_revisions,
+            to_revisions=target_revisions,
+        )
+        logger.info("Created pre-migration SQLite backup at %s", backup_path)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
     command.upgrade(cfg, revision)
+
+
+def _migration_backup_revisions(db_path: Path, cfg: Config, revision: str) -> tuple[set[str], set[str]] | None:
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return None
+
+    with sqlite3.connect(db_path) as conn:
+        tables = _table_names(conn)
+        if not tables - {"alembic_version"}:
+            return None
+        current_revisions = (
+            {str(row[0]) for row in conn.execute("select version_num from alembic_version")}
+            if "alembic_version" in tables
+            else set()
+        )
+
+    script = ScriptDirectory.from_config(cfg)
+    target_revisions = {item.revision for item in script.get_revisions(revision)}
+    if current_revisions == target_revisions:
+        return None
+    return current_revisions, target_revisions
 
 
 def background_tables_ready(db_path: Path | None = None) -> bool:
@@ -150,12 +186,7 @@ def background_tables_ready(db_path: Path | None = None) -> bool:
 
 def initialize_background_tables(db_path: Path | None = None) -> None:
     target_db = db_path or paths.get_sqlite_state_path()
-    guard_source_checkout_default_state_migration(target_db)
-    cfg = alembic_config(target_db)
-    command.ensure_version(cfg)
-    _repair_unreleased_head_schema_drift(target_db)
-    _stamp_existing_initial_schema(target_db, cfg)
-    command.upgrade(cfg, "head")
+    run_migrations(target_db)
 
 
 def guard_source_checkout_default_state_migration(db_path: Path) -> None:

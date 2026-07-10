@@ -21,6 +21,7 @@ from config.v2_sessions import (
     migrate_session_state_mappings,
 )
 from config.v2_settings import SettingsState, load_settings_state_from_json
+from storage.backups import BACKUP_MANIFEST_VERSION, prune_state_backups
 from storage.db import create_sqlite_engine
 from storage.lock import MigrationFileLock
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
@@ -73,6 +74,7 @@ def ensure_sqlite_state(
     with MigrationFileLock(lock_path):
         run_migrations(target_db)
         engine = create_sqlite_engine(target_db)
+        report: MigrationImportReport | None = None
         try:
             backup_path: Path | None = None
             with engine.begin() as conn:
@@ -90,44 +92,49 @@ def ensure_sqlite_state(
                             or background_counts.get("background_runs_imported")
                         )
                     data_migration_counts = _run_sqlite_data_migrations(conn)
-                    return MigrationImportReport(
+                    report = MigrationImportReport(
                         db_path=target_db,
                         imported=imported_background,
                         backup_path=backup_path,
                         counts=_current_counts(conn) | background_counts | data_migration_counts,
                     )
+                else:
+                    _clear_imported_state(conn)
 
-                _clear_imported_state(conn)
+            if report is None:
+                backup_path = _backup_json_state(target_state_dir)
+                parsed = _parse_json_state(target_state_dir, primary_platform=primary_platform)
+                _write_parsed_state(target_db, parsed)
 
-            backup_path = _backup_json_state(target_state_dir)
-            parsed = _parse_json_state(target_state_dir, primary_platform=primary_platform)
-            _write_parsed_state(target_db, parsed)
-
-            with engine.begin() as conn:
-                discovered_count = _import_discovered_chats(conn, parsed.discovered)
-                background_counts = _import_background_state(conn, target_state_dir)
-                data_migration_counts = _run_sqlite_data_migrations(conn)
-                counts = _current_counts(conn)
-                counts["discovered_scopes"] = discovered_count
-                counts.update(background_counts)
-                counts.update(data_migration_counts)
-                if parsed.discovered_skipped:
-                    counts["discovered_chats_skipped"] = 1
-                _validate_import(conn, counts)
-                _set_import_marker(conn)
-                _set_background_import_marker(conn)
-                return MigrationImportReport(
-                    db_path=target_db,
-                    imported=True,
-                    backup_path=backup_path,
-                    counts=_current_counts(conn)
-                    | {"discovered_scopes": discovered_count}
-                    | background_counts
-                    | data_migration_counts
-                    | ({"discovered_chats_skipped": 1} if parsed.discovered_skipped else {}),
-                )
+                with engine.begin() as conn:
+                    discovered_count = _import_discovered_chats(conn, parsed.discovered)
+                    background_counts = _import_background_state(conn, target_state_dir)
+                    data_migration_counts = _run_sqlite_data_migrations(conn)
+                    counts = _current_counts(conn)
+                    counts["discovered_scopes"] = discovered_count
+                    counts.update(background_counts)
+                    counts.update(data_migration_counts)
+                    if parsed.discovered_skipped:
+                        counts["discovered_chats_skipped"] = 1
+                    _validate_import(conn, counts)
+                    _set_import_marker(conn)
+                    _set_background_import_marker(conn)
+                    report = MigrationImportReport(
+                        db_path=target_db,
+                        imported=True,
+                        backup_path=backup_path,
+                        counts=_current_counts(conn)
+                        | {"discovered_scopes": discovered_count}
+                        | background_counts
+                        | data_migration_counts
+                        | ({"discovered_chats_skipped": 1} if parsed.discovered_skipped else {}),
+                    )
         finally:
             engine.dispose()
+        if report is None:
+            raise RuntimeError("SQLite state initialization completed without a report")
+        prune_state_backups(target_state_dir / "backups")
+        return report
 
 
 def _ensure_sqlite_target_dirs(*, target_state_dir: Path, target_db: Path, use_default_dirs: bool) -> None:
@@ -232,14 +239,28 @@ def _backup_json_state(state_dir: Path) -> Path:
     backups_dir = state_dir / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = backups_dir / f"sqlite-state-migration-{timestamp}"
-    suffix = 1
+    existing_suffixes: list[int] = []
+    prefix = f"sqlite-state-migration-{timestamp}"
+    for entry in backups_dir.iterdir():
+        if entry.name == prefix:
+            existing_suffixes.append(0)
+            continue
+        if entry.name.startswith(prefix + "-") and entry.name[len(prefix) + 1 :].isdigit():
+            existing_suffixes.append(int(entry.name[len(prefix) + 1 :]))
+    suffix = max(existing_suffixes, default=-1) + 1
+    backup_path = backups_dir / f"{prefix}{f'-{suffix}' if suffix else ''}"
     while backup_path.exists():
         suffix += 1
-        backup_path = backups_dir / f"sqlite-state-migration-{timestamp}-{suffix}"
+        backup_path = backups_dir / f"{prefix}-{suffix}"
     backup_path.mkdir(parents=True)
 
-    manifest: dict[str, Any] = {"created_at": _utc_now_iso(), "files": {}}
+    manifest: dict[str, Any] = {
+        "schema_version": BACKUP_MANIFEST_VERSION,
+        "managed_by": "avibe",
+        "kind": "json-state-migration",
+        "created_at": _utc_now_iso(),
+        "files": {},
+    }
     for name in (
         "settings.json",
         "sessions.json",
@@ -267,6 +288,7 @@ def _backup_json_state(state_dir: Path) -> Path:
         manifest["files"]["task_requests"] = {"present": False}
 
     (backup_path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    prune_state_backups(backups_dir)
     return backup_path
 
 

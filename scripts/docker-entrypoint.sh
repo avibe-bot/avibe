@@ -21,7 +21,7 @@ start_ui_process() {
     python -c "
 from vibe.ui_server import run_ui_server
 run_ui_server('0.0.0.0', ${VIBE_UI_PORT:-5123})
-" >>"$ui_stdout" 2>>"$ui_stderr" &
+" > >(python -m vibe.log_sink "$ui_stdout") 2> >(python -m vibe.log_sink "$ui_stderr") &
 
     local ui_pid=$!
     echo "$ui_pid" > "$runtime_dir/vibe-ui.pid"
