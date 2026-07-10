@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -179,6 +180,32 @@ def _write_runtime_manifest(tmp_path: Path, archive_path: Path, *, sha256: str |
         encoding="utf-8",
     )
     return manifest_path
+
+
+def _write_cached_runtime_install(
+    runtime_dir: Path,
+    name: str,
+    *,
+    manifest_source: str = "package:show_runtime_manifest.json",
+    mtime: float,
+) -> tuple[Path, Path]:
+    install_dir = runtime_dir / "versions" / name / _runtime_platform_tag() / f"fingerprint-{name}"
+    cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    cli_path.parent.mkdir(parents=True)
+    cli_path.write_text(f"{name}\n", encoding="utf-8")
+    (install_dir / ".vibe-show-runtime.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "manifest_source": manifest_source,
+                "runtime_version": name,
+                "platform": _runtime_platform_tag(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(install_dir, (mtime, mtime))
+    return install_dir, cli_path
 
 
 def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
@@ -1748,6 +1775,86 @@ def test_show_runtime_clean_prunes_stale_manifest_fingerprints(monkeypatch, tmp_
     assert str(old_install_dir) in result["removed"]
     assert old_install_dir.exists() is False
     assert new_install_dir.exists() is True
+
+
+def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=200)
+    current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    custom_install, _custom_cli = _write_cached_runtime_install(
+        runtime_dir,
+        "custom",
+        manifest_source=str(tmp_path / "development-manifest.json"),
+        mtime=50,
+    )
+    github_source = runtime_dir / "source" / "github" / "avibe-bot_vibe-show-runtime" / "main"
+    github_source.mkdir(parents=True)
+    (github_source / "README.md").write_text("development checkout\n", encoding="utf-8")
+    local_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    local_bin.parent.mkdir(parents=True)
+    local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert previous_install.exists() is True
+    assert old_install.exists() is False
+    assert custom_install.exists() is True
+    assert github_source.exists() is True
+    assert local_bin.exists() is True
+
+
+def test_show_runtime_prepare_with_explicit_command_does_not_clean_managed_installs(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    install_dirs = [
+        _write_cached_runtime_install(runtime_dir, name, mtime=mtime)[0]
+        for name, mtime in (("old", 100), ("previous", 200), ("current", 300))
+    ]
+    local_bin = tmp_path / "development" / "show-runtime"
+    local_bin.parent.mkdir()
+    local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        command=str(local_bin),
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert all(path.exists() for path in install_dirs)
+    assert local_bin.exists() is True
+
+
+def test_show_runtime_failed_prepare_does_not_clean_managed_installs(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    install_dirs = [
+        _write_cached_runtime_install(runtime_dir, name, mtime=mtime)[0]
+        for name, mtime in (("old", 100), ("previous", 200), ("current", 300))
+    ]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: None)
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert all(path.exists() for path in install_dirs)
 
 
 def test_show_runtime_manager_reuses_legacy_manifest_install_offline(monkeypatch, tmp_path):
