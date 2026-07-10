@@ -41,6 +41,8 @@ _RUNTIME_SOURCE_ARCHIVE = "archive"
 _RUNTIME_SOURCE_GITHUB = "github"
 _RUNTIME_SOURCE_NPM = "npm"
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
+_PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
+_MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -373,16 +375,41 @@ class ShowRuntimeManager:
         return command
 
     def _install_managed_runtime(self) -> list[str] | None:
+        command: list[str] | None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-            return self._install_manifest_runtime()
-        if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
-            return self._install_archive_runtime()
-        if self.runtime_source == _RUNTIME_SOURCE_GITHUB:
-            return self._install_github_runtime()
-        if self.runtime_source == _RUNTIME_SOURCE_NPM:
-            return self._install_npm_runtime()
-        self._install_reason = "runtime_source_unsupported"
-        return None
+            command = self._install_manifest_runtime()
+        elif self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
+            command = self._install_archive_runtime()
+        elif self.runtime_source == _RUNTIME_SOURCE_GITHUB:
+            command = self._install_github_runtime()
+        elif self.runtime_source == _RUNTIME_SOURCE_NPM:
+            command = self._install_npm_runtime()
+        else:
+            self._install_reason = "runtime_source_unsupported"
+            return None
+        if command:
+            self._clean_after_managed_install(command)
+        return command
+
+    def _clean_after_managed_install(self, command: list[str]) -> None:
+        if (
+            self.runtime_source != _RUNTIME_SOURCE_MANIFEST
+            or self.manifest_path is not None
+            or self.manifest_url is not None
+        ):
+            return
+        try:
+            protected_install_dirs = self._manifest_install_dirs_for_command(command)
+            removed = self._clean_manifest_install_dirs(
+                keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
+                manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
+                protected_install_dirs=protected_install_dirs,
+            )
+            if removed:
+                logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
+        except Exception:
+            # Cache cleanup must never turn a usable runtime install into a failed prepare.
+            logger.warning("Failed to clean stale managed Show Runtime installs", exc_info=True)
 
     def status(self) -> dict[str, Any]:
         configured_command = _resolve_command(self.command) if self._command_explicit else None
@@ -434,42 +461,136 @@ class ShowRuntimeManager:
                 if path.is_dir():
                     shutil.rmtree(path, ignore_errors=True)
                     removed.append(str(path))
-        versions_dir = self.runtime_dir / "versions"
-        if versions_dir.is_dir():
-            current_install_dir: Path | None = None
-            try:
-                pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-                pointer_install_dir = Path(str(pointer.get("install_dir") or "")).resolve()
-                if versions_dir.resolve() in pointer_install_dir.parents:
-                    current_install_dir = pointer_install_dir
-            except Exception:
-                current_install_dir = None
-            install_dirs = {
-                path.parent
-                for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json")
-                for path in versions_dir.glob(pattern)
-                if path.parent.is_dir()
-            }
-            sorted_install_dirs = sorted(install_dirs, key=lambda path: path.stat().st_mtime, reverse=True)
-            kept_previous = 0
-            for path in sorted_install_dirs:
-                path_resolved = path.resolve()
-                if current_install_dir is not None and (
-                    path_resolved == current_install_dir or path_resolved in current_install_dir.parents
-                ):
-                    continue
-                if kept_previous < keep_previous:
-                    kept_previous += 1
-                    continue
-                shutil.rmtree(path, ignore_errors=True)
-                removed.append(str(path))
-            for path in sorted(versions_dir.glob("*/*"), reverse=True):
-                if path.is_dir() and not any(path.iterdir()):
-                    path.rmdir()
-            for path in sorted(versions_dir.iterdir(), reverse=True):
-                if path.is_dir() and not any(path.iterdir()):
-                    path.rmdir()
+        removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous))
         return {"ok": True, "removed": removed}
+
+    def _clean_manifest_install_dirs(
+        self,
+        *,
+        keep_previous: int,
+        manifest_source: str | None = None,
+        protected_install_dirs: set[Path] | None = None,
+    ) -> list[str]:
+        versions_dir = self.runtime_dir / "versions"
+        if not versions_dir.is_dir():
+            return []
+        protected = set(protected_install_dirs or ())
+        current_install_dir = self._current_manifest_install_dir(versions_dir)
+        if current_install_dir is not None:
+            protected.add(current_install_dir)
+        install_dirs = self._manifest_install_dirs(versions_dir, manifest_source=manifest_source)
+        all_manifest_install_dirs = self._manifest_install_dirs(versions_dir)
+        sorted_install_dirs = sorted(install_dirs, key=lambda path: path.stat().st_mtime, reverse=True)
+        resolved_install_dirs = {path: path.resolve() for path in install_dirs}
+        all_resolved_install_dirs = {path: path.resolve() for path in all_manifest_install_dirs}
+        rollback_candidates = [
+            path
+            for path in sorted_install_dirs
+            if not any(
+                resolved_install_dirs[path] in other_resolved.parents
+                for other, other_resolved in resolved_install_dirs.items()
+                if other != path
+            )
+        ]
+        kept_previous = 0
+        for path in rollback_candidates:
+            path_resolved = resolved_install_dirs[path]
+            if self._install_dir_overlaps_protected(path_resolved, protected):
+                continue
+            if kept_previous < keep_previous:
+                kept_previous += 1
+                protected.add(path_resolved)
+        removed: list[str] = []
+        removable_install_dirs = [
+            path
+            for path, path_resolved in resolved_install_dirs.items()
+            if not self._install_dir_overlaps_protected(path_resolved, protected)
+        ]
+        removable_resolved_install_dirs = {resolved_install_dirs[path] for path in removable_install_dirs}
+        safe_removable_install_dirs = [
+            path
+            for path in removable_install_dirs
+            if not any(
+                resolved_install_dirs[path] in other_resolved.parents
+                and other_resolved not in removable_resolved_install_dirs
+                for other_resolved in all_resolved_install_dirs.values()
+            )
+        ]
+        for path in sorted(safe_removable_install_dirs, key=lambda item: len(resolved_install_dirs[item].parts), reverse=True):
+            if not path.is_dir():
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+        self._prune_empty_manifest_version_dirs(versions_dir)
+        return removed
+
+    @staticmethod
+    def _install_dir_overlaps_protected(path_resolved: Path, protected: set[Path]) -> bool:
+        return any(
+            path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
+            for item in protected
+        )
+
+    def _manifest_install_dirs(self, versions_dir: Path, *, manifest_source: str | None = None) -> set[Path]:
+        install_dirs: set[Path] = set()
+        for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
+            for metadata_path in versions_dir.glob(pattern):
+                if not metadata_path.parent.is_dir():
+                    continue
+                if manifest_source is not None:
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    if (
+                        metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST
+                        or metadata.get("manifest_source") != manifest_source
+                    ):
+                        continue
+                install_dirs.add(metadata_path.parent)
+        return install_dirs
+
+    def _current_manifest_install_dir(self, versions_dir: Path) -> Path | None:
+        try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+            pointer_install_dir = Path(str(pointer.get("install_dir") or "")).resolve()
+            if versions_dir.resolve() in pointer_install_dir.parents:
+                return pointer_install_dir
+        except Exception:
+            pass
+        return None
+
+    def _manifest_install_dirs_for_command(self, command: list[str]) -> set[Path]:
+        versions_dir = self.runtime_dir / "versions"
+        if not versions_dir.is_dir():
+            return set()
+        install_dirs = self._manifest_install_dirs(
+            versions_dir,
+            manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
+        )
+        matching_install_dirs: set[Path] = set()
+        for command_part in command:
+            try:
+                command_path = Path(command_part).resolve()
+            except (OSError, RuntimeError):
+                continue
+            for install_dir in install_dirs:
+                install_dir_resolved = install_dir.resolve()
+                if install_dir_resolved == command_path or install_dir_resolved in command_path.parents:
+                    matching_install_dirs.add(install_dir_resolved)
+        return {
+            path
+            for path in matching_install_dirs
+            if not any(path in other.parents for other in matching_install_dirs if other != path)
+        }
+
+    def _prune_empty_manifest_version_dirs(self, versions_dir: Path) -> None:
+        for path in sorted(versions_dir.glob("*/*"), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+        for path in sorted(versions_dir.iterdir(), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
 
     def prepare(self, *, force: bool | None = None, offline: bool | None = None) -> dict[str, Any]:
         previous_force = self.force_install
@@ -593,7 +714,7 @@ class ShowRuntimeManager:
                 self._install_reason = "runtime_manifest_missing"
                 return None
             payload = resource.read_bytes()
-            source = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
+            source = _PACKAGED_RUNTIME_MANIFEST_SOURCE
         digest = hashlib.sha256(payload).hexdigest()
         try:
             data = json.loads(payload.decode("utf-8"))

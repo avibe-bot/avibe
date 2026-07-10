@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -179,6 +180,42 @@ def _write_runtime_manifest(tmp_path: Path, archive_path: Path, *, sha256: str |
         encoding="utf-8",
     )
     return manifest_path
+
+
+def _write_cached_runtime_install(
+    runtime_dir: Path,
+    name: str,
+    *,
+    manifest_source: str = "package:show_runtime_manifest.json",
+    mtime: float,
+) -> tuple[Path, Path]:
+    install_dir = runtime_dir / "versions" / name / _runtime_platform_tag() / f"fingerprint-{name}"
+    return _write_cached_runtime_install_at(install_dir, name, manifest_source=manifest_source, mtime=mtime)
+
+
+def _write_cached_runtime_install_at(
+    install_dir: Path,
+    name: str,
+    *,
+    manifest_source: str = "package:show_runtime_manifest.json",
+    mtime: float,
+) -> tuple[Path, Path]:
+    cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    cli_path.parent.mkdir(parents=True)
+    cli_path.write_text(f"{name}\n", encoding="utf-8")
+    (install_dir / ".vibe-show-runtime.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "manifest_source": manifest_source,
+                "runtime_version": name,
+                "platform": _runtime_platform_tag(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(install_dir, (mtime, mtime))
+    return install_dir, cli_path
 
 
 def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
@@ -1748,6 +1785,236 @@ def test_show_runtime_clean_prunes_stale_manifest_fingerprints(monkeypatch, tmp_
     assert str(old_install_dir) in result["removed"]
     assert old_install_dir.exists() is False
     assert new_install_dir.exists() is True
+
+
+def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=200)
+    current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    custom_install, _custom_cli = _write_cached_runtime_install(
+        runtime_dir,
+        "custom",
+        manifest_source=str(tmp_path / "development-manifest.json"),
+        mtime=50,
+    )
+    github_source = runtime_dir / "source" / "github" / "avibe-bot_vibe-show-runtime" / "main"
+    github_source.mkdir(parents=True)
+    (github_source / "README.md").write_text("development checkout\n", encoding="utf-8")
+    local_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    local_bin.parent.mkdir(parents=True)
+    local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert previous_install.exists() is True
+    assert old_install.exists() is False
+    assert custom_install.exists() is True
+    assert github_source.exists() is True
+    assert local_bin.exists() is True
+
+
+@pytest.mark.parametrize(("parent_mtime", "child_mtime"), ((100, 200), (200, 100)))
+def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tmp_path, parent_mtime, child_mtime):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=10)
+    current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    rollback_parent = runtime_dir / "versions" / "rollback" / _runtime_platform_tag()
+    _rollback_parent, rollback_parent_cli = _write_cached_runtime_install_at(
+        rollback_parent,
+        "rollback-legacy",
+        mtime=parent_mtime,
+    )
+    rollback_install, rollback_cli = _write_cached_runtime_install_at(
+        rollback_parent / "fingerprint",
+        "rollback",
+        mtime=child_mtime,
+    )
+    stale_sibling, _stale_cli = _write_cached_runtime_install_at(
+        rollback_parent / "stale-fingerprint",
+        "stale-rollback",
+        mtime=20,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert rollback_install.exists() is True
+    assert rollback_cli.exists() is True
+    assert rollback_parent.exists() is True
+    assert rollback_parent_cli.exists() is True
+    assert stale_sibling.exists() is False
+    assert old_install.exists() is False
+
+
+def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
+    current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
+    _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
+    current_install, current_cli = _write_cached_runtime_install_at(
+        current_parent / "current-fingerprint",
+        "current",
+        mtime=300,
+    )
+    stale_sibling, _stale_cli = _write_cached_runtime_install_at(
+        current_parent / "stale-fingerprint",
+        "stale-current",
+        mtime=200,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert current_cli.exists() is True
+    assert current_parent.exists() is True
+    assert parent_cli.exists() is True
+    assert previous_install.exists() is True
+    assert stale_sibling.exists() is False
+    assert old_install.exists() is False
+
+
+def test_show_runtime_prepare_preserves_descendants_of_current_legacy_parent(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
+    current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
+    _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
+    current_child, current_child_cli = _write_cached_runtime_install_at(
+        current_parent / "current-fingerprint",
+        "current-child",
+        mtime=300,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(parent_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_parent.exists() is True
+    assert parent_cli.exists() is True
+    assert current_child.exists() is True
+    assert current_child_cli.exists() is True
+    assert previous_install.exists() is True
+    assert old_install.exists() is False
+
+
+def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=20)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
+    current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    stale_parent = runtime_dir / "versions" / "stale-parent" / _runtime_platform_tag()
+    _parent_install, parent_cli = _write_cached_runtime_install_at(stale_parent, "stale-parent", mtime=80)
+    custom_child, custom_cli = _write_cached_runtime_install_at(
+        stale_parent / "custom-fingerprint",
+        "custom-child",
+        manifest_source=str(tmp_path / "custom-manifest.json"),
+        mtime=70,
+    )
+    stale_child, _stale_child_cli = _write_cached_runtime_install_at(
+        stale_parent / "stale-fingerprint",
+        "stale-child",
+        mtime=60,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert previous_install.exists() is True
+    assert stale_parent.exists() is True
+    assert parent_cli.exists() is True
+    assert custom_child.exists() is True
+    assert custom_cli.exists() is True
+    assert stale_child.exists() is False
+    assert old_install.exists() is False
+
+
+def test_show_runtime_prepare_with_explicit_command_does_not_clean_managed_installs(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    install_dirs = [
+        _write_cached_runtime_install(runtime_dir, name, mtime=mtime)[0]
+        for name, mtime in (("old", 100), ("previous", 200), ("current", 300))
+    ]
+    local_bin = tmp_path / "development" / "show-runtime"
+    local_bin.parent.mkdir()
+    local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        command=str(local_bin),
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert all(path.exists() for path in install_dirs)
+    assert local_bin.exists() is True
+
+
+def test_show_runtime_failed_prepare_does_not_clean_managed_installs(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    install_dirs = [
+        _write_cached_runtime_install(runtime_dir, name, mtime=mtime)[0]
+        for name, mtime in (("old", 100), ("previous", 200), ("current", 300))
+    ]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: None)
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert all(path.exists() for path in install_dirs)
 
 
 def test_show_runtime_manager_reuses_legacy_manifest_install_offline(monkeypatch, tmp_path):
