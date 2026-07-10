@@ -1983,6 +1983,12 @@ def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch,
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(api, "load_catalog_models", lambda: ["claude-opus-4-6"])
     monkeypatch.setattr(api, "infer_bundle_path_from_cli", lambda cli_path: None)
+    monkeypatch.setattr(api.backend_model_catalog, "remote_catalog_token", lambda: (1.0, None))
+    monkeypatch.setattr(
+        api.backend_model_catalog,
+        "remote_catalog_refresh_pending",
+        lambda token: token == (1.0, None),
+    )
     monkeypatch.setattr(
         api.backend_model_catalog,
         "load_cached_remote_catalog",
@@ -2029,6 +2035,7 @@ def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch,
     assert result["models"][:2] == ["claude-fable-6", "claude-opus-4-6"]
     assert "claude-fable-6-20260710" not in result["models"]
     assert result["model_labels"]["claude-fable-6"] == "Claude Fable 6"
+    assert result["catalog_refresh_pending"] is True
     assert [item["value"] for item in result["reasoning_options"]["claude-fable-6"]] == [
         "__default__",
         "low",
@@ -2095,8 +2102,11 @@ def test_codex_models_prefers_live_catalog_and_model_reasoning(monkeypatch, tmp_
         ]
     }
 
+    configured_codex_path = "/custom/bin/codex-wrapper"
+    resolved_codex_path = "/usr/local/bin/codex"
+
     def fake_run(cmd, **kwargs):
-        assert cmd == ["/usr/local/bin/codex", "debug", "models"]
+        assert cmd == [resolved_codex_path, "debug", "models"]
         assert kwargs["timeout"] == api._CODEX_LIVE_MODEL_CATALOG_TIMEOUT_SECONDS
         return api.subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(live_catalog), stderr="")
 
@@ -2120,7 +2130,15 @@ def test_codex_models_prefers_live_catalog_and_model_reasoning(monkeypatch, tmp_
         },
     )
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(api, "resolve_cli_path", lambda binary: "/usr/local/bin/codex" if binary == "codex" else binary)
+    v2_config = SimpleNamespace(
+        agents=SimpleNamespace(codex=SimpleNamespace(cli_path=configured_codex_path))
+    )
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        api,
+        "resolve_cli_path",
+        lambda binary: resolved_codex_path if binary == configured_codex_path else None,
+    )
     monkeypatch.setattr(api.subprocess, "run", fake_run)
 
     result = api.codex_models()

@@ -5385,6 +5385,7 @@ def claude_models() -> dict:
     model_labels: dict[str, str] = {}
     reasoning_efforts: dict[str, list[str]] = {}
 
+    remote_refresh_token = backend_model_catalog.remote_catalog_token()
     _append_catalog_entries(backend_model_catalog.load_cached_remote_catalog())
     _append_catalog_entries(backend_model_catalog.load_bundled_catalog())
 
@@ -5432,6 +5433,7 @@ def claude_models() -> dict:
         "models": options,
         "reasoning_options": reasoning_options,
         "model_labels": model_labels,
+        "catalog_refresh_pending": backend_model_catalog.remote_catalog_refresh_pending(remote_refresh_token),
     }
 
 
@@ -10602,11 +10604,24 @@ def _append_codex_catalog_models(
                 reasoning_efforts[model_id] = efforts
 
 
+def _configured_codex_cli_path() -> str:
+    try:
+        config = V2Config.load()
+        backend_cfg = getattr(getattr(config, "agents", None), "codex", None)
+        return str(getattr(backend_cfg, "cli_path", "") or "codex")
+    except Exception:
+        logger.debug("Failed to load configured Codex CLI path", exc_info=True)
+        return "codex"
+
+
 def _read_codex_live_model_catalog() -> tuple[object | None, str | None]:
     now = time.time()
+    configured_path = _configured_codex_cli_path()
+    codex_path = resolve_cli_path(configured_path)
+    cache_key = codex_path or configured_path
     with _CODEX_LIVE_MODEL_CATALOG_LOCK:
         cached_at = _CODEX_LIVE_MODEL_CATALOG_CACHE.get("cached_at")
-        if isinstance(cached_at, (int, float)):
+        if isinstance(cached_at, (int, float)) and _CODEX_LIVE_MODEL_CATALOG_CACHE.get("cli_path") == cache_key:
             ttl = (
                 _CODEX_LIVE_MODEL_CATALOG_TTL_SECONDS
                 if _CODEX_LIVE_MODEL_CATALOG_CACHE.get("data") is not None
@@ -10615,9 +10630,8 @@ def _read_codex_live_model_catalog() -> tuple[object | None, str | None]:
             if now - cached_at < ttl:
                 return _CODEX_LIVE_MODEL_CATALOG_CACHE.get("data"), _CODEX_LIVE_MODEL_CATALOG_CACHE.get("error")
 
-    codex_path = resolve_cli_path("codex")
     if not codex_path:
-        error = "codex CLI not found"
+        error = f"codex CLI not found: {configured_path}"
         data = None
     else:
         try:
@@ -10655,7 +10669,9 @@ def _read_codex_live_model_catalog() -> tuple[object | None, str | None]:
         logger.debug("Failed to read live Codex model catalog: %s", error)
     with _CODEX_LIVE_MODEL_CATALOG_LOCK:
         _CODEX_LIVE_MODEL_CATALOG_CACHE.clear()
-        _CODEX_LIVE_MODEL_CATALOG_CACHE.update({"cached_at": now, "data": data, "error": error})
+        _CODEX_LIVE_MODEL_CATALOG_CACHE.update(
+            {"cached_at": now, "cli_path": cache_key, "data": data, "error": error}
+        )
     return data, error
 
 
@@ -10688,6 +10704,7 @@ def codex_models() -> dict:
             "model_labels": model_labels,
             "live": live_catalog_error is None,
             "source": "github backend model catalog + codex debug models + built-in fallbacks",
+            "catalog_refresh_pending": backend_model_catalog.remote_catalog_refresh_pending(remote_refresh_token),
         }
         if live_catalog_error:
             result["notes"] = [live_catalog_error]
@@ -10701,6 +10718,7 @@ def codex_models() -> dict:
     models_cache_path = codex_home / "models_cache.json"
     config_path = codex_home / "config.toml"
 
+    remote_refresh_token = backend_model_catalog.remote_catalog_token()
     for catalog in (
         backend_model_catalog.load_cached_remote_catalog(),
         backend_model_catalog.load_bundled_catalog(),

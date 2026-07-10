@@ -86,3 +86,19 @@ def test_failed_refresh_with_stale_catalog_uses_failure_ttl():
     }
 
     assert backend_model_catalog._remote_cache_stale(payload) is True
+
+
+def test_remote_catalog_refresh_pending_tracks_in_flight_and_token_changes(monkeypatch):
+    backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
+    backend_model_catalog._REMOTE_MEMORY_CACHE.update({"fetched_at": 10.0, "catalog": {}})
+    monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", False)
+
+    token = backend_model_catalog.remote_catalog_token()
+
+    assert backend_model_catalog.remote_catalog_refresh_pending(token) is False
+    monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", True)
+    assert backend_model_catalog.remote_catalog_refresh_pending(token) is True
+    monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", False)
+    backend_model_catalog._REMOTE_MEMORY_CACHE["fetched_at"] = 11.0
+    assert backend_model_catalog.remote_catalog_refresh_pending(token) is True
+    backend_model_catalog._REMOTE_MEMORY_CACHE.clear()

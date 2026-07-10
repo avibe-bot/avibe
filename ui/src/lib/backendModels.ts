@@ -7,7 +7,12 @@ export interface BackendModels {
   modelLabels?: Record<string, string>;
   /** Per-model reasoning-effort option sets; undefined when a backend has none. */
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  /** True when the backend catalog changed, or is still refreshing, after this snapshot was read. */
+  catalogRefreshPending?: boolean;
 }
+
+const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
+const CATALOG_REFRESH_MAX_RETRIES = 2;
 
 export function modelOptionLabel(model: string, labels?: Record<string, string>): string {
   return labels?.[model] || model;
@@ -36,6 +41,7 @@ export async function fetchBackendModels(
       models: res.ok && res.models ? res.models : [],
       modelLabels: res.model_labels,
       reasoningOptions: res.reasoning_options,
+      catalogRefreshPending: res.catalog_refresh_pending,
     };
   }
   if (backend === 'codex') {
@@ -44,6 +50,7 @@ export async function fetchBackendModels(
       models: res.ok && res.models ? res.models : [],
       modelLabels: res.model_labels,
       reasoningOptions: res.reasoning_options,
+      catalogRefreshPending: res.catalog_refresh_pending,
     };
   }
   if (backend === 'opencode') {
@@ -54,4 +61,35 @@ export async function fetchBackendModels(
     return { models };
   }
   return { models: [] };
+}
+
+export function loadBackendModelsWithRefresh(
+  api: ApiContextType,
+  backend: string,
+  onResult: (result: BackendModels) => void,
+  onInitialError?: () => void,
+): () => void {
+  let cancelled = false;
+  let delivered = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const load = async (retriesRemaining: number) => {
+    try {
+      const result = await fetchBackendModels(api, backend);
+      if (cancelled) return;
+      delivered = true;
+      onResult(result);
+      if (result.catalogRefreshPending && retriesRemaining > 0) {
+        timer = setTimeout(() => void load(retriesRemaining - 1), CATALOG_REFRESH_RETRY_DELAY_MS);
+      }
+    } catch {
+      if (!cancelled && !delivered) onInitialError?.();
+    }
+  };
+
+  void load(CATALOG_REFRESH_MAX_RETRIES);
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
 }

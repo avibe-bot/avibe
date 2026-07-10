@@ -37,7 +37,7 @@ import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { fetchBackendModels, modelOptionLabel } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -687,22 +687,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
   // suggestions. Keeps `allowCustomValue` so users can type a model the
   // backend doesn't know about yet (e.g. a freshly-released preview).
   useEffect(() => {
-    let cancelled = false;
-    async function loadModels() {
-      try {
-        const { models, modelLabels, reasoningOptions: opts } = await fetchBackendModels(api, agent.backend);
-        if (!cancelled) {
-          setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
-          setReasoningOptions(opts ?? {});
-        }
-      } catch {
-        if (!cancelled) setModelOptions([]);
-      }
-    }
-    loadModels();
-    return () => {
-      cancelled = true;
-    };
+    return loadBackendModelsWithRefresh(
+      api,
+      agent.backend,
+      ({ models, modelLabels, reasoningOptions: opts }) => {
+        setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
+        setReasoningOptions(opts ?? {});
+      },
+      () => setModelOptions([]),
+    );
   }, [agent.backend, api]);
 
   const systemPromptTokens = estimateTokens(systemPrompt);

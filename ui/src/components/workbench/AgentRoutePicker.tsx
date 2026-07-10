@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Bot, ChevronDown, Loader2, Plus, Search, Sparkles } from 'lucide-react';
@@ -6,7 +6,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
-import { fetchBackendModels, modelOptionLabel } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
@@ -91,6 +91,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // backend's map so the effort column offers exactly what the selected model
   // supports.
   const [reasoningByBackend, setReasoningByBackend] = useState<Record<string, Record<string, ReasoningOption[]>>>({});
+  const loadedModelBackendsRef = useRef<Set<string>>(new Set());
   const [loadingModels, setLoadingModels] = useState(false);
   const [patching, setPatching] = useState(false);
   // Free-text filter for the model column — long backends (OpenCode) list dozens.
@@ -156,6 +157,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
   useEffect(() => {
     const clearOpenCodeModels = () => {
+      loadedModelBackendsRef.current.delete('opencode');
       setModelsByBackend((prev) => {
         if (!prev.opencode) return prev;
         const next = { ...prev };
@@ -186,27 +188,32 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // Fetch the active backend's model list the first time the menu opens for it;
   // cached per backend so toggling agents doesn't refetch.
   useEffect(() => {
-    if (!open || !backend || modelsByBackend[backend]) return;
-    let cancelled = false;
+    const loadedBackends = loadedModelBackendsRef.current;
+    if (!open || !backend || loadedBackends.has(backend)) return;
+    loadedBackends.add(backend);
+    let reloadOnNextOpen = true;
     setLoadingModels(true);
-    (async () => {
-      try {
-        const { models, modelLabels, reasoningOptions } = await fetchBackendModels(api, backend);
-        if (!cancelled) {
-          setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
-          setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
-          setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
-        }
-      } catch {
-        if (!cancelled) setModelsByBackend((prev) => ({ ...prev, [backend]: [] }));
-      } finally {
-        if (!cancelled) setLoadingModels(false);
-      }
-    })();
+    const cancel = loadBackendModelsWithRefresh(
+      api,
+      backend,
+      ({ models, modelLabels, reasoningOptions, catalogRefreshPending }) => {
+        reloadOnNextOpen = Boolean(catalogRefreshPending);
+        setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
+        setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
+        setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
+        setLoadingModels(false);
+      },
+      () => {
+        loadedBackends.delete(backend);
+        setModelsByBackend((prev) => ({ ...prev, [backend]: [] }));
+        setLoadingModels(false);
+      },
+    );
     return () => {
-      cancelled = true;
+      cancel();
+      if (reloadOnNextOpen) loadedBackends.delete(backend);
     };
-  }, [open, backend, api, modelsByBackend]);
+  }, [open, backend, api]);
 
   // Start each open (and every backend switch) from the full, unfiltered list.
   useEffect(() => {

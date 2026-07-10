@@ -47,6 +47,22 @@ def load_cached_remote_catalog(*, schedule_refresh: bool = True) -> dict[str, An
     return catalog if isinstance(catalog, dict) else {}
 
 
+def remote_catalog_token() -> tuple[float | None, float | None]:
+    payload = _cached_remote_payload()
+    fetched_at = payload.get("fetched_at")
+    failed_at = payload.get("failed_at")
+    return (
+        float(fetched_at) if isinstance(fetched_at, (int, float)) else None,
+        float(failed_at) if isinstance(failed_at, (int, float)) else None,
+    )
+
+
+def remote_catalog_refresh_pending(since: tuple[float | None, float | None]) -> bool:
+    with _REMOTE_LOCK:
+        refresh_in_flight = _REMOTE_REFRESH_IN_FLIGHT
+    return refresh_in_flight or remote_catalog_token() != since
+
+
 def schedule_remote_catalog_refresh() -> bool:
     global _REMOTE_REFRESH_IN_FLIGHT
 
