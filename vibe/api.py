@@ -2812,14 +2812,6 @@ def _remaining_ttl_seconds(expires_at: datetime) -> int:
     return max(1, int(round(remaining)))
 
 
-def _binding_relay_ttl_seconds(expires_at: datetime, requested_ttl_seconds: int) -> int:
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
-    if remaining <= 0:
-        raise VaultApiError("resident agent DEK binding context has expired", code="invalid_grant")
-    remaining_seconds = max(1, int(remaining))
-    return min(requested_ttl_seconds, remaining_seconds)
-
-
 def _grant_ttl_seconds(grant: dict) -> int:
     expires_at = _parse_iso_utc(grant.get("expires_at"))
     if expires_at is None:
@@ -3222,7 +3214,7 @@ def create_vault_grant(payload: dict) -> dict:
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
     needs_agent_deks = bool(protected_member_names)
     binding_grant_expires_at: str | None = None
-    binding_relay_ttl_seconds: int | None = None
+    binding_operation_ttl_seconds: int | None = None
 
     agent_deks = _resident_agent_deks_from_payload(payload, needs_agent_deks=needs_agent_deks)
     provided_names = {item["name"] for item in agent_deks}
@@ -3255,7 +3247,9 @@ def create_vault_grant(payload: dict) -> dict:
         binding_expires_at = _parse_iso_utc(binding_grant_expires_at)
         if binding_expires_at is None:
             raise VaultApiError("resident agent DEK binding context has invalid expiry", code="invalid_grant")
-        binding_relay_ttl_seconds = _binding_relay_ttl_seconds(binding_expires_at, binding_requested_ttl_seconds)
+        if binding_expires_at <= datetime.now(timezone.utc):
+            raise VaultApiError("resident agent DEK binding context has expired", code="invalid_grant")
+        binding_operation_ttl_seconds = binding_requested_ttl_seconds
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:
@@ -3296,11 +3290,15 @@ def create_vault_grant(payload: dict) -> dict:
         return {"ok": True, "grant": grant}
     agent_relayed = False
     try:
-        relay_ttl = binding_relay_ttl_seconds if binding_relay_ttl_seconds is not None else _grant_ttl_seconds(grant)
+        operation_ttl = (
+            binding_operation_ttl_seconds
+            if binding_operation_ttl_seconds is not None
+            else _grant_ttl_seconds(grant)
+        )
         agent_result = avault_agent_grant(
             grant_id=str(grant["id"]),
             purpose=str(grant.get("purpose") or purpose),
-            ttl_secs=relay_ttl,
+            ttl_secs=operation_ttl,
             deks=agent_deks,
             expected_pubkey=expected_pubkey,
         )

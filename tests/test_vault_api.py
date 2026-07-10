@@ -3394,23 +3394,41 @@ def test_create_grant_api_accepts_fingerprint_only_agent_pubkey(monkeypatch, ava
     assert agent_grant.call_args.kwargs["expected_pubkey"] == {"fingerprint": issued["agent_pubkey"]["fingerprint"]}
 
 
-def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, avault_p2):
+def test_create_grant_api_keeps_operation_ttl_near_binding_expiry(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 60})
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
     monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
     requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
-    issued = _issued_agent_dek_payload(requested["request"]["id"])
-    binding_expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
-    with api._vault_engine().begin() as conn:
-        row = conn.execute(select(vault_requests).where(vault_requests.c.id == requested["request"]["id"])).mappings().one()
-        delivery = json.loads(row["delivery"])
-        delivery["agent_binding_approvals"][0]["expires_at"] = api._isoformat_z(binding_expires_at)
-        conn.execute(
-            vault_requests.update()
-            .where(vault_requests.c.id == requested["request"]["id"])
-            .values(delivery=json.dumps(delivery))
-        )
+
+    issued_at = datetime.now(timezone.utc)
+
+    class BindingClock(datetime):
+        current = issued_at
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz) if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(api, "datetime", BindingClock)
+    binding = api.create_vault_agent_bindings_batch(
+        {"request_id": requested["request"]["id"], "grant_duration": 300}
+    )
+    release = _verified_signed_context(binding["items"][0]["context"])["release"]
+    assert release["ttlSecs"] == 300
+    assert release["operationHash"] == api._agent_deliver_operation_hash("GRANT_KEY", 300)
+
+    BindingClock.current = issued_at + timedelta(seconds=295)
+    issued = {
+        "agent_pubkey": binding["agent_pubkey"],
+        "deks": [
+            {
+                "name": binding["items"][0]["name"],
+                "dek_blindbox": _agent_dek_blindbox(),
+                "approval": binding["items"][0]["approval"],
+            }
+        ],
+    }
 
     created = api.create_vault_grant(
         {
@@ -3421,9 +3439,12 @@ def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, av
     )
 
     grant_expires_at = datetime.fromisoformat(created["grant"]["expires_at"]).astimezone(timezone.utc)
-    assert grant_expires_at <= binding_expires_at
-    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 60
-    assert agent_grant.call_args.kwargs["ttl_secs"] < 300
+    remaining_binding_life = (grant_expires_at - BindingClock.current).total_seconds()
+    assert 0 < remaining_binding_life <= 5
+    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
+    assert agent_grant.call_args.kwargs["deks"][0]["approval"]["expires_at_unix"] == release[
+        "approvalExpiresAtUnix"
+    ]
 
 
 def test_create_grant_api_rejects_expired_binding_before_claiming_request(monkeypatch, avault_p2):
