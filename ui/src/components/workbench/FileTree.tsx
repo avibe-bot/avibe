@@ -148,7 +148,7 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
     setError(null);
     listDir(path, tree.showHidden)
       .then((r) => {
-        if (seq === loadSeq.current) setEntries(sortEntries(r.entries));
+        if (seq === loadSeq.current) setEntries(sortEntries(r.entries.filter((e) => !TREE_EXCLUDED_ENTRIES.has(e.name))));
       })
       .catch((e: unknown) => {
         if (seq !== loadSeq.current) return;
@@ -244,6 +244,13 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
   );
 };
 
+// Never shown in the tree, at any level — mirrors VS Code's files.exclude defaults: VCS internals
+// and OS thumbnail noise. (`.git` matches the worktree FILE variant too.) All OTHER dotfiles are
+// visible by default (showHidden below): in a code editor, .env / .gitignore / .github are everyday
+// edit targets, and the cross-file content search already reaches into them — the tree hiding what
+// search can find was an inconsistency.
+const TREE_EXCLUDED_ENTRIES = new Set(['.git', '.svn', '.hg', 'CVS', '.DS_Store', 'Thumbs.db']);
+
 // The VS-Code-style explorer tree (design dnYPx): a root folder whose subfolders lazily expand via
 // listDir. Reused by the Editor IDE; emits file opens upward. Owns inline new-file/new-folder/rename
 // + delete via a right-click menu, and re-lists the affected folder after each mutation.
@@ -261,7 +268,7 @@ export const FileTree: React.FC<{
   /** An entry was deleted from the tree (absolute path); the editor reconciles tabs for that file or
    *  its descendants. */
   onEntryDeleted?: (path: string) => void;
-}> = ({ rootPath, rootName, activePath, showHidden = false, onOpenFile, refreshSignal, onEntryRenamed, onEntryDeleted }) => {
+}> = ({ rootPath, rootName, activePath, showHidden = true, onOpenFile, refreshSignal, onEntryRenamed, onEntryDeleted }) => {
   const { t } = useTranslation();
   const [versions, setVersions] = useState<Record<string, number>>({});
   const [edit, setEdit] = useState<EditSession | null>(null);
