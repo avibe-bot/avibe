@@ -16,6 +16,7 @@ import {
 } from './vaultSandboxManifest';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
+import { buildVaultConfirmSurface, type VaultConfirmSurface } from './vaultConfirmSurface';
 
 const CHANNEL = 'avibe.vault.crypto';
 const VERSION = 2;
@@ -273,24 +274,6 @@ function parseVaultStateEvent(payload: unknown): VaultStateEvent | null {
 }
 
 /**
- * Parent-measured visibility attestation of the sandbox iframe (protocol v2 §6.6 addendum / §13).
- * The parent owns the iframe, so only it can measure the element from the embedder document; the
- * sandbox cannot observe its own frame cross-origin. Field names + nesting match the sandbox's
- * `parseParentConfirmSurface` contract exactly (`frame.*` plus a top-level `sampledAt`).
- */
-type VaultConfirmSurface = {
-  frame: {
-    frameWidth: number;
-    frameHeight: number;
-    intersectionRatio: number;
-    visibleByIntersectionObserver: boolean;
-    opacity: number;
-    pointerEvents: boolean;
-  };
-  sampledAt: number;
-};
-
-/**
  * One-shot IntersectionObserver reading of an element's on-screen visibility, mirroring the sandbox's
  * own self-check (`trackVisibility` occlusion detection where the engine supports it, ratio fallback
  * otherwise) so the parent attests visibility the same way the sandbox measures itself. Resolves on
@@ -447,19 +430,16 @@ export class VaultSandboxClient {
     if (typeof window === 'undefined' || !this.iframe.isConnected) return null;
     const rect = this.iframe.getBoundingClientRect();
     const style = window.getComputedStyle(this.iframe);
-    const opacity = Number.parseFloat(style.opacity);
     const observed = await observeElementVisibility(this.iframe);
-    return {
-      frame: {
-        frameWidth: rect.width,
-        frameHeight: rect.height,
-        intersectionRatio: observed.ratio,
-        visibleByIntersectionObserver: observed.visible,
-        opacity: Number.isFinite(opacity) ? opacity : 0,
-        pointerEvents: style.pointerEvents !== 'none',
-      },
+    return buildVaultConfirmSurface({
+      frameWidth: rect.width,
+      frameHeight: rect.height,
+      intersectionRatio: observed.ratio,
+      visibleByIntersectionObserver: observed.visible,
+      opacity: style.opacity,
+      pointerEvents: style.pointerEvents,
       sampledAt: Date.now(),
-    };
+    });
   }
 
   private startSurfaceRefresh(): void {
