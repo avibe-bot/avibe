@@ -479,25 +479,45 @@ class ShowRuntimeManager:
         if current_install_dir is not None:
             protected.add(current_install_dir)
         install_dirs = self._manifest_install_dirs(versions_dir, manifest_source=manifest_source)
+        all_manifest_install_dirs = self._manifest_install_dirs(versions_dir)
         sorted_install_dirs = sorted(install_dirs, key=lambda path: path.stat().st_mtime, reverse=True)
+        resolved_install_dirs = {path: path.resolve() for path in install_dirs}
+        all_resolved_install_dirs = {path: path.resolve() for path in all_manifest_install_dirs}
+        rollback_candidates = [
+            path
+            for path in sorted_install_dirs
+            if not any(
+                resolved_install_dirs[path] in other_resolved.parents
+                for other, other_resolved in resolved_install_dirs.items()
+                if other != path
+            )
+        ]
         kept_previous = 0
-        for path in sorted_install_dirs:
-            path_resolved = path.resolve()
-            if any(
-                path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
-                for item in protected
-            ):
+        for path in rollback_candidates:
+            path_resolved = resolved_install_dirs[path]
+            if any(path_resolved == item or path_resolved in item.parents for item in protected):
                 continue
             if kept_previous < keep_previous:
                 kept_previous += 1
                 protected.add(path_resolved)
         removed: list[str] = []
-        for path in sorted_install_dirs:
-            path_resolved = path.resolve()
-            if any(
-                path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
-                for item in protected
-            ):
+        removable_install_dirs = [
+            path
+            for path, path_resolved in resolved_install_dirs.items()
+            if not any(path_resolved == item or path_resolved in item.parents for item in protected)
+        ]
+        removable_resolved_install_dirs = {resolved_install_dirs[path] for path in removable_install_dirs}
+        safe_removable_install_dirs = [
+            path
+            for path in removable_install_dirs
+            if not any(
+                resolved_install_dirs[path] in other_resolved.parents
+                and other_resolved not in removable_resolved_install_dirs
+                for other_resolved in all_resolved_install_dirs.values()
+            )
+        ]
+        for path in sorted(safe_removable_install_dirs, key=lambda item: len(resolved_install_dirs[item].parts), reverse=True):
+            if not path.is_dir():
                 continue
             shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
@@ -541,7 +561,7 @@ class ShowRuntimeManager:
             versions_dir,
             manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
         )
-        protected: set[Path] = set()
+        matching_install_dirs: set[Path] = set()
         for command_part in command:
             try:
                 command_path = Path(command_part).resolve()
@@ -550,8 +570,12 @@ class ShowRuntimeManager:
             for install_dir in install_dirs:
                 install_dir_resolved = install_dir.resolve()
                 if install_dir_resolved == command_path or install_dir_resolved in command_path.parents:
-                    protected.add(install_dir_resolved)
-        return protected
+                    matching_install_dirs.add(install_dir_resolved)
+        return {
+            path
+            for path in matching_install_dirs
+            if not any(path in other.parents for other in matching_install_dirs if other != path)
+        }
 
     def _prune_empty_manifest_version_dirs(self, versions_dir: Path) -> None:
         for path in sorted(versions_dir.glob("*/*"), reverse=True):

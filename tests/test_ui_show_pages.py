@@ -190,6 +190,16 @@ def _write_cached_runtime_install(
     mtime: float,
 ) -> tuple[Path, Path]:
     install_dir = runtime_dir / "versions" / name / _runtime_platform_tag() / f"fingerprint-{name}"
+    return _write_cached_runtime_install_at(install_dir, name, manifest_source=manifest_source, mtime=mtime)
+
+
+def _write_cached_runtime_install_at(
+    install_dir: Path,
+    name: str,
+    *,
+    manifest_source: str = "package:show_runtime_manifest.json",
+    mtime: float,
+) -> tuple[Path, Path]:
     cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
     cli_path.parent.mkdir(parents=True)
     cli_path.write_text(f"{name}\n", encoding="utf-8")
@@ -1817,22 +1827,24 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
 @pytest.mark.parametrize(("parent_mtime", "child_mtime"), ((100, 200), (200, 100)))
 def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tmp_path, parent_mtime, child_mtime):
     runtime_dir = tmp_path / "runtime"
-    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=50)
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=10)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
     rollback_parent = runtime_dir / "versions" / "rollback" / _runtime_platform_tag()
-    rollback_cli = rollback_parent / "fingerprint" / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
-    rollback_cli.parent.mkdir(parents=True)
-    rollback_cli.write_text("rollback\n", encoding="utf-8")
-    metadata = {
-        "provider": "manifest-cache",
-        "manifest_source": "package:show_runtime_manifest.json",
-        "runtime_version": "rollback",
-        "platform": _runtime_platform_tag(),
-    }
-    (rollback_parent / ".vibe-show-runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
-    (rollback_parent / "fingerprint" / ".vibe-show-runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
-    os.utime(rollback_parent, (parent_mtime, parent_mtime))
-    os.utime(rollback_parent / "fingerprint", (child_mtime, child_mtime))
+    _rollback_parent, rollback_parent_cli = _write_cached_runtime_install_at(
+        rollback_parent,
+        "rollback-legacy",
+        mtime=parent_mtime,
+    )
+    rollback_install, rollback_cli = _write_cached_runtime_install_at(
+        rollback_parent / "fingerprint",
+        "rollback",
+        mtime=child_mtime,
+    )
+    stale_sibling, _stale_cli = _write_cached_runtime_install_at(
+        rollback_parent / "stale-fingerprint",
+        "stale-rollback",
+        mtime=20,
+    )
 
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
@@ -1846,8 +1858,88 @@ def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tm
 
     assert result["ok"] is True
     assert current_install.exists() is True
+    assert rollback_install.exists() is True
     assert rollback_cli.exists() is True
     assert rollback_parent.exists() is True
+    assert rollback_parent_cli.exists() is True
+    assert stale_sibling.exists() is False
+    assert old_install.exists() is False
+
+
+def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
+    current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
+    _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
+    current_install, current_cli = _write_cached_runtime_install_at(
+        current_parent / "current-fingerprint",
+        "current",
+        mtime=300,
+    )
+    stale_sibling, _stale_cli = _write_cached_runtime_install_at(
+        current_parent / "stale-fingerprint",
+        "stale-current",
+        mtime=200,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert current_cli.exists() is True
+    assert current_parent.exists() is True
+    assert parent_cli.exists() is True
+    assert previous_install.exists() is True
+    assert stale_sibling.exists() is False
+    assert old_install.exists() is False
+
+
+def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=20)
+    previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
+    current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    stale_parent = runtime_dir / "versions" / "stale-parent" / _runtime_platform_tag()
+    _parent_install, parent_cli = _write_cached_runtime_install_at(stale_parent, "stale-parent", mtime=80)
+    custom_child, custom_cli = _write_cached_runtime_install_at(
+        stale_parent / "custom-fingerprint",
+        "custom-child",
+        manifest_source=str(tmp_path / "custom-manifest.json"),
+        mtime=70,
+    )
+    stale_child, _stale_child_cli = _write_cached_runtime_install_at(
+        stale_parent / "stale-fingerprint",
+        "stale-child",
+        mtime=60,
+    )
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="manifest-cache",
+    )
+    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert current_install.exists() is True
+    assert previous_install.exists() is True
+    assert stale_parent.exists() is True
+    assert parent_cli.exists() is True
+    assert custom_child.exists() is True
+    assert custom_cli.exists() is True
+    assert stale_child.exists() is False
     assert old_install.exists() is False
 
 
