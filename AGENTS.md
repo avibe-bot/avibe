@@ -179,10 +179,11 @@ Source-of-truth rule:
 
 ### Review Loop for PRs
 
-- the full implementation-lane standard lives at
-  `~/vibe-remote-project/.agents/skills/pr-delivery-loop/SKILL.md` (roles and
-  authority, contracts, Codex-bot review-loop discipline, close-out); follow
-  it for every PR
+- the rules in this section are the self-sufficient baseline for every PR; a
+  fuller implementation-lane standard (roles and authority, contracts,
+  close-out details) lives in the multi-repo workspace at
+  `~/vibe-remote-project/.agents/skills/pr-delivery-loop/SKILL.md` — follow it
+  whenever that workspace file is available in your environment
 - open PRs non-draft; draft PRs do not trigger the Codex bot review
 - the GitHub Codex bot is the review gate: after every push confirm a review
   of the new head starts, comment `@codex review` if none appears, and treat a
