@@ -7,7 +7,7 @@ import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
 import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
-import { resolveEffortOptions } from '../../lib/effortOptions';
+import { isEffortSupported, resolveEffortOptions } from '../../lib/effortOptions';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -402,9 +402,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                     // Switching to a model whose effort set no longer includes
                     // the current effort: clear it in the same patch so the displayed
                     // route matches what dispatches.
-                    if (currentEffort) {
-                      const opts = backendReasoning[model];
-                      if (opts && !opts.some((o) => o.value === currentEffort)) patch.reasoning_effort = null;
+                    if (!isEffortSupported(backend, model, currentEffort, backendReasoning)) {
+                      patch.reasoning_effort = null;
                     }
                     void applyPatch(patch);
                   }}

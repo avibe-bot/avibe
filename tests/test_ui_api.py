@@ -1946,11 +1946,28 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(api.backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
     monkeypatch.setattr(api.backend_model_catalog, "load_bundled_catalog", lambda: {})
-    monkeypatch.setattr(api, "infer_bundle_path_from_cli", lambda cli_path: None)
+    configured_claude_path = "/custom/bin/claude-beta"
+    resolved_claude_path = "/usr/local/bin/claude-beta"
+    v2_config = SimpleNamespace(
+        agents=SimpleNamespace(claude=SimpleNamespace(cli_path=configured_claude_path))
+    )
+    scanned_cli_paths = []
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        api,
+        "resolve_cli_path",
+        lambda binary: resolved_claude_path if binary == configured_claude_path else None,
+    )
+    monkeypatch.setattr(
+        api,
+        "infer_bundle_path_from_cli",
+        lambda cli_path: scanned_cli_paths.append(cli_path) or None,
+    )
 
     result = api.claude_models()
 
     assert result["ok"] is True
+    assert scanned_cli_paths == [resolved_claude_path]
     assert result["models"][:4] == [
         "claude-opus-4-6",
         "claude-sonnet-4-6",
@@ -1982,6 +1999,8 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
 def test_claude_models_merges_remote_catalog_with_dynamic_reasoning(monkeypatch, tmp_path):
     monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(api, "load_catalog_models", lambda: ["claude-opus-4-6"])
+    monkeypatch.setattr(api, "_configured_claude_cli_path", lambda: "claude")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda binary: None)
     monkeypatch.setattr(api, "infer_bundle_path_from_cli", lambda cli_path: None)
     monkeypatch.setattr(api.backend_model_catalog, "remote_catalog_token", lambda: (1.0, None))
     monkeypatch.setattr(

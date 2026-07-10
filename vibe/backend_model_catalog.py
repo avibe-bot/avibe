@@ -87,7 +87,7 @@ def fetch_remote_catalog(url: str | None = None) -> dict[str, Any]:
     request_url = (url or os.environ.get(REMOTE_CATALOG_URL_ENV) or DEFAULT_REMOTE_CATALOG_URL).strip()
     req = urllib.request.Request(request_url, headers={"User-Agent": REMOTE_CATALOG_USER_AGENT})
     with urllib.request.urlopen(req, timeout=REMOTE_CATALOG_TIMEOUT_SECONDS) as response:  # noqa: S310 - public catalog
-        return _normalize_catalog(json.loads(response.read().decode("utf-8")))
+        return _normalize_catalog(json.loads(response.read().decode("utf-8")), strict=True)
 
 
 def backend_model_entries(backend: str, catalog: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -122,6 +122,22 @@ def model_label(entry: dict[str, Any]) -> str | None:
 def reasoning_efforts(entry: dict[str, Any]) -> list[str]:
     values = entry.get("reasoning_efforts")
     return _dedupe_str_values(values) if isinstance(values, list) else []
+
+
+def catalog_reasoning_efforts_for_model(backend: str, model: str | None) -> list[str] | None:
+    if not model:
+        return None
+    for catalog in (
+        load_cached_remote_catalog(schedule_refresh=False),
+        load_bundled_catalog(),
+    ):
+        for entry in backend_model_entries(backend, catalog):
+            if model_id(entry) != model:
+                continue
+            efforts = reasoning_efforts(entry)
+            if efforts:
+                return efforts
+    return None
 
 
 def _cached_remote_payload() -> dict[str, Any]:
@@ -181,12 +197,17 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
         return {}
 
     normalized: dict[str, Any] = {}
+    catalog_valid = False
     raw_catalog = payload.get("catalog")
     if isinstance(raw_catalog, dict):
-        normalized["catalog"] = _normalize_catalog(raw_catalog)
+        try:
+            normalized["catalog"] = _normalize_catalog(raw_catalog, strict=True)
+            catalog_valid = True
+        except ValueError:
+            pass
     for key in ("fetched_at", "failed_at"):
         value = payload.get(key)
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and (key != "fetched_at" or catalog_valid):
             normalized[key] = value
     error = payload.get("error")
     if isinstance(error, str) or error is None:
@@ -212,22 +233,42 @@ def _write_cached_remote_payload(payload: dict[str, Any]) -> None:
         _REMOTE_MEMORY_CACHE.update(payload)
 
 
-def _normalize_catalog(payload: object) -> dict[str, Any]:
+def _normalize_catalog(payload: object, *, strict: bool = False) -> dict[str, Any]:
     if not isinstance(payload, dict):
+        if strict:
+            raise ValueError("Backend model catalog must be an object")
         return {}
+    schema_version = payload.get("schema_version")
+    if strict and schema_version != 1:
+        raise ValueError(f"Unsupported backend model catalog schema version: {schema_version!r}")
     backends = payload.get("backends")
     if not isinstance(backends, dict):
+        if strict:
+            raise ValueError("Backend model catalog must contain a backends object")
         return {}
     normalized_backends: dict[str, Any] = {}
     for backend, raw_backend in backends.items():
         if not isinstance(backend, str) or not isinstance(raw_backend, dict):
+            if strict:
+                raise ValueError("Backend model catalog contains an invalid backend entry")
+            continue
+        backend_key = backend.strip().lower()
+        if not backend_key:
+            if strict:
+                raise ValueError("Backend model catalog contains an empty backend name")
             continue
         models = raw_backend.get("models")
         if not isinstance(models, list):
+            if strict:
+                raise ValueError(f"Backend model catalog models must be a list: {backend_key}")
             continue
         entries = [_normalize_model_entry(item) for item in models]
-        normalized_backends[backend.strip().lower()] = {"models": [entry for entry in entries if entry]}
-    return {"schema_version": payload.get("schema_version") or 1, "backends": normalized_backends}
+        if strict and any(not entry for entry in entries):
+            raise ValueError(f"Backend model catalog contains an invalid model entry: {backend_key}")
+        normalized_backends[backend_key] = {"models": [entry for entry in entries if entry]}
+    if strict and not normalized_backends:
+        raise ValueError("Backend model catalog must contain at least one backend")
+    return {"schema_version": schema_version or 1, "backends": normalized_backends}
 
 
 def _normalize_model_entry(item: object) -> dict[str, Any]:

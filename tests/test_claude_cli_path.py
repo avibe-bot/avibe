@@ -161,6 +161,42 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
 
 
+def test_session_handler_preserves_catalog_provided_claude_effort(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        session_handler_module.backend_model_catalog,
+        "catalog_reasoning_efforts_for_model",
+        lambda backend, model: ["low", "medium", "ultra"]
+        if (backend, model) == ("claude", "claude-fable-6")
+        else None,
+    )
+
+    handler = SessionHandler(_Controller(tmp_path))
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    asyncio.run(
+        handler.get_or_create_claude_session(
+            context,
+            subagent_model="claude-fable-6",
+            subagent_reasoning_effort="ultra",
+        )
+    )
+
+    assert captured["connected"] is True
+    assert captured["options"].extra_args == {"model": "claude-fable-6"}
+    assert captured["options"].effort == "ultra"
+
+
 def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp_path: Path) -> None:
     calls: list[tuple[int, str]] = []
 

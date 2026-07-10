@@ -1,6 +1,8 @@
 import json
 import time
 
+import pytest
+
 from vibe import backend_model_catalog
 
 
@@ -76,6 +78,51 @@ def test_refresh_remote_catalog_persists_state_cache(monkeypatch, tmp_path):
     reloaded = backend_model_catalog.load_cached_remote_catalog(schedule_refresh=False)
     assert backend_model_catalog.backend_model_entries("claude", reloaded)[0]["id"] == "claude-fable-6"
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
+
+
+def test_malformed_remote_catalog_preserves_last_good_cache(monkeypatch, tmp_path):
+    previous_catalog = {
+        "schema_version": 1,
+        "backends": {"claude": {"models": [{"id": "claude-fable-6"}]}},
+    }
+    monkeypatch.setattr(backend_model_catalog.paths, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        backend_model_catalog.urllib.request,
+        "urlopen",
+        lambda request, timeout: _FakeResponse({"schema_version": 2, "models": []}),
+    )
+    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 200.0)
+    backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
+    backend_model_catalog._write_cached_remote_payload(
+        {"fetched_at": 100.0, "catalog": previous_catalog, "error": None}
+    )
+    monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", True)
+
+    backend_model_catalog._refresh_remote_catalog_worker()
+
+    cached_payload = json.loads((tmp_path / "backend_model_catalog.json").read_text(encoding="utf-8"))
+    assert cached_payload["catalog"] == previous_catalog
+    assert cached_payload["failed_at"] == 200.0
+    assert "fetched_at" not in cached_payload
+    assert "Unsupported backend model catalog schema version" in cached_payload["error"]
+    assert backend_model_catalog._REMOTE_REFRESH_IN_FLIGHT is False
+    backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
+
+
+def test_fetch_remote_catalog_rejects_invalid_model_entries(monkeypatch):
+    monkeypatch.setattr(
+        backend_model_catalog.urllib.request,
+        "urlopen",
+        lambda request, timeout: _FakeResponse(
+            {
+                "schema_version": 1,
+                "backends": {"codex": {"models": [{"label": "missing id"}]}},
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="invalid model entry"):
+        backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
 
 
 def test_failed_refresh_with_stale_catalog_uses_failure_ttl():

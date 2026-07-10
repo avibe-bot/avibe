@@ -194,7 +194,14 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                 <button
                   key={opt.key}
                   type="button"
-                  onClick={() => setBackend(opt.key)}
+                  onClick={() => {
+                    if (backend === opt.key) return;
+                    setBackend(opt.key);
+                    setModel('');
+                    setEffort('medium');
+                    setModelOptions([]);
+                    setReasoningOptions({});
+                  }}
                   className={clsx(
                     'flex flex-col items-center justify-center gap-1.5 rounded-lg border-2 px-3 py-3.5 transition',
                     active ? `${cc.border} ${cc.bg}` : 'border-border-strong bg-surface-2 hover:bg-foreground/[0.04]',

@@ -39,3 +39,12 @@ export function resolveEffortOptions(
   }
   return effortOptionsFor(backend);
 }
+
+export function isEffortSupported(
+  backend: string,
+  model: string | null | undefined,
+  effort: string | null | undefined,
+  reasoningOptions: Record<string, { value: string; label: string }[]> | undefined,
+): boolean {
+  return !effort || resolveEffortOptions(backend, model, reasoningOptions).includes(effort);
+}

@@ -3995,25 +3995,9 @@ def _normalize_backend_routing_payload(routing_payload: dict) -> dict:
         routing.reasoning_effort = normalize_claude_reasoning_effort(
             routing.model,
             routing.reasoning_effort,
-            _catalog_reasoning_efforts_for_model("claude", routing.model),
+            backend_model_catalog.catalog_reasoning_efforts_for_model("claude", routing.model),
         )
     return _routing_to_dict(routing)
-
-
-def _catalog_reasoning_efforts_for_model(backend: str, model: Optional[str]) -> Optional[list[str]]:
-    if not model:
-        return None
-    for catalog in (
-        backend_model_catalog.load_cached_remote_catalog(schedule_refresh=False),
-        backend_model_catalog.load_bundled_catalog(),
-    ):
-        for entry in backend_model_catalog.backend_model_entries(backend, catalog):
-            if backend_model_catalog.model_id(entry) != model:
-                continue
-            efforts = backend_model_catalog.reasoning_efforts(entry)
-            if efforts:
-                return efforts
-    return None
 
 
 def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
@@ -5354,6 +5338,14 @@ def codex_agents(cwd: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _configured_claude_cli_path() -> str:
+    try:
+        return str(V2Config.load().agents.claude.cli_path or "claude")
+    except Exception:
+        logger.debug("Failed to load configured Claude CLI path", exc_info=True)
+        return "claude"
+
+
 def claude_models() -> dict:
     """Best-effort merged list of Claude Code model options.
 
@@ -5393,7 +5385,8 @@ def claude_models() -> dict:
         _append_unique_model(options, seen, model)
 
     try:
-        bundle_path = infer_bundle_path_from_cli(resolve_cli_path("claude"))
+        configured_claude_path = _configured_claude_cli_path()
+        bundle_path = infer_bundle_path_from_cli(resolve_cli_path(configured_claude_path) or configured_claude_path)
         if bundle_path is not None:
             for model in infer_models_from_bundle(bundle_path):
                 _append_unique_model(options, seen, model)
