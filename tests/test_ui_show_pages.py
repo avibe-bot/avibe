@@ -1814,7 +1814,8 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
     assert local_bin.exists() is True
 
 
-def test_show_runtime_prepare_does_not_remove_parent_of_retained_rollback(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("parent_mtime", "child_mtime"), ((100, 200), (200, 100)))
+def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tmp_path, parent_mtime, child_mtime):
     runtime_dir = tmp_path / "runtime"
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=50)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
@@ -1830,8 +1831,8 @@ def test_show_runtime_prepare_does_not_remove_parent_of_retained_rollback(monkey
     }
     (rollback_parent / ".vibe-show-runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
     (rollback_parent / "fingerprint" / ".vibe-show-runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
-    os.utime(rollback_parent, (100, 100))
-    os.utime(rollback_parent / "fingerprint", (200, 200))
+    os.utime(rollback_parent, (parent_mtime, parent_mtime))
+    os.utime(rollback_parent / "fingerprint", (child_mtime, child_mtime))
 
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",

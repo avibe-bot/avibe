@@ -483,7 +483,10 @@ class ShowRuntimeManager:
         kept_previous = 0
         for path in sorted_install_dirs:
             path_resolved = path.resolve()
-            if any(path_resolved == item or path_resolved in item.parents for item in protected):
+            if any(
+                path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
+                for item in protected
+            ):
                 continue
             if kept_previous < keep_previous:
                 kept_previous += 1
@@ -491,7 +494,10 @@ class ShowRuntimeManager:
         removed: list[str] = []
         for path in sorted_install_dirs:
             path_resolved = path.resolve()
-            if any(path_resolved == item or path_resolved in item.parents for item in protected):
+            if any(
+                path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
+                for item in protected
+            ):
                 continue
             shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
