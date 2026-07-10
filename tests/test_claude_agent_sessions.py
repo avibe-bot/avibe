@@ -1362,6 +1362,122 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._native_session_ids[composite_key], "session-sdk")
         controller.emit_agent_message.assert_not_awaited()
 
+    async def test_receive_refusal_fallback_emits_notify_and_discards_retracted_text(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "avibe::project::p1"
+        controller.session_handler = SimpleNamespace(
+            capture_session_id=lambda *_args, **_kwargs: None,
+            mark_session_idle=lambda _key: None,
+            _t=lambda key, **kwargs: (
+                (
+                    "Claude's safeguards flagged this message. "
+                    f"It switched from {kwargs['originalModel']} to {kwargs['fallbackModel']} and retried. "
+                    f"This session will continue on {kwargs['fallbackModel']}."
+                )
+                if key == "status.claudeRefusalFallback"
+                else key
+            ),
+        )
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "turn_token": "stale-turn",
+                "agent_runtime_turn_token": "stale-runtime",
+            },
+        )
+        pending_context = SimpleNamespace(
+            platform_specific={
+                "turn_token": "current-turn",
+                "agent_runtime_turn_key": "session-1:/tmp/work",
+                "agent_runtime_turn_token": "current-runtime",
+            }
+        )
+        pending_request = SimpleNamespace(context=pending_context)
+        composite_key = "session-1:/tmp/work"
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._pending_assistant_message[composite_key] = "retracted partial response"
+        agent._last_assistant_text[composite_key] = "retracted partial response"
+
+        emitted = []
+
+        async def _emit(message_context, message_type, text, **kwargs):
+            emitted.append(
+                (
+                    message_type,
+                    text,
+                    kwargs,
+                    dict(message_context.platform_specific),
+                )
+            )
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        fallback_message = type(
+            "ModelRefusalFallbackMessage",
+            (),
+            {
+                "subtype": "model_refusal_fallback",
+                "data": {
+                    "direction": "retry",
+                    "trigger": "refusal",
+                    "original_model": "claude-fable-5",
+                    "fallback_model": "claude-opus-4-8",
+                    "content": "provider fallback notice",
+                },
+            },
+        )()
+        result_message = type(
+            "ResultMessage",
+            (),
+            {"subtype": "success", "result": "replacement answer", "duration_ms": 1},
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield fallback_message
+                    yield result_message
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-1",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        self.assertEqual(
+            emitted,
+            [
+                (
+                    "notify",
+                    "Claude's safeguards flagged this message. It switched from claude-fable-5 "
+                    "to claude-opus-4-8 and retried. This session will continue on "
+                    "claude-opus-4-8.",
+                    {"parse_mode": "markdown"},
+                    {
+                        "turn_token": "current-turn",
+                        "agent_runtime_turn_key": composite_key,
+                        "agent_runtime_turn_token": "current-runtime",
+                    },
+                )
+            ],
+        )
+        self.assertNotIn(composite_key, agent._pending_assistant_message)
+        self.assertNotIn(composite_key, agent._last_assistant_text)
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "replacement answer",
+            subtype="success",
+            duration_ms=1,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+
     async def test_init_message_binds_native_session_to_existing_agent_session(self):
         controller = _StubController()
         binds = []

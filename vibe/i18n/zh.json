@@ -4,6 +4,7 @@
     "done": "完成",
     "stopped": "已终止",
     "failed": "失败",
+    "claudeRefusalFallback": "Claude 的安全机制标记了这条消息，已从 {originalModel} 切换到 {fallbackModel} 并重试。本会话后续将继续使用 {fallbackModel}。",
     "steps": "{count} 步",
     "tokens": "{count} tok"
   },

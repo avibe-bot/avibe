@@ -4,6 +4,7 @@
     "done": "done",
     "stopped": "stopped",
     "failed": "failed",
+    "claudeRefusalFallback": "Claude's safeguards flagged this message. It switched from {originalModel} to {fallbackModel} and retried. This session will continue on {fallbackModel}.",
     "steps": "{count} st",
     "tokens": "{count} tok"
   },

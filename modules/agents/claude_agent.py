@@ -558,15 +558,17 @@ class ClaudeAgent(BaseAgent):
 
                     message_type = self._detect_message_type(message)
                     formatter = self._get_formatter(context)
+                    is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
 
                     # Unsolicited backend output (a background-task completion or
                     # a ScheduleWakeup re-invoked the agent inside this SDK
                     # process) reaches this long-lived receiver with no Avibe turn
                     # open. Open an agent-initiated turn so the reply is persisted
                     # + delivered + notified instead of dropped by the outbound
-                    # active-turn guard. Content messages only — system/user
-                    # frames never carry a user-facing reply.
-                    if message_type in ("assistant", "result"):
+                    # active-turn guard. A refusal-fallback system frame is the one
+                    # user-facing system exception: it precedes the replacement
+                    # assistant response and must open the same turn first.
+                    if message_type in ("assistant", "result") or is_model_refusal_fallback:
                         await self._maybe_begin_agent_initiated_turn(
                             context,
                             composite_key,
@@ -695,6 +697,17 @@ class ClaudeAgent(BaseAgent):
                         #         base_session_id,
                         #     )
 
+                        continue
+
+                    # Match the structured subtype instead of relying only on the
+                    # current SDK's generic SystemMessage class. A future SDK may
+                    # promote this event to a dedicated typed message.
+                    if is_model_refusal_fallback:
+                        await self._handle_model_refusal_fallback(
+                            context,
+                            composite_key,
+                            message,
+                        )
                         continue
 
                     if message_type == "system":
@@ -1320,6 +1333,72 @@ class ClaudeAgent(BaseAgent):
                 if text:
                     parts.append(self._get_formatter(context).escape_special_chars(text))
         return "\n\n".join(parts).strip()
+
+    @staticmethod
+    def _is_model_refusal_fallback_message(message) -> bool:
+        return (getattr(message, "subtype", "") or "").strip().lower() == "model_refusal_fallback"
+
+    async def _handle_model_refusal_fallback(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        message,
+    ) -> None:
+        """Surface Claude's structured safety fallback without ending the turn."""
+        data = getattr(message, "data", None)
+        if not isinstance(data, dict):
+            logger.warning("Claude refusal fallback for %s had no structured payload", composite_key)
+            return
+
+        direction = str(data.get("direction") or "").strip().lower()
+        if direction != "retry":
+            logger.info(
+                "Ignoring legacy Claude refusal fallback direction %r for %s",
+                direction,
+                composite_key,
+            )
+            return
+
+        # The refusal event retracts the primary model's partial response before
+        # Claude retries on the fallback model. Avibe buffers the latest assistant
+        # text until the next assistant/result frame, so discard that buffer now
+        # instead of emitting a response Claude explicitly withdrew.
+        self._pending_assistant_message.pop(composite_key, None)
+        self._last_assistant_text.pop(composite_key, None)
+
+        pending_requests = self._pending_requests.get(composite_key) or []
+        self._adopt_pending_turn_token(context, pending_requests[0] if pending_requests else None)
+
+        original_model = " ".join(str(data.get("original_model") or "").split())[:160]
+        fallback_model = " ".join(str(data.get("fallback_model") or "").split())[:160]
+        provider_content = str(data.get("content") or "").strip()
+
+        text = ""
+        translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
+        if callable(translator) and original_model and fallback_model:
+            text = translator(
+                "status.claudeRefusalFallback",
+                originalModel=original_model,
+                fallbackModel=fallback_model,
+            )
+        if not text:
+            text = provider_content
+        if not text:
+            logger.warning("Claude refusal fallback for %s had no displayable content", composite_key)
+            return
+
+        logger.info(
+            "Claude safety fallback for session %s: %s -> %s",
+            composite_key,
+            original_model or "<unknown>",
+            fallback_model or "<unknown>",
+        )
+        await self.controller.emit_agent_message(
+            context,
+            "notify",
+            text,
+            parse_mode="markdown",
+        )
 
     async def _handle_auth_failure_result(
         self,
