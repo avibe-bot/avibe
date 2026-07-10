@@ -529,3 +529,31 @@ Implementation split (Alex): frontend UI/UX & product-experience work →
 Claude; daemon/backend & cryptography-sensitive work (incl. the sandbox) →
 Codex. Orchestrated from the design session; each implementation agent owns
 its PR review loop; the orchestrator reviews and merges last.
+
+## 13. Contract-audit edge — operation identity TTL vs binding expiry (2026-07-10)
+
+The `agent-deliver` operation hash authenticates the approved operation
+identity: `agent-deliver`, secret name, and the original grant duration. It
+must not change as the binding approaches its absolute expiry. In particular,
+the daemon must relay the original `release.ttlSecs` to avault even when only a
+few seconds of binding life remain; otherwise avault recomputes a different
+operation hash and rejects the blind box.
+
+The cache lifetime is a separate clock. Avault caps each resident DEK grant to
+the earlier of `now + ttl_secs` and the blind-box approval's absolute
+`expires_at_unix`. The daemon also persists that same binding expiry on the
+grant. Therefore relaying the original duration preserves the three-way
+sandbox/daemon/avault operation identity without allowing the resident cache
+to outlive the binding.
+
+**Frozen contract:**
+
+1. Sandbox and daemon derive `operationHash` from the original approved grant
+   duration in `release.ttlSecs`.
+2. Daemon sends that same original duration as avault agent-grant `ttl_secs`;
+   it never substitutes remaining binding life into operation identity.
+3. Avault authenticates the blind box with that duration, but bounds the cache
+   by the approval's absolute `expires_at_unix`.
+4. Regression coverage must exercise a near-expiry binding: the blind box
+   opens with the original duration and the cached DEK becomes unavailable at
+   the binding's absolute expiry.
