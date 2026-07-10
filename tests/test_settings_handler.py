@@ -191,6 +191,35 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
     send_message.assert_not_awaited()
 
 
+def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
+    settings_manager = _StubSettingsManager(None)
+    handler, send_message = _make_handler(settings_manager)
+
+    with patch(
+        "core.handlers.settings_handler.backend_model_catalog.catalog_reasoning_efforts_for_model",
+        return_value=["low", "ultra"],
+    ):
+        asyncio.run(
+            handler.handle_routing_update(
+                user_id="42",
+                channel_id="-100123",
+                backend="claude",
+                opencode_agent=None,
+                opencode_model=None,
+                claude_agent="reviewer",
+                claude_model="claude-future-6",
+                claude_reasoning_effort="ultra",
+                notify_user=False,
+                platform="telegram",
+            )
+        )
+
+    assert settings_manager.saved_routing is not None
+    assert settings_manager.saved_routing.model == "claude-future-6"
+    assert settings_manager.saved_routing.reasoning_effort == "ultra"
+    send_message.assert_not_awaited()
+
+
 def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() -> None:
     handler, send_message, sessions = _make_flat_scope_handler(row={"agent_backend": "opencode"})
 

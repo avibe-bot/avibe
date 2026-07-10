@@ -80,14 +80,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     return loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions: opts, catalogRefreshPending }) => {
+      ({ models, modelLabels, reasoningOptions: opts }) => {
         setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
         setReasoningOptions(opts ?? {});
-        if (!catalogRefreshPending) {
-          setModel((currentModel) =>
-            currentModel && !models.includes(currentModel) ? '' : currentModel,
-          );
-        }
       },
       () => setModelOptions([]),
     );

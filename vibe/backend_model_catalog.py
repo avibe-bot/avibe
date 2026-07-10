@@ -11,6 +11,7 @@ from typing import Any, Iterable, Sequence
 
 from config import paths
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
+from vibe.codex_config import get_codex_home
 
 
 REMOTE_CATALOG_URL_ENV = "AVIBE_BACKEND_MODEL_CATALOG_URL"
@@ -337,7 +338,7 @@ def _read_claude_settings_models() -> list[dict[str, Any]]:
 
 
 def _read_codex_models_cache() -> list[dict[str, Any]]:
-    cache_path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+    cache_path = get_codex_home() / "models_cache.json"
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
@@ -350,11 +351,9 @@ def _read_codex_models_cache() -> list[dict[str, Any]]:
 
 
 def _read_codex_config_models() -> list[dict[str, Any]]:
-    config_path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    config_path = get_codex_home() / "config.toml"
     try:
-        import tomllib
-
-        payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        payload = _parse_toml(config_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
         return []
     if not isinstance(payload, dict):
@@ -370,6 +369,16 @@ def _read_codex_config_models() -> list[dict[str, Any]]:
         for value in values
         if isinstance(value, str) and value.strip()
     ]
+
+
+def _parse_toml(raw: str) -> dict[str, Any]:
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+        import tomli as tomllib
+
+    payload = tomllib.loads(raw)
+    return payload if isinstance(payload, dict) else {}
 
 
 def _legacy_claude_reasoning_efforts(model: str) -> list[str]:

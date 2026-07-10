@@ -1,6 +1,8 @@
+import builtins
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -365,3 +367,38 @@ def test_bundled_codex_56_efforts_include_ultra():
         for entry in snapshot["reasoning_options"]["gpt-5.6-terra"]
     }
     assert "ultra" in values
+
+
+def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-state"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(
+        json.dumps({"models": [{"slug": "gpt-expanded", "visibility": "list"}]}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text('model = "gpt-configured"', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", "~/codex-state")
+
+    assert backend_model_catalog._read_codex_models_cache() == [
+        {"id": "gpt-expanded", "visibility": "list"}
+    ]
+    assert backend_model_catalog._read_codex_config_models()[0]["id"] == "gpt-configured"
+
+
+def test_parse_toml_falls_back_to_tomli_when_tomllib_is_unavailable(monkeypatch):
+    real_import = builtins.__import__
+    fallback = SimpleNamespace(loads=lambda raw: {"model": "gpt-python-310"})
+
+    def fake_import(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ModuleNotFoundError("No module named 'tomllib'")
+        if name == "tomli":
+            return fallback
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert backend_model_catalog._parse_toml('model = "gpt-python-310"') == {
+        "model": "gpt-python-310"
+    }

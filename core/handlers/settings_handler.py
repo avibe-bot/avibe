@@ -7,6 +7,7 @@ from typing import Optional
 from modules.agents import get_agent_display_name
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from core.modals import RoutingModalData, RoutingModalSelection
+from vibe import backend_model_catalog
 
 from .base import BaseHandler
 
@@ -843,6 +844,7 @@ class SettingsHandler(BaseHandler):
             normalized_claude_reasoning_effort = normalize_claude_reasoning_effort(
                 claude_model,
                 claude_reasoning_effort,
+                backend_model_catalog.catalog_reasoning_efforts_for_model("claude", claude_model),
             )
             if backend == "codex" and codex_agent is _UNSET:
                 resolved_codex_agent = existing_routing.codex_agent if existing_routing else None
