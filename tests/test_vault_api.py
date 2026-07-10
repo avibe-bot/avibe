@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import hashlib
 import json
 import socket
 import tempfile
@@ -144,6 +145,17 @@ def _payload_keys(payload: object) -> set[str]:
     return set()
 
 
+def _stable_json_like_js(payload: object) -> str:
+    if isinstance(payload, dict):
+        return "{" + ",".join(
+            f"{json.dumps(str(key), ensure_ascii=False, separators=(',', ':'))}:{_stable_json_like_js(payload[key])}"
+            for key in sorted(payload)
+        ) + "}"
+    if isinstance(payload, list):
+        return "[" + ",".join(_stable_json_like_js(item) for item in payload) + "]"
+    return api._jsonify_surrogates_like_js(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
 def _verified_signed_context(context: dict) -> dict:
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -153,7 +165,7 @@ def _verified_signed_context(context: dict) -> dict:
     public_key = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(root_key["publicKey"]))
     public_key.verify(
         base64.b64decode(signature["value"]),
-        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        api._vault_sandbox_canonical_json(unsigned).encode("utf-8"),
     )
     assert signature["alg"] == "ed25519"
     assert signature["keyId"] == root_key["keyId"]
@@ -218,6 +230,70 @@ def _establish_protected_secret_with_factor(
 def avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_pubkey", lambda: dict(TEST_AGENT_PUBKEY))
+
+
+def test_vault_sandbox_canonical_json_preserves_unicode_for_signed_contexts():
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = api._new_vault_daemon_binding_key()
+    context = {
+        "v": 2,
+        "purpose": "agent-deliver",
+        "requestId": "vab_unicode",
+        "display": {
+            "secrets": [{"name": "生产密钥", "kind": "static"}],
+            "sessionLabel": "Alex 的工作台 🚀",
+            "command": "部署：echo 你好 🌕",
+            "egress": "api.example.com/路径",
+            "grantTtlSeconds": 300,
+        },
+        "expiresAt": "2030-01-01T00:00:00Z",
+    }
+
+    signed = api._signed_operation_context(context, key)
+    unsigned = dict(signed)
+    signature = unsigned.pop("signature")
+    canonical = api._vault_sandbox_canonical_json(unsigned)
+
+    assert canonical == _stable_json_like_js(unsigned)
+    assert "Alex 的工作台 🚀" in canonical
+    assert "部署：echo 你好 🌕" in canonical
+    assert "\\u" not in canonical
+
+    public_key = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(key["publicKey"]))
+    public_key.verify(base64.b64decode(signature["value"]), canonical.encode("utf-8"))
+
+    envelope = {"ciphertext": "密文🚀", "nonce": "随机值", "wrap_meta": {"label": "中文🔐"}}
+    envelope_canonical = api._vault_sandbox_canonical_json(envelope)
+    assert envelope_canonical == _stable_json_like_js(envelope)
+    assert "\\u" not in envelope_canonical
+    assert api._envelope_hash(envelope)["digest"] == hashlib.sha256(envelope_canonical.encode("utf-8")).hexdigest()
+
+
+def test_vault_sandbox_canonical_json_escapes_lone_surrogates_like_js():
+    key = api._new_vault_daemon_binding_key()
+    context = {
+        "v": 2,
+        "purpose": "reveal",
+        "requestId": "vrl_surrogate",
+        "display": {
+            "secrets": [{"name": "BROKEN_INPUT", "kind": "static"}],
+            "command": "bad high \ud800 low \ude80 paired \ud83d\ude80",
+        },
+        "expiresAt": "2030-01-01T00:00:00Z",
+    }
+
+    signed = api._signed_operation_context(context, key)
+    unsigned = dict(signed)
+    unsigned.pop("signature")
+    canonical = api._vault_sandbox_canonical_json(unsigned)
+
+    assert canonical == _stable_json_like_js(unsigned)
+    assert "\\ud800" in canonical
+    assert "\\ude80" in canonical
+    assert "paired 🚀" in canonical
+    assert not any(0xD800 <= ord(char) <= 0xDFFF for char in canonical)
+    canonical.encode("utf-8")
 
 
 def test_create_list_delete_roundtrip(monkeypatch):

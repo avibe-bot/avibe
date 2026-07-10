@@ -1628,8 +1628,32 @@ def _agent_deliver_operation_hash(name: str, ttl_seconds: int) -> str:
     ).hexdigest()
 
 
+def _jsonify_surrogates_like_js(canonical: str) -> str:
+    chars: list[str] = []
+    index = 0
+    while index < len(canonical):
+        codepoint = ord(canonical[index])
+        if 0xD800 <= codepoint <= 0xDBFF and index + 1 < len(canonical):
+            next_codepoint = ord(canonical[index + 1])
+            if 0xDC00 <= next_codepoint <= 0xDFFF:
+                chars.append(chr(0x10000 + ((codepoint - 0xD800) << 10) + (next_codepoint - 0xDC00)))
+                index += 2
+                continue
+        if 0xD800 <= codepoint <= 0xDFFF:
+            chars.append(f"\\u{codepoint:04x}")
+        else:
+            chars.append(canonical[index])
+        index += 1
+    return "".join(chars)
+
+
+def _vault_sandbox_canonical_json(payload: Any) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return _jsonify_surrogates_like_js(canonical)
+
+
 def _envelope_hash(envelope_payload: dict[str, Any]) -> dict[str, str]:
-    canonical = json.dumps(envelope_payload, sort_keys=True, separators=(",", ":"))
+    canonical = _vault_sandbox_canonical_json(envelope_payload)
     return {
         "alg": "sha256",
         "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
@@ -1640,7 +1664,7 @@ def _signed_agent_binding(binding: dict[str, Any], key: dict[str, str]) -> dict[
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
     private_key = ed25519.Ed25519PrivateKey.from_private_bytes(base64.b64decode(key["privateKey"]))
-    canonical = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+    canonical = _vault_sandbox_canonical_json(binding)
     signature = _b64(private_key.sign(canonical.encode("utf-8")))
     return {
         **binding,
