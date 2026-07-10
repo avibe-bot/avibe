@@ -179,13 +179,30 @@ Source-of-truth rule:
 
 ### Review Loop for PRs
 
-- before opening a PR, run the reviewer subagent and fix significant issues first
-- PR descriptions must name the changed capability and list the affected scenario IDs when a scenario catalog exists
-- PR descriptions must state which evidence layers were updated: unit, contract, scenario, and residual manual checks
-- after opening a PR, use the `background-watch-hook` skill to keep a review-fix loop running until Codex review passes
-- use the skill's bundled `wait_pr.py` / `wait_action.py` for PR review and CI watches; do not hand-roll PR waiters
-- by default, create the review watch immediately after the PR is opened; do not wait for the user to remind you unless they explicitly say not to keep a watch
-- keep expensive full-suite gates on GitHub CI by default, then require those CI checks to pass before merge
+- the full implementation-lane standard lives at
+  `~/vibe-remote-project/.agents/skills/pr-delivery-loop/SKILL.md` (roles and
+  authority, contracts, Codex-bot review-loop discipline, close-out); follow
+  it for every PR
+- open PRs non-draft; draft PRs do not trigger the Codex bot review
+- the GitHub Codex bot is the review gate: after every push confirm a review
+  of the new head starts, comment `@codex review` if none appears, and treat a
+  trigger as accepted only once the bot reacts 👀 to that comment
+- a bot pass is a plain issue comment naming the reviewed commit; close-out
+  requires zero unresolved review threads on the current head, not just a
+  0-finding latest review
+- after opening a PR, use the `background-watch-hook` skill to keep a
+  review-fix loop running until the review passes; use its bundled
+  `wait_pr.py` / `wait_action.py`, never hand-rolled waiters, and create the
+  watch immediately without waiting to be reminded
+- PR descriptions must name the changed capability, list affected scenario IDs
+  when a catalog exists, and state which evidence layers were updated: unit,
+  contract, scenario, and residual manual checks
+- do not merge on your own initiative: the orchestrator (or the user) does the
+  final review and merge; an explicit merge instruction from them is carried
+  out directly after a mechanical `mergeStateStatus == CLEAN` check, never by
+  spawning another agent to re-review
+- keep expensive full-suite gates on GitHub CI by default, then require those
+  CI checks to pass before merge
 
 ### Pre-Push Requirements
 

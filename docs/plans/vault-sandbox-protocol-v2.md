@@ -333,11 +333,27 @@ engine supports it), no pending `ui.show` unacknowledged. Confirm buttons are
 dead for the first ~500 ms after render (anti-timing-redress) and may use
 hold-to-confirm for release/reveal. Otherwise fail closed with
 `sandbox_not_visible` (parent responds by expanding the modal and retrying).
-This was designed in v1 and never built; in v2 it is a blocker for shipping
-R2-without-passkey. Note the shape of the residual: an XSS with **no user
+Note the shape of the residual: an XSS with **no user
 present** can complete nothing (every R2/R3 needs a real gesture inside the
 sandbox document); the residual is exclusively "user present and redressed",
 bounded by these checks and by Strict mode.
+
+**Parent surface attestation is advisory telemetry, not an enforced gate.**
+While an embedded confirm is up, the parent measures the sandbox iframe
+element (rect, own IntersectionObserver reading, computed opacity and
+pointer-events) and streams it as per-request `surface` plus `confirm.surface`
+events refreshed every ~10 s (wire shape frozen by the parent's
+`buildVaultConfirmSurface` unit test and the sandbox's
+`parseParentConfirmSurface`). The sandbox records it and logs anomalies but
+never fails a ceremony on it, for two reasons. First, it is self-reported by
+the very party the sandbox distrusts: a compromised parent fabricates a
+perfect reading, so enforcing it adds nothing against the adversary it
+targets (overlay redress requires a compromised parent, which lies). Second,
+honest parents fail it persistently: IntersectionObserver v2 `trackVisibility`
+reports occlusion whenever any ancestor carries a transform, filter, opacity
+transition, or animation — ordinary modal CSS. Enforcement therefore only
+taxes legitimate users. The browser-truth self-checks above remain the
+enforced gate.
 
 ## 7. Flow redesigns
 
@@ -529,6 +545,21 @@ Implementation split (Alex): frontend UI/UX & product-experience work →
 Claude; daemon/backend & cryptography-sensitive work (incl. the sandbox) →
 Codex. Orchestrated from the design session; each implementation agent owns
 its PR review loop; the orchestrator reviews and merges last.
+
+## 12. Frozen contract — signed context verification & approvalNonce
+
+1. The daemon signature covers the **entire** context object exactly as
+   transmitted, including the `release` block. The sandbox verifies against
+   the received record losslessly — no field allowlist, no re-serialization
+   that could drop or reorder content (`parseSignedOperationContext` returns
+   the raw record; `signedOperationContextMessage` re-canonicalizes it whole).
+2. `release.approvalNonce` is **produced by the daemon** (random) and consumed
+   by the sandbox as-is when sealing the blind box. The sandbox never derives
+   its own nonce.
+3. Canonical JSON on both sides: UTF-8, keys sorted, compact separators
+   (`","`/`":"`), non-ASCII characters **unescaped** (Python
+   `ensure_ascii=False` ≡ JS `JSON.stringify`). Cross-boundary tests must
+   include non-ASCII payloads.
 
 ## 13. Contract-audit edge — operation identity TTL vs binding expiry (2026-07-10)
 
