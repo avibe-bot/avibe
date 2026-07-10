@@ -2117,7 +2117,8 @@ def test_codex_models_prefers_live_catalog_and_model_reasoning(monkeypatch, tmp_
                     {"effort": "ultra"},
                 ],
             },
-            {"slug": "hidden-live-model", "visibility": "hide", "priority": 0},
+            {"slug": "gpt-5.6-luna", "visibility": "hide", "priority": 0},
+            {"slug": "hidden-live-model", "visibility": "hide", "priority": 3},
         ]
     }
 
@@ -2167,9 +2168,10 @@ def test_codex_models_prefers_live_catalog_and_model_reasoning(monkeypatch, tmp_
     assert result["models"][:4] == [
         "gpt-5.6-sol",
         "gpt-5.6-terra",
-        "gpt-5.6-luna",
         "gpt-5.5",
+        "gpt-5.4",
     ]
+    assert "gpt-5.6-luna" not in result["models"]
     assert "hidden-live-model" not in result["models"]
     assert "codex-auto-review" not in result["models"]
     assert "stale-codex-model" in result["models"]
@@ -2300,6 +2302,7 @@ def test_codex_models_bundled_catalog_uses_model_supported_reasoning(monkeypatch
         "high",
         "xhigh",
         "max",
+        "ultra",
     ]
     assert [o["value"] for o in result["reasoning_options"]["gpt-5.5"]] == [
         "__default__",

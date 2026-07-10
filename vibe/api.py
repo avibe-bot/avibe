@@ -10574,6 +10574,20 @@ def _sorted_codex_catalog_items(data: object) -> list[dict]:
     return [item for _, _, item in sorted(visible_models, key=lambda entry: (entry[0], entry[1]))]
 
 
+def _hidden_codex_catalog_model_ids(data: object) -> set[str]:
+    raw_models = data.get("models") if isinstance(data, dict) else data
+    if not isinstance(raw_models, list):
+        return set()
+    hidden: set[str] = set()
+    for item in raw_models:
+        if not isinstance(item, dict) or _codex_model_visible(item):
+            continue
+        model_id = item.get("slug") or item.get("id")
+        if isinstance(model_id, str) and model_id.strip():
+            hidden.add(model_id.strip())
+    return hidden
+
+
 def _append_codex_catalog_models(
     data: object,
     *,
@@ -10726,6 +10740,13 @@ def codex_models() -> dict:
 
     live_catalog, live_catalog_error = _read_codex_live_model_catalog()
     if live_catalog is not None:
+        hidden_live_models = _hidden_codex_catalog_model_ids(live_catalog)
+        if hidden_live_models:
+            options[:] = [model for model in options if model not in hidden_live_models]
+            seen.update(hidden_live_models)
+            for model in hidden_live_models:
+                model_labels.pop(model, None)
+                reasoning_efforts.pop(model, None)
         _append_codex_catalog_models(
             live_catalog,
             options=options,

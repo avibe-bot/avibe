@@ -49,6 +49,17 @@ def test_backend_model_entries_normalize_string_and_dict_entries():
     ]
 
 
+def test_bundled_codex_56_efforts_include_ultra():
+    catalog = backend_model_catalog.load_bundled_catalog()
+    entries = {
+        backend_model_catalog.model_id(entry): backend_model_catalog.reasoning_efforts(entry)
+        for entry in backend_model_catalog.backend_model_entries("codex", catalog)
+    }
+
+    assert "ultra" in entries["gpt-5.6-sol"]
+    assert "ultra" in entries["gpt-5.6-terra"]
+
+
 def test_refresh_remote_catalog_persists_state_cache(monkeypatch, tmp_path):
     payload = {
         "schema_version": 1,

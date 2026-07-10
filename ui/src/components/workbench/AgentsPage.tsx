@@ -669,9 +669,20 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt ?? '');
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [modelOptions, setModelOptions] = useState<ComboboxOption[]>([]);
-  const [reasoningOptions, setReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
+  const [modelCatalogs, setModelCatalogs] = useState<
+    Record<
+      string,
+      {
+        modelOptions: ComboboxOption[];
+        reasoningOptions: Record<string, { value: string; label: string }[]>;
+      }
+    >
+  >({});
   const [running, setRunning] = useState(false);
+
+  const activeModelCatalog = modelCatalogs[agent.backend];
+  const modelOptions = activeModelCatalog?.modelOptions ?? [];
+  const reasoningOptions = activeModelCatalog?.reasoningOptions ?? {};
 
   useEffect(() => {
     setName(agent.name);
@@ -691,10 +702,20 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
       api,
       agent.backend,
       ({ models, modelLabels, reasoningOptions: opts }) => {
-        setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
-        setReasoningOptions(opts ?? {});
+        setModelCatalogs((current) => ({
+          ...current,
+          [agent.backend]: {
+            modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
+            reasoningOptions: opts ?? {},
+          },
+        }));
       },
-      () => setModelOptions([]),
+      () => {
+        setModelCatalogs((current) => ({
+          ...current,
+          [agent.backend]: { modelOptions: [], reasoningOptions: {} },
+        }));
+      },
     );
   }, [agent.backend, api]);
 
