@@ -233,6 +233,28 @@ def test_startup_keeps_json_rollbacks_when_import_after_snapshot_fails(monkeypat
     assert all(path.exists() for path in existing)
 
 
+def test_startup_keeps_sqlite_rollbacks_when_import_after_upgrade_fails(monkeypatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+    backups_dir = state_dir / "backups"
+    backups_dir.mkdir()
+    existing = [
+        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-2026070{day}T020000Z.sqlite")
+        for day in (7, 8, 9)
+    ]
+    monkeypatch.setattr(
+        "storage.importer._parse_json_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid import")),
+    )
+
+    with pytest.raises(ValueError, match="invalid import"):
+        ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
+
+    assert all(path.exists() for path in existing)
+
+
 def test_failed_schema_upgrade_keeps_existing_sqlite_rollbacks(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     db_path.parent.mkdir()

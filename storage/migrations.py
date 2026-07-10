@@ -135,7 +135,12 @@ def alembic_config(db_path: Path | None = None) -> Config:
     return cfg
 
 
-def run_migrations(db_path: Path | None = None, *, revision: str = "head") -> None:
+def run_migrations(
+    db_path: Path | None = None,
+    *,
+    revision: str = "head",
+    prune_backups_after_upgrade: bool = True,
+) -> None:
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     guard_source_checkout_default_state_migration(target_db)
     cfg = alembic_config(target_db)
@@ -152,7 +157,8 @@ def run_migrations(db_path: Path | None = None, *, revision: str = "head") -> No
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
     command.upgrade(cfg, revision)
-    prune_state_backups(target_db.parent / "backups", json_retention=None)
+    if prune_backups_after_upgrade:
+        prune_state_backups(target_db.parent / "backups", json_retention=None)
 
 
 def _migration_backup_revisions(db_path: Path, cfg: Config, revision: str) -> tuple[set[str], set[str]] | None:

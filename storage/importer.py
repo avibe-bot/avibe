@@ -72,7 +72,7 @@ def ensure_sqlite_state(
     lock_path = target_state_dir / "migration.lock"
 
     with MigrationFileLock(lock_path):
-        run_migrations(target_db)
+        run_migrations(target_db, prune_backups_after_upgrade=False)
         engine = create_sqlite_engine(target_db)
         report: MigrationImportReport | None = None
         try:

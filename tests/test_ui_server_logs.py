@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from pathlib import Path
 
 from config import paths
 from vibe.ui_server import app
@@ -65,6 +66,32 @@ def test_logs_endpoint_reads_rotated_service_generations(monkeypatch, tmp_path):
     assert payload["total"] == 1
     assert payload["logs"][0]["message"] == "retained failure"
     assert next(source for source in payload["sources"] if source["key"] == "service")["exists"] is True
+
+
+def test_logs_endpoint_skips_generation_removed_during_rotation(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    rotated = paths.get_logs_dir() / "vibe_remote.log.1"
+    rotated.write_text("old generation\n", encoding="utf-8")
+    (paths.get_logs_dir() / "vibe_remote.log").write_text(
+        "2026-03-25 15:51:17,428 - service.main - INFO - current line\n",
+        encoding="utf-8",
+    )
+    real_open = Path.open
+
+    def open_with_rotation_race(path: Path, *args, **kwargs):
+        if path == rotated:
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_with_rotation_race)
+    client = app.test_client()
+    response = client.post("/api/logs", json={"lines": 20, "source": "service"}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert payload["logs"][0]["message"] == "current line"
 
 
 def test_logs_endpoint_returns_aggregated_all_view(monkeypatch, tmp_path):

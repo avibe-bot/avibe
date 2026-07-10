@@ -2234,11 +2234,14 @@ def _read_log_entries(log_path: Path, source_key: str, lines: int) -> tuple[list
     recent_lines: deque[tuple[str, int, int]] = deque(maxlen=lines)
     total_lines = 0
     for path in existing_paths:
-        file_sort_ns = path.stat().st_mtime_ns
-        with path.open("r", encoding="utf-8", errors="replace") as log_file:
-            for raw_line in log_file:
-                recent_lines.append((raw_line, file_sort_ns, total_lines))
-                total_lines += 1
+        try:
+            file_sort_ns = path.stat().st_mtime_ns
+            with path.open("r", encoding="utf-8", errors="replace") as log_file:
+                for raw_line in log_file:
+                    recent_lines.append((raw_line, file_sort_ns, total_lines))
+                    total_lines += 1
+        except OSError:
+            continue
 
     logs_list: list[dict[str, Any]] = []
     for raw_line, file_sort_ns, line_index in recent_lines:

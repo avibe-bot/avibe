@@ -72,6 +72,48 @@ def test_copy_bounded_log_drains_while_waiting_for_previous_sink(tmp_path: Path)
     assert path.read_bytes().endswith(b"noisy replacement startup\n")
 
 
+def test_copy_bounded_log_flushes_quiet_startup_burst_after_lock_release(tmp_path: Path) -> None:
+    class StartupBurst:
+        def __init__(self) -> None:
+            self.burst_read = threading.Event()
+            self.finish = threading.Event()
+            self.delivered = False
+
+        def read1(self, _size: int) -> bytes:
+            if not self.delivered:
+                self.delivered = True
+                self.burst_read.set()
+                return b"startup complete\n"
+            self.finish.wait(timeout=5)
+            return b""
+
+    path = tmp_path / "ui_stderr.log"
+    lock = MigrationFileLock(path.with_name(f".{path.name}.sink.lock"))
+    lock.acquire()
+    source = StartupBurst()
+    result: list[bool] = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            copy_bounded_log(source, path, max_bytes=512, retain_bytes=256, chunk_bytes=64)
+        )
+    )
+    thread.start()
+    try:
+        assert source.burst_read.wait(timeout=2)
+        lock.release()
+        deadline = time.monotonic() + 2
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert path.read_bytes() == b"startup complete\n"
+        assert thread.is_alive()
+    finally:
+        lock.release()
+        source.finish.set()
+        thread.join(timeout=5)
+
+    assert result == [True]
+
+
 def test_spawned_process_output_is_continuously_bounded(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
     monkeypatch.setattr(runtime, "RUNTIME_LOG_MAX_BYTES", 512)

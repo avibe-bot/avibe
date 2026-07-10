@@ -5,6 +5,8 @@ import os
 import stat
 import sys
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import BinaryIO
 
@@ -77,9 +79,32 @@ def _write_bounded_chunk(
     log_file.write(chunk)
 
 
-def _drain(source: BinaryIO, chunk_bytes: int) -> None:
-    while source.read(chunk_bytes):
-        pass
+def _append_bounded_chunk(
+    chunks: deque[bytes],
+    chunk: bytes,
+    *,
+    buffered_bytes: int,
+    max_bytes: int,
+) -> int:
+    if len(chunk) >= max_bytes:
+        chunks.clear()
+        chunks.append(chunk[-max_bytes:])
+        return max_bytes
+
+    chunks.append(chunk)
+    buffered_bytes += len(chunk)
+    overflow = buffered_bytes - max_bytes
+    while overflow > 0:
+        oldest = chunks[0]
+        if len(oldest) <= overflow:
+            chunks.popleft()
+            buffered_bytes -= len(oldest)
+            overflow -= len(oldest)
+            continue
+        chunks[0] = oldest[overflow:]
+        buffered_bytes -= overflow
+        overflow = 0
+    return buffered_bytes
 
 
 def copy_bounded_log(
@@ -98,6 +123,11 @@ def copy_bounded_log(
     lock_ready = threading.Event()
     lock_stop = threading.Event()
     lock_acquired = False
+    pending: deque[bytes] = deque()
+    pending_bytes = 0
+    source_eof = False
+    source_failed = False
+    pending_ready = threading.Condition()
 
     def _acquire_lock() -> None:
         nonlocal lock_acquired
@@ -114,23 +144,42 @@ def copy_bounded_log(
 
     lock_thread = threading.Thread(target=_acquire_lock, name=f"log-sink-lock-{path.name}", daemon=True)
     lock_thread.start()
-    pending = bytearray()
-    source_eof = False
-    try:
-        read_chunk = getattr(source, "read1", source.read)
-        while not lock_ready.is_set():
-            chunk = read_chunk(chunk_bytes)
-            if not chunk:
+
+    def _read_source() -> None:
+        nonlocal pending_bytes, source_eof, source_failed
+        read_chunk = getattr(source, "read1", None) or source.read
+        try:
+            while chunk := read_chunk(chunk_bytes):
+                with pending_ready:
+                    pending_bytes = _append_bounded_chunk(
+                        pending,
+                        chunk,
+                        buffered_bytes=pending_bytes,
+                        max_bytes=max_bytes,
+                    )
+                    pending_ready.notify()
+        except OSError:
+            source_failed = True
+        finally:
+            with pending_ready:
                 source_eof = True
+                pending_ready.notify_all()
+
+    reader_thread = threading.Thread(target=_read_source, name=f"log-sink-reader-{path.name}", daemon=True)
+    reader_thread.start()
+    try:
+        eof_wait_deadline: float | None = None
+        while not lock_ready.wait(timeout=0.05):
+            with pending_ready:
+                reached_eof = source_eof
+            if not reached_eof:
+                continue
+            if eof_wait_deadline is None:
+                eof_wait_deadline = time.monotonic() + 31.0
+            elif time.monotonic() >= eof_wait_deadline:
                 break
-            pending.extend(chunk)
-            if len(pending) > max_bytes:
-                del pending[:-max_bytes]
-        if source_eof and not lock_ready.is_set():
-            lock_ready.wait(timeout=31.0)
         if not lock_acquired:
-            if not source_eof:
-                _drain(source, chunk_bytes)
+            reader_thread.join()
             return False
 
         log_file = _open_regular_log(path)
@@ -138,25 +187,27 @@ def copy_bounded_log(
             raise OSError(f"runtime log path is not a regular file: {path}")
         with log_file:
             _compact_log(log_file, max_bytes=max_bytes, retain_bytes=retain_bytes)
-            if pending:
-                _write_bounded_chunk(
-                    log_file,
-                    bytes(pending),
-                    max_bytes=max_bytes,
-                    retain_bytes=retain_bytes,
-                )
-            if not source_eof:
-                while chunk := source.read(chunk_bytes):
+            while True:
+                with pending_ready:
+                    while not pending and not source_eof:
+                        pending_ready.wait()
+                    chunk = b"".join(pending)
+                    pending.clear()
+                    pending_bytes = 0
+                    finished = source_eof and not chunk
+                if chunk:
                     _write_bounded_chunk(
                         log_file,
                         chunk,
                         max_bytes=max_bytes,
                         retain_bytes=retain_bytes,
                     )
-        return True
+                if finished:
+                    break
+        reader_thread.join()
+        return not source_failed
     except OSError:
-        if not source_eof:
-            _drain(source, chunk_bytes)
+        reader_thread.join()
         return False
     finally:
         lock_stop.set()
