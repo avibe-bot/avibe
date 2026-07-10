@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 from uuid import uuid4
 
 import yaml
@@ -101,6 +102,85 @@ class AgentImportCandidate:
 class AgentImportResult:
     imported: list[VibeAgent]
     skipped: list[dict[str, Any]]
+
+
+# Metadata key holding per-Agent env overrides for backend subprocesses.
+# The value is a JSON object of env-var names to string values. A value of
+# the exact form "${NAME}" is resolved from the daemon process environment
+# at spawn time, so secrets can stay out of the agents store.
+AGENT_ENV_METADATA_KEY = "env"
+
+
+def vibe_agent_name_from_platform_payload(payload: Mapping[str, Any] | None) -> Optional[str]:
+    """Return the Avibe Agent name a message/turn payload resolved to.
+
+    Message dispatch stamps ``resolved_vibe_agent`` onto the platform
+    payload once routing picks an Agent; Agent-run/session targets carry
+    ``agent_session_target.agent_name``. Both shapes are accepted so
+    per-Agent behavior applies uniformly across IM routing,
+    ``vibe agent run``, scheduled tasks, and watches.
+    """
+    if not payload:
+        return None
+    resolved = payload.get("resolved_vibe_agent")
+    if isinstance(resolved, Mapping):
+        name = str(resolved.get("name") or "").strip()
+        if name:
+            return name
+    target = payload.get("agent_session_target")
+    if isinstance(target, Mapping):
+        name = str(target.get("agent_name") or "").strip()
+        if name:
+            return name
+    return None
+
+
+def resolve_agent_env_overrides(
+    agent: Optional[VibeAgent],
+    *,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return the env overrides ``agent.metadata["env"]`` declares.
+
+    The mapping is applied on top of the backend subprocess env at spawn
+    time. This lets multiple Agents share one backend binary and one
+    settings/skills home while running with isolated authentication —
+    e.g. a subscription (OAuth) Claude Agent next to an
+    ``ANTHROPIC_API_KEY`` Claude Agent.
+
+    Non-dict metadata, blank/non-string keys, and ``None`` values are
+    ignored. A value of the exact form ``"${NAME}"`` resolves from
+    ``base_env`` (the daemon process env by default) and is skipped with
+    a warning when unset, so a missing secret fails visibly instead of
+    injecting an empty credential.
+    """
+    if agent is None or not isinstance(agent.metadata, dict):
+        return {}
+    raw = agent.metadata.get(AGENT_ENV_METADATA_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    env_source = base_env if base_env is not None else os.environ
+    overrides: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if value is None:
+            continue
+        text = str(value)
+        if text.startswith("${") and text.endswith("}") and len(text) > 3:
+            ref = text[2:-1]
+            resolved_value = str(env_source.get(ref) or "")
+            if not resolved_value:
+                logger.warning(
+                    "Agent %r env override %s references unset ${%s}; skipping",
+                    agent.name,
+                    key,
+                    ref,
+                )
+                continue
+            text = resolved_value
+        overrides[key.strip()] = text
+    return overrides
 
 
 class VibeAgentStore:

@@ -187,6 +187,15 @@ class SessionHandler(BaseHandler):
             await self.cleanup_session(composite_key)
             return None
 
+        agent_env = self._vibe_agent_env_overrides(context)
+        if getattr(client, "_vibe_agent_env", {}) != agent_env:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because Agent env overrides changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
+
         try:
             await self._set_claude_model_if_needed(client, current_model)
         except Exception as e:
@@ -227,6 +236,14 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
+        agent_env = self._vibe_agent_env_overrides(context)
+        if getattr(client, "_vibe_agent_env", {}) != agent_env:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because Agent env overrides changed",
                 composite_key,
             )
             await self.cleanup_session(composite_key)
@@ -761,6 +778,36 @@ class SessionHandler(BaseHandler):
         finally:
             self._untrack_claude_session_create(composite_key, create_future)
 
+    def _vibe_agent_env_overrides(self, context: MessageContext) -> Dict[str, str]:
+        """Per-Agent env overrides declared in ``VibeAgent.metadata["env"]``.
+
+        Applied on top of the global auth composition at subprocess spawn so
+        Agents on the same backend can carry isolated authentication (e.g.
+        one OAuth Agent and one ``ANTHROPIC_API_KEY`` Agent) while sharing
+        the backend binary, settings, and skills.
+        """
+        from core.vibe_agents import (
+            resolve_agent_env_overrides,
+            vibe_agent_name_from_platform_payload,
+        )
+
+        agent_name = vibe_agent_name_from_platform_payload(
+            getattr(context, "platform_specific", None)
+        )
+        if not agent_name:
+            return {}
+        store = getattr(self.controller, "vibe_agent_store", None)
+        if store is None:
+            return {}
+        try:
+            agent = store.get(agent_name)
+        except Exception:
+            logger.warning(
+                "Agent env override lookup failed for %r", agent_name, exc_info=True
+            )
+            return {}
+        return resolve_agent_env_overrides(agent)
+
     async def _create_claude_session(
         self,
         *,
@@ -853,6 +900,16 @@ class SessionHandler(BaseHandler):
         from vibe.claude_config import build_claude_subprocess_env
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        agent_env_overrides = self._vibe_agent_env_overrides(context)
+        if agent_env_overrides:
+            # Per-Agent auth/env isolation: metadata["env"] wins over the
+            # global auth composition but never over Avibe identity keys
+            # (caller context and owner marker below). Log key names only.
+            claude_env.update(agent_env_overrides)
+            logger.info(
+                "Applied Agent env override(s): %s",
+                ", ".join(sorted(agent_env_overrides)),
+            )
         claude_env.update(caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
         claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
@@ -910,6 +967,7 @@ class SessionHandler(BaseHandler):
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
         setattr(client, "_vibe_caller_env", caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
+        setattr(client, "_vibe_agent_env", agent_env_overrides)
 
         # Log the actual options being used
         logger.info("ClaudeAgentOptions details:")

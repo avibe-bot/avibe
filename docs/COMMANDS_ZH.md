@@ -801,6 +801,34 @@ vibe agent models --backend opencode --provider deepseek
 按 `<name>` 查询时，结果包含 `current`——该 Agent 配置的 `model` / `reasoning_effort` 及其是否仍然有效。
 `create` / `update` 接受任意取值，但当取值不在已知集合中时会给出警告（不拒绝），并指回本命令。
 
+### Per-Agent 环境变量覆盖（`metadata.env`）
+
+Agent 可以在 metadata JSON 的 `env` 键里声明后端子进程的环境变量覆盖。
+每次为该 Agent 拉起会话进程时，这些覆盖会叠加在后端全局环境组合之上——
+同一后端上的多个 Agent 因此可以携带互相隔离的认证，同时继续共享后端二进制、
+settings、skills 与权限配置。
+
+典型场景：一个 Claude Code Agent 走订阅 OAuth，另一个走 API-key 计费，并行运行：
+
+```bash
+# 全局 Claude 认证保持 "oauth"（Settings → Backends → Claude）。
+# 只有这个 Agent 用自己的 key 直连 API：
+vibe agent create cc-api --backend claude \
+  --description "Claude Code on API-key billing" \
+  --metadata '{"env": {"ANTHROPIC_API_KEY": "${CC_API_KEY}"}}'
+```
+
+- 值为字符串；非字符串值会被字符串化，`null` 值被忽略
+- 形如 `"${NAME}"` 的值会在拉起时从 Avibe 守护进程的环境变量解析，
+  密钥本身无需落入 agents 数据库；引用未设置时跳过并告警，而不是注入空值
+- 覆盖优先于全局认证组合，但永远不会覆盖 Avibe 管理的身份变量
+  （`AVIBE_SESSION_ID` 等）
+- 修改 Agent 的 `env` metadata 在下一条消息生效：缓存的活跃会话若覆盖不同会自动重建
+- Claude Code 注意事项：`~/.claude/settings.json` 的 `env` 块由 CLI 启动时自行应用，
+  优先级高于进程环境。给单个 Agent 配 `ANTHROPIC_API_KEY` 时，请让全局 Claude
+  认证保持 OAuth 模式（该模式会保证 settings.json 中不含 `ANTHROPIC_*` 凭证）。
+- 目前应用于 `claude` 后端；`codex` / `opencode` 后续可按同一 metadata 契约接入
+
 ### `vibe agent run`
 
 ```bash

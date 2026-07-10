@@ -825,6 +825,42 @@ When queried by `<name>`, the result includes `current` — the Agent's configur
 accept any value but warn (without rejecting) when it is not in the known set and
 point back to this command.
 
+### Per-Agent env overrides (`metadata.env`)
+
+An Agent may declare environment overrides for its backend subprocess in the
+`env` key of its metadata JSON. They are applied on top of the backend's
+global env composition every time a session process is spawned for that
+Agent, so multiple Agents on the same backend can run with isolated
+authentication while still sharing the backend binary, settings, skills, and
+permission configuration.
+
+The primary use case is running one Claude Code Agent on subscription OAuth
+and another on API-key billing side by side:
+
+```bash
+# Global Claude auth stays "oauth" (Settings → Backends → Claude).
+# This Agent alone talks to the API with its own key:
+vibe agent create cc-api --backend claude \
+  --description "Claude Code on API-key billing" \
+  --metadata '{"env": {"ANTHROPIC_API_KEY": "${CC_API_KEY}"}}'
+```
+
+- values are strings; non-string values are stringified, `null` values are ignored
+- a value of the exact form `"${NAME}"` is resolved from the Avibe daemon's
+  process environment at spawn time, so the secret itself never has to be
+  stored in the agents database; an unset reference is skipped with a warning
+  instead of injecting an empty value
+- overrides win over the global auth composition but never over
+  Avibe-managed identity variables (`AVIBE_SESSION_ID` and friends)
+- changing an Agent's `env` metadata takes effect on the next message: a
+  cached live session with different overrides is recreated automatically
+- Claude Code note: `~/.claude/settings.json`'s `env` block is applied by the
+  CLI itself at launch and wins over process env. Keep global Claude auth in
+  OAuth mode (which keeps that block free of `ANTHROPIC_*` credentials) when
+  giving individual Agents their own `ANTHROPIC_API_KEY`.
+- currently applied to the `claude` backend; `codex` / `opencode` wiring can
+  adopt the same metadata contract later
+
 ### `vibe agent run`
 
 ```bash
