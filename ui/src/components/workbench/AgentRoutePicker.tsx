@@ -55,6 +55,10 @@ interface AgentRoutePickerProps {
   onNavigateAway?: () => void;
 }
 
+type ReasoningOption = { value: string; label: string };
+
+const EMPTY_REASONING_OPTIONS: Record<string, ReasoningOption[]> = {};
+
 // design.pen Q5xIZa — one cyan-ringed trigger showing `[backend] agent · model ·
 // effort` that opens a three-column cascading menu (Agent → Model → Effort).
 // Picking an agent seeds model/effort from its defaults; the model column is
@@ -86,7 +90,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // Some backends expose model-specific reasoning efforts. Cache the active
   // backend's map so the effort column offers exactly what the selected model
   // supports.
-  const [reasoningByBackend, setReasoningByBackend] = useState<Record<string, Record<string, { value: string; label: string }[]>>>({});
+  const [reasoningByBackend, setReasoningByBackend] = useState<Record<string, Record<string, ReasoningOption[]>>>({});
   const [loadingModels, setLoadingModels] = useState(false);
   const [patching, setPatching] = useState(false);
   // Free-text filter for the model column — long backends (OpenCode) list dozens.
@@ -211,7 +215,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
   const models = modelsByBackend[backend] ?? [];
   const modelLabels = modelLabelsByBackend[backend] ?? {};
-  const backendReasoning = reasoningByBackend[backend] ?? {};
+  const backendReasoning = reasoningByBackend[backend] ?? EMPTY_REASONING_OPTIONS;
   // Show the search field only when the list is long enough to warrant it, so
   // claude/codex (a handful of models) stay uncluttered.
   const showModelSearch = models.length > 8;
