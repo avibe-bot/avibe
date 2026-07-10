@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
@@ -33,6 +34,7 @@ from storage import vault_crypto, vault_webauthn
 from storage.models import (
     agent_sessions,
     scopes,
+    state_meta,
     vault_audit,
     vault_auth_factors,
     vault_grants,
@@ -46,17 +48,17 @@ from storage.vault_crypto import Sealed
 logger = logging.getLogger(__name__)
 
 SKILL_TAG_PREFIX = "skill:"
-DEFAULT_ENV_GRANT_TTL_SECONDS = 300
-DEFAULT_TAG_GRANT_TTL_SECONDS = 900
+VAULT_SETTINGS_META_KEY = "vault_settings"
+DEFAULT_UNLOCK_WINDOW_SECONDS = 600
+UNLOCK_WINDOW_OPTIONS_SECONDS = (300, 600, 1800)
+GRANT_DURATION_ONE_TIME = "one-time"
+ONE_TIME_GRANT_TTL_SECONDS = 60
+DEFAULT_GRANT_TTL_SECONDS = 300
+GRANT_TTL_OPTIONS_SECONDS = (300, 900)
+LAST_GRANT_TTL_OPTIONS = (GRANT_DURATION_ONE_TIME, *GRANT_TTL_OPTIONS_SECONDS)
 DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS = 120
 DEFAULT_REQUEST_TTL_SECONDS = 30 * 60
 AUTH_FACTOR_REGISTRATION_AUTHZ_OPERATION = "authorize_webauthn_factor_registration"
-DEFAULT_GRANT_TTL_SECONDS = {
-    "env": DEFAULT_ENV_GRANT_TTL_SECONDS,
-    "tag": DEFAULT_TAG_GRANT_TTL_SECONDS,
-    "skill": DEFAULT_TAG_GRANT_TTL_SECONDS,
-}
-GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
 GRANT_PURPOSES = {"run", "fetch", "inject"}
 SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
@@ -300,6 +302,118 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _default_vault_settings() -> dict[str, Any]:
+    return {
+        "unlock_window_seconds": DEFAULT_UNLOCK_WINDOW_SECONDS,
+        "strict_approvals": False,
+        "last_grant_ttl": DEFAULT_GRANT_TTL_SECONDS,
+    }
+
+
+def _normalize_unlock_window_seconds(value: Any) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError) as exc:
+        raise VaultServiceError("unlock_window_seconds must be one of 300, 600, or 1800") from exc
+    if seconds not in UNLOCK_WINDOW_OPTIONS_SECONDS:
+        raise VaultServiceError("unlock_window_seconds must be one of 300, 600, or 1800")
+    return seconds
+
+
+def normalize_grant_duration(value: Any | None, *, default: Any | None = None) -> dict[str, Any]:
+    raw = default if value is None else value
+    if raw is None:
+        raw = DEFAULT_GRANT_TTL_SECONDS
+    if isinstance(raw, str):
+        normalized = raw.strip().lower().replace("_", "-")
+        if normalized == GRANT_DURATION_ONE_TIME:
+            return {
+                "last_grant_ttl": GRANT_DURATION_ONE_TIME,
+                "ttl_seconds": ONE_TIME_GRANT_TTL_SECONDS,
+                "one_shot": True,
+            }
+        try:
+            raw = int(normalized)
+        except ValueError as exc:
+            raise InvalidGrantError("grant duration must be one-time, 300, or 900 seconds") from exc
+    try:
+        ttl = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidGrantError("grant duration must be one-time, 300, or 900 seconds") from exc
+    if ttl not in GRANT_TTL_OPTIONS_SECONDS:
+        raise InvalidGrantError("grant duration must be one-time, 300, or 900 seconds")
+    return {"last_grant_ttl": ttl, "ttl_seconds": ttl, "one_shot": False}
+
+
+def _normalize_last_grant_ttl(value: Any) -> str | int:
+    return normalize_grant_duration(value)["last_grant_ttl"]
+
+
+def _normalize_strict_approvals(value: Any) -> bool:
+    if type(value) is not bool:
+        raise VaultServiceError("strict_approvals must be a boolean")
+    return value
+
+
+def _normalize_vault_settings(raw: Any) -> dict[str, Any]:
+    settings = _default_vault_settings()
+    if isinstance(raw, dict):
+        if "unlock_window_seconds" in raw:
+            settings["unlock_window_seconds"] = _normalize_unlock_window_seconds(raw["unlock_window_seconds"])
+        if "strict_approvals" in raw:
+            settings["strict_approvals"] = _normalize_strict_approvals(raw["strict_approvals"])
+        if "last_grant_ttl" in raw:
+            settings["last_grant_ttl"] = _normalize_last_grant_ttl(raw["last_grant_ttl"])
+    return settings
+
+
+def get_vault_settings(conn: Connection) -> dict[str, Any]:
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == VAULT_SETTINGS_META_KEY)
+    ).scalar_one_or_none()
+    return _normalize_vault_settings(_loads(raw))
+
+
+def save_vault_settings(conn: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise VaultServiceError("vault settings payload must be an object")
+    current = get_vault_settings(conn)
+    updates: dict[str, Any] = {}
+    if "unlock_window_seconds" in payload:
+        updates["unlock_window_seconds"] = _normalize_unlock_window_seconds(payload["unlock_window_seconds"])
+    if "strict_approvals" in payload:
+        updates["strict_approvals"] = _normalize_strict_approvals(payload["strict_approvals"])
+    if "last_grant_ttl" in payload:
+        updates["last_grant_ttl"] = _normalize_last_grant_ttl(payload["last_grant_ttl"])
+    next_settings = _normalize_vault_settings({**current, **updates})
+    value_json = json.dumps(next_settings, sort_keys=True)
+    now = _now()
+    stmt = sqlite_insert(state_meta).values(
+        key=VAULT_SETTINGS_META_KEY,
+        value_json=value_json,
+        updated_at=now,
+    )
+    conn.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[state_meta.c.key],
+            set_={
+                "value_json": value_json,
+                "updated_at": now,
+            },
+        )
+    )
+    return next_settings
+
+
+def vault_session_policy(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = _normalize_vault_settings(settings or {})
+    return {
+        "windowSeconds": normalized["unlock_window_seconds"],
+        "strictApprovals": normalized["strict_approvals"],
+        "parentValueSealAllowed": True,
+    }
 
 
 def _secret_name_case_key(name: str) -> str:
@@ -1394,11 +1508,7 @@ def _ttl_cap_from_grant_option(option: dict[str, Any], selector: dict[str, Any])
                 ttl_options.append(value)
     if ttl_options:
         return max(ttl_options)
-    try:
-        default = int(option.get("default_ttl_seconds") or 0)
-    except (TypeError, ValueError):
-        default = 0
-    return max(1, default or _selector_ttl_seconds(selector))
+    return max(GRANT_TTL_OPTIONS_SECONDS)
 
 
 def _request_grant_option(row: dict[str, Any]) -> RequestGrantOption:
@@ -2384,6 +2494,14 @@ def get_protected_envelope(conn: Connection, name: str) -> Sealed:
     return _row_sealed(row)
 
 
+def get_protected_record_envelope(conn: Connection, name: str) -> Sealed:
+    row = _require_row(conn, name)
+    if row.get("protection") != "protected":
+        raise UnsupportedProtectionError(f"{name} is standard-tier")
+    _reject_keypair_value_delivery(row, name)
+    return _row_sealed(row)
+
+
 def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
     """Bump usage + write a value-free ``proxied`` audit row after a brokered request."""
     row = _require_row(conn, name)
@@ -2411,6 +2529,24 @@ def record_signing_use(
         .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
     )
     audit(conn, "signed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
+
+
+def record_reveal_use(
+    conn: Connection,
+    name: str,
+    *,
+    requester: Any = None,
+    delivery: Any = None,
+    request_id: str | None = None,
+) -> None:
+    """Bump revealed secret usage + write a value-free ``revealed`` audit row."""
+    _require_row(conn, name)
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == name)
+        .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
+    )
+    audit(conn, "revealed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
 
 
 def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
@@ -2597,15 +2733,6 @@ def _source_selector_payload(source_selector: dict[str, Any] | None = None) -> d
     return payload or {"env": [], "tags": []}
 
 
-def _selector_ttl_seconds(source_selector: dict[str, Any]) -> int:
-    tags = source_selector.get("tags")
-    if isinstance(tags, list) and tags:
-        if any(isinstance(tag, str) and tag.startswith(SKILL_TAG_PREFIX) for tag in tags):
-            return DEFAULT_GRANT_TTL_SECONDS["skill"]
-        return DEFAULT_GRANT_TTL_SECONDS["tag"]
-    return DEFAULT_GRANT_TTL_SECONDS["env"]
-
-
 def _parse_env_selector(spec: str) -> tuple[str, str]:
     raw = spec.strip()
     if not raw:
@@ -2749,6 +2876,7 @@ def request_grantable_member_metas(conn: Connection, request_id: str) -> list[di
 
 
 def _grant_option(
+    conn: Connection,
     rows: list[dict[str, Any]],
     *,
     source_selector: dict[str, Any],
@@ -2756,13 +2884,17 @@ def _grant_option(
     one_shot: bool,
 ) -> dict[str, Any]:
     members = [str(row["name"]) for row in rows]
-    default_ttl_seconds = _selector_ttl_seconds(source_selector)
+    settings = get_vault_settings(conn)
+    default_duration = GRANT_DURATION_ONE_TIME if one_shot else settings["last_grant_ttl"]
+    normalized_default_duration = normalize_grant_duration(default_duration)
     option = {
         "grant_id": _id("vgr"),
         "source_selector": source_selector,
         "purpose": purpose,
-        "default_ttl_seconds": default_ttl_seconds,
-        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds >= default_ttl_seconds],
+        "default_grant_duration": normalized_default_duration["last_grant_ttl"],
+        "grant_duration_options": list(LAST_GRANT_TTL_OPTIONS),
+        "default_ttl_seconds": normalized_default_duration["ttl_seconds"],
+        "ttl_options_seconds": list(GRANT_TTL_OPTIONS_SECONDS),
         "session_binding_default": True,
         "member_count": len(members),
         "member_snapshot": members,
@@ -2792,7 +2924,7 @@ def approval_card(
     rows = member_rows if member_rows is not None else ([_require_row(conn, secret_name)] if secret_name else [])
     default_selector = {"env": [secret_name]} if secret_name else None
     selector = _source_selector_payload(source_selector or default_selector)
-    grant_options = [_grant_option(rows, source_selector=selector, purpose=purpose, one_shot=one_shot)] if grantable and rows else []
+    grant_options = [_grant_option(conn, rows, source_selector=selector, purpose=purpose, one_shot=one_shot)] if grantable and rows else []
     protected_names = [str(row["name"]) for row in rows if row.get("protection") == "protected"]
     card = {
         "card_type": "approval",
@@ -3029,6 +3161,101 @@ def complete_sign_request(
 def get_request(conn: Connection, request_id: str, *, audience: str | None = REQUEST_AUDIENCE_UI) -> dict[str, Any]:
     row_dict = _load_request_row(conn, request_id)
     return _request_row_payload(row_dict, conn=conn, audience=audience)
+
+
+def set_request_operation_context(
+    conn: Connection,
+    request_id: str,
+    operation_context: dict[str, Any],
+    *,
+    audience: str | None = REQUEST_AUDIENCE_UI,
+) -> dict[str, Any]:
+    row_dict = _load_request_row(conn, request_id)
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
+    delivery_payload["operation_context"] = operation_context
+    card = delivery_payload.get("card")
+    if isinstance(card, dict):
+        next_card = dict(card)
+        next_card["operation_context"] = operation_context
+        delivery_payload["card"] = next_card
+    conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id)
+        .values(delivery=json.dumps(delivery_payload))
+    )
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=audience)
+
+
+def _agent_binding_record_item_names(record: dict[str, Any]) -> set[str]:
+    items = record.get("items")
+    if not isinstance(items, list):
+        return set()
+    return {str(item.get("name") or "") for item in items if isinstance(item, dict) and item.get("name")}
+
+
+def _agent_binding_record_superseded(existing_record: dict[str, Any], new_record: dict[str, Any]) -> bool:
+    existing_names = _agent_binding_record_item_names(existing_record)
+    new_names = _agent_binding_record_item_names(new_record)
+    if not existing_names or not new_names:
+        return False
+    existing_grant_id = str(existing_record.get("grant_id") or "")
+    new_grant_id = str(new_record.get("grant_id") or "")
+    if existing_grant_id and new_grant_id and existing_grant_id != new_grant_id:
+        return False
+    return existing_names.issubset(new_names)
+
+
+def _agent_binding_approval_record_cap(row_dict: dict[str, Any], new_record: dict[str, Any]) -> int:
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = delivery if isinstance(delivery, dict) else {}
+    card = delivery_payload.get("card") if isinstance(delivery_payload.get("card"), dict) else {}
+    grant_options = card.get("grant_options") if isinstance(card, dict) else []
+    member_count = 0
+    if isinstance(grant_options, list):
+        for option in grant_options:
+            if not isinstance(option, dict):
+                continue
+            members = option.get("member_snapshot")
+            if isinstance(members, list):
+                member_count = max(member_count, len([name for name in members if isinstance(name, str) and name]))
+    return max(1, member_count, len(_agent_binding_record_item_names(new_record)))
+
+
+def record_request_agent_binding_approvals(
+    conn: Connection,
+    request_id: str,
+    record: dict[str, Any],
+    *,
+    max_records: int | None = None,
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise InvalidRequestError("agent binding approval record must be an object")
+    row_dict = _load_request_row(conn, request_id)
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
+    records = delivery_payload.get("agent_binding_approvals")
+    if not isinstance(records, list):
+        records = []
+    records = [
+        existing
+        for existing in records
+        if isinstance(existing, dict) and not _agent_binding_record_superseded(existing, record)
+    ]
+    records.append(record)
+    if max_records is not None:
+        records = records[-max(1, max_records) :]
+    else:
+        records = records[-_agent_binding_approval_record_cap(row_dict, record) :]
+    delivery_payload["agent_binding_approvals"] = records
+    conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id)
+        .values(delivery=json.dumps(delivery_payload))
+    )
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
 def claim_sign_request(
@@ -3577,6 +3804,8 @@ def create_grant(
     purpose: str = "run",
     session_id: str | None = None,
     ttl_seconds: int | None = None,
+    grant_duration: Any | None = None,
+    expires_at: str | None = None,
     request_id: str | None = None,
     inherit_request_session: bool = True,
     expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
@@ -3608,8 +3837,33 @@ def create_grant(
     if expected_member_names is not None and set(members) != set(expected_member_names):
         raise InvalidGrantError("resident agent DEKs must match the approved grant members")
     live_rows_by_name = {row["name"]: row for row in live_rows}
-    one_shot_grant = approval.one_shot
+    remember_duration = grant_duration is not None or ttl_seconds is not None
+    default_duration = GRANT_DURATION_ONE_TIME if approval.one_shot else get_vault_settings(conn)["last_grant_ttl"]
+    duration = normalize_grant_duration(grant_duration, default=default_duration)
+    if ttl_seconds is not None:
+        if grant_duration is not None:
+            raise InvalidGrantError("use grant_duration or ttl_seconds, not both")
+        duration = normalize_grant_duration(ttl_seconds)
+    one_shot_grant = approval.one_shot or bool(duration["one_shot"])
+    if one_shot_grant:
+        requested_session_id = _request_session_id(_load_request_row(conn, request_id))
+        if requested_session_id:
+            if session_id and session_id != requested_session_id:
+                raise InvalidRequestError("grant session does not match the approval request")
+            session_id = requested_session_id
     resident_cache_ready = cache_ready and any(live_rows_by_name[name].get("protection") == "protected" for name in members)
+    ttl = int(duration["ttl_seconds"])
+    ttl = max(1, min(ttl, approval.ttl_cap_seconds))
+    now_dt = datetime.now(timezone.utc)
+    expires_at_dt = now_dt + timedelta(seconds=ttl)
+    if expires_at is not None:
+        issued_expires_at = _parse_iso_datetime(expires_at)
+        if issued_expires_at is None:
+            raise InvalidGrantError("grant binding expiry is invalid")
+        if issued_expires_at <= now_dt:
+            raise InvalidGrantError("grant binding has expired")
+        expires_at_dt = min(expires_at_dt, issued_expires_at)
+    expires_at = expires_at_dt.isoformat()
     decided_at = _now()
     claim = conn.execute(
         vault_requests.update()
@@ -3622,10 +3876,6 @@ def create_grant(
     )
     if claim.rowcount != 1:
         raise InvalidRequestError("grant approval request is not pending")
-    ttl = int(ttl_seconds or _selector_ttl_seconds(selector))
-    ttl = max(1, min(ttl, approval.ttl_cap_seconds))
-    now_dt = datetime.now(timezone.utc)
-    expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
     grant_id = approval.grant_id
     grant_values = {
         "member_snapshot": json.dumps(members),
@@ -3680,10 +3930,17 @@ def create_grant(
         conn,
         "granted",
         requester={"session_id": session_id} if session_id else None,
-        delivery={"source_selector": selector, "purpose": purpose, "member_count": len(members)},
+        delivery={
+            "source_selector": selector,
+            "purpose": purpose,
+            "member_count": len(members),
+            "grant_duration": duration["last_grant_ttl"],
+        },
         request_id=request_id,
         grant_id=grant_id,
     )
+    if remember_duration:
+        save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
     if not one_shot_grant:
         _approve_sibling_access_requests_for_grant(
@@ -3778,6 +4035,7 @@ def mark_grant_agent_ready(
     grant_id: str,
     *,
     ttl_seconds: int | None = None,
+    expires_at: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
     row = conn.execute(
@@ -3795,7 +4053,14 @@ def mark_grant_agent_ready(
     ready_at_dt = datetime.now(timezone.utc)
     ready_at = ready_at_dt.isoformat()
     values: dict[str, Any] = {"agent_ready": 1, "agent_ready_at": ready_at}
-    if ttl_seconds is not None:
+    if expires_at is not None:
+        ready_expires_at = _parse_iso_datetime(expires_at)
+        if ready_expires_at is None:
+            raise InvalidGrantError("grant ready expiry is invalid")
+        if ready_expires_at <= ready_at_dt:
+            raise GrantNotActiveError(grant_id)
+        values["expires_at"] = ready_expires_at.isoformat()
+    elif ttl_seconds is not None:
         ttl = max(1, int(ttl_seconds))
         values["expires_at"] = (ready_at_dt + timedelta(seconds=ttl)).isoformat()
     result = conn.execute(

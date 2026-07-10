@@ -24,6 +24,8 @@ from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 from vibe import api
 
+TEST_AGENT_PUBKEY = {"public_key": "pk", "fingerprint": "fp"}
+
 
 def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
@@ -128,6 +130,60 @@ def _assert_no_unlock_material(payload: object) -> None:
     assert "wm-protected" not in encoded
 
 
+def _payload_keys(payload: object) -> set[str]:
+    if isinstance(payload, dict):
+        keys = {str(key) for key in payload}
+        for value in payload.values():
+            keys.update(_payload_keys(value))
+        return keys
+    if isinstance(payload, list):
+        keys: set[str] = set()
+        for item in payload:
+            keys.update(_payload_keys(item))
+        return keys
+    return set()
+
+
+def _verified_signed_context(context: dict) -> dict:
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    unsigned = dict(context)
+    signature = unsigned.pop("signature")
+    root_key = api.get_vault_sandbox_root_metadata()["root_metadata"]["daemon"]["verificationKeys"][0]
+    public_key = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(root_key["publicKey"]))
+    public_key.verify(
+        base64.b64decode(signature["value"]),
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    )
+    assert signature["alg"] == "ed25519"
+    assert signature["keyId"] == root_key["keyId"]
+    return unsigned
+
+
+def _agent_dek_blindbox(enc: str = "enc", ct: str = "ct") -> dict:
+    return {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": enc, "ct": ct}
+
+
+def _issued_agent_dek_payload(
+    request_id: str,
+    *,
+    grant_duration: str | int = 300,
+    blindboxes: dict[str, dict] | None = None,
+) -> dict:
+    issued = api.create_vault_agent_bindings_batch({"request_id": request_id, "grant_duration": grant_duration})
+    return {
+        "agent_pubkey": issued["agent_pubkey"],
+        "deks": [
+            {
+                "name": item["name"],
+                "dek_blindbox": (blindboxes or {}).get(item["name"], _agent_dek_blindbox()),
+                "approval": item["approval"],
+            }
+            for item in issued["items"]
+        ],
+    }
+
+
 def _auth_factor_for_credential(credential: WebAuthnTestCredential) -> dict:
     with api._vault_engine().connect() as conn:
         row = conn.execute(
@@ -161,6 +217,7 @@ def _establish_protected_secret_with_factor(
 @pytest.fixture
 def avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", lambda: dict(TEST_AGENT_PUBKEY))
 
 
 def test_create_list_delete_roundtrip(monkeypatch):
@@ -471,20 +528,14 @@ def test_update_secret_metadata_does_not_stale_pending_protected_grant(monkeypat
     hydrated = api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI)
     unlock_material = hydrated["request"]["card"]["grant_options"][0]["unlock_material"]
     assert unlock_material[0]["name"] == "PENDING_PROTECTED"
+    issued = _issued_agent_dek_payload(request_id)
 
     fulfilled = api.fulfill_vault_access_request(
         request_id,
         {
             "grant_id": grant_id,
             "session_id": "ses_1",
-            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
-            "deks": [
-                {
-                    "name": "PENDING_PROTECTED",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         },
     )
 
@@ -1158,11 +1209,11 @@ def test_vault_sandbox_root_metadata_first_key_wins_under_concurrency(monkeypatc
     assert len(keys) == 1
 
 
-def test_create_vault_agent_binding_signs_value_free_protected_grant(monkeypatch):
-    from cryptography.hazmat.primitives.asymmetric import ed25519
-
+def test_create_vault_agent_bindings_batch_signs_value_free_contexts(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    with api._vault_engine().begin() as conn:
+        _insert_workbench_session(conn, session_id="ses_binding", title="fix-ci-flake")
     api.create_vault_secret(
         {
             "name": "PROTECTED_BINDING",
@@ -1179,34 +1230,320 @@ def test_create_vault_agent_binding_signs_value_free_protected_grant(monkeypatch
         )
     grant_id = request["card"]["grant_options"][0]["grant_id"]
 
-    result = api.create_vault_agent_binding(
-        {"request_id": request["id"], "grant_id": grant_id, "name": "PROTECTED_BINDING", "ttl_seconds": 300}
+    result = api.create_vault_agent_bindings_batch(
+        {"request_id": request["id"], "grant_duration": 300}
     )
 
     assert result["ok"] is True
     assert result["agent_pubkey"] == {"public_key": "agent-pk", "fingerprint": "agent-fp"}
-    assert set(result["approval"]) == {"nonce", "expires_at_unix"}
-    binding = dict(result["binding"])
-    signature = binding.pop("signature")
-    root_key = api.get_vault_sandbox_root_metadata()["root_metadata"]["daemon"]["verificationKeys"][0]
-    public_key = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(root_key["publicKey"]))
-    public_key.verify(
-        base64.b64decode(signature["value"]),
-        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-    )
-    assert signature["alg"] == "ed25519"
-    assert signature["keyId"] == root_key["keyId"]
-    assert binding["requestId"] == request["id"]
-    assert binding["grantId"] == grant_id
-    assert binding["agent"]["fingerprint"] == "agent-fp"
-    context = binding["context"]
+    assert result["grant_duration"] == 300
+    assert result["ttl_seconds"] == 300
+    assert len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["name"] == "PROTECTED_BINDING"
+    assert set(item["approval"]) == {"nonce", "expires_at_unix"}
+    context = _verified_signed_context(item["context"])
+    assert context["v"] == 2
     assert context["purpose"] == "agent-deliver"
-    assert context["name"] == "PROTECTED_BINDING"
+    assert context["requestId"].startswith("vab_")
     assert context["grantId"] == grant_id
-    assert context["ttlSecs"] == 300
-    assert isinstance(context["approvalNonce"], list)
-    assert len(context["approvalNonce"]) == 16
-    assert context["operationHash"] == api._agent_deliver_operation_hash("PROTECTED_BINDING", 300)
+    assert context["agent"]["fingerprint"] == "agent-fp"
+    assert context["display"]["secrets"] == [{"name": "PROTECTED_BINDING", "kind": "static"}]
+    assert context["display"]["sessionLabel"] == "fix-ci-flake"
+    assert context["display"]["grantTtlSeconds"] == 300
+    assert context["release"] == {
+        "name": "PROTECTED_BINDING",
+        "ttlSecs": 300,
+        "approvalNonce": list(base64.b64decode(item["approval"]["nonce"])),
+        "approvalExpiresAtUnix": item["approval"]["expires_at_unix"],
+        "operationHash": api._agent_deliver_operation_hash("PROTECTED_BINDING", 300),
+    }
+
+
+def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
+    for name in ("PROTECTED_A", "PROTECTED_B"):
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["deploy"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    api.create_vault_secret(
+        {
+            "name": "STANDARD_ASK",
+            "tags": ["deploy"],
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "policy": {"always_ask": True},
+        }
+    )
+    request = api.request_vault_access(
+        {
+            "source_selector": {"tags": ["deploy"]},
+            "session_id": "ses_batch",
+            "command": "deploy\nprod",
+            "egress": "api.github.com",
+        }
+    )["request"]
+
+    result = api.create_vault_agent_bindings_batch(
+        {
+            "request_id": request["id"],
+            "grant_duration": "one-time",
+        }
+    )
+
+    assert result["grant_duration"] == "one-time"
+    assert result["ttl_seconds"] == 60
+    assert [item["name"] for item in result["items"]] == ["PROTECTED_A", "PROTECTED_B"]
+    assert request["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_A", "PROTECTED_B", "STANDARD_ASK"]
+    contexts = [_verified_signed_context(item["context"]) for item in result["items"]]
+    assert len({context["requestId"] for context in contexts}) == 2
+    assert all(context["requestId"].startswith("vab_") for context in contexts)
+    for context in contexts:
+        assert context["display"]["secrets"] == [
+            {"name": "PROTECTED_A", "kind": "static"},
+            {"name": "PROTECTED_B", "kind": "static"},
+            {"name": "STANDARD_ASK", "kind": "static"},
+        ]
+        assert context["display"]["command"] == "deploy prod"
+        assert context["display"]["egress"] == "api.github.com"
+        assert context["display"]["source"] == {"tags": ["deploy"]}
+        assert context["display"]["grantTtlSeconds"] == 60
+        assert context["release"]["ttlSecs"] == 60
+        assert context["release"]["operationHash"] == api._agent_deliver_operation_hash(
+            context["release"]["name"],
+            60,
+        )
+    assert api.get_vault_settings()["settings"]["last_grant_ttl"] == "one-time"
+
+
+def test_agent_bindings_batch_rejects_mixed_duration_fields(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_MIXED_TTL",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        request = vault_service.create_access_request(conn, "PROTECTED_MIXED_TTL")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_agent_bindings_batch(
+            {
+                "request_id": request["id"],
+                "grant_duration": 300,
+                "ttl_seconds": 900,
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+
+
+def test_agent_bindings_batch_retries_replace_stale_approval_records(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    for name in ("PROTECTED_BATCH_RETRY_A", "PROTECTED_BATCH_RETRY_B"):
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["batch-retry"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    request = api.request_vault_access(
+        {"source_selector": {"tags": ["batch-retry"]}, "session_id": "ses_batch_retry"}
+    )["request"]
+
+    for _index in range(5):
+        api.create_vault_agent_bindings_batch({"request_id": request["id"], "grant_duration": 300})
+
+    with api._vault_engine().connect() as conn:
+        stored = vault_service.get_request(conn, request["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    records = stored["delivery"]["agent_binding_approvals"]
+    assert len(records) == 1
+    assert [item["name"] for item in records[0]["items"]] == ["PROTECTED_BATCH_RETRY_A", "PROTECTED_BATCH_RETRY_B"]
+
+
+def test_legacy_agent_binding_records_all_protected_members(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "agent-pk", "fingerprint": "agent-fp"}))
+    agent_grant = Mock(return_value={"granted": 25, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    names = [f"PROTECTED_BULK_{index:02d}" for index in range(25)]
+    for name in names:
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["bulk"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    requested = api.request_vault_access({"source_selector": {"tags": ["bulk"]}, "session_id": "ses_bulk"})
+    option = requested["request"]["card"]["grant_options"][0]
+
+    deks = []
+    agent_pubkey = None
+    for name in option["member_snapshot"]:
+        binding = api.create_vault_agent_binding(
+            {
+                "request_id": requested["request"]["id"],
+                "grant_id": option["grant_id"],
+                "name": name,
+                "grant_duration": 300,
+            }
+        )
+        agent_pubkey = binding["agent_pubkey"]
+        deks.append({"name": name, "dek_blindbox": _agent_dek_blindbox(enc=f"enc-{name}"), "approval": binding["approval"]})
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_bulk",
+            "request_id": requested["request"]["id"],
+            "agent_pubkey": agent_pubkey,
+            "deks": deks,
+        }
+    )
+
+    assert created["grant"]["member_snapshot"] == names
+    assert agent_grant.call_count == 1
+    with api._vault_engine().connect() as conn:
+        request = vault_service.get_request(conn, requested["request"]["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    assert len(request["delivery"]["agent_binding_approvals"]) == 25
+
+
+def test_legacy_agent_binding_retries_replace_stale_approval_records(monkeypatch, avault_p2):
+    names = [f"PROTECTED_RETRY_{index}" for index in range(3)]
+    for name in names:
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["retry"],
+                "sealed": {"ciphertext": f"ct-{name}", "nonce": "n", "wrap_meta": "wm"},
+            }
+        )
+    requested = api.request_vault_access({"source_selector": {"tags": ["retry"]}, "session_id": "ses_retry"})
+    option = requested["request"]["card"]["grant_options"][0]
+
+    for name in names:
+        api.create_vault_agent_binding(
+            {"request_id": requested["request"]["id"], "grant_id": option["grant_id"], "name": name, "grant_duration": 300}
+        )
+    for _index in range(5):
+        api.create_vault_agent_binding(
+            {
+                "request_id": requested["request"]["id"],
+                "grant_id": option["grant_id"],
+                "name": names[0],
+                "grant_duration": 300,
+            }
+        )
+
+    with api._vault_engine().connect() as conn:
+        request = vault_service.get_request(conn, requested["request"]["id"], audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    records = request["delivery"]["agent_binding_approvals"]
+    record_names = [record["items"][0]["name"] for record in records]
+    assert len(records) == len(names)
+    assert record_names.count(names[0]) == 1
+    assert set(record_names) == set(names)
+
+
+def test_vault_settings_roundtrip_and_policy():
+    defaults = api.get_vault_settings()
+    assert defaults["settings"] == {
+        "unlock_window_seconds": 600,
+        "strict_approvals": False,
+        "last_grant_ttl": 300,
+    }
+    assert defaults["policy"] == {
+        "windowSeconds": 600,
+        "strictApprovals": False,
+        "parentValueSealAllowed": True,
+    }
+
+    saved = api.save_vault_settings(
+        {
+            "unlock_window_seconds": 1800,
+            "strict_approvals": True,
+            "last_grant_ttl": "one-time",
+        }
+    )
+
+    assert saved["settings"]["last_grant_ttl"] == "one-time"
+    assert saved["policy"]["windowSeconds"] == 1800
+    assert saved["policy"]["strictApprovals"] is True
+    assert api.get_vault_settings()["settings"] == saved["settings"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.save_vault_settings({"strict_approvals": "false"})
+    assert exc.value.code == "invalid_request"
+
+
+def test_create_vault_reveal_context_signs_named_protected_secret(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REVEAL",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+
+    result = api.create_vault_reveal_context("PROTECTED_REVEAL", {"session_label": "Workbench - vaults"})
+
+    assert result["ok"] is True
+    context = _verified_signed_context(result["context"])
+    assert context["v"] == 2
+    assert context["purpose"] == "reveal"
+    assert context["requestId"].startswith("vrl_")
+    assert context["display"]["secrets"] == [{"name": "PROTECTED_REVEAL", "kind": "static"}]
+    assert context["display"]["sessionLabel"] == "Workbench - vaults"
+    assert result["envelope"] == {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}
+    assert context["release"] == {
+        "name": "PROTECTED_REVEAL",
+        "envelopeHash": api._envelope_hash(result["envelope"]),
+    }
+    assert not ({"plaintext", "plain_text", "dek", "deks", "secret_unlock_material", "unlock_material"} & _payload_keys(result))
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "PROTECTED_REVEAL")
+        audit_rows = conn.execute(
+            select(vault_audit.c.request_id, vault_audit.c.delivery).where(
+                vault_audit.c.secret_name == "PROTECTED_REVEAL",
+                vault_audit.c.event == "revealed",
+            )
+        ).mappings().all()
+    assert meta["use_count"] == 0
+    assert meta["last_used_at"] is None
+    assert audit_rows == []
+
+
+def test_create_vault_reveal_context_rejects_protected_keypair(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REVEAL_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_reveal_context("PROTECTED_REVEAL_KEY")
+
+    assert exc.value.code == "keypair_not_value_deliverable"
 
 
 def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
@@ -1665,6 +2002,7 @@ def test_request_vault_access_reports_missing_selector_member_name():
 def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", lambda: dict(TEST_AGENT_PUBKEY))
     monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 1, "ttl_secs": 300}))
     api.create_vault_secret(
         {
@@ -1675,17 +2013,12 @@ def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch)
     )
     req_a = api.request_vault_access({"name": "A_KEY", "session_id": "ses_1"})
     req_b = api.request_vault_access({"name": "A_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(req_a["request"]["id"])
     created = api.create_vault_grant(
         {
             "request_id": req_a["request"]["id"],
             "session_id": "ses_1",
-            "deks": [
-                {
-                    "name": "A_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         }
     )
 
@@ -1699,6 +2032,7 @@ def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch)
 def test_agent_access_selector_sibling_request_result_returns_covering_grant(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", lambda: dict(TEST_AGENT_PUBKEY))
     monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 2, "ttl_secs": 300}))
     for name in ("A_KEY", "B_KEY"):
         api.create_vault_secret(
@@ -1715,22 +2049,18 @@ def test_agent_access_selector_sibling_request_result_returns_covering_grant(mon
         )
     req_a = api.request_vault_access({"source_selector": {"tags": ["deploy"]}, "session_id": "ses_1"})
     req_b = api.request_vault_access({"source_selector": {"tags": ["deploy"]}, "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(
+        req_a["request"]["id"],
+        blindboxes={
+            "A_KEY": _agent_dek_blindbox("enc-a", "ct-a"),
+            "B_KEY": _agent_dek_blindbox("enc-b", "ct-b"),
+        },
+    )
     created = api.create_vault_grant(
         {
             "request_id": req_a["request"]["id"],
             "session_id": "ses_1",
-            "deks": [
-                {
-                    "name": "A_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc-a", "ct": "ct-a"},
-                    "approval": {"nonce": "bm9uY2UtYQ==", "expires_at_unix": 4102444800},
-                },
-                {
-                    "name": "B_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc-b", "ct": "ct-b"},
-                    "approval": {"nonce": "bm9uY2UtYg==", "expires_at_unix": 4102444800},
-                },
-            ],
+            **issued,
         }
     )
 
@@ -2037,7 +2367,13 @@ def test_agent_sign_request_accepts_protected_browser_signature(monkeypatch):
 
     assert requested["ok"] is True
     assert requested["request"]["card"]["protection"] == "protected"
+    assert requested["request"]["card"]["secret_unlock_material"] == {
+        "name": "PROTECTED_ETH_KEY",
+        "kind": "keypair",
+        "envelope": {"ciphertext": "ct-key", "nonce": "n-key", "wrap_meta": "wm-key"},
+    }
     assert requested["request"]["delivery"]["signing_context"] == _signing_context(digest)
+    assert requested["request"]["delivery"]["operation_context"] == requested["request"]["card"]["operation_context"]
     assert completed["ok"] is True
     assert completed["signature"] == signature
     assert api.get_vault_request(requested["request"]["id"])["result"] == {"type": "signature", "signature": signature}
@@ -2135,28 +2471,23 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
     created = api.create_vault_grant(
         {
             "session_id": "ses_1",
             "ttl_seconds": 300,
             "request_id": req["id"],
-            "deks": [
-                {
-                    "name": "GRANT_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         }
     )
     assert created["grant"]["runtime_member_count"] == 1
     assert created["grant"]["delivery_ready"] is True
-    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
+    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 300
     assert agent_grant.call_args.kwargs["deks"] == [
         {
             "name": "GRANT_KEY",
             "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+            "approval": issued["deks"][0]["approval"],
         }
     ]
     grants = api.get_vault_grants()["grants"]
@@ -2181,6 +2512,7 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
     )
     requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
     grant_id = requested["request"]["card"]["grant_options"][0]["grant_id"]
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
 
     fulfilled = api.fulfill_vault_access_request(
         requested["request"]["id"],
@@ -2188,14 +2520,7 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
             "grant_id": grant_id,
             "session_id": "ses_1",
             "ttl_seconds": 300,
-            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
-            "deks": [
-                {
-                    "name": "PROTECTED_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         },
     )
 
@@ -2208,13 +2533,13 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
         {
             "name": "PROTECTED_KEY",
             "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+            "approval": issued["deks"][0]["approval"],
         }
     ]
     with api._vault_engine().connect() as conn:
         resolved = vault_service.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", create_request=False)
     assert resolved["status"] == "agent_delivery_ready"
-    validate_pubkey.assert_called_once_with({"public_key": "pk", "fingerprint": "fp"})
+    validate_pubkey.assert_called_once_with(TEST_AGENT_PUBKEY)
     encoded = json.dumps({"fulfilled": fulfilled, "agent_deks": agent_grant.call_args.kwargs["deks"]})
     assert "raw-dek-must-not-cross-python-agent-boundary" not in encoded
     assert "plaintext-must-not-cross-python-agent-boundary" not in encoded
@@ -2235,19 +2560,13 @@ def test_fulfill_protected_always_ask_access_uses_one_shot_resident_agent_grant(
         }
     )
     requested = api.request_vault_access({"name": "PROTECTED_ASK", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"], grant_duration="one-time")
 
     fulfilled = api.fulfill_vault_access_request(
         requested["request"]["id"],
         {
             "session_id": "ses_1",
-            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
-            "deks": [
-                {
-                    "name": "PROTECTED_ASK",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         },
     )
 
@@ -2256,12 +2575,12 @@ def test_fulfill_protected_always_ask_access_uses_one_shot_resident_agent_grant(
     assert fulfilled["grant"]["one_shot"] is True
     assert fulfilled["grant"]["source_selector"] == {"env": ["PROTECTED_ASK"]}
     assert fulfilled["grant"]["delivery_ready"] is True
-    validate_pubkey.assert_called_once_with({"public_key": "pk", "fingerprint": "fp"})
+    validate_pubkey.assert_called_once_with(TEST_AGENT_PUBKEY)
     assert agent_grant.call_args.kwargs["deks"] == [
         {
             "name": "PROTECTED_ASK",
             "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+            "approval": issued["deks"][0]["approval"],
         }
     ]
 
@@ -2928,6 +3247,145 @@ def test_create_grant_api_rejects_mismatched_deks_before_claiming_request(monkey
     assert grants == []
 
 
+def test_create_grant_api_rejects_unissued_agent_dek_approval(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+    tampered_deks = [dict(issued["deks"][0])]
+    tampered_deks[0]["approval"] = {**tampered_deks[0]["approval"], "nonce": "tampered"}
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+                "agent_pubkey": issued["agent_pubkey"],
+                "deks": tampered_deks,
+            }
+        )
+
+    assert exc.value.code == "invalid_grant"
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])).scalar_one()
+    assert status == "pending"
+
+
+def test_create_grant_api_rejects_binding_duration_mismatch(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"], grant_duration="one-time")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+                "grant_duration": 300,
+                **issued,
+            }
+        )
+
+    assert exc.value.code == "invalid_grant"
+    agent_grant.assert_not_called()
+
+
+def test_create_grant_api_accepts_fingerprint_only_agent_pubkey(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+            "agent_pubkey": {"fingerprint": issued["agent_pubkey"]["fingerprint"]},
+            "deks": issued["deks"],
+        }
+    )
+
+    assert created["grant"]["status"] == "active"
+    agent_grant.assert_called_once()
+    assert agent_grant.call_args.kwargs["expected_pubkey"] == {"fingerprint": issued["agent_pubkey"]["fingerprint"]}
+
+
+def test_create_grant_api_caps_grant_and_relay_by_binding_expiry(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 60})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+    binding_expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+    with api._vault_engine().begin() as conn:
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == requested["request"]["id"])).mappings().one()
+        delivery = json.loads(row["delivery"])
+        delivery["agent_binding_approvals"][0]["expires_at"] = api._isoformat_z(binding_expires_at)
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == requested["request"]["id"])
+            .values(delivery=json.dumps(delivery))
+        )
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+            **issued,
+        }
+    )
+
+    grant_expires_at = datetime.fromisoformat(created["grant"]["expires_at"]).astimezone(timezone.utc)
+    assert grant_expires_at <= binding_expires_at
+    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 60
+    assert agent_grant.call_args.kwargs["ttl_secs"] < 300
+
+
+def test_create_grant_api_rejects_expired_binding_before_claiming_request(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    requested = api.request_vault_access({"name": "GRANT_KEY", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+    binding_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with api._vault_engine().begin() as conn:
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == requested["request"]["id"])).mappings().one()
+        delivery = json.loads(row["delivery"])
+        delivery["agent_binding_approvals"][0]["expires_at"] = api._isoformat_z(binding_expires_at)
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == requested["request"]["id"])
+            .values(delivery=json.dumps(delivery))
+        )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+                **issued,
+            }
+        )
+
+    assert exc.value.code == "invalid_grant"
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])).scalar_one()
+        grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
+    assert grants == []
+
+
 def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
@@ -2950,18 +3408,13 @@ def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch, avault_p2):
         return {"granted": 1, "ttl_secs": kwargs["ttl_secs"]}
 
     monkeypatch.setattr(api, "avault_agent_grant", relay)
+    issued = _issued_agent_dek_payload(req["id"])
 
     created = api.create_vault_grant(
         {
             "session_id": "ses_1",
             "request_id": req["id"],
-            "deks": [
-                {
-                    "name": "GRANT_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         }
     )
 
@@ -3022,19 +3475,14 @@ def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch, avau
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
 
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_grant(
             {
                 "session_id": "ses_1",
                 "request_id": req["id"],
-                "deks": [
-                    {
-                        "name": "GRANT_KEY",
-                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                    }
-                ],
+                **issued,
             }
         )
 
@@ -3062,19 +3510,14 @@ def test_create_grant_api_rejects_partial_agent_cache(monkeypatch, avault_p2):
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
 
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_grant(
             {
                 "session_id": "ses_1",
                 "request_id": req["id"],
-                "deks": [
-                    {
-                        "name": "GRANT_KEY",
-                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                    }
-                ],
+                **issued,
             }
         )
 
@@ -3090,7 +3533,7 @@ def test_create_grant_api_rejects_partial_agent_cache(monkeypatch, avault_p2):
     agent_release.assert_called_once_with(grant_id=grants[0]["id"])
 
 
-def test_grant_ttl_uses_approved_lifetime():
+def test_grant_ttl_uses_remaining_lifetime():
     now = datetime.now(timezone.utc)
     ttl = api._grant_ttl_seconds(
         {
@@ -3099,7 +3542,7 @@ def test_grant_ttl_uses_approved_lifetime():
         }
     )
 
-    assert ttl == 1020
+    assert 1 <= ttl <= 120
 
 
 def test_create_grant_api_releases_scope_when_mark_ready_fails(monkeypatch, avault_p2):
@@ -3116,21 +3559,16 @@ def test_create_grant_api_releases_scope_when_mark_ready_fails(monkeypatch, avau
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
 
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_grant(
             {
                 "session_id": "ses_1",
                 "request_id": req["id"],
-                "deks": [
-                    {
-                        "name": "GRANT_KEY",
-                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                    }
-                ],
+                **issued,
             }
-    )
+        )
 
     assert exc.value.code == "invalid_grant"
     with api._vault_engine().connect() as conn:
@@ -3156,16 +3594,11 @@ def test_create_grant_retry_reuses_expired_failed_grant_id(monkeypatch, avault_p
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
     payload = {
         "session_id": "ses_1",
         "request_id": req["id"],
-        "deks": [
-            {
-                "name": "GRANT_KEY",
-                "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-            }
-        ],
+        **issued,
     }
 
     with pytest.raises(api.VaultApiError) as exc:
@@ -3205,19 +3638,14 @@ def test_create_grant_api_releases_failed_grant_id_without_touching_existing_gra
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
 
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_grant(
             {
                 "session_id": "ses_1",
                 "request_id": req["id"],
-                "deks": [
-                    {
-                        "name": "GRANT_KEY",
-                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                    }
-                ],
+                **issued,
             }
         )
 
@@ -3244,18 +3672,13 @@ def test_create_grant_api_preserves_unbound_session_choice(monkeypatch, avault_p
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
 
     created = api.create_vault_grant(
         {
             "request_id": req["id"],
             "this_session_only": False,
-            "deks": [
-                {
-                    "name": "GRANT_KEY",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         }
     )
 
@@ -3319,7 +3742,58 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
     assert result["code"] == "browser_signature_required"
     assert result["request"]["card"]["request_type"] == "sign"
     assert result["request"]["card"]["grant_options"] == []
+    assert result["request"]["card"]["secret_unlock_material"] == {
+        "name": "ETH_KEY",
+        "kind": "keypair",
+        "envelope": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+    }
     assert result["request"]["delivery"]["signing_context"] == _signing_context(digest)
+    signed_context = result["request"]["delivery"]["operation_context"]
+    assert result["request"]["card"]["operation_context"] == signed_context
+    context = _verified_signed_context(signed_context)
+    assert context["v"] == 2
+    assert context["purpose"] == "sign"
+    assert context["requestId"] == result["request"]["id"]
+    assert context["display"]["secrets"] == [{"name": "ETH_KEY", "kind": "keypair"}]
+
+
+def test_protected_sign_agent_audience_keeps_unlock_material_omitted(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
+    api.create_vault_secret(
+        {
+            "name": "ETH_AGENT_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct-agent", "nonce": "n-agent", "wrap_meta": "wm-agent"},
+            "public_meta": public_meta,
+        }
+    )
+    digest = "00" * 32
+
+    result = api.vault_sign(
+        {
+            "name": "ETH_AGENT_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "signing_context": _signing_context(digest),
+            "requester": {"source": "agent-cli", "session_id": "ses_agent"},
+            "delivery": {"session_id": "ses_agent"},
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "browser_signature_required"
+    assert "secret_unlock_material" not in json.dumps(result["request"])
+    assert "unlock_material" not in json.dumps(result["request"])
+    signed_context = result["request"]["delivery"]["operation_context"]
+    assert result["request"]["card"]["operation_context"] == signed_context
+    context = _verified_signed_context(signed_context)
+    assert context["purpose"] == "sign"
+    assert context["display"]["secrets"] == [{"name": "ETH_AGENT_KEY", "kind": "keypair"}]
 
 
 def test_protected_sign_request_requires_pinned_signing_public_key(monkeypatch):

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -11,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 
 from storage import vault_service as vs, vault_webauthn
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_auth_factors, vault_grants, vault_requests, vault_secrets
+from storage.models import metadata, state_meta, vault_auth_factors, vault_grants, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 
@@ -58,7 +60,14 @@ def _establish_protected_secret(conn, name: str, credential: WebAuthnTestCredent
     return credential, dict(factor)
 
 
-def _grant_from_request(conn, request: dict, *, cache_ready: bool = True, ttl_seconds: int | None = None) -> dict:
+def _grant_from_request(
+    conn,
+    request: dict,
+    *,
+    cache_ready: bool = True,
+    ttl_seconds: int | None = None,
+    expires_at: str | None = None,
+) -> dict:
     option = request["card"]["grant_options"][0]
     return vs.create_grant(
         conn,
@@ -67,6 +76,7 @@ def _grant_from_request(conn, request: dict, *, cache_ready: bool = True, ttl_se
         purpose=option["purpose"],
         request_id=request["id"],
         ttl_seconds=ttl_seconds,
+        expires_at=expires_at,
         cache_ready=cache_ready,
     )
 
@@ -321,16 +331,56 @@ def test_create_grant_stores_final_fields_and_readiness_by_grant_id(vault):
     assert release_refs == [{"grant_id": grant["id"]}]
 
 
-def test_create_grant_caps_ttl_to_approval_options(vault):
+def test_create_grant_rejects_removed_ttl_options(vault):
     _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
 
     with vault.begin() as conn:
         req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]})
-        grant = _grant_from_request(conn, req, ttl_seconds=86_400)
+
+        with pytest.raises(vs.InvalidGrantError):
+            _grant_from_request(conn, req, ttl_seconds=86_400)
+
+
+def test_create_grant_one_time_uses_short_one_shot_window(vault):
+    _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]}, requester={"session_id": "ses_1"})
+        option = req["card"]["grant_options"][0]
+        grant = vs.create_grant(
+            conn,
+            member_names=option["member_snapshot"],
+            source_selector=option["source_selector"],
+            purpose=option["purpose"],
+            request_id=req["id"],
+            grant_duration="one-time",
+        )
+        settings = vs.get_vault_settings(conn)
 
     created = datetime.fromisoformat(grant["created_at"])
     expires = datetime.fromisoformat(grant["expires_at"])
-    assert expires - created == timedelta(seconds=3600)
+    assert expires - created == timedelta(seconds=60)
+    assert grant["one_shot"] is True
+    assert grant["session_id"] == "ses_1"
+    assert settings["last_grant_ttl"] == "one-time"
+
+
+def test_save_vault_settings_first_write_is_atomic_under_concurrency(vault):
+    barrier = threading.Barrier(6)
+
+    def save_settings(index: int) -> dict:
+        with vault.begin() as conn:
+            barrier.wait(timeout=5)
+            return vs.save_vault_settings(conn, {"last_grant_ttl": 300 if index % 2 else 900})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(save_settings, range(6)))
+
+    with vault.connect() as conn:
+        rows = list(conn.execute(select(state_meta).where(state_meta.c.key == vs.VAULT_SETTINGS_META_KEY)).mappings())
+
+    assert len(rows) == 1
+    assert {result["last_grant_ttl"] for result in results}.issubset({300, 900})
 
 
 def test_sibling_approval_requires_matching_purpose(vault):
@@ -615,6 +665,23 @@ def test_multi_member_one_shot_grant_is_consumed_once(vault):
     assert reserved["status"] == "reserved"
     assert row["status"] == "expired"
     assert releases == [{"grant_id": grant["id"]}]
+
+
+def test_create_grant_rejects_expired_binding_without_claiming_request(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "PROTECTED_KEY", requester={"session_id": "ses_1"})
+
+        with pytest.raises(vs.InvalidGrantError, match="grant binding has expired"):
+            _grant_from_request(conn, req, expires_at=expired_at)
+
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == req["id"])).mappings().one()
+        grants = conn.execute(select(vault_grants).where(vault_grants.c.request_id == req["id"])).mappings().all()
+
+    assert row["status"] == "pending"
+    assert grants == []
 
 
 def test_selector_request_expires_when_member_rotates(vault):

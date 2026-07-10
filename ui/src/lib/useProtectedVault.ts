@@ -2,16 +2,21 @@ import { useCallback, useEffect, useReducer, useState } from 'react';
 
 import {
   useApi,
+  type VaultSignedOperationContext,
   type VaultWebAuthnRegistrationPayload,
   type VaultWebAuthnSerializedCredential,
 } from '@/context/ApiContext';
 import {
   getVaultSandboxClient,
-  type DaemonAgentBinding,
+  resetVaultSandboxClient,
+  subscribeVaultStateEvents,
+  type ApproveReleaseItem,
   type VaultSandboxSealResult,
   type VaultSandboxSigningContext,
+  type VaultStateEvent,
 } from './vaultSandboxClient';
 import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult, type SignatureScheme } from './vaultCrypto';
+import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
 
 /**
  * Value-free protected material hydrated into UI approval cards. The parent app brokers it to the
@@ -30,8 +35,6 @@ type ParentStaticSealValue = {
 
 export type ProtectedVaultStatus = 'checking' | 'needs-setup' | 'locked' | 'unlocked' | 'error';
 
-const VAULT_AUTO_LOCK_MS = 10 * 60 * 1000;
-
 const sessionVault: {
   status: Exclude<ProtectedVaultStatus, 'checking' | 'error'>;
   wrapMeta: string | null;
@@ -44,8 +47,11 @@ const sessionVault: {
   authzFactorRegistration: null,
 };
 
+// The unlock-window deadline (ms epoch) is now owned by the sandbox — the parent only *mirrors*
+// the value it receives from `vault.state` events and `status` results (protocol v2 §6.4/§8).
+// There is no parent-side auto-lock timer anymore: the sandbox holds the single clock and emits a
+// `vault.state { locked, auto-lock }` event when it expires. See the module subscription below.
 let vaultLockExpiresAt: number | null = null;
-let vaultAutoLockTimer: ReturnType<typeof setTimeout> | null = null;
 const vaultLockListeners = new Set<() => void>();
 
 let vaultLockChannel: BroadcastChannel | null = null;
@@ -57,6 +63,10 @@ function getVaultLockChannel(): BroadcastChannel | null {
   vaultLockChannel = new BroadcastChannel('avibe-vault-lock');
   vaultLockChannel.onmessage = (event: MessageEvent) => {
     if (event.data === 'lock') void lockVault(false);
+    // A policy tightening (enabling Strict) in another tab: lock AND drop this tab's sandbox client
+    // so it re-handshakes under the new policy — a plain lock would leave this tab's client pinned
+    // to the stale policy, and its next auto-unlock would run non-Strict.
+    else if (event.data === 'reset') applyPolicyResetLock();
   };
   return vaultLockChannel;
 }
@@ -76,27 +86,10 @@ export function vaultUnlockExpiresAt(): number | null {
   return sessionVault.status === 'unlocked' ? vaultLockExpiresAt : null;
 }
 
-function autoLockExpired(): boolean {
-  return vaultLockExpiresAt != null && Date.now() >= vaultLockExpiresAt;
-}
-
 export function vaultUnlocked(): boolean {
-  if (sessionVault.status === 'unlocked' && autoLockExpired()) {
-    clearUnlockState();
-    queueMicrotask(notifyVaultLockChange);
-    void getVaultSandboxClient()
-      .then((client) => client.lock())
-      .catch(() => undefined);
-    return false;
-  }
-  return sessionVault.status === 'unlocked';
-}
-
-function enforceAutoLock(): boolean {
-  if (sessionVault.status === 'unlocked' && autoLockExpired()) {
-    void lockVault(false);
-    return false;
-  }
+  // The sandbox is authoritative: it auto-locks and emits a `vault.state` event we mirror, so the
+  // parent no longer second-guesses the clock. A rendered countdown reaching 0 is cosmetic; the
+  // real transition arrives as an event (or the next `status` reconciliation).
   return sessionVault.status === 'unlocked';
 }
 
@@ -109,12 +102,10 @@ function vaultStatusNow(): ProtectedVaultStatus {
 }
 
 function clearUnlockState(): void {
-  if (vaultAutoLockTimer) {
-    clearTimeout(vaultAutoLockTimer);
-    vaultAutoLockTimer = null;
-  }
   vaultLockExpiresAt = null;
   if (sessionVault.freshSetup) {
+    // A fresh setup that never persisted a secret: locking reverts to needs-setup (the daemon has
+    // no wrap_meta yet), so drop the in-memory handle rather than pretend a vault exists.
     sessionVault.wrapMeta = null;
     sessionVault.freshSetup = false;
     sessionVault.authzFactorRegistration = null;
@@ -123,6 +114,26 @@ function clearUnlockState(): void {
     sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
   }
 }
+
+// The single source of truth for lock state: sandbox `vault.state` events. One module-level
+// subscription mirrors every transition (unlock / renew / auto-lock / manual-lock / unload) into
+// the shared session state and notifies React subscribers. Registered once at module load so it is
+// live before any component mounts and survives sandbox-client recreation.
+function applyVaultStateEvent(event: VaultStateEvent): void {
+  if (event.state === 'unlocked') {
+    // The sandbox only unlocks material the parent handed it, so wrapMeta should already be known;
+    // guard anyway so a stray event can't flip us to a wrapMeta-less "unlocked".
+    if (!sessionVault.wrapMeta) return;
+    sessionVault.status = 'unlocked';
+    if (typeof event.expiresAt === 'number' && Number.isFinite(event.expiresAt)) vaultLockExpiresAt = event.expiresAt;
+    notifyVaultLockChange();
+    return;
+  }
+  clearUnlockState();
+  notifyVaultLockChange();
+}
+
+subscribeVaultStateEvents(applyVaultStateEvent);
 
 async function lockVault(broadcast = false): Promise<void> {
   clearUnlockState();
@@ -135,13 +146,24 @@ async function lockVault(broadcast = false): Promise<void> {
   }
 }
 
-function armVaultAutoLock(expiresAt?: number | null): void {
-  getVaultLockChannel();
-  const sandboxDeadline = typeof expiresAt === 'number' && Number.isFinite(expiresAt) ? expiresAt : null;
-  vaultLockExpiresAt = sandboxDeadline ?? Date.now() + VAULT_AUTO_LOCK_MS;
-  if (vaultAutoLockTimer) clearTimeout(vaultAutoLockTimer);
-  vaultAutoLockTimer = setTimeout(() => void lockVault(false), Math.max(0, vaultLockExpiresAt - Date.now()));
+// Lock this tab AND discard its sandbox client so the next ceremony re-handshakes under the fresh
+// policy. Used for a policy tightening (enabling Strict): the sandbox pins policy at handshake and
+// its internal auto-unlock reuses that pin, so locking alone would let this tab re-unlock stale.
+function applyPolicyResetLock(): void {
+  clearUnlockState();
   notifyVaultLockChange();
+  // Invalidate the parent policy mirror too: the reset is a tightening, so if the next handshake's
+  // settings fetch fails we must fail closed (strict) rather than re-pin the old confirmed policy.
+  invalidateVaultSandboxPolicy();
+  resetVaultSandboxClient();
+}
+
+// Broadcast a policy reset to every tab (including this one): all drop their pinned sandbox client
+// and re-handshake under the new policy on the next ceremony. This is the cross-tab counterpart to
+// the local reset — a plain `lock` broadcast would leave siblings re-unlocking under stale policy.
+function lockAndResetAllTabs(): void {
+  getVaultLockChannel()?.postMessage('reset');
+  applyPolicyResetLock();
 }
 
 function baseVmkWrapMeta(wrapMeta: string): string {
@@ -172,14 +194,13 @@ function commitUnlocked(
   sessionVault.status = 'unlocked';
   sessionVault.freshSetup = freshSetup;
   sessionVault.authzFactorRegistration = authzFactorRegistration;
-  armVaultAutoLock(expiresAt);
+  // Mirror the sandbox-provided deadline directly; the event stream keeps it fresh on renewal.
+  vaultLockExpiresAt = typeof expiresAt === 'number' && Number.isFinite(expiresAt) ? expiresAt : null;
+  getVaultLockChannel();
+  notifyVaultLockChange();
 }
 
 function commitLocked(wrapMeta: string): void {
-  if (vaultAutoLockTimer) {
-    clearTimeout(vaultAutoLockTimer);
-    vaultAutoLockTimer = null;
-  }
   vaultLockExpiresAt = null;
   sessionVault.wrapMeta = baseVmkWrapMeta(wrapMeta);
   sessionVault.status = 'locked';
@@ -210,17 +231,20 @@ export function useProtectedVault() {
   const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.status);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(
-    () =>
-      subscribeVaultLock(() => {
-        setStatus((prev) => (prev === 'checking' || prev === 'error' ? prev : vaultStatusNow()));
-      }),
-    [],
-  );
+  useEffect(() => {
+    // Initialize the cross-tab lock channel as soon as any vault UI mounts, so this tab receives
+    // `reset`/`lock` broadcasts regardless of which path later creates a sandbox client (reveal,
+    // approve, sign, and seal all acquire the client directly, not only refresh()). Idempotent.
+    getVaultLockChannel();
+    return subscribeVaultLock(() => {
+      setStatus((prev) => (prev === 'checking' || prev === 'error' ? prev : vaultStatusNow()));
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
-    enforceAutoLock();
     if (sessionVault.status === 'unlocked') {
+      // Already unlocked and kept honest by the event stream — don't flash a "checking" state or
+      // re-query (a `status` call is silent but pointless here).
       setStatus('unlocked');
       return;
     }
@@ -230,19 +254,31 @@ export function useProtectedVault() {
       const res = await api.getVaultVmk();
       if (!res?.ok) throw new Error('vmk-discovery-failed');
       const sandbox = await getVaultSandboxClient();
+      // A sandbox client now exists for this tab (even while locked); make sure the cross-tab lock
+      // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
+      getVaultLockChannel();
       if (res.exists && res.wrap_meta) {
         sessionVault.wrapMeta = baseVmkWrapMeta(res.wrap_meta);
         const sandboxStatus = await sandbox.status(sessionVault.wrapMeta);
         if (sandboxStatus.state === 'unlocked') {
           sessionVault.status = 'unlocked';
-          armVaultAutoLock(sandboxStatus.expiresAt);
+          vaultLockExpiresAt =
+            typeof sandboxStatus.expiresAt === 'number' && Number.isFinite(sandboxStatus.expiresAt) ? sandboxStatus.expiresAt : null;
         } else {
           sessionVault.status = 'locked';
+          vaultLockExpiresAt = null;
         }
       } else {
         sessionVault.wrapMeta = null;
         sessionVault.status = 'needs-setup';
+        vaultLockExpiresAt = null;
       }
+      // Reconciling an existing sandbox session mutates the shared module state, so wake every
+      // `subscribeVaultLock` listener (e.g. sibling VaultLockIndicators) — not just this hook's
+      // `setStatus` below. The deleted `armVaultAutoLock()` path used to do this; without it a
+      // remount that finds an already-unlocked session leaves siblings on stale lock state until
+      // the next `vault.state` event.
+      notifyVaultLockChange();
       setStatus(sessionVault.status);
     } catch (err) {
       sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
@@ -291,36 +327,24 @@ export function useProtectedVault() {
         authzFactorRegistration?: VaultWebAuthnRegistrationPayload;
       }
     > => {
-      if (!enforceAutoLock()) throw new Error('vault-locked');
       const wrapMeta = sessionVault.wrapMeta;
       if (!wrapMeta) throw new Error('vault-locked');
-      armVaultAutoLock();
+      const sandbox = await getVaultSandboxClient();
       let sealed: VaultSandboxSealResult;
       if (kind === 'static') {
         if (!parentStaticValue) throw new Error('protected-static-value-required');
-        const sandbox = await getVaultSandboxClient();
-        // Hand the plaintext to the sandbox, then drop the parent-held copy IMMEDIATELY.
-        // `seal()` captures `value` into the request payload synchronously here, so we can
-        // clear the persistent ref + revealed field right away rather than leaving the
-        // plaintext in parent memory for the whole interactive ceremony (up to a 5-min timeout).
-        const sealing = sandbox.seal({
-          name,
-          kind: 'static',
-          inputMode: 'parent-value',
-          value: parentStaticValue.valueRef.current,
-          wrapMeta,
-        });
+        // Hand the plaintext to the sandbox, then drop the parent-held copy IMMEDIATELY. `seal()`
+        // captures `value` into the request payload synchronously here, so we clear the persistent
+        // ref + revealed field right away rather than leaving plaintext in parent memory for the
+        // whole ceremony (R1 seal is silent while unlocked, but the value must not linger).
+        const sealing = sandbox.seal({ name, kind: 'static', value: parentStaticValue.valueRef.current, wrapMeta });
         parentStaticValue.valueRef.current = '';
         parentStaticValue.clear();
         sealed = await sealing;
       } else {
-        const sandbox = await getVaultSandboxClient();
-        sealed = await sandbox.seal({
-          name,
-          kind,
-          inputMode: 'sandbox-entry',
-          wrapMeta,
-        });
+        // Keypair is generate-only: the secp256k1 key is born inside the sandbox and never crosses
+        // the boundary; the parent receives only ciphertext + public key/addresses (protocol v2 §7.2).
+        sealed = await sandbox.seal({ name, kind: 'keypair', wrapMeta });
       }
       return {
         ...sealed,
@@ -356,10 +380,11 @@ export function useProtectedVault() {
       material: ProtectedUnlockMaterial,
       signingContext: VaultSandboxSigningContext,
       scheme: SignatureScheme,
+      context: VaultSignedOperationContext,
     ): Promise<SignatureResult> => {
       const sandbox = await getVaultSandboxClient();
       try {
-        return await sandbox.sign({ material, scheme, signingContext });
+        return await sandbox.sign({ material, scheme, signingContext, context });
       } finally {
         void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
       }
@@ -367,11 +392,36 @@ export function useProtectedVault() {
     [syncProtectedOperationStatus],
   );
 
-  const releaseProtectedDelivery = useCallback(
-    async (material: ProtectedUnlockMaterial, agentBinding: DaemonAgentBinding): Promise<BlindBox> => {
+  /**
+   * Batch DEK release for an access approval: one confirm card covers every protected member and
+   * the sandbox returns one HPKE blind box per item (order matches `items`). Replaces the v1
+   * per-secret `releaseProtectedDelivery` loop.
+   */
+  const approveProtectedRelease = useCallback(
+    async (items: ApproveReleaseItem[]): Promise<BlindBox[]> => {
+      if (items.length === 0) return [];
       const sandbox = await getVaultSandboxClient();
       try {
-        return await sandbox.releaseDEK({ material, agentBinding });
+        const result = await sandbox.approveRelease({ items });
+        return result.blindBoxes;
+      } finally {
+        const wrapMeta = items[0]?.material.envelope.wrap_meta;
+        if (wrapMeta) void syncProtectedOperationStatus(wrapMeta).catch(() => undefined);
+      }
+    },
+    [syncProtectedOperationStatus],
+  );
+
+  /**
+   * Reveal a protected static value inside the sandbox frame. Plaintext is displayed (and, on the
+   * sandbox-side explicit action, copied) entirely within the sandbox — it is never returned to
+   * the parent. R2: an in-sandbox confirm while unlocked, a passkey while locked or under Strict.
+   */
+  const revealProtectedValue = useCallback(
+    async (material: ProtectedUnlockMaterial, context: VaultSignedOperationContext): Promise<{ completed: boolean }> => {
+      const sandbox = await getVaultSandboxClient();
+      try {
+        return await sandbox.reveal({ material, context });
       } finally {
         void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
       }
@@ -381,6 +431,14 @@ export function useProtectedVault() {
 
   const lock = useCallback(() => {
     void lockVault(true);
+    setStatus(vaultStatusNow());
+  }, []);
+
+  // Lock + force a sandbox re-handshake across ALL tabs. Used when a policy tightening (Strict)
+  // must take effect immediately everywhere: the sandbox pins policy at handshake, so every tab
+  // must drop its client and re-handshake under the new policy, not merely lock.
+  const lockAndResetForPolicyChange = useCallback(() => {
+    lockAndResetAllTabs();
     setStatus(vaultStatusNow());
   }, []);
 
@@ -406,9 +464,11 @@ export function useProtectedVault() {
     unlockPasskey,
     sealValue,
     signProtectedRequest,
-    releaseProtectedDelivery,
+    approveProtectedRelease,
+    revealProtectedValue,
     afterCreated,
     lock,
+    lockAndResetForPolicyChange,
     discardAndRefresh,
     hasPasskey,
     passkeyUsableHere,
@@ -423,12 +483,13 @@ export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNo
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!unlocked) return;
-    const updateNow = () => {
-      enforceAutoLock();
-      setNow(Date.now());
-    };
-    const immediate = window.setTimeout(updateNow, 0);
-    const id = setInterval(updateNow, 1000);
+    // Pure render clock: tick `now` once a second so the countdown advances. The sandbox owns the
+    // actual auto-lock and emits a `vault.state` event when it fires — the parent never locks off
+    // this timer (protocol v2 §8). The 0ms timer syncs `now` right after unlock without a
+    // setState directly in the effect body (which would trigger a cascading render).
+    const sync = () => setNow(Date.now());
+    const immediate = window.setTimeout(sync, 0);
+    const id = setInterval(sync, 1000);
     return () => {
       window.clearTimeout(immediate);
       clearInterval(id);

@@ -6704,6 +6704,7 @@ def cmd_vault_sign(args):
                 signature=result.get("signature"),
             )
             return 0
+        request = api._attach_signed_sign_operation_context(str(request["id"]))
         _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
             "vault_sign_request",

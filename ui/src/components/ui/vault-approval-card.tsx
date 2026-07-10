@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, Globe, KeyRound, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Copy, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { useApi, type SigningAddresses, type VaultRequest, type VaultSourceSelector } from '@/context/ApiContext';
+import {
+  useApi,
+  type SigningAddresses,
+  type VaultGrantDuration,
+  type VaultRequest,
+  type VaultSignedOperationContext,
+  type VaultSourceSelector,
+} from '@/context/ApiContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { SigningAddressList } from './signing-address-list';
@@ -10,8 +17,22 @@ import { type BlindBox, type SignatureScheme } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Badge } from './badge';
 import { Button } from './button';
+import { SegmentedRadio } from './segmented';
 import { Switch } from './switch';
 import { VaultRequestSessionLink, vaultRequestSessionDisplay } from './vault-request-session-link';
+
+/** The three approver-chosen grant-duration options (protocol v2 §7.1), as SegmentedRadio ids. */
+type GrantDurationChoice = 'one-time' | '300' | '900';
+
+function grantChoiceFromLastTtl(value: VaultGrantDuration | undefined): GrantDurationChoice {
+  if (value === 'one-time') return 'one-time';
+  if (value === 900) return '900';
+  return '300';
+}
+
+function grantDurationApiValue(choice: GrantDurationChoice): VaultGrantDuration {
+  return choice === 'one-time' ? 'one-time' : Number(choice);
+}
 
 /**
  * The fixed protected grant the daemon attaches to an access request's card. In the
@@ -22,6 +43,8 @@ type GrantOption = {
   grant_id: string;
   default_ttl_seconds?: number;
   session_binding_default?: boolean;
+  /** The grant is consumed after a single delivery — the agent never gets a timed window. */
+  one_shot?: boolean;
   member_count?: number;
   member_snapshot?: string[];
   source_selector?: VaultSourceSelector;
@@ -46,6 +69,8 @@ type ApprovalCard = {
   default_ttl_seconds?: number;
   /** The fixed protected grant. */
   grant_options?: GrantOption[];
+  /** The whole request is one-shot (a single delivery, no timed window). */
+  one_shot?: boolean;
   /** Hydrated for UI audience when the requested secret is protected. */
   secret_unlock_material?: ProtectedUnlockMaterial | null;
 };
@@ -73,18 +98,6 @@ const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({ lab
   </div>
 );
 
-/** Localized TTL label ("15 min" / "2 h") from a seconds value. */
-function useTtlLabel() {
-  const { t } = useTranslation();
-  return useCallback(
-    (seconds: number) => {
-      if (seconds >= 3600 && seconds % 3600 === 0) return t('vaults.approval.ttlHours', { count: seconds / 3600 });
-      return t('vaults.approval.ttlMinutes', { count: Math.max(1, Math.round(seconds / 60)) });
-    },
-    [t],
-  );
-}
-
 /**
  * Full approval surface for a single pending vault request (access or sign), rendering
  * the daemon's approval card (design.pen frames ① / ②). Standard and protected tiers are
@@ -100,7 +113,6 @@ export const VaultApprovalCard: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const vault = useProtectedVault();
-  const ttlLabel = useTtlLabel();
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
@@ -113,6 +125,8 @@ export const VaultApprovalCard: React.FC<{
     scheme?: string;
     signing_context?: Record<string, unknown>;
     signingContext?: Record<string, unknown>;
+    // The daemon-signed sign context (protocol v2 §6.2); the sandbox renders + verifies it.
+    operation_context?: VaultSignedOperationContext;
   };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
   const isKeypair = card?.kind === 'keypair';
@@ -120,6 +134,10 @@ export const VaultApprovalCard: React.FC<{
   // A grant covers a fixed protected set — there is no scope picker.
   const grantOptions = useMemo(() => card?.grant_options ?? [], [card]);
   const option = useMemo(() => grantOptions[0], [grantOptions]);
+  // A one-shot request is consumed after a single delivery — the agent never gets a timed window,
+  // so the duration control is forced to and locked on "one-time" (showing 5/15 min would promise
+  // a window the agent won't receive).
+  const isOneShot = Boolean(option?.one_shot || card?.one_shot);
   const materials = useMemo(() => option?.unlock_material ?? [], [option]);
   const memberNames = useMemo(() => {
     if (isSign) return card?.secret_name ? [card.secret_name] : [];
@@ -140,14 +158,40 @@ export const VaultApprovalCard: React.FC<{
     for (const tag of tags) chips.push({ key: `tag:${tag}`, label: t('vaults.approval.sourceTag', { name: tag }), icon: Tag });
     return chips;
   }, [source, t]);
-  // TTL is a fixed product default (env-list 300s, tag/skill 900s), not a user control.
-  const ttlSeconds = option?.default_ttl_seconds ?? card?.default_ttl_seconds ?? (source.tags?.length ? 900 : 300);
-
   const [thisSessionOnly, setThisSessionOnly] = useState(() => option?.session_binding_default !== false);
+  // Approver-chosen agent access duration (protocol v2 §7.1): the daemon remembers the last choice,
+  // so seed from `GET /api/vault/settings` and default to 5 min until it loads. Access requests only.
+  const [grantDuration, setGrantDuration] = useState<GrantDurationChoice>('300');
+  // Once the approver has picked a duration, the async settings seed must not clobber it if the GET
+  // happens to resolve after the click.
+  const grantTouchedRef = useRef(false);
+  const pickGrantDuration = useCallback((next: GrantDurationChoice) => {
+    grantTouchedRef.current = true;
+    setGrantDuration(next);
+  }, []);
+  // A one-shot grant is always one-time regardless of the picker; everything downstream (submit,
+  // persistence, the rendered control) reads this rather than the raw picker state.
+  const effectiveGrantDuration: GrantDurationChoice = isOneShot ? 'one-time' : grantDuration;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   const [copiedDigest, setCopiedDigest] = useState(false);
+
+  useEffect(() => {
+    // Skip the remembered-choice seed for sign requests and one-shot grants (one-shot is forced to
+    // one-time, so seeding a remembered 5/15 min would be misleading and pointless).
+    if (isSign || isOneShot) return;
+    let alive = true;
+    api
+      .getVaultSettings()
+      .then((res) => {
+        if (alive && !grantTouchedRef.current && res?.ok) setGrantDuration(grantChoiceFromLastTtl(res.settings?.last_grant_ttl));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [api, isSign, isOneShot]);
 
   // Sign approvals: fetch the key's derived addresses (best-effort) so the human sees which
   // on-chain identity is about to sign — not just an opaque digest. Addresses are public.
@@ -193,6 +237,15 @@ export const VaultApprovalCard: React.FC<{
     [],
   );
 
+  // Protected access with a session is bound to it: the daemon-signed contexts the sandbox consents
+  // to carry that session's label, and the batch endpoint mints them from the request scope (no
+  // session-scope choice), so granting any-session would exceed the session-labeled card the user
+  // approved. But a session-less request (e.g. a CLI ask with no session) has nothing to bind to —
+  // the daemon records session_id=None (unscoped) regardless — so don't force or claim binding
+  // there. The "This session only" toggle is offered for standard access only.
+  const hasRequestSession = Boolean(requestSession);
+  const sessionBound = needsProtectedApproval && hasRequestSession ? true : thisSessionOnly;
+
   const failIfNotOk = (res: { ok: boolean; code?: string; message?: string }) => {
     if (!res.ok) throw new Error(res.message || res.code || t('vaults.approval.errors.failed'));
   };
@@ -206,51 +259,48 @@ export const VaultApprovalCard: React.FC<{
       // without UI-audience hydration — fail clearly instead of taking the standard path
       // (which the daemon rejects for a protected secret anyway).
       if (isProtected && materials.length === 0) throw new Error(t('vaults.approval.errors.missingMaterial'));
+      const durationValue = grantDurationApiValue(effectiveGrantDuration);
       if (materials.length === 0) {
         // No protected members (a hidden always-ask standard case) — metadata-only grant, no DEK.
         failIfNotOk(
           await api.createVaultGrant({
             request_id: request.id,
             grant_id: grantId,
-            ttl_seconds: ttlSeconds,
-            this_session_only: thisSessionOnly,
+            grant_duration: durationValue,
+            this_session_only: sessionBound,
           }),
         );
       } else {
-        // Protected members — ask the daemon for signed, value-free agent bindings, then let the
-        // sandbox release each DEK as an opaque HPKE blind box for that pinned resident agent.
-        let agentPubkey: { public_key: string; fingerprint: string } | null = null;
-        const deks: Array<{ name: string; dek_blindbox: BlindBox; approval: { nonce: string; expires_at_unix: number } }> = [];
-        for (const material of materials) {
-          const binding = await api.createVaultAgentBinding({
-            request_id: request.id,
-            grant_id: grantId,
-            name: material.name,
-            ttl_seconds: ttlSeconds,
-          });
-          failIfNotOk(binding);
-          if (agentPubkey && binding.agent_pubkey.fingerprint !== agentPubkey.fingerprint) {
-            throw new Error(t('vaults.approval.errors.failed'));
-          }
-          agentPubkey = binding.agent_pubkey;
-          const dekBlindbox = await vault.releaseProtectedDelivery(material, binding.binding);
-          deks.push({
-            name: material.name,
-            dek_blindbox: dekBlindbox,
-            approval: binding.approval,
-          });
-        }
-        if (!agentPubkey) throw new Error(t('vaults.approval.errors.failed'));
+        // Protected members — ONE batch call returns signed, value-free agent-delivery contexts
+        // for the whole selector; the sandbox then releases every DEK behind ONE confirm (protocol
+        // v2 §7.1) as opaque HPKE blind boxes for the pinned resident agent.
+        const issued = await api.createVaultAgentBindingsBatch({ request_id: request.id, grant_duration: durationValue });
+        failIfNotOk(issued);
+        const materialByName = new Map(materials.map((m) => [m.name, m]));
+        const approveItems = issued.items.map((item) => {
+          const material = materialByName.get(item.name);
+          if (!material) throw new Error(t('vaults.approval.errors.missingMaterial'));
+          return { material, context: item.context };
+        });
+        // One confirm card lists every member; the blind boxes come back in item order.
+        const blindBoxes = await vault.approveProtectedRelease(approveItems);
+        if (blindBoxes.length !== issued.items.length) throw new Error(t('vaults.approval.errors.failed'));
+        const deks: Array<{ name: string; dek_blindbox: BlindBox; approval: { nonce: string; expires_at_unix: number } }> =
+          issued.items.map((item, index) => ({ name: item.name, dek_blindbox: blindBoxes[index], approval: item.approval }));
         failIfNotOk(
           await api.fulfillVaultAccessRequest(request.id, {
             grant_id: grantId,
-            ttl_seconds: ttlSeconds,
-            this_session_only: thisSessionOnly,
-            agent_pubkey: agentPubkey,
+            grant_duration: durationValue,
+            this_session_only: sessionBound,
+            agent_pubkey: issued.agent_pubkey,
             deks,
           }),
         );
       }
+      // Remember the approver's choice as next time's default — but not for one-shot, where the
+      // duration was forced to one-time (not chosen), so persisting it would wrongly bias the next
+      // approval. Best-effort: the daemon also persists a real choice on the grant/binding.
+      if (!isOneShot) void api.saveVaultSettings({ last_grant_ttl: durationValue }).catch(() => undefined);
       onResolved({ kind: 'approved', requestType: 'access' });
     });
 
@@ -266,7 +316,12 @@ export const VaultApprovalCard: React.FC<{
         if (!material) throw new Error(t('vaults.approval.errors.missingMaterial'));
         const signingContext = delivery.signing_context ?? delivery.signingContext;
         if (!signingContext || typeof signingContext !== 'object') throw new Error(t('vaults.approval.errors.missingDigest'));
-        const sig = await vault.signProtectedRequest(material, signingContext, scheme as SignatureScheme);
+        // The daemon-signed sign context (protocol v2 §6.2) is attached to the request; the sandbox
+        // renders + verifies it alongside the decoded signing payload.
+        const operationContext =
+          delivery.operation_context ?? (card as { operation_context?: VaultSignedOperationContext } | null)?.operation_context;
+        if (!operationContext) throw new Error(t('vaults.approval.errors.missingMaterial'));
+        const sig = await vault.signProtectedRequest(material, signingContext, scheme as SignatureScheme, operationContext);
         const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
         failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme, signature }));
@@ -412,9 +467,9 @@ export const VaultApprovalCard: React.FC<{
 
       <div className="h-px bg-border" />
 
-      {/* Access grant summary (access only): how the set was selected, the fixed protected
-          secret names to be granted, and the fixed access duration. There is no scope
-          picker — the grant is a fixed protected set determined by the request's selector. */}
+      {/* Access grant summary (access only): how the set was selected and the fixed protected
+          secret names to be granted. There is no scope picker — the grant is a fixed protected
+          set determined by the request's selector. */}
       {!isSign ? (
         <div className="flex flex-col gap-3.5">
           {sourceChips.length > 0 ? (
@@ -439,12 +494,6 @@ export const VaultApprovalCard: React.FC<{
               ))}
             </DetailRow>
           ) : null}
-          <DetailRow label={t('vaults.approval.duration')}>
-            <span className="flex items-center gap-1.5 text-[13px] text-foreground">
-              <Clock className="size-3.5 shrink-0 text-muted" />
-              {t('vaults.approval.durationValue', { time: ttlLabel(ttlSeconds) })}
-            </span>
-          </DetailRow>
         </div>
       ) : null}
 
@@ -457,6 +506,33 @@ export const VaultApprovalCard: React.FC<{
         </span>
       ) : null}
 
+      {/* Agent access duration (access only) — the approver picks how long the agent may use the
+          set (protocol v2 §7.1). "授权时长 / Agent access duration" language (§8): this is what the
+          agent receives, distinct from the browser unlock window; never a countdown pill. */}
+      {!isSign ? (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[13px] font-medium text-foreground">{t('vaults.approval.grantDuration')}</span>
+          <SegmentedRadio<GrantDurationChoice>
+            value={effectiveGrantDuration}
+            onChange={pickGrantDuration}
+            disabled={busy || isOneShot}
+            ariaLabel={t('vaults.approval.grantDuration')}
+            options={[
+              { id: 'one-time', label: t('vaults.approval.grantOneTime') },
+              { id: '300', label: t('vaults.approval.grantMinutes', { count: 5 }) },
+              { id: '900', label: t('vaults.approval.grantMinutes', { count: 15 }) },
+            ]}
+          />
+          <span className="text-[11px] text-muted-foreground">
+            {isOneShot
+              ? t('vaults.approval.grantOneShotHelp')
+              : effectiveGrantDuration === 'one-time'
+                ? t('vaults.approval.grantOneTimeHelp')
+                : t('vaults.approval.grantDurationHelp')}
+          </span>
+        </div>
+      ) : null}
+
       {error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
@@ -465,7 +541,7 @@ export const VaultApprovalCard: React.FC<{
 
       {/* Footer */}
       <div className="flex items-center gap-3">
-        {!isSign ? (
+        {!isSign && !needsProtectedApproval ? (
           <label className="flex items-center gap-2 text-xs font-medium text-muted">
             <Switch
               checked={thisSessionOnly}
@@ -475,6 +551,15 @@ export const VaultApprovalCard: React.FC<{
             />
             {t('vaults.approval.thisSessionOnly')}
           </label>
+        ) : null}
+        {!isSign && needsProtectedApproval && hasRequestSession ? (
+          // Protected access with a session is session-bound (see `sessionBound`); show it read-only
+          // so the scope the approver grants matches the session on the sandbox consent card. Hidden
+          // for session-less requests, where the grant is unscoped and claiming binding would lie.
+          <span className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            <Link2 className="size-3.5 shrink-0" />
+            {t('vaults.approval.sessionBound')}
+          </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
           <Button type="button" variant="outline" onClick={deny} disabled={busy}>

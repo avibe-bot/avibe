@@ -3214,12 +3214,42 @@ def vault_sandbox_root_metadata_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/agent-bindings:batch", methods=["POST"])
+def vault_agent_bindings_batch_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_agent_bindings_batch(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/agent-binding", methods=["POST"])
 def vault_agent_binding_post():
     from vibe import api
 
     try:
         return jsonify(api.create_vault_agent_binding(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/settings", methods=["GET"])
+def vault_settings_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_settings())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/settings", methods=["PATCH"])
+def vault_settings_patch():
+    from vibe import api
+
+    try:
+        return jsonify(api.save_vault_settings(request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -3287,6 +3317,16 @@ def vault_secret_delete(name):
 
     try:
         return jsonify(api.delete_vault_secret(name))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/secrets/<name>/reveal-context", methods=["POST"])
+def vault_secret_reveal_context_post(name):
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_reveal_context(name, request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
 

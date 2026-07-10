@@ -20,6 +20,22 @@ def _sealed(suffix: str = "1") -> Sealed:
 def _mock_avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", lambda: {"public_key": "pk", "fingerprint": "fp"})
+
+
+def _issued_agent_dek_payload(request_id: str) -> dict:
+    issued = api.create_vault_agent_bindings_batch({"request_id": request_id, "grant_duration": 300})
+    return {
+        "agent_pubkey": issued["agent_pubkey"],
+        "deks": [
+            {
+                "name": item["name"],
+                "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "approval": item["approval"],
+            }
+            for item in issued["items"]
+        ],
+    }
 
 
 def test_rest_create_rejects_protected_plaintext_value(monkeypatch):
@@ -182,6 +198,119 @@ def test_rest_agent_pubkey_route(monkeypatch):
     assert response.get_json() == {"ok": True, "public_key": "pk", "fingerprint": "fp"}
 
 
+def test_rest_vault_settings_roundtrip():
+    client = app.test_client()
+
+    defaults = client.get("/api/vault/settings")
+    saved = client.patch(
+        "/api/vault/settings",
+        json={"unlock_window_seconds": 300, "strict_approvals": True, "last_grant_ttl": 900},
+        headers=csrf_headers(client),
+    )
+
+    assert defaults.status_code == 200
+    assert defaults.get_json()["settings"]["unlock_window_seconds"] == 600
+    assert saved.status_code == 200
+    assert saved.get_json()["settings"] == {
+        "unlock_window_seconds": 300,
+        "strict_approvals": True,
+        "last_grant_ttl": 900,
+    }
+    assert saved.get_json()["policy"]["windowSeconds"] == 300
+    rejected = client.patch(
+        "/api/vault/settings",
+        json={"strict_approvals": "false"},
+        headers=csrf_headers(client),
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["code"] == "invalid_request"
+
+
+def test_rest_reveal_context_route(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST_REVEAL",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/secrets/PROTECTED_REST_REVEAL/reveal-context",
+        json={},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["context"]["purpose"] == "reveal"
+    assert body["envelope"] == {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}
+    assert body["context"]["release"] == {
+        "name": "PROTECTED_REST_REVEAL",
+        "envelopeHash": api._envelope_hash(body["envelope"]),
+    }
+
+
+def test_rest_agent_bindings_batch_route(monkeypatch):
+    _mock_avault_p2(monkeypatch)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "pk", "fingerprint": "fp"}))
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST_BINDING",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_REST_BINDING", "session_id": "ses_1"})["request"]
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/agent-bindings:batch",
+        json={"request_id": requested["id"], "grant_duration": 300},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["grant_id"] == requested["card"]["grant_options"][0]["grant_id"]
+    assert [item["name"] for item in body["items"]] == ["PROTECTED_REST_BINDING"]
+
+
+def test_rest_agent_binding_legacy_route_bridge(monkeypatch):
+    _mock_avault_p2(monkeypatch)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST_LEGACY_BINDING",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_REST_LEGACY_BINDING", "session_id": "ses_1"})["request"]
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/agent-binding",
+        json={
+            "request_id": requested["id"],
+            "grant_id": requested["card"]["grant_options"][0]["grant_id"],
+            "name": "PROTECTED_REST_LEGACY_BINDING",
+            "ttl_seconds": 300,
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["grant_id"] == requested["card"]["grant_options"][0]["grant_id"]
+    assert body["binding"]["context"]["purpose"] == "agent-deliver"
+    assert body["binding"]["context"]["name"] == "PROTECTED_REST_LEGACY_BINDING"
+    assert set(body["approval"]) == {"nonce", "expires_at_unix"}
+
+
 def test_rest_security_headers_delegate_webauthn_to_self_and_sandbox():
     client = app.test_client()
 
@@ -254,19 +383,14 @@ def test_rest_requests_and_grants_routes(monkeypatch):
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+    issued = _issued_agent_dek_payload(req["id"])
 
     grant_response = client.post(
         "/api/vault/grants",
         json={
             "session_id": "ses_1",
             "request_id": req["id"],
-            "deks": [
-                {
-                    "name": "PROTECTED_REST",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         },
         headers=csrf_headers(client),
     )
@@ -369,18 +493,13 @@ def test_rest_fulfill_access_request_route(monkeypatch):
     )
     requested = api.request_vault_access({"name": "PROTECTED_REST", "session_id": "ses_1"})
     client = app.test_client()
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
 
     response = client.post(
         f"/api/vault/requests/{requested['request']['id']}/fulfill-access",
         json={
             "session_id": "ses_1",
-            "deks": [
-                {
-                    "name": "PROTECTED_REST",
-                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                }
-            ],
+            **issued,
         },
         headers=csrf_headers(client),
     )
