@@ -25,6 +25,12 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 // Ops that may raise an in-sandbox card (confirm / passkey / plaintext display) can sit open for
 // as long as the user takes to act, so they get the long ceremony timeout regardless of tier.
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
+// Cadence for refreshing the parent surface attestation while a confirm card is up (protocol v2
+// §6.6 addendum / §13). The sandbox fail-closes an embedded R2/R3 confirm unless the parent freshly
+// attests the sandbox iframe's on-screen geometry — it cannot observe its own iframe element from a
+// cross-origin frame. The sandbox rejects attestations older than 60 s, so we refresh well under
+// that cap while the ceremony is pending.
+const SURFACE_REFRESH_INTERVAL_MS = 10_000;
 
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
@@ -266,6 +272,60 @@ function parseVaultStateEvent(payload: unknown): VaultStateEvent | null {
   };
 }
 
+/**
+ * Parent-measured visibility attestation of the sandbox iframe (protocol v2 §6.6 addendum / §13).
+ * The parent owns the iframe, so only it can measure the element from the embedder document; the
+ * sandbox cannot observe its own frame cross-origin. Field names + nesting match the sandbox's
+ * `parseParentConfirmSurface` contract exactly (`frame.*` plus a top-level `sampledAt`).
+ */
+type VaultConfirmSurface = {
+  frame: {
+    frameWidth: number;
+    frameHeight: number;
+    intersectionRatio: number;
+    visibleByIntersectionObserver: boolean;
+    opacity: number;
+    pointerEvents: boolean;
+  };
+  sampledAt: number;
+};
+
+/**
+ * One-shot IntersectionObserver reading of an element's on-screen visibility, mirroring the sandbox's
+ * own self-check (`trackVisibility` occlusion detection where the engine supports it, ratio fallback
+ * otherwise) so the parent attests visibility the same way the sandbox measures itself. Resolves on
+ * the first observer entry or a short timeout so it never hangs.
+ */
+function observeElementVisibility(target: Element): Promise<{ ratio: number; visible: boolean }> {
+  if (typeof IntersectionObserver === 'undefined') return Promise.resolve({ ratio: 0, visible: false });
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = 0;
+    const finish = (entry?: IntersectionObserverEntry): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      observer.disconnect();
+      if (!entry) {
+        resolve({ ratio: 0, visible: false });
+        return;
+      }
+      const isVisible = (entry as IntersectionObserverEntry & { isVisible?: boolean }).isVisible;
+      resolve({
+        ratio: entry.intersectionRatio,
+        visible: isVisible === undefined ? entry.intersectionRatio >= 0.99 : isVisible === true,
+      });
+    };
+    const observer = new IntersectionObserver((entries) => finish(entries[0]), {
+      threshold: [0, 0.99, 1],
+      trackVisibility: true,
+      delay: 100,
+    } as IntersectionObserverInit);
+    observer.observe(target);
+    timer = window.setTimeout(() => finish(), 250);
+  });
+}
+
 export class VaultSandboxClient {
   private iframe: HTMLIFrameElement;
   private backdrop: HTMLDivElement | null = null;
@@ -273,6 +333,11 @@ export class VaultSandboxClient {
   private readyPromise: Promise<ReadyMessage>;
   private handshaken = false;
   private modalVisible = false;
+  // Ids of in-flight interactive (R2/R3) requests whose confirm card the sandbox gates on a fresh
+  // parent surface attestation. While the modal is up each one's attestation is refreshed on an
+  // interval; an id is dropped when its request settles (reply, timeout, or teardown).
+  private interactiveRequests = new Set<string>();
+  private surfaceRefreshTimer: number | null = null;
 
   private constructor(iframe: HTMLIFrameElement) {
     this.iframe = iframe;
@@ -361,6 +426,83 @@ export class VaultSandboxClient {
     this.iframe.style.visibility = visible ? 'visible' : 'hidden';
     this.iframe.style.pointerEvents = visible ? 'auto' : 'none';
     this.iframe.style.boxShadow = visible ? '0 24px 80px rgba(15, 23, 42, 0.38)' : 'none';
+    // The expanded modal is the sandbox's on-screen confirm surface. Attest it to the sandbox while
+    // it's up, and stop once it collapses (protocol v2 §6.6). Refresh starts only after this
+    // expansion so the measurement reflects the visible modal, not the 0-size headless worker.
+    if (visible) {
+      this.startSurfaceRefresh();
+    } else {
+      this.stopSurfaceRefresh();
+    }
+  }
+
+  /**
+   * Measure the sandbox iframe in the parent (embedder) document and package it as the attestation
+   * the sandbox's confirm-surface gate expects (protocol v2 §6.6 / §13): `getBoundingClientRect()`
+   * for size, an IntersectionObserver reading for visibility, computed `opacity` and `pointer-events`,
+   * and `sampledAt = Date.now()`. Measured honestly — a hidden or occluded iframe yields failing
+   * numbers and the sandbox still fail-closes; the values are never faked to pass the gate.
+   */
+  private async measureSurface(): Promise<VaultConfirmSurface | null> {
+    if (typeof window === 'undefined' || !this.iframe.isConnected) return null;
+    const rect = this.iframe.getBoundingClientRect();
+    const style = window.getComputedStyle(this.iframe);
+    const opacity = Number.parseFloat(style.opacity);
+    const observed = await observeElementVisibility(this.iframe);
+    return {
+      frame: {
+        frameWidth: rect.width,
+        frameHeight: rect.height,
+        intersectionRatio: observed.ratio,
+        visibleByIntersectionObserver: observed.visible,
+        opacity: Number.isFinite(opacity) ? opacity : 0,
+        pointerEvents: style.pointerEvents !== 'none',
+      },
+      sampledAt: Date.now(),
+    };
+  }
+
+  private startSurfaceRefresh(): void {
+    this.stopSurfaceRefresh();
+    // Emit once immediately (right after the modal expanded) then on a fixed cadence well under the
+    // sandbox's 60 s staleness cap, so a fresh attestation is always waiting when the user confirms.
+    void this.emitSurfaceAttestation();
+    this.surfaceRefreshTimer = window.setInterval(() => {
+      void this.emitSurfaceAttestation();
+    }, SURFACE_REFRESH_INTERVAL_MS);
+  }
+
+  private stopSurfaceRefresh(): void {
+    if (this.surfaceRefreshTimer !== null) {
+      window.clearInterval(this.surfaceRefreshTimer);
+      this.surfaceRefreshTimer = null;
+    }
+  }
+
+  /**
+   * Refresh the parent surface attestation for every in-flight interactive request via a
+   * `confirm.surface` event carrying the live rpc request id (protocol v2 §6.6 / §13). One
+   * measurement is shared across all active ceremonies (in practice the modal hosts one at a time).
+   */
+  private async emitSurfaceAttestation(): Promise<void> {
+    if (this.interactiveRequests.size === 0) return;
+    const surface = await this.measureSurface();
+    if (!surface) return;
+    // The set may have drained (request settled) while we awaited the observer reading.
+    for (const id of [...this.interactiveRequests]) {
+      this.postSurfaceEvent(id, surface);
+    }
+  }
+
+  private postSurfaceEvent(id: string, surface: VaultConfirmSurface): void {
+    try {
+      this.target.postMessage(
+        { channel: CHANNEL, version: VERSION, kind: 'event', event: 'confirm.surface', id, surface },
+        VAULT_SANDBOX_ORIGIN,
+      );
+    } catch {
+      // The iframe may be mid-teardown or already removed; the next real request surfaces staleness.
+    }
   }
 
   private waitForReady(): Promise<ReadyMessage> {
@@ -401,6 +543,7 @@ export class VaultSandboxClient {
     const pending = this.pending.get(reply.id);
     if (!pending) return;
     this.pending.delete(reply.id);
+    this.interactiveRequests.delete(reply.id);
     window.clearTimeout(pending.timer);
     // Safety net: if the sandbox errored out of a card without emitting `ui.hide`, collapse once
     // the last in-flight request settles so a stale modal can't strand the app behind a backdrop.
@@ -465,12 +608,25 @@ export class VaultSandboxClient {
     }
   }
 
-  private async request<T>(op: VaultSandboxOp, payload?: unknown, options: { timeoutMs?: number } = {}): Promise<T> {
+  private async request<T>(
+    op: VaultSandboxOp,
+    payload?: unknown,
+    options: { timeoutMs?: number; interactive?: boolean } = {},
+  ): Promise<T> {
     await this.readyPromise;
     const id = randomId();
+    // Interactive (R2/R3) ops carry a parent surface attestation and get it refreshed while their
+    // confirm card is up (protocol v2 §6.6). Measured before send it reflects the still-headless
+    // worker; the post-`ui.show` refresh replaces it with the visible-modal reading the sandbox
+    // actually gates on. The `surface` field rides as a top-level sibling of `op`/`payload`. Only
+    // `approveRelease`/`sign`/`reveal` are interactive here: those are the ops whose sandbox handler
+    // runs the confirm-surface gate (§13). `setup`/`unlock` are WebAuthn/PRF ceremonies, not in-
+    // sandbox confirm clicks, so their handlers never assert a parent surface and none is sent.
+    const surface = options.interactive ? await this.measureSurface() : null;
     const promise = new Promise<T>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
+        this.interactiveRequests.delete(id);
         if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
         reject(new VaultSandboxError('sandbox_request_timeout', `Sandbox ${op} request timed out`, true));
       }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -480,7 +636,11 @@ export class VaultSandboxClient {
         timer,
       });
     });
-    this.target.postMessage({ channel: CHANNEL, version: VERSION, id, op, payload: payload ?? {} }, VAULT_SANDBOX_ORIGIN);
+    if (options.interactive) this.interactiveRequests.add(id);
+    this.target.postMessage(
+      { channel: CHANNEL, version: VERSION, id, op, payload: payload ?? {}, ...(surface ? { surface } : {}) },
+      VAULT_SANDBOX_ORIGIN,
+    );
     return promise;
   }
 
@@ -541,7 +701,7 @@ export class VaultSandboxClient {
   }
 
   reveal(payload: { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }): Promise<{ completed: boolean }> {
-    return this.request<{ completed: boolean }>('reveal', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    return this.request<{ completed: boolean }>('reveal', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS, interactive: true });
   }
 
   sign(payload: {
@@ -550,7 +710,7 @@ export class VaultSandboxClient {
     signingContext: VaultSandboxSigningContext;
     context: VaultSignedOperationContext;
   }): Promise<SignatureResult> {
-    return this.request<SignatureResult>('sign', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    return this.request<SignatureResult>('sign', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS, interactive: true });
   }
 
   /**
@@ -558,7 +718,10 @@ export class VaultSandboxClient {
    * box per item (order matches `items`). Replaces v1 `releaseDEK`'s per-secret ceremony.
    */
   approveRelease(payload: { items: ApproveReleaseItem[] }): Promise<{ blindBoxes: BlindBox[] }> {
-    return this.request<{ blindBoxes: BlindBox[] }>('approveRelease', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    return this.request<{ blindBoxes: BlindBox[] }>('approveRelease', payload, {
+      timeoutMs: INTERACTIVE_TIMEOUT_MS,
+      interactive: true,
+    });
   }
 
   /**
@@ -574,6 +737,7 @@ export class VaultSandboxClient {
       pending.reject(new VaultSandboxError('sandbox_reset', 'Sandbox client was reset', true));
     }
     this.pending.clear();
+    this.interactiveRequests.clear();
     this.setModalVisible(false);
     this.iframe.remove();
   }
