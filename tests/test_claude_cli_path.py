@@ -860,6 +860,49 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
     assert first_client.model_calls == []
 
 
+def test_session_handler_recreates_cached_client_when_git_path_changes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    clients: list[Any] = []
+    runtime_ready = {"value": False}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            clients.append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    def inject_git(env, *, base_env, working_dir):
+        if runtime_ready["value"]:
+            env["PATH"] = f"/managed/git/bin{session_handler_module.os.pathsep}{base_env['PATH']}"
+            return True
+        return False
+
+    monkeypatch.setenv("PATH", "/gitless/bin")
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(git_runtime_module, "prepend_vendored_git_to_path", inject_git)
+    handler = SessionHandler(_Controller(tmp_path))
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    first_client = _run_session(handler, context)
+    runtime_ready["value"] = True
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(clients) == 2
+    assert "PATH" not in first_client.options.env
+    assert second_client.options.env["PATH"] == "/managed/git/bin:/gitless/bin"
+
+
 def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
     monkeypatch, tmp_path: Path
 ) -> None:

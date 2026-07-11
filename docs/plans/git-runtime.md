@@ -28,7 +28,8 @@ must not be executed before `xcode-select -p` confirms the tools are installed.
   where each backend passes it as an explicit fallback. Relative, empty, and
   workspace-owned prefixes are not trusted ahead of system Git. Claude injects
   at SDK client creation, Codex at its per-thread shell policy, and OpenCode at
-  its per-session `shell.env` binding.
+  its per-session `shell.env` binding. Cached clients, thread policies, and
+  binding rows refresh or clear when the effective Git PATH changes.
 
 ## Build Boundary
 

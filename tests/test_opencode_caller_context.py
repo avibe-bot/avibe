@@ -95,3 +95,30 @@ def test_bind_session_writes_vendored_path_without_caller_context(
     entry = data["sessions"]["oc-session"]
     assert entry["env"] == {"PATH": "/managed/git/bin"}
     assert "caller_context" not in entry
+
+
+def test_bind_session_clears_stale_path_when_git_override_disappears(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    inject = {"enabled": True}
+
+    def inject_git(env, *, base_env, working_dir):
+        if inject["enabled"]:
+            env["PATH"] = "/managed/git/bin"
+            return True
+        return False
+
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", inject_git)
+    kwargs = {
+        "base_env": {"PATH": "/usr/bin"},
+        "working_dir": tmp_path / "workspace",
+    }
+    assert bridge.bind_session("oc-session", {"platform": "slack"}, **kwargs) is True
+
+    inject["enabled"] = False
+
+    assert bridge.bind_session("oc-session", {"platform": "slack"}, **kwargs) is False
+    data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
+    assert "oc-session" not in data["sessions"]

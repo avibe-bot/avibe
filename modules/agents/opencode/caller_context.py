@@ -130,6 +130,13 @@ def _prune_sessions(sessions: dict[str, Any], now: datetime) -> dict[str, Any]:
     return pruned
 
 
+def _write_bindings(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+
 def bind_session(
     opencode_session_id: str,
     platform_payload: Mapping[str, object] | None,
@@ -150,12 +157,20 @@ def bind_session(
         base_env=base_env,
         working_dir=working_dir,
     )
+    path = binding_path()
+    now = _utc_now()
     if not env:
+        if not path.is_file():
+            return False
+        data = _load_bindings(path)
+        existing_sessions = data.get("sessions", {})
+        sessions = _prune_sessions(existing_sessions, now)
+        sessions.pop(session_id, None)
+        if sessions != existing_sessions:
+            data["sessions"] = sessions
+            _write_bindings(path, data)
         return False
 
-    path = binding_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    now = _utc_now()
     expires_at = now + timedelta(hours=max(1, int(ttl_hours)))
     data = _load_bindings(path)
     sessions = _prune_sessions(data.get("sessions", {}), now)
@@ -168,7 +183,5 @@ def bind_session(
         entry["caller_context"] = caller.to_metadata()
     sessions[session_id] = entry
     data["sessions"] = sessions
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+    _write_bindings(path, data)
     return True

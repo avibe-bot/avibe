@@ -146,6 +146,18 @@ class SessionHandler(BaseHandler):
         await set_model(desired_model)
         setattr(client, "_vibe_current_model", desired_model)
 
+    @staticmethod
+    def _claude_git_path_state(working_path: str) -> str:
+        from core.git_runtime import prepend_vendored_git_to_path
+
+        env: dict[str, str] = {}
+        prepend_vendored_git_to_path(
+            env,
+            base_env=os.environ,
+            working_dir=working_path,
+        )
+        return env["PATH"] if "PATH" in env else os.environ.get("PATH", "")
+
     async def _reuse_cached_claude_session_if_available(
         self,
         *,
@@ -182,6 +194,14 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
+        git_path_state = self._claude_git_path_state(working_path)
+        if getattr(client, "_vibe_git_path_state", None) != git_path_state:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because Git PATH changed",
                 composite_key,
             )
             await self.cleanup_session(composite_key)
@@ -227,6 +247,14 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
+        git_path_state = self._claude_git_path_state(working_path)
+        if getattr(client, "_vibe_git_path_state", None) != git_path_state:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because Git PATH changed",
                 composite_key,
             )
             await self.cleanup_session(composite_key)
@@ -860,6 +888,7 @@ class SessionHandler(BaseHandler):
             base_env=os.environ,
             working_dir=working_path,
         )
+        git_path_state = claude_env["PATH"] if "PATH" in claude_env else os.environ.get("PATH", "")
         claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"
@@ -916,6 +945,7 @@ class SessionHandler(BaseHandler):
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
         setattr(client, "_vibe_caller_env", caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
+        setattr(client, "_vibe_git_path_state", git_path_state)
 
         # Log the actual options being used
         logger.info("ClaudeAgentOptions details:")
