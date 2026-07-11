@@ -81,6 +81,68 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detached_output_uses_explicit_run_lineage_over_receiver_context(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda run_id: False),
+            emit_matches_runtime_turn=lambda context: False,
+            release_runtime_turn=lambda context: self.fail("detached output released current Turn"),
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-stale-receiver",
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "older-turn",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append((run_id, kwargs["terminal_status"]))
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_Store(),
+            ),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "background work finished",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=True,
+                    detached=True,
+                    idempotency_key="activity-complete",
+                    run_id="run-origin",
+                    metadata={"run_ids": ["run-origin", "run-coalesced"]},
+                ),
+            )
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(
+            calls,
+            [
+                ("run-origin", "succeeded"),
+                ("run-coalesced", "succeeded"),
+            ],
+        )
+
     async def test_empty_detached_result_can_complete_origin_run_without_current_turn(self):
         controller = _StubController()
         controller.agent_service = SimpleNamespace(

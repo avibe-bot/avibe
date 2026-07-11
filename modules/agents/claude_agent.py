@@ -1373,6 +1373,7 @@ class ClaudeAgent(BaseAgent):
                 "activity_kind": activity.kind,
                 "activity_status": activity.status,
                 "backend": activity.backend,
+                "run_ids": activity.metadata.get("run_ids"),
                 "turn_id": activity.turn_id,
             },
         )

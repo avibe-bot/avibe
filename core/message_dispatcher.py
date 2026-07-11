@@ -1058,12 +1058,21 @@ class ConsolidatedMessageDispatcher:
         log_label: str = "agent run terminal result",
     ) -> None:
         payload = context.platform_specific or {}
-        if payload.get("task_trigger_kind") != "agent_run":
-            return
-        run_ids = _coalesced_task_execution_ids(payload)
+        semantics = output_semantics or MessageOutput(completes_turn=True)
+        run_ids: list[str] = []
+        explicit_run_id = str(semantics.run_id or "").strip()
+        if explicit_run_id:
+            run_ids.append(explicit_run_id)
+        explicit_run_ids = semantics.metadata.get("run_ids")
+        if isinstance(explicit_run_ids, list):
+            for value in explicit_run_ids:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+        if not run_ids and payload.get("task_trigger_kind") == "agent_run":
+            run_ids = _coalesced_task_execution_ids(payload)
         if not run_ids:
             return
-        semantics = output_semantics or MessageOutput(completes_turn=True)
         terminal_status = None
         if semantics.settles_run:
             terminal_status = "failed" if is_error else "succeeded"
