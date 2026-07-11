@@ -2512,6 +2512,79 @@ def test_recovered_terminal_waits_for_pending_activity_output(
     assert activity_store.list_activities() == []
 
 
+def test_recovered_terminal_settlement_failure_does_not_abort_startup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="target-session",
+        activity_id="task-failed",
+        kind="background_task",
+        run_id=request.id,
+    )
+    failed = first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+    assert failed is not None
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    original_defer = request_store.defer_run_terminal
+    attempts = 0
+
+    def transient_defer_failure(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("database is locked")
+        return original_defer(*args, **kwargs)
+
+    request_store.defer_run_terminal = transient_defer_failure
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=recovered_registry),
+    )
+
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    assert attempts == 1
+    assert len(service._pending_recovered_activity_terminals) == 1
+    assert len(activity_store.list_activities()) == 1
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert attempts == 2
+    assert terminal["status"] == "failed"
+    assert terminal["error"] == "Background Activity task-failed failed"
+    assert service._pending_recovered_activity_terminals == []
+    assert activity_store.list_activities() == []
+
+
 def test_restart_preserves_activity_delivery_override(
     tmp_path: Path,
     monkeypatch,

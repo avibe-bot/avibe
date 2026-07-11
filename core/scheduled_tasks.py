@@ -1590,7 +1590,16 @@ class ScheduledTaskService:
         has_pending_output = getattr(registry, "has_pending_run_output", None)
         if callable(drain_terminals):
             for activity in drain_terminals():
-                self.settle_activity_runs(activity)
+                try:
+                    self.settle_activity_runs(activity)
+                except Exception:
+                    self._pending_recovered_activity_terminals.append(activity)
+                    logger.warning(
+                        "Failed to settle recovered terminal Activity %s during startup",
+                        getattr(activity, "id", ""),
+                        exc_info=True,
+                    )
+                    continue
                 if callable(has_pending_output) and any(
                     has_pending_output(run_id)
                     for run_id in self._activity_run_ids(activity)
