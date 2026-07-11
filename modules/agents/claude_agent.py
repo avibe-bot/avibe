@@ -1173,9 +1173,10 @@ class ClaudeAgent(BaseAgent):
         )
 
     def _end_activity_runtime(self, composite_key: str) -> None:
-        registry = self._activity_registry()
-        if registry is not None and composite_key:
-            registry.end_runtime(self.name, composite_key)
+        service = getattr(self.controller, "agent_service", None)
+        end_runtime = getattr(service, "end_activity_runtime", None)
+        if callable(end_runtime) and composite_key:
+            end_runtime(self.name, composite_key)
 
     @staticmethod
     def _task_field(message, name: str, default=None):
@@ -1372,6 +1373,7 @@ class ClaudeAgent(BaseAgent):
                 "activity_kind": activity.kind,
                 "activity_status": activity.status,
                 "backend": activity.backend,
+                "turn_id": activity.turn_id,
             },
         )
 

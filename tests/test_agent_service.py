@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from modules.agents.service import AgentService
 
@@ -193,6 +193,30 @@ def test_agent_service_reports_missing_runtime_refresh_contract() -> None:
 
     assert asyncio.run(service.refresh_runtime_config("codex", object())) is False
     assert asyncio.run(service.refresh_runtime_config("claude", object())) is False
+
+
+def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() -> None:
+    settle = Mock()
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(settle_activity_runs=settle),
+    )
+    service = AgentService(controller)
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="session-1",
+        activity_id="task-1",
+        kind="background_task",
+        run_id="run-1",
+    )
+
+    service.end_activity_runtime("claude", "runtime-1")
+
+    assert service.activities.active_for_runtime("claude", "runtime-1") == []
+    activity = settle.call_args.args[0]
+    assert activity.id == "task-1"
+    assert activity.run_id == "run-1"
+    assert activity.status == "disconnected"
 
 
 def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:

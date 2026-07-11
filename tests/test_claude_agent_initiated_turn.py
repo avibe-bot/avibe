@@ -513,6 +513,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(output.completes_run)
         self.assertEqual(output.activity_id, "task-690")
         self.assertEqual(output.causation_id, "tool-690")
+        self.assertEqual(output.provenance(receiver_context)["turn_id"], "origin-turn")
         self.assertEqual(agent._pending_requests[composite_key], [user_request])
         self.assertEqual(agent._pending_assistant_message[composite_key], "newer turn draft")
         self.assertEqual(gate.token, "USER-TURN")

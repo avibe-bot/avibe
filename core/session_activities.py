@@ -259,7 +259,13 @@ class SessionActivityRegistry:
             self._completed_outputs.pop(key, None)
         return None
 
-    def end_runtime(self, backend: str, runtime_key: str, *, status: str = "disconnected") -> None:
+    def end_runtime(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        status: str = "disconnected",
+    ) -> list[SessionActivity]:
         key = (str(backend), str(runtime_key))
         with self._lock:
             connection = self._connections.get(key)
@@ -277,13 +283,17 @@ class SessionActivityRegistry:
             )
             active_ids = [activity.id for activity in active]
             self._completed_outputs.pop(key, None)
+        completed: list[SessionActivity] = []
         for activity_id in active_ids:
-            self.complete(
+            activity = self.complete(
                 backend=backend,
                 runtime_key=runtime_key,
                 activity_id=activity_id,
                 status="disconnected",
             )
+            if activity is not None:
+                completed.append(activity)
+        return completed
 
     def session_state(self, session_id: str) -> dict[str, Any]:
         with self._lock:

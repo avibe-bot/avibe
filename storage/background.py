@@ -1256,7 +1256,7 @@ class SQLiteBackgroundTaskStore:
                 payload_changed = True
 
             existing_text = str(row["result_text"] or "")
-            if payload_changed:
+            if recorded:
                 result_text = f"{existing_text}\n\n{visible_text}" if existing_text else visible_text
             else:
                 result_text = existing_text
@@ -1266,16 +1266,20 @@ class SQLiteBackgroundTaskStore:
             if recorded and message_id and message_id not in message_ids:
                 message_ids.append(message_id)
 
-            if recorded:
+            if payload_changed:
+                values: dict[str, Any] = {
+                    "result_payload_json": _json_dumps(result_payload),
+                    "updated_at": now,
+                }
+                if recorded:
+                    values.update(
+                        result_text=result_text,
+                        message_ids_json=_json_dumps(message_ids),
+                    )
                 conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
-                    .values(
-                        result_text=result_text,
-                        result_payload_json=_json_dumps(result_payload),
-                        message_ids_json=_json_dumps(message_ids),
-                        updated_at=now,
-                    )
+                    .values(**values)
                 )
             if terminal_status:
                 transition = conn.execute(

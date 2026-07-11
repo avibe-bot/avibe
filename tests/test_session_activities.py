@@ -79,9 +79,12 @@ def test_activity_updates_are_independent_and_runtime_disconnect_terminates_all(
     assert [item.id for item in active] == ["task-2"]
     assert active[0].metadata["last_tool_name"] == "Bash"
 
-    registry.end_runtime("claude", "runtime-1", status="disconnected")
+    completed = registry.end_runtime("claude", "runtime-1", status="disconnected")
     assert registry.active_for_runtime("claude", "runtime-1") == []
     assert registry.session_state("ses-1")["connection"] == "disconnected"
+    assert [(item.id, item.status) for item in completed] == [
+        ("task-2", "disconnected"),
+    ]
 
 
 def test_turn_state_composes_foreground_inbox_activity_and_connection_axes():

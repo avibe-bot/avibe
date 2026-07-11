@@ -2088,6 +2088,49 @@ def test_agent_run_forwards_multiple_outputs_and_completes_once(tmp_path: Path, 
     }
 
 
+def test_duplicate_terminal_output_does_not_append_result_text_again(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    first = sqlite_store.record_run_output(
+        request.id,
+        output_id="output-1",
+        text="callback output",
+    )
+    assert first["recorded"] is True
+    assert sqlite_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    duplicate = sqlite_store.record_run_output(
+        request.id,
+        output_id="output-1",
+        text="callback output",
+        terminal_status="succeeded",
+    )
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert duplicate["recorded"] is False
+    assert duplicate["terminal_transition"] is True
+    assert terminal["result_text"] == "callback output"
+    assert [item["id"] for item in terminal["result_payload"]["outputs"]] == [
+        "output-1",
+    ]
+    assert "deferred_terminal_status" not in terminal["result_payload"]
+
+
 @pytest.mark.parametrize(
     ("activity_status", "expected_run_status"),
     [
