@@ -2336,14 +2336,18 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
     if signer_kind is not None:
         signer_kind = str(signer_kind)
     provision_request_id = str(payload.get("provision_request_id") or "") or None
+    atomic_protected_establishment = establishing_vmk and protection == "protected"
     engine = _vault_engine()
     try:
-        with engine.begin() as conn:
-            vault_service.preflight_secret_create(
-                conn,
-                name=name,
-                provision_request_id=provision_request_id,
-            )
+        # Establishment defers preflight to create_secret's write-serialized
+        # transaction so a same-name loser receives vault_already_initialized.
+        if not atomic_protected_establishment:
+            with engine.begin() as conn:
+                vault_service.preflight_secret_create(
+                    conn,
+                    name=name,
+                    provision_request_id=provision_request_id,
+                )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretNameCaseConflictError as exc:

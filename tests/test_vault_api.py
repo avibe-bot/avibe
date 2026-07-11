@@ -1622,7 +1622,8 @@ def test_create_vault_reveal_context_rejects_protected_keypair(monkeypatch):
     assert exc.value.code == "keypair_not_value_deliverable"
 
 
-def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
+@pytest.mark.parametrize("second_name", ["FIRST_PROTECTED", "SECOND_PROTECTED"])
+def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch, second_name):
     _establish_protected_secret_with_factor("FIRST_PROTECTED")
     with api._vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "FIRST_PROTECTED")["protection"] == "protected"
@@ -1632,7 +1633,7 @@ def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_secret(
             {
-                "name": "SECOND_PROTECTED",
+                "name": second_name,
                 "protection": "protected",
                 "sealed": {"ciphertext": "ct2", "nonce": "n2", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d2"}},
                 "establishing_vmk": True,
