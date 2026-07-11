@@ -233,6 +233,12 @@ class Controller:
         # Initialize agents (depends on handlers/session handler)
         self._init_agents()
         self.agent_auth_service = AgentAuthService(self)
+        from core.backend_restart import BackendRestartCoordinator
+
+        self.backend_restart_coordinator = BackendRestartCoordinator(
+            self,
+            self.agent_auth_service._apply_backend_runtime_refresh,
+        )
 
         self.vibe_agent_store = VibeAgentStore()
         self.vibe_agent_store.ensure_builtin_default_agents(
@@ -1504,11 +1510,12 @@ class Controller:
             self._im_thread.join(timeout=5)
         self._im_thread = None
 
-        # Stop OpenCode server if running
+        # An explicit Avibe stop/restart must not leave an adopted OpenCode
+        # generation behind. Active turns have already reached shutdown cleanup.
         try:
             from modules.agents.opencode import OpenCodeServerManager
 
-            OpenCodeServerManager.stop_instance_sync()
+            OpenCodeServerManager.terminate_instance_sync()
         except Exception as e:
             logger.debug(f"OpenCode server cleanup skipped: {e}")
 

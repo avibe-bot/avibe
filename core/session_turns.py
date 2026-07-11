@@ -558,6 +558,8 @@ class SessionTurnManager:
         self._build_context = build_context
         self._engine: Engine | None = None
         self.in_flight: dict[str, Turn] = {}
+        self._draining_backends: set[str] = set()
+        self._deferred_restart_sessions: dict[str, set[str]] = {}
         # The live streaming turn sink per SESSION KEY (avibe/web-Chat only; IM/CLI
         # turns register none). Each is ``{on_chunk, done_event, turn_token}`` — the
         # turn's stream callback + completion event + correlation token. Keyed by
@@ -579,6 +581,46 @@ class SessionTurnManager:
         the gate is built, so ``flush_queue`` can rebuild a queued follow-up's
         routing from the current session row."""
         self._build_context = build_context
+
+    @staticmethod
+    def _context_backend(context: "MessageContext") -> str:
+        spec = getattr(context, "platform_specific", None) or {}
+        target = spec.get("agent_session_target")
+        return str(target.get("agent_backend") or "").strip() if isinstance(target, dict) else ""
+
+    def begin_backend_drain(self, backend: str) -> None:
+        self._draining_backends.add(backend)
+        self._deferred_restart_sessions.setdefault(backend, set())
+
+    async def end_backend_drain(self, backend: str, *, resume_deferred: bool = True) -> None:
+        self._draining_backends.discard(backend)
+        session_ids = self._deferred_restart_sessions.pop(backend, set())
+        if not resume_deferred:
+            return
+        for session_id in sorted(session_ids):
+            if not self.is_in_flight(session_id):
+                await self.flush_queue(session_id)
+
+    def active_session_ids_for_backend(self, backend: str) -> set[str]:
+        return {
+            session_id
+            for session_id, turn in self.in_flight.items()
+            if not turn.task.done() and self._context_backend(turn.context) == backend
+        }
+
+    def active_runtime_session_ids_for_backend(self, backend: str) -> set[str]:
+        """Active Sessions that actually entered the old backend generation."""
+        return {
+            session_id
+            for session_id, turn in self.in_flight.items()
+            if not turn.task.done()
+            and self._context_backend(turn.context) == backend
+            and bool(
+                (getattr(turn.context, "platform_specific", None) or {}).get(
+                    "agent_runtime_turn_token"
+                )
+            )
+        }
 
     @staticmethod
     async def _noop_chunk(_envelope: dict) -> None:
@@ -610,11 +652,15 @@ class SessionTurnManager:
             await self._run(None, context, text, source=source)
             return "ran"
 
+        backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
         busy = entry is not None and not entry.task.done()
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
         # new message must run AFTER them, not jump ahead (Codex P2).
-        if busy:
+        if backend in self._draining_backends:
+            should_enqueue = True
+            self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
+        elif busy:
             should_enqueue = True
         else:
             with self._sqlite_engine().connect() as conn:
@@ -622,7 +668,7 @@ class SessionTurnManager:
         if should_enqueue:
             if enqueue is not None:
                 enqueue()
-            if busy:
+            if busy or backend in self._draining_backends:
                 # The row joins the active turn's queue and stays until it drains —
                 # surface the queue growth NOW so the UI reflects it immediately
                 # (the later flush emits its own queue.updated when it pops). This
@@ -720,7 +766,10 @@ class SessionTurnManager:
                         (not cancelled and not failed and not (turn is not None and turn.stop_no_flush))
                         or (turn is not None and turn.flush_on_cancel)
                     )
-                    if should_flush:
+                    backend = self._context_backend(context)
+                    if should_flush and backend in self._draining_backends:
+                        self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
+                    elif should_flush:
                         await self.flush_queue(session_id)
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")

@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import subprocess
 import time
@@ -272,10 +273,13 @@ class OpenCodeServerManager:
         self._auth_refresh_pending_port = None
         self._apply_pending_runtime_config_locked()
 
-    async def detach_after_deferred_refresh(self) -> None:
+    async def detach_after_deferred_refresh(self, *, force: bool = False) -> None:
         """Drop cached client state when a refresh must wait for active runs."""
         async with self._get_lock():
-            if self._active_requests > 0 or self._has_active_run_sessions():
+            if force:
+                self._active_requests = 0
+                self._active_run_sessions.clear()
+            if not force and (self._active_requests > 0 or self._has_active_run_sessions()):
                 self._auth_refresh_pending = True
                 self._auth_refresh_pending_port = self.port
                 logger.info(
@@ -353,6 +357,9 @@ class OpenCodeServerManager:
 
     def _has_active_run_sessions(self) -> bool:
         return bool(self._active_run_sessions)
+
+    def runtime_has_active_turns(self) -> bool:
+        return self._active_requests > 0 or self._has_active_run_sessions()
 
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():
@@ -923,8 +930,54 @@ class OpenCodeServerManager:
 
     async def _terminate_pid(self, pid: int, reason: str) -> None:
         logger.info(f"Stopping OpenCode server pid={pid} ({reason})")
-        if not runtime.stop_pid(pid, timeout=5) and self._pid_exists(pid):
+        stopped = await asyncio.to_thread(self._terminate_pid_tree_sync, pid)
+        if not stopped and self._pid_exists(pid):
             logger.debug("Failed to terminate OpenCode server pid=%s", pid)
+
+    @staticmethod
+    def _terminate_pid_tree_sync(pid: int, timeout: float = 5.0) -> bool:
+        """Stop the dedicated OpenCode process group, including tool children."""
+        if os.name == "nt":
+            return runtime.stop_pid(pid, timeout=timeout)
+        try:
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, PermissionError):
+            return not runtime.pid_alive(pid)
+        if pgid != pid:
+            return runtime.stop_pid(pid, timeout=timeout)
+
+        def group_alive() -> bool:
+            try:
+                os.killpg(pgid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not group_alive():
+                return True
+            time.sleep(0.1)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not group_alive():
+                return True
+            time.sleep(0.1)
+        return not group_alive()
 
     async def _cleanup_orphaned_managed_server(self) -> None:
         info = self._read_pid_file()
@@ -1160,7 +1213,7 @@ class OpenCodeServerManager:
             self._process = None
             self._process_loop = None
 
-    def stop_sync(self) -> None:
+    def _close_http_session_sync(self) -> None:
         if self._http_session and self._http_session_loop:
             try:
                 future = asyncio.run_coroutine_threadsafe(self._http_session.close(), self._http_session_loop)
@@ -1170,6 +1223,9 @@ class OpenCodeServerManager:
             finally:
                 self._http_session = None
                 self._http_session_loop = None
+
+    def stop_sync(self) -> None:
+        self._close_http_session_sync()
 
         # Don't terminate OpenCode server on vibe-remote shutdown.
         # Let it continue running so the next vibe-remote instance can adopt it.
@@ -1181,10 +1237,47 @@ class OpenCodeServerManager:
         self._process = None
         self._process_loop = None
 
-    async def restart_for_auth_refresh(self) -> None:
+    def terminate_sync(self) -> None:
+        """Terminate the managed server during an explicit Avibe shutdown."""
+        self._close_http_session_sync()
+        info = self._read_pid_file()
+        pid = info.get("pid") if isinstance(info, dict) else None
+        if isinstance(pid, int) and self._pid_exists(pid):
+            command = self._get_pid_command(pid)
+            if command and self._is_opencode_serve_cmd(command, self.port):
+                self._terminate_pid_tree_sync(pid)
+        self._clear_pid_file()
+        self._base_url = None
+
+    @classmethod
+    def terminate_instance_sync(cls) -> None:
+        if cls._instance is not None:
+            cls._instance.terminate_sync()
+            return
+        pid_file = paths.get_logs_dir() / "opencode_server.json"
+        try:
+            info = json.loads(pid_file.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        pid = info.get("pid") if isinstance(info, dict) else None
+        port = info.get("port") if isinstance(info, dict) else None
+        if not isinstance(pid, int) or not isinstance(port, int):
+            return
+        command = runtime.get_process_command(pid)
+        if command and cls._is_opencode_serve_cmd(command, port):
+            cls._terminate_pid_tree_sync(pid)
+        try:
+            pid_file.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to clear OpenCode pid file during shutdown", exc_info=True)
+
+    async def restart_for_auth_refresh(self, *, force: bool = False) -> None:
         """Terminate the shared server so the next request reloads refreshed auth."""
         async with self._get_lock():
-            if self._active_requests > 0 or self._has_active_run_sessions():
+            if force:
+                self._active_requests = 0
+                self._active_run_sessions.clear()
+            if not force and (self._active_requests > 0 or self._has_active_run_sessions()):
                 self._auth_refresh_pending = True
                 logger.info(
                     "Deferring OpenCode auth refresh restart until %s active request(s) and %s active run(s) finish",

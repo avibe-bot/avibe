@@ -21,7 +21,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
 from sqlalchemy import select
@@ -1003,6 +1003,41 @@ def test_release_for_backend_refresh_leaves_other_backend_turn_running():
     assert released == 0
     assert done is False
     assert statuses == []
+
+
+def test_backend_drain_queues_idle_session_without_dispatching():
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    enqueue = Mock()
+    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "ses_codex",
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+
+    async def _go():
+        manager.begin_backend_drain("codex")
+        return await manager.submit("ses_codex", context, "next", enqueue=enqueue)
+
+    result = asyncio.run(_go())
+
+    assert result == "enqueued"
+    enqueue.assert_called_once_with()
+    assert manager.is_in_flight("ses_codex") is False
+    assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+
+
+def test_backend_drain_flushes_deferred_session_after_cutover():
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    manager.flush_queue = AsyncMock(return_value=True)
+    manager.begin_backend_drain("codex")
+    manager._deferred_restart_sessions["codex"].add("ses_codex")
+
+    asyncio.run(manager.end_backend_drain("codex"))
+
+    manager.flush_queue.assert_awaited_once_with("ses_codex")
+    assert "codex" not in manager._draining_backends
 
 
 # ---------------------------------------------------------------------

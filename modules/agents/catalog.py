@@ -82,9 +82,9 @@ WEB_OAUTH_BACKENDS: Final[frozenset[str]] = frozenset(
 )
 
 _RUNTIME_REFRESH_SUCCESS_MESSAGES: Final[dict[str, str]] = {
-    "opencode": "OpenCode server refreshed; it will respawn on next request.",
-    "claude": "Claude runtime refreshed; sessions will reconnect on next request.",
-    "codex": "Codex runtime refreshed; transports will respawn on next request.",
+    "opencode": "OpenCode restart accepted; active turns will drain before the server refreshes.",
+    "claude": "Claude restart accepted; active turns will drain before sessions reconnect.",
+    "codex": "Codex restart accepted; active turns will drain before transports refresh.",
 }
 
 
@@ -161,5 +161,5 @@ def runtime_refresh_success_message(name: str) -> str:
     """Return the success message for a refreshed backend runtime."""
     return _RUNTIME_REFRESH_SUCCESS_MESSAGES.get(
         name,
-        f"{name} runtime refreshed; next request will use current settings.",
+        f"{name} restart accepted; active turns will drain before runtime refresh.",
     )

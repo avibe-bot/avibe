@@ -248,6 +248,37 @@ def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:
     asyncio.run(_run())
 
 
+def test_agent_service_restart_barrier_preserves_same_runtime_fifo() -> None:
+    async def _run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        service.register(agent)
+        service.begin_backend_drain("claude")
+
+        first_request = _request("first")
+        second_request = _request("second")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(service.handle_message("claude", second_request))
+        await asyncio.sleep(0.01)
+
+        assert agent.started == []
+        assert service.runtime_turn_tokens_for_backend("claude") == {}
+
+        service.end_backend_drain("claude")
+        await asyncio.sleep(0)
+        assert agent.started == ["first"]
+
+        service.release_runtime_turn(first_request.context)
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+        assert agent.started == ["first", "second"]
+
+    asyncio.run(_run())
+
+
 class _RecordingIndicator:
     """Records the queued/promote/finish reaction calls the gate drives."""
 

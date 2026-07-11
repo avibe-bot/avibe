@@ -1553,14 +1553,17 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to clear OpenCode provider option apiKey after OAuth for %s: %s", provider, err)
 
-    async def _refresh_opencode_server(self) -> None:
+    async def _refresh_opencode_server(self, *, force: bool = False) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
         opencode_agent = getattr(agent_service, "agents", {}).get("opencode") if agent_service else None
         if not opencode_agent or not hasattr(opencode_agent, "_get_server"):
             return
         server = await opencode_agent._get_server()
         if hasattr(server, "restart_for_auth_refresh"):
-            await server.restart_for_auth_refresh()
+            if force:
+                await server.restart_for_auth_refresh(force=True)
+            else:
+                await server.restart_for_auth_refresh()
 
     def _load_backend_runtime_config(self, backend: str):
         from config.v2_compat import to_app_config
@@ -1649,6 +1652,13 @@ class AgentAuthService:
         return True
 
     async def _refresh_backend_runtime(self, backend: str) -> None:
+        coordinator = getattr(self.controller, "backend_restart_coordinator", None)
+        if coordinator is not None:
+            await coordinator.request_restart(backend)
+            return
+        await self._apply_backend_runtime_refresh(backend, False)
+
+    async def _apply_backend_runtime_refresh(self, backend: str, force: bool = False) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
         runtime_tokens: dict[str, str] = {}
         snapshot_tokens = getattr(agent_service, "runtime_turn_tokens_for_backend", None)
@@ -1664,6 +1674,13 @@ class AgentAuthService:
                     return
                 if runtime_config is not None and self._register_missing_backend_agent(backend, runtime_config):
                     return
+                if force and backend == "opencode":
+                    agent = getattr(agent_service, "agents", {}).get(backend)
+                    refresh_config = getattr(agent, "refresh_runtime_config", None)
+                    if callable(refresh_config):
+                        await refresh_config(runtime_config, force=True)
+                        self._sync_builtin_default_agents()
+                        return
                 if runtime_config is not None and await refresh_runtime_config(backend, runtime_config):
                     self._sync_builtin_default_agents()
                     return
@@ -1678,7 +1695,10 @@ class AgentAuthService:
                 await refresh_config(runtime_config)
                 return
             if backend == "opencode":
-                await self._refresh_opencode_server()
+                if force:
+                    await self._refresh_opencode_server(force=True)
+                else:
+                    await self._refresh_opencode_server()
                 return
             refresh = getattr(agent, "refresh_auth_state", None)
             if callable(refresh):

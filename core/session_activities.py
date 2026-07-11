@@ -282,6 +282,44 @@ class SessionActivityRegistry:
         with self._lock:
             return bool(self._completed_outputs.get((str(backend), str(runtime_key))))
 
+    def has_backend_work(self, backend: str) -> bool:
+        """Whether a backend has live Activities or undelivered completions."""
+
+        identity = str(backend)
+        with self._lock:
+            return any(key[0] == identity for key in self._active) or any(
+                key[0] == identity and bool(queue)
+                for key, queue in self._completed_outputs.items()
+            )
+
+    def end_backend(self, backend: str, *, status: str = "killed") -> list[SessionActivity]:
+        """Settle every Activity owned by a force-terminated backend runtime."""
+
+        identity = str(backend)
+        with self._lock:
+            runtime_keys = {
+                runtime_key
+                for item_backend, runtime_key, _activity_id in self._active
+                if item_backend == identity
+            }
+            runtime_keys.update(
+                runtime_key
+                for item_backend, runtime_key in self._connections
+                if item_backend == identity
+            )
+            runtime_keys.update(
+                runtime_key
+                for item_backend, runtime_key in self._completed_outputs
+                if item_backend == identity
+            )
+        completed: list[SessionActivity] = []
+        for runtime_key in runtime_keys:
+            completed.extend(self.end_runtime(identity, runtime_key, status=status))
+        with self._lock:
+            for key in [key for key in self._completed_outputs if key[0] == identity]:
+                self._completed_outputs.pop(key, None)
+        return completed
+
     def end_runtime(
         self,
         backend: str,
@@ -311,7 +349,7 @@ class SessionActivityRegistry:
                 backend=backend,
                 runtime_key=runtime_key,
                 activity_id=activity_id,
-                status="disconnected",
+                status=status if status in TERMINAL_ACTIVITY_STATUSES else "disconnected",
             )
             if activity is not None:
                 completed.append(activity)

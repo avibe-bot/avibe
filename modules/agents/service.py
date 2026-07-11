@@ -31,6 +31,43 @@ class AgentService:
         # Strong refs to fire-and-forget tasks (e.g. the cancellation tidy) so the
         # event loop doesn't GC them before they run (asyncio only weak-refs tasks).
         self._background_tasks: set[asyncio.Task] = set()
+        self._backend_ready: dict[str, asyncio.Event] = {}
+
+    def _backend_ready_event(self, backend: str) -> asyncio.Event:
+        event = self._backend_ready.get(backend)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._backend_ready[backend] = event
+        return event
+
+    def begin_backend_drain(self, backend: str) -> None:
+        self._backend_ready_event(backend).clear()
+
+    def end_backend_drain(self, backend: str) -> None:
+        self._backend_ready_event(backend).set()
+
+    async def wait_backend_ready(self, backend: str) -> None:
+        await self._backend_ready_event(backend).wait()
+
+    def backend_runtime_active(self, backend: str) -> bool:
+        if self.activities.has_backend_work(backend):
+            return True
+        agent = self.agents.get(backend)
+        probe = getattr(agent, "runtime_has_active_turns", None)
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe())
+        except Exception:
+            logger.debug("Backend active-runtime probe failed for %s", backend, exc_info=True)
+            return True
+
+    def force_end_backend_activities(self, backend: str) -> list[Any]:
+        completed = self.activities.end_backend(backend, status="killed")
+        for activity in completed:
+            self.on_activity_terminal(activity)
+        return completed
 
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
@@ -111,8 +148,30 @@ class AgentService:
                     except Exception:
                         logger.debug("Failed to clean up queued reaction on cancel", exc_info=True)
             raise
+        # A restart may have started while this turn waited behind the previous
+        # owner of the runtime key. Keep the key lock, wait for cutover, then
+        # resolve the current adapter so the queued turn cannot enter the old
+        # generation.
+        try:
+            await self.wait_backend_ready(agent_name)
+        except BaseException:
+            if queued_reaction_task is not None:
+                try:
+                    await queued_reaction_task
+                except BaseException:
+                    pass
+                if indicator is not None:
+                    try:
+                        await indicator.finish(request)
+                    except Exception:
+                        logger.debug("Failed to clean up queued reaction on restart-wait cancel", exc_info=True)
+            if gate.lock.locked() and not gate.token:
+                gate.lock.release()
+            raise
+        agent = self.get(agent_name)
         gate.token = uuid.uuid4().hex
         gate.backend = agent.name
+        gate.agent = agent
         gate.runtime_started = False
         self._stamp_runtime_turn(request, runtime_key, gate.token)
         try:
@@ -244,9 +303,12 @@ class AgentService:
             self.release_runtime_turn_key(runtime_key, runtime_token)
 
     async def handle_stop(self, agent_name: str, request: AgentRequest) -> bool:
-        agent = self.get(agent_name)
-        runtime_key = self._runtime_turn_key(agent, request)
+        current_agent = self.get(agent_name)
+        payload = getattr(request.context, "platform_specific", None) or {}
+        stamped_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        runtime_key = stamped_key or self._runtime_turn_key(current_agent, request)
         gate = self._turn_gates.get(runtime_key)
+        agent = gate.agent if gate is not None and gate.agent is not None else current_agent
         if gate is not None and gate.token:
             self._stamp_runtime_turn(request, runtime_key, gate.token)
         handled = await agent.handle_stop(request)
@@ -399,6 +461,7 @@ class AgentService:
         gate.token = ""
         gate.backend = ""
         gate.runtime_started = False
+        gate.agent = None
         if gate.lock.locked():
             gate.lock.release()
 
@@ -419,7 +482,9 @@ class AgentService:
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
         gate = self._turn_gates.get(runtime_key) if runtime_key else None
         backend = gate.backend if gate else None
-        agent = self.agents.get(backend) if backend else None
+        agent = getattr(gate, "agent", None) if gate is not None else None
+        if agent is None and backend:
+            agent = self.agents.get(backend)
         if agent is None:
             return None
         probe = getattr(agent, "backend_alive", None)
@@ -528,3 +593,4 @@ class _RuntimeTurnGate:
     token: str = ""
     backend: str = ""
     runtime_started: bool = False
+    agent: BaseAgent | None = None

@@ -178,3 +178,35 @@ def test_only_owned_non_detached_activities_block_run_completion():
         status="completed",
     )
     assert registry.has_blocking_run_activity("run-1") is False
+
+
+def test_force_end_backend_settles_active_and_discards_pending_output():
+    registry = SessionActivityRegistry()
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-active",
+        kind="background_task",
+    )
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-2",
+        session_id="ses-2",
+        activity_id="task-complete",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-2",
+        activity_id="task-complete",
+        status="completed",
+        expects_output=True,
+    )
+
+    assert registry.has_backend_work("claude") is True
+    completed = registry.end_backend("claude", status="killed")
+
+    assert [(item.id, item.status) for item in completed] == [("task-active", "killed")]
+    assert registry.has_backend_work("claude") is False
+    assert registry.claim_completed_output("claude", "runtime-2") is None

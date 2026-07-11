@@ -1589,7 +1589,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(governor.mode, "enabled")
         self.assertEqual(governor.config["agent_group_name"], "web-oauth-agents")
 
-    async def test_opencode_agent_refresh_runtime_config_does_not_restart_uncached_adopted_server_on_refresh_miss(self):
+    async def test_opencode_agent_refresh_runtime_config_restarts_uncached_adopted_server_on_refresh_miss(self):
         from config.v2_compat import OpenCodeCompatConfig
         from modules.agents.opencode.agent import OpenCodeAgent
         from modules.agents.opencode.server import OpenCodeServerManager
@@ -1629,8 +1629,12 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             await agent.refresh_runtime_config(new_config)
 
         live_server.refresh_global_config.assert_awaited_once()
-        live_server.detach_after_deferred_refresh.assert_not_awaited()
-        live_server.reload_runtime_config.assert_not_awaited()
+        live_server.detach_after_deferred_refresh.assert_awaited_once()
+        live_server.reload_runtime_config.assert_awaited_once_with(
+            binary="/opencode",
+            port=4096,
+            request_timeout_seconds=60,
+        )
 
     async def test_opencode_agent_refresh_runtime_config_restarts_when_runtime_changes(self):
         from config.v2_compat import OpenCodeCompatConfig
