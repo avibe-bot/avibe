@@ -1311,7 +1311,7 @@ class ClaudeAgent(BaseAgent):
             activity_id=task_id,
             status=status,
             metadata=metadata,
-            expects_output=True,
+            expects_output=status == "completed",
         )
         if status != "completed":
             self._mark_session_idle_if_no_pending_requests(composite_key)

@@ -277,6 +277,22 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_task_does_not_claim_a_missing_followup_output(self):
+        mark_idle_calls: list[str] = []
+        agent, service = _build_agent(mark_idle_calls=mark_idle_calls)
+        composite_key = "session-failed:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-failed"},
+        )
+        failed = TaskNotificationMessage()
+        failed.status = "failed"
+
+        self.assertTrue(agent._handle_activity_message(TaskStartedMessage(), composite_key, context))
+        self.assertTrue(agent._handle_activity_message(failed, composite_key, context))
+
+        self.assertIsNone(service.activities.claim_completed_output("claude", composite_key))
+        self.assertEqual(mark_idle_calls, [composite_key])
+
     async def test_completed_background_task_output_does_not_settle_newer_user_turn(self):
         agent, service = _build_agent()
         composite_key = "session-690:/tmp/work"
