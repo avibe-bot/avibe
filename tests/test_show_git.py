@@ -122,6 +122,29 @@ def test_lazy_adoption_is_idempotent_and_native_git_works(resolved_git):
     assert all(pattern in exclude.splitlines() for pattern in ("node_modules/", "dist/", ".vite/"))
 
 
+def test_lazy_adoption_does_not_require_initial_branch_option(resolved_git, monkeypatch):
+    session_id = "ses_adopt_old_git"
+    workspace = _workspace(session_id)
+    (workspace / "page.txt").write_text("content\n", encoding="utf-8")
+    commands = []
+    real_run = subprocess.run
+
+    def reject_new_init_option(command, **kwargs):
+        commands.append(command)
+        if any(str(part).startswith("--initial-branch") for part in command):
+            return subprocess.CompletedProcess(command, 129, "", "unknown option: initial-branch")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(show_git.subprocess, "run", reject_new_init_option)
+    repo = _repo(session_id, resolved_git)
+
+    assert repo.checkpoint(PRE_TURN) is True
+    assert _platform_git(repo, "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/main"
+    init_command = next(command for command in commands if "init" in command)
+    assert "--bare" in init_command
+    assert not any(str(part).startswith("--initial-branch") for part in init_command)
+
+
 def test_user_git_directory_is_untouched_while_shadow_checkpoints_continue(resolved_git):
     session_id = "ses_shadow"
     workspace = _workspace(session_id)

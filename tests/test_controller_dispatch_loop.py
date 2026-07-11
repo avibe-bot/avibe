@@ -9,6 +9,10 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.controller import Controller
+from core.git_binary import ResolvedGit
+from core.inbox_events import InboxEventBus
+from core.show_git import ShowGitCheckpointService
+from modules.im import MessageContext
 
 
 def test_dispatch_to_controller_loop_runs_callback_on_controller_loop():
@@ -227,3 +231,133 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stopped["tasks"] is True
     assert stopped["watch"] is True
     assert stopped["runtime"] is True
+
+
+def test_im_show_checkpoint_lifecycle_spans_real_start_to_terminal_result(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    controller = Controller.__new__(Controller)
+    updated_threads = []
+    emitted_messages = []
+    linked_messages = []
+
+    class _Dispatcher:
+        def update_thread_message_id(self, context) -> None:
+            updated_threads.append(context)
+
+        async def emit_agent_message(self, **kwargs):
+            emitted_messages.append(kwargs)
+            return "result-1"
+
+    controller.message_dispatcher = _Dispatcher()
+    controller.sessions = SimpleNamespace(
+        find_session_for_anchor=lambda session_key, anchor: {"id": "ses_im"}
+        if (session_key, anchor) == ("slack:C", "anchor")
+        else None
+    )
+    controller.agent_service = SimpleNamespace(emit_matches_runtime_turn=lambda _context: True)
+    controller._get_session_key = lambda context: f"{context.platform}:{context.channel_id}"
+    checkpoint_service = ShowGitCheckpointService(ResolvedGit(path=Path("/usr/bin/git"), source="system"))
+    checkpoint_bus = InboxEventBus()
+    checkpoint_service.start(checkpoint_bus)
+    controller.show_git_checkpoint_service = checkpoint_service
+    monkeypatch.setattr(
+        "core.message_mirror.link_inbound_message_session",
+        lambda **kwargs: linked_messages.append(kwargs),
+    )
+    context = MessageContext(
+        user_id="U",
+        channel_id="C",
+        platform="slack",
+        message_id="msg-1",
+        platform_specific={},
+    )
+    checkpoint_service.mark_im_turn(context)
+    context.platform_specific["turn_base_session_id"] = "anchor"
+    lifecycle = []
+    subscription_id = checkpoint_bus.subscribe_callback(
+        lambda event_type, data: lifecycle.append((event_type, data))
+        if event_type in {"turn.start", "turn.end"}
+        else None
+    )
+    try:
+        controller.update_thread_message_id(context)
+        first_result = asyncio.run(controller.emit_agent_message(context, "result", "done"))
+        second_result = asyncio.run(controller.emit_agent_message(context, "result", "duplicate"))
+    finally:
+        checkpoint_bus.unsubscribe(subscription_id)
+        checkpoint_service.stop()
+
+    assert first_result == "result-1"
+    assert second_result == "result-1"
+    assert updated_threads == [context]
+    assert len(emitted_messages) == 2
+    assert context.platform_specific["agent_session_id"] == "ses_im"
+    assert linked_messages == [
+        {
+            "platform": "slack",
+            "native_message_id": "msg-1",
+            "session_id": "ses_im",
+        }
+    ]
+    assert lifecycle == [
+        ("turn.start", {"session_id": "ses_im"}),
+        ("turn.end", {"session_id": "ses_im"}),
+    ]
+
+
+def test_first_im_show_turn_adopts_on_terminal_after_backend_binds_session(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    controller = Controller.__new__(Controller)
+    linked_messages = []
+
+    class _Dispatcher:
+        def update_thread_message_id(self, _context) -> None:
+            return None
+
+        async def emit_agent_message(self, **_kwargs):
+            return "result-1"
+
+    controller.message_dispatcher = _Dispatcher()
+    controller.sessions = SimpleNamespace(find_session_for_anchor=lambda _session_key, _anchor: None)
+    controller.agent_service = SimpleNamespace(emit_matches_runtime_turn=lambda _context: True)
+    controller._get_session_key = lambda context: f"{context.platform}:{context.channel_id}"
+    checkpoint_service = ShowGitCheckpointService(ResolvedGit(path=Path("/usr/bin/git"), source="system"))
+    checkpoint_bus = InboxEventBus()
+    checkpoint_service.start(checkpoint_bus)
+    controller.show_git_checkpoint_service = checkpoint_service
+    monkeypatch.setattr(
+        "core.message_mirror.link_inbound_message_session",
+        lambda **kwargs: linked_messages.append(kwargs),
+    )
+    context = MessageContext(
+        user_id="U",
+        channel_id="C",
+        platform="slack",
+        message_id="msg-new",
+        platform_specific={},
+    )
+    checkpoint_service.mark_im_turn(context)
+    context.platform_specific["turn_base_session_id"] = "new-anchor"
+    lifecycle = []
+    subscription_id = checkpoint_bus.subscribe_callback(
+        lambda event_type, data: lifecycle.append((event_type, data))
+        if event_type in {"turn.start", "turn.end"}
+        else None
+    )
+    try:
+        controller.update_thread_message_id(context)
+        assert lifecycle == []
+        context.platform_specific["agent_session_id"] = "ses_new_im"
+        asyncio.run(controller.emit_agent_message(context, "result", "done"))
+    finally:
+        checkpoint_bus.unsubscribe(subscription_id)
+        checkpoint_service.stop()
+
+    assert lifecycle == [("turn.end", {"session_id": "ses_new_im"})]
+    assert linked_messages == [
+        {
+            "platform": "slack",
+            "native_message_id": "msg-new",
+            "session_id": "ses_new_im",
+        }
+    ]

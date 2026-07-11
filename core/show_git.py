@@ -33,6 +33,7 @@ _CHECKPOINT_KINDS = {PRE_TURN, POST_TURN, ADOPT}
 _MANAGED_POINTER_PARENT = "show-git"
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAIN_ANCHOR_REF = "refs/avibe/checkpoint-main"
+_IM_TURN_STATE_KEY = "_avibe_show_git_checkpoint"
 _SCRUBBED_GIT_ENV = {
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -279,11 +280,12 @@ class ShowGitRepository:
             return False
         self.gitdir.parent.mkdir(parents=True, exist_ok=True)
         result = self._run_raw(
-            ["init", "--bare", "--initial-branch=main", str(self.gitdir)],
+            ["init", "--bare", str(self.gitdir)],
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             raise ShowGitError(result.stderr.strip() or "failed to initialize Show Page checkpoint repository")
+        self._run_checked(["symbolic-ref", "HEAD", "refs/heads/main"])
         return True
 
     def _ensure_platform_config(self) -> None:
@@ -541,6 +543,107 @@ class ShowGitCheckpointService:
         self._bus = None
         self._subscription_id = None
         self._active_turns.clear()
+
+    @staticmethod
+    def _im_turn_state(context: Any) -> dict[str, Any] | None:
+        state = (getattr(context, "platform_specific", None) or {}).get(_IM_TURN_STATE_KEY)
+        return state if isinstance(state, dict) else None
+
+    def mark_im_turn(self, context: Any) -> None:
+        if not self.enabled:
+            return
+        payload = dict(getattr(context, "platform_specific", None) or {})
+        payload[_IM_TURN_STATE_KEY] = {"start_published": False, "ended": False}
+        context.platform_specific = payload
+
+    @staticmethod
+    def _existing_im_session_id(controller: Any, context: Any) -> str | None:
+        session_id = controller._session_id_from_context(context)
+        if session_id:
+            return session_id
+        payload = getattr(context, "platform_specific", None) or {}
+        base_session_id = str(payload.get("turn_base_session_id") or "").strip()
+        finder = getattr(getattr(controller, "sessions", None), "find_session_for_anchor", None)
+        if not base_session_id or not callable(finder):
+            return None
+        try:
+            row = finder(controller._get_session_key(context), base_session_id)
+        except Exception:
+            logger.debug("IM Show checkpoint session lookup failed", exc_info=True)
+            return None
+        session_id = str(row.get("id") or "").strip() if row else ""
+        if not session_id:
+            return None
+        updated = dict(payload)
+        updated["agent_session_id"] = session_id
+        context.platform_specific = updated
+        return session_id
+
+    @staticmethod
+    def _link_im_message(context: Any, session_id: str) -> bool:
+        platform = str(getattr(context, "platform", None) or "").strip()
+        message_id = str(getattr(context, "message_id", None) or "").strip()
+        if not platform or platform == "avibe" or not message_id:
+            return False
+        try:
+            from core.message_mirror import link_inbound_message_session
+
+            link_inbound_message_session(
+                platform=platform,
+                native_message_id=message_id,
+                session_id=session_id,
+            )
+            return True
+        except Exception:
+            logger.debug("IM Show checkpoint message link failed", exc_info=True)
+            return False
+
+    def begin_im_turn(self, controller: Any, context: Any) -> None:
+        state = self._im_turn_state(context)
+        if self._bus is None or state is None or state.get("start_published"):
+            return
+        session_id = self._existing_im_session_id(controller, context)
+        if not session_id:
+            # A first-ever IM turn has no Show workspace yet. Its terminal event
+            # lazily adopts the workspace if the turn creates one.
+            return
+        state = {
+            **state,
+            "start_published": True,
+            "start_session_id": session_id,
+            "message_linked": self._link_im_message(context, session_id),
+        }
+        payload = dict(context.platform_specific or {})
+        payload[_IM_TURN_STATE_KEY] = state
+        context.platform_specific = payload
+        self._bus.publish("turn.start", {"session_id": session_id})
+
+    def should_end_im_turn(self, controller: Any, context: Any, message_type: str) -> bool:
+        state = self._im_turn_state(context)
+        if self._bus is None or message_type != "result" or state is None or state.get("ended"):
+            return False
+        matches = getattr(getattr(controller, "agent_service", None), "emit_matches_runtime_turn", None)
+        if not callable(matches):
+            return True
+        try:
+            return bool(matches(context))
+        except Exception:
+            logger.debug("IM Show checkpoint active-turn check failed", exc_info=True)
+            return True
+
+    def end_im_turn(self, context: Any) -> None:
+        state = self._im_turn_state(context)
+        if self._bus is None or state is None or state.get("ended"):
+            return
+        payload = dict(getattr(context, "platform_specific", None) or {})
+        session_id = str(payload.get("agent_session_id") or state.get("start_session_id") or "").strip()
+        message_linked = bool(state.get("message_linked"))
+        if session_id and not message_linked:
+            message_linked = self._link_im_message(context, session_id)
+        payload[_IM_TURN_STATE_KEY] = {**state, "ended": True, "message_linked": message_linked}
+        context.platform_specific = payload
+        if session_id:
+            self._bus.publish("turn.end", {"session_id": session_id})
 
     def _handle_event(self, event_type: str, data: Any) -> None:
         if event_type not in {"turn.start", "turn.end"} or not isinstance(data, dict):

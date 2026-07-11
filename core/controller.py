@@ -678,6 +678,10 @@ class Controller:
         from core.services.dispatch import dispatch_turn
 
         async def _on_im_message(context, text):
+            checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
+            mark_im_turn = getattr(checkpoint_service, "mark_im_turn", None)
+            if callable(mark_im_turn):
+                mark_im_turn(context)
             await dispatch_turn(self, context, text)
 
         # Register callbacks with the IM client
@@ -1107,7 +1111,11 @@ class Controller:
         return self.platform_settings_managers.get(platform, self.platform_settings_managers[self.primary_platform])
 
     def update_thread_message_id(self, context: MessageContext) -> None:
-        """Update message tracking for consolidated log dispatch."""
+        """Run real-turn-start hooks after the runtime gate is acquired."""
+        checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
+        begin_im_turn = getattr(checkpoint_service, "begin_im_turn", None)
+        if callable(begin_im_turn):
+            begin_im_turn(self, context)
         self.message_dispatcher.update_thread_message_id(context)
 
     async def clear_consolidated_message_id(
@@ -1269,17 +1277,26 @@ class Controller:
         output: MessageOutput | None = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
-        return await self.message_dispatcher.emit_agent_message(
-            context=context,
-            message_type=message_type,
-            text=text,
-            parse_mode=parse_mode,
-            is_error=is_error,
-            level=level,
-            status_label=status_label,
-            result_footer=result_footer,
-            output=output,
+        checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
+        should_end_im_turn = getattr(checkpoint_service, "should_end_im_turn", None)
+        publish_checkpoint_end = bool(
+            should_end_im_turn(self, context, message_type) if callable(should_end_im_turn) else False
         )
+        try:
+            return await self.message_dispatcher.emit_agent_message(
+                context=context,
+                message_type=message_type,
+                text=text,
+                parse_mode=parse_mode,
+                is_error=is_error,
+                level=level,
+                status_label=status_label,
+                result_footer=result_footer,
+                output=output,
+            )
+        finally:
+            if publish_checkpoint_end:
+                checkpoint_service.end_im_turn(context)
 
     def note_session_tokens(self, context: MessageContext, *, total: int) -> None:
         """Report the session's current context-window occupancy for the status
