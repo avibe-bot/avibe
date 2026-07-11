@@ -207,6 +207,9 @@ def test_force_end_backend_settles_active_and_discards_pending_output():
     assert registry.has_backend_work("claude") is True
     completed = registry.end_backend("claude", status="killed")
 
-    assert [(item.id, item.status) for item in completed] == [("task-active", "killed")]
+    assert sorted((item.id, item.status) for item in completed) == [
+        ("task-active", "killed"),
+        ("task-complete", "killed"),
+    ]
     assert registry.has_backend_work("claude") is False
     assert registry.claim_completed_output("claude", "runtime-2") is None

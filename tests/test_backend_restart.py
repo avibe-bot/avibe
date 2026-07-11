@@ -23,6 +23,9 @@ class _AgentService:
         assert backend == "opencode"
         self.draining = False
 
+    async def prepare_backend_restart(self, backend: str) -> None:
+        assert backend == "opencode"
+
     def runtime_turn_tokens_for_backend(self, backend: str) -> dict[str, str]:
         return {"session:key": "token"} if self.active else {}
 
@@ -134,5 +137,24 @@ def test_refresh_failure_reopens_barrier() -> None:
 
         assert service.draining is False
         controller.session_turns.end_backend_drain.assert_awaited_once_with("opencode", resume_deferred=False)
+
+    asyncio.run(run())
+
+
+def test_idle_refresh_failure_is_propagated_before_ack() -> None:
+    async def run() -> None:
+        service = _AgentService()
+        controller = _controller(service)
+        refresh = AsyncMock(side_effect=RuntimeError("invalid config"))
+        coordinator = BackendRestartCoordinator(controller, refresh, drain_timeout=1)
+
+        with pytest.raises(RuntimeError, match="invalid config"):
+            await coordinator.request_restart("opencode")
+
+        assert service.draining is False
+        controller.session_turns.end_backend_drain.assert_awaited_once_with(
+            "opencode",
+            resume_deferred=False,
+        )
 
     asyncio.run(run())

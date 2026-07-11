@@ -4,6 +4,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from modules.agents.service import AgentService
 
 
@@ -277,6 +279,68 @@ def test_agent_service_restart_barrier_preserves_same_runtime_fifo() -> None:
         assert agent.started == ["first", "second"]
 
     asyncio.run(_run())
+
+
+def test_agent_service_restart_wait_releases_gate_when_backend_disappears() -> None:
+    async def _run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RuntimeAgent())
+        service.begin_backend_drain("claude")
+
+        request = _request("waiting")
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.sleep(0.01)
+        gate = service._turn_gates[request.composite_session_id]
+        assert gate.lock.locked() is True
+        assert gate.token == ""
+
+        service.agents.pop("claude")
+        service.end_backend_drain("claude")
+        with pytest.raises(KeyError):
+            await task
+        assert gate.lock.locked() is False
+
+    asyncio.run(_run())
+
+
+def test_force_end_backend_activities_settles_pending_runs() -> None:
+    settled = []
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(settle_activity_runs=settled.append),
+    )
+    service = AgentService(controller=controller)
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-active",
+        kind="background_task",
+        run_id="run-active",
+    )
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-2",
+        session_id="ses-2",
+        activity_id="task-pending",
+        kind="background_task",
+        run_id="run-pending",
+    )
+    service.activities.complete(
+        backend="claude",
+        runtime_key="runtime-2",
+        activity_id="task-pending",
+        status="completed",
+        expects_output=True,
+    )
+
+    service.force_end_backend_activities("claude")
+
+    assert sorted((item.id, item.status) for item in settled) == [
+        ("task-active", "killed"),
+        ("task-pending", "killed"),
+    ]
 
 
 class _RecordingIndicator:

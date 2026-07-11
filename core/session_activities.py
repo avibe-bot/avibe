@@ -316,8 +316,24 @@ class SessionActivityRegistry:
         for runtime_key in runtime_keys:
             completed.extend(self.end_runtime(identity, runtime_key, status=status))
         with self._lock:
+            pending = [
+                activity
+                for key, queue in self._completed_outputs.items()
+                if key[0] == identity
+                for _completed_at, activity in queue
+            ]
             for key in [key for key in self._completed_outputs if key[0] == identity]:
                 self._completed_outputs.pop(key, None)
+        now = _now_iso()
+        completed.extend(
+            replace(
+                activity,
+                status=status if status in TERMINAL_ACTIVITY_STATUSES else "killed",
+                updated_at=now,
+                completed_at=now,
+            )
+            for activity in pending
+        )
         return completed
 
     def end_runtime(

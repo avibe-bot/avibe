@@ -950,6 +950,7 @@ def test_release_for_backend_refresh_cancels_matching_turn_and_sets_idle():
             "agent_session_target": {"agent_backend": "codex"},
         }
         manager.in_flight["ses_codex"] = session_turns.Turn(task=task, context=ctx)
+        manager.begin_backend_drain("codex")
 
         released = await manager.release_for_backend_refresh(
             backend="codex",
@@ -966,6 +967,7 @@ def test_release_for_backend_refresh_cancels_matching_turn_and_sets_idle():
     assert released == 1
     assert cancelled is True
     assert statuses == [("ses_codex", "idle")]
+    assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
 
 
 def test_release_for_backend_refresh_leaves_other_backend_turn_running():

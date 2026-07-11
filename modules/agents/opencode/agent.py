@@ -69,6 +69,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def _get_server(self) -> OpenCodeServerManager:
         return await self._client_manager.get_server()
 
+    async def prepare_runtime_restart(self) -> None:
+        """Adopt persisted server state before the shared drain snapshot."""
+        await self._get_server()
+
     def runtime_has_active_turns(self) -> bool:
         if any(not task.done() for task in self._active_requests.values()):
             return True

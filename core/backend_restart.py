@@ -39,25 +39,35 @@ class BackendRestartCoordinator:
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._request_locks: dict[str, asyncio.Lock] = {}
 
     async def request_restart(self, backend: str) -> str:
         """Begin or join a restart and return without waiting for a long drain."""
-        existing = self._tasks.get(backend)
-        if existing is not None and not existing.done():
-            return "draining"
+        lock = self._request_locks.setdefault(backend, asyncio.Lock())
+        async with lock:
+            existing = self._tasks.get(backend)
+            if existing is not None and not existing.done():
+                return "draining"
 
-        agent_service = self.controller.agent_service
-        session_turns = self.controller.session_turns
-        agent_service.begin_backend_drain(backend)
-        session_turns.begin_backend_drain(backend)
-        task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
-        self._tasks[backend] = task
-        task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+            agent_service = self.controller.agent_service
+            session_turns = self.controller.session_turns
+            agent_service.begin_backend_drain(backend)
+            session_turns.begin_backend_drain(backend)
+            try:
+                await agent_service.prepare_backend_restart(backend)
+            except Exception:
+                agent_service.end_backend_drain(backend)
+                await session_turns.end_backend_drain(backend, resume_deferred=False)
+                raise
+            had_active_work = self._has_active_turns(backend)
+            task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
+            self._tasks[backend] = task
+            task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
 
-        # Let an idle refresh finish inline so callers still receive immediate
-        # setup/config errors. A draining restart remains asynchronous.
-        await asyncio.sleep(0)
-        if task.done():
+        # Idle refreshes remain synchronous so setup/config errors reach the
+        # runtime-command requester. Only genuinely active work makes the
+        # restart an acknowledged background drain.
+        if not had_active_work:
             await task
             return "restarted"
         return "draining"

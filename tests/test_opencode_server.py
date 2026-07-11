@@ -1324,9 +1324,33 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         await manager.restart_for_auth_refresh(force=True)
 
-        self.assertEqual(manager._active_requests, 0)
+        self.assertEqual(manager._active_requests, 2)
         self.assertEqual(manager._active_run_sessions, set())
         manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+    def test_runtime_has_active_turns_reads_adopted_pid_state(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 321,
+            "port": 4096,
+            "active_run_sessions": ["sess-live"],
+        }
+        manager._pid_exists = lambda pid: pid == 321  # type: ignore[method-assign]
+
+        self.assertTrue(manager.runtime_has_active_turns())
+
+    def test_terminate_sync_falls_back_to_tracked_process_without_pid_file(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._process = types.SimpleNamespace(pid=654, returncode=None)
+        manager._read_pid_file = lambda: None  # type: ignore[method-assign]
+        manager._pid_exists = lambda pid: pid == 654  # type: ignore[method-assign]
+        manager._clear_pid_file = Mock()  # type: ignore[method-assign]
+        manager._terminate_pid_tree_sync = Mock(return_value=True)  # type: ignore[method-assign]
+
+        manager.terminate_sync()
+
+        manager._terminate_pid_tree_sync.assert_called_once_with(654)
+        self.assertIsNone(manager._process)
 
     async def test_request_scope_does_not_restart_pending_auth_refresh_while_run_active(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

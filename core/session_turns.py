@@ -1155,6 +1155,8 @@ class SessionTurnManager:
                 tasks_to_settle.append(turn.task)
             if self.controller is not None:
                 self.controller.set_agent_status(session_id, "idle")
+            if backend in self._draining_backends:
+                self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
             released += 1
         if tasks_to_settle:
             await asyncio.gather(*tasks_to_settle, return_exceptions=True)

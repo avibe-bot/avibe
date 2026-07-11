@@ -50,6 +50,12 @@ class AgentService:
     async def wait_backend_ready(self, backend: str) -> None:
         await self._backend_ready_event(backend).wait()
 
+    async def prepare_backend_restart(self, backend: str) -> None:
+        agent = self.agents.get(backend)
+        prepare = getattr(agent, "prepare_runtime_restart", None)
+        if callable(prepare):
+            await prepare()
+
     def backend_runtime_active(self, backend: str) -> bool:
         if self.activities.has_backend_work(backend):
             return True
@@ -154,6 +160,7 @@ class AgentService:
         # generation.
         try:
             await self.wait_backend_ready(agent_name)
+            agent = self.get(agent_name)
         except BaseException:
             if queued_reaction_task is not None:
                 try:
@@ -168,7 +175,6 @@ class AgentService:
             if gate.lock.locked() and not gate.token:
                 gate.lock.release()
             raise
-        agent = self.get(agent_name)
         gate.token = uuid.uuid4().hex
         gate.backend = agent.name
         gate.agent = agent

@@ -277,7 +277,6 @@ class OpenCodeServerManager:
         """Drop cached client state when a refresh must wait for active runs."""
         async with self._get_lock():
             if force:
-                self._active_requests = 0
                 self._active_run_sessions.clear()
             if not force and (self._active_requests > 0 or self._has_active_run_sessions()):
                 self._auth_refresh_pending = True
@@ -359,7 +358,16 @@ class OpenCodeServerManager:
         return bool(self._active_run_sessions)
 
     def runtime_has_active_turns(self) -> bool:
-        return self._active_requests > 0 or self._has_active_run_sessions()
+        if self._active_requests > 0 or self._has_active_run_sessions():
+            return True
+        info = self._read_pid_file()
+        if not self._pid_file_references_current_server(info):
+            return False
+        pid = info.get("pid") if isinstance(info, dict) else None
+        if not isinstance(pid, int) or not self._pid_exists(pid):
+            return False
+        active = info.get("active_run_sessions") if isinstance(info, dict) else None
+        return isinstance(active, list) and bool(active)
 
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():
@@ -1242,12 +1250,18 @@ class OpenCodeServerManager:
         self._close_http_session_sync()
         info = self._read_pid_file()
         pid = info.get("pid") if isinstance(info, dict) else None
+        tracked_pid = getattr(self._process, "pid", None)
+        stopped = False
         if isinstance(pid, int) and self._pid_exists(pid):
             command = self._get_pid_command(pid)
             if command and self._is_opencode_serve_cmd(command, self.port):
-                self._terminate_pid_tree_sync(pid)
+                stopped = self._terminate_pid_tree_sync(pid)
+        if not stopped and isinstance(tracked_pid, int) and self._pid_exists(tracked_pid):
+            self._terminate_pid_tree_sync(tracked_pid)
         self._clear_pid_file()
         self._base_url = None
+        self._process = None
+        self._process_loop = None
 
     @classmethod
     def terminate_instance_sync(cls) -> None:
@@ -1275,7 +1289,6 @@ class OpenCodeServerManager:
         """Terminate the shared server so the next request reloads refreshed auth."""
         async with self._get_lock():
             if force:
-                self._active_requests = 0
                 self._active_run_sessions.clear()
             if not force and (self._active_requests > 0 or self._has_active_run_sessions()):
                 self._auth_refresh_pending = True
