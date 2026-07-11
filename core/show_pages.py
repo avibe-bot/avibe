@@ -583,7 +583,7 @@ def show_page_runtime_recovery_html(session_id: str) -> str:
         "Ready to visualize, check src/App.tsx, src/main.tsx, src/styles.css, and the Vite/browser "
         "console for compile or runtime errors. Make the page responsive and verify it renders.\n\n"
         "Show Page history contract:\n"
-        f"{format_agent_contract(numbered=True)}"
+        f"{format_agent_contract(numbered=True, session_id=session_id)}"
     )
     escaped_prompt = _escape_html(prompt)
     return f"""<!doctype html>

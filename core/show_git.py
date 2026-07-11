@@ -56,7 +56,12 @@ SHOW_GIT_AGENT_CONTRACT = (
     "Read freely: `git -C <workspace> status / log / diff / show`.",
     "Restore only via `git restore --source=<ref> -- <path>`; the turn-end checkpoint records it as a forward commit.",
     "Never move HEAD, switch branches, rewrite history, or run gc; if you do, the platform self-heals with the worktree as truth.",
-    "Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks. If the workspace contains the user's own repo (real `.git` directory), do not commit/push on their behalf; platform history keeps running in the background.",
+    "Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks.",
+)
+SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT = (
+    "Avibe's shadow history continues automatically in the background; you don't manage it.",
+    "`git -C <workspace>` addresses the **user's repo**, not Avibe history: never commit, push, or publish on their behalf, and never use it for Avibe restore.",
+    "Never locate or mutate Avibe's shadow gitdir on your own initiative. Only if the user explicitly asks to recover from Avibe history, use standard git with explicit `--git-dir` and `--work-tree` against the session's shadow gitdir for read or restore only; never commit to it.",
 )
 SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT = (
     "Automatic Show Page history is unavailable because Git could not be resolved for this process. Continue editing normally, but do not use history or restore commands for this workspace.",
@@ -80,10 +85,63 @@ class _ActiveTurnCheckpoint:
     started_at: str
 
 
-def format_agent_contract(*, numbered: bool = False, checkpointing_available: bool | None = None) -> str:
+def _read_git_pointer(pointer: Path) -> Path | None:
+    if pointer.is_symlink() or not pointer.is_file():
+        return None
+    try:
+        lines = pointer.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        return None
+    raw = lines[0].removeprefix("gitdir: ").strip()
+    if not raw:
+        return None
+    target = Path(raw).expanduser()
+    if not target.is_absolute():
+        target = pointer.parent / target
+    return target.resolve(strict=False)
+
+
+def _workspace_ownership(workspace: Path, gitdir: Path) -> tuple[bool, bool]:
+    pointer = workspace / ".git"
+    if not pointer.exists() and not pointer.is_symlink():
+        return True, False
+    target = _read_git_pointer(pointer)
+    if target is None:
+        return False, False
+    expected = gitdir.resolve(strict=False)
+    if target == expected:
+        return True, False
+    if target.name == gitdir.name and target.parent.name == _MANAGED_POINTER_PARENT:
+        return True, True
+    return False, False
+
+
+def _workspace_is_self_managed(session_id: str) -> bool:
+    if not _SESSION_ID_PATTERN.fullmatch(str(session_id or "")):
+        return True
+    managed, _rewrite_pointer = _workspace_ownership(
+        paths.get_show_page_dir(session_id),
+        paths.get_show_git_dir(session_id),
+    )
+    return not managed
+
+
+def format_agent_contract(
+    *,
+    numbered: bool = False,
+    checkpointing_available: bool | None = None,
+    session_id: str | None = None,
+) -> str:
     if checkpointing_available is None:
         checkpointing_available = resolve_git() is not None
-    lines = SHOW_GIT_AGENT_CONTRACT if checkpointing_available else SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT
+    if not checkpointing_available:
+        lines = SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT
+    elif session_id is not None and _workspace_is_self_managed(session_id):
+        lines = SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT
+    else:
+        lines = SHOW_GIT_AGENT_CONTRACT
     if numbered:
         return "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
     return "\n".join(f"- {line}" for line in lines)
@@ -244,35 +302,7 @@ class ShowGitRepository:
         return created
 
     def _workspace_ownership(self) -> tuple[bool, bool]:
-        pointer = self.workspace / ".git"
-        if not pointer.exists() and not pointer.is_symlink():
-            return True, False
-        target = self._read_git_pointer(pointer)
-        if target is None:
-            return False, False
-        expected = self.gitdir.resolve(strict=False)
-        if target == expected:
-            return True, False
-        if target.name == self.gitdir.name and target.parent.name == _MANAGED_POINTER_PARENT:
-            return True, True
-        return False, False
-
-    def _read_git_pointer(self, pointer: Path) -> Path | None:
-        if pointer.is_symlink() or not pointer.is_file():
-            return None
-        try:
-            lines = pointer.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return None
-        if len(lines) != 1 or not lines[0].startswith("gitdir: "):
-            return None
-        raw = lines[0].removeprefix("gitdir: ").strip()
-        if not raw:
-            return None
-        target = Path(raw).expanduser()
-        if not target.is_absolute():
-            target = pointer.parent / target
-        return target.resolve(strict=False)
+        return _workspace_ownership(self.workspace, self.gitdir)
 
     def _ensure_repository(self) -> bool:
         valid = (self.gitdir / "HEAD").is_file() and (self.gitdir / "objects").is_dir()

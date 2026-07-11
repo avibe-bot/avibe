@@ -491,6 +491,37 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("History is saved automatically around each turn", prompt)
         self.assertNotIn("git restore --source", prompt)
 
+    def test_show_pages_prompt_rechecks_mid_session_ownership_flip(self):
+        session_id = "sesk8m4q2p7x"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": session_id},
+        )
+        workspace = paths.get_show_page_dir(session_id)
+        workspace.mkdir(parents=True)
+
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.show_git.resolve_git", return_value=object()),
+        ):
+            managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+            (workspace / ".git").mkdir()
+            self_managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+            (workspace / ".git").rmdir()
+            managed_again_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+
+        self.assertIn("History is saved automatically around each turn", managed_prompt)
+        self.assertNotIn("shadow history continues automatically", managed_prompt)
+        self.assertIn("Avibe's shadow history continues automatically", self_managed_prompt)
+        self.assertIn("addresses the **user's repo**, not Avibe history", self_managed_prompt)
+        self.assertIn("Only if the user explicitly asks to recover from Avibe history", self_managed_prompt)
+        self.assertNotIn("Read freely: `git -C <workspace>", self_managed_prompt)
+        self.assertNotIn("Restore only via `git restore", self_managed_prompt)
+        self.assertIn("History is saved automatically around each turn", managed_again_prompt)
+        self.assertNotIn("shadow history continues automatically", managed_again_prompt)
+
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
         context = MessageContext(
             user_id="U1",

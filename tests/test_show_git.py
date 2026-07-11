@@ -18,6 +18,7 @@ from core.show_git import (
     ShowGitCheckpointService,
     ShowGitRepository,
     TurnCheckpointContext,
+    format_agent_contract,
     sanitize_checkpoint_subject,
 )
 
@@ -96,6 +97,19 @@ def test_missing_workspace_never_creates_checkpoint_paths(resolved_git):
     assert not repo.workspace.exists()
     assert not repo.gitdir.exists()
     assert not repo.gitdir.parent.exists()
+
+
+def test_agent_contract_ownership_probe_never_creates_workspace():
+    session_id = "ses_guidance_missing"
+    workspace = paths.get_show_page_dir(session_id)
+    gitdir = paths.get_show_git_dir(session_id)
+
+    contract = format_agent_contract(checkpointing_available=True, session_id=session_id)
+
+    assert "History is saved automatically around each turn" in contract
+    assert not workspace.exists()
+    assert not gitdir.exists()
+    assert not gitdir.parent.exists()
 
 
 def test_lazy_adoption_is_idempotent_and_native_git_works(resolved_git):

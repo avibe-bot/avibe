@@ -7761,6 +7761,16 @@ def _is_show_page_dot_path(asset_path: str) -> bool:
     return any(segment.startswith(".") for segment in re.split(r"[\\/]", decoded) if segment)
 
 
+def _is_show_page_runtime_denied_dot_path(asset_path: str) -> bool:
+    decoded = unquote((asset_path or "").strip("/"))
+    segments = [segment for segment in re.split(r"[\\/]", decoded) if segment]
+    dot_segments = [index for index, segment in enumerate(segments) if segment.startswith(".")]
+    if not dot_segments:
+        return False
+    vite_dependency = len(segments) >= 4 and segments[:3] == ["node_modules", ".vite", "deps"]
+    return not (vite_dependency and dot_segments == [1])
+
+
 def _show_page_recovery_response(session_id: str):
     from core.show_pages import show_page_runtime_recovery_html
 
@@ -8725,7 +8735,7 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "private":
             return _show_page_not_found_response()
-        if _is_show_page_dot_path(asset_path):
+        if _is_show_page_runtime_denied_dot_path(asset_path):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
@@ -8796,7 +8806,7 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
-        if _is_show_page_dot_path(asset_path):
+        if _is_show_page_runtime_denied_dot_path(asset_path):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method != "GET":

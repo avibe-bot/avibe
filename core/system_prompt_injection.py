@@ -460,7 +460,7 @@ def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: s
     return Template(_SHOW_PAGES_PROMPT).substitute(
         default_session_id=default_session_id,
         avibe_cloud_guidance_section=f"\n{avibe_cloud_guidance}\n" if avibe_cloud_guidance else "\n",
-        show_git_agent_contract=format_agent_contract(numbered=True),
+        show_git_agent_contract=format_agent_contract(numbered=True, session_id=default_session_id),
     )
 
 
