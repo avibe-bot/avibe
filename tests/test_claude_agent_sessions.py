@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -348,7 +348,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queries, [("first", runtime_key)])
         self.assertEqual(mark_active_calls, [runtime_key])
         self.assertIn(runtime_key, mark_idle_calls)
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         agent._remove_ack_reaction.assert_awaited_once_with(request)
         self.assertNotIn(runtime_key, agent._pending_requests)
         self.assertNotIn(runtime_key, controller.claude_sessions)
@@ -1219,7 +1219,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         persist.assert_called_once()
         self.assertEqual(persist.call_args.args[1], "notify")
         self.assertEqual(persist.call_args.args[2], "❌ Claude error: Connection lost")
@@ -1253,7 +1253,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
             context,
             "claude",
@@ -1678,7 +1678,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.wait_for(receiver_task, timeout=1)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         self.assertFalse(service._turn_gates[composite_key].lock.locked())
         self.assertNotIn(composite_key, controller.claude_sessions)
         self.assertNotIn(composite_key, agent._pending_requests)
@@ -1784,6 +1784,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             "",
             is_error=True,
             level="silent",
+            output=ANY,
         )
         self.assertEqual(pending_context.platform_specific["turn_token"], "current")
         self.assertEqual(pending_context.platform_specific["agent_runtime_turn_token"], "current-runtime")
@@ -1851,7 +1852,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.wait_for(receiver_task, timeout=1)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         self.assertEqual(context.platform_specific["turn_token"], "current-turn")
         self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "current-runtime")
         self.assertFalse(service._turn_gates[composite_key].lock.locked())
@@ -1992,7 +1993,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         agent.emit_result_message.assert_not_awaited()
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         self.assertEqual(context.platform_specific["turn_token"], "T1")
@@ -2047,7 +2048,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         agent.emit_result_message.assert_not_awaited()
         self.assertEqual(agent._pending_requests[composite_key], [next_request])
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
@@ -2105,7 +2106,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         agent.emit_result_message.assert_not_awaited()
         self.assertEqual(agent._pending_requests[composite_key], [next_request])
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
@@ -2177,7 +2178,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         client.ready.set()
         await receiver_task
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         agent.emit_result_message.assert_not_awaited()
         self.assertEqual(agent._pending_requests[composite_key], [followup_request])
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
@@ -2250,7 +2251,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         client.ready.set()
         await receiver_task
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
         agent.emit_result_message.assert_awaited_once_with(
             context,
             "next turn result",

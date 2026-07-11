@@ -2210,6 +2210,14 @@
       "zoomIn": "Zoom in",
       "zoomOut": "Zoom out"
     },
+    "activities": {
+      "running": "Background work · {{count}}",
+      "delivering": "Delivering background output · {{count}}",
+      "connection": {
+        "reconnecting": "Reconnecting",
+        "disconnected": "Disconnected"
+      }
+    },
     "queue": {
       "title": "Queued · {{count}}",
       "sendNow": "Send now",

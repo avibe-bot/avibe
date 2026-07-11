@@ -17,6 +17,7 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
+from core.message_output import terminal_output_for
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
@@ -136,6 +137,7 @@ class CodexAgent(BaseAgent):
                 "result",
                 "❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
                 is_error=True,
+                output=terminal_output_for(request),
             )
             await self._remove_ack_reaction(request)
             self._event_handler._release_stream_turn(request.context)
@@ -147,6 +149,7 @@ class CodexAgent(BaseAgent):
                 "result",
                 f"❌ Failed to start Codex CLI: {e}",
                 is_error=True,
+                output=terminal_output_for(request),
             )
             await self._remove_ack_reaction(request)
             self._event_handler._release_stream_turn(request.context)
@@ -189,6 +192,7 @@ class CodexAgent(BaseAgent):
                             "result",
                             f"❌ Failed to interrupt previous Codex turn: {e}",
                             is_error=True,
+                            output=terminal_output_for(request),
                         )
                         await self._remove_ack_reaction(request)
                         self._event_handler._release_stream_turn(request.context)
@@ -245,6 +249,7 @@ class CodexAgent(BaseAgent):
                         "result",
                         error_text,
                         is_error=True,
+                        output=terminal_output_for(request),
                     )
                 await self._remove_ack_reaction(request)
                 # The turn never started (all retries failed) — release the
@@ -281,7 +286,11 @@ class CodexAgent(BaseAgent):
             # idle; IM shows the ack reaction removed above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
             await self.controller.emit_agent_message(
-                request.context, "result", "", level="silent"
+                request.context,
+                "result",
+                "",
+                level="silent",
+                output=terminal_output_for(request),
             )
             logger.info("Codex turn %s interrupted via /stop", turn_id)
             return True
@@ -554,7 +563,14 @@ class CodexAgent(BaseAgent):
         emit = getattr(controller, "emit_agent_message", None)
         if callable(emit):
             try:
-                await emit(context, "result", "", is_error=True, level="silent")
+                await emit(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    level="silent",
+                    output=terminal_output_for(request),
+                )
                 return
             except Exception:
                 logger.warning(

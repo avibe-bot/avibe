@@ -1037,7 +1037,12 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to inspect owned Activities for Run %s", run_id, exc_info=True)
             return True
 
-    def _forward_agent_run_outputs(self, run_ids: list[str]) -> None:
+    def _forward_agent_run_outputs(
+        self,
+        run_ids: list[str],
+        *,
+        raise_on_error: bool = False,
+    ) -> None:
         service = getattr(self.controller, "scheduled_task_service", None)
         forward = getattr(service, "forward_run_outputs", None)
         if not callable(forward):
@@ -1046,6 +1051,8 @@ class ConsolidatedMessageDispatcher:
             forward(run_ids)
         except Exception:
             logger.warning("Failed to forward Agent Run outputs for %s", ",".join(run_ids), exc_info=True)
+            if raise_on_error:
+                raise
 
     def _record_agent_run_terminal_result(
         self,
@@ -1059,6 +1066,7 @@ class ConsolidatedMessageDispatcher:
     ) -> None:
         payload = context.platform_specific or {}
         semantics = output_semantics or MessageOutput(completes_turn=True)
+        require_confirmation = semantics.requires_delivery_for_run_settlement
         run_ids: list[str] = []
         explicit_run_id = str(semantics.run_id or "").strip()
         if explicit_run_id:
@@ -1090,10 +1098,15 @@ class ConsolidatedMessageDispatcher:
             )
         except Exception as err:
             logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
+            if require_confirmation:
+                raise
         finally:
             if store is not None:
                 store.close()
-        self._forward_agent_run_outputs(run_ids)
+        self._forward_agent_run_outputs(
+            run_ids,
+            raise_on_error=require_confirmation,
+        )
 
     def _record_suppressed_agent_run_terminal_result(
         self,
@@ -1455,7 +1468,11 @@ class ConsolidatedMessageDispatcher:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(context)
-                return None
+                # A previously persisted output is a successful idempotent
+                # delivery attempt. Return its stable identity so a recovered
+                # Activity can acknowledge its durable Outbox snapshot instead
+                # of retrying forever after a crash between emit and ack.
+                return native_output_id
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
@@ -1758,18 +1775,20 @@ class ConsolidatedMessageDispatcher:
                 # mutated) and is a no-op when there is no footer.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
 
-                self._record_agent_run_terminal_result(
-                    context,
-                    persisted_result_text,
-                    primary_message_id,
-                    is_error=is_error,
-                    output_semantics=output_semantics,
-                )
+                if not output_semantics.requires_delivery_for_run_settlement:
+                    self._record_agent_run_terminal_result(
+                        context,
+                        persisted_result_text,
+                        primary_message_id,
+                        is_error=is_error,
+                        output_semantics=output_semantics,
+                    )
 
                 # Persist the delivered result (cleaned text == what was shown).
                 # avibe always persists (SSE is its delivery); for IM a result that
                 # failed every send/upload (primary_message_id is None) is NOT
                 # recorded, matching the old outbound mirror's success-only rule.
+                persisted_output = None
                 if persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
@@ -1787,7 +1806,7 @@ class ConsolidatedMessageDispatcher:
                             text, include_quick_replies=quick_replies_on, keep_file_links=True
                         )
                         avibe_text = self._fold_footer(avibe_enhanced.text or persist_text, folded_footer)
-                        persist_agent_message(
+                        persisted_output = persist_agent_message(
                             target_context,
                             result_type,
                             avibe_text,
@@ -1796,13 +1815,29 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                         )
                     else:
-                        persist_agent_message(
+                        persisted_output = persist_agent_message(
                             target_context,
                             result_type,
                             persisted_result_text,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
+
+                if output_semantics.requires_delivery_for_run_settlement:
+                    if persisted_output is None and not (
+                        native_output_id
+                        and agent_message_exists(target_context, native_output_id)
+                    ):
+                        raise RuntimeError(
+                            "Activity output was not durably persisted after delivery"
+                        )
+                    self._record_agent_run_terminal_result(
+                        context,
+                        persisted_result_text,
+                        primary_message_id,
+                        is_error=is_error,
+                        output_semantics=output_semantics,
+                    )
 
                 if primary_message_id and display_text and not output_semantics.detached:
                     # Stream the delivered result to live consumers (avibe SSE).

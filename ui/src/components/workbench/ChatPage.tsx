@@ -1,14 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Undo2, UploadCloud, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
@@ -51,6 +51,17 @@ const WORKING_RECONCILE_INTERVAL_MS = 60 * 1000;
 // idle check clear Stop. A genuinely stale turn (missed ``turn.end``) was set
 // working far longer ago than this, so it still clears (Codex P2).
 const WORKING_SETTLE_GRACE_MS = 4000;
+const ACTIVITY_RECONCILE_INTERVAL_MS = 10 * 1000;
+
+const emptyRuntimeState = (): SessionRuntimeState => ({
+  in_flight: false,
+  foreground: 'idle',
+  native_turn_started: false,
+  pending_input_count: 0,
+  background_activities: [],
+  pending_activity_output_count: 0,
+  connection: 'unknown',
+});
 
 // The transcript-visible message types — mirrors the server filter on
 // ``GET /api/sessions/{id}/messages`` so the live ``message.new`` feed appends
@@ -263,6 +274,7 @@ export const ChatPage: React.FC = () => {
   // ``working`` = a turn is in flight for this session (from our send, or any
   // other origin we observe). Drives the thinking bubble + the Send→Stop swap.
   const [working, setWorking] = useState(false);
+  const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>(emptyRuntimeState);
   // Bumped on resume (tab visible again / network back) to force the transcript
   // subscription effect to reopen a possibly-dead SSE stream — see the
   // visibility effect below.
@@ -541,8 +553,9 @@ export const ChatPage: React.FC = () => {
     try {
       const res = await api.getTurnState(sessionId);
       if (sessionId !== sessionIdRef.current) return;
-      if (res.in_flight === null) return;
-      if (res.in_flight) {
+      if (res.foreground === 'unknown') return;
+      setRuntimeState(res);
+      if (res.foreground === 'running') {
         // markWorking (not setWorking): bump the epoch + timestamp so an OLDER
         // overlapping sync whose idle response lands AFTER this one can't clear
         // the Stop we just confirmed live — its captured epoch is now stale (P2).
@@ -602,12 +615,13 @@ export const ChatPage: React.FC = () => {
       setHistoricalWindow(false);
       setQueue(bootstrap.queued ?? []);
       setInitialDraft(bootstrap.draft?.text ?? '');
+      setRuntimeState(bootstrap.turn_state);
       // Restore Stop for a turn that is still running (e.g. opened in another tab
       // or reloaded mid-turn). markWorking on the live branch so a racing
       // syncTurnState idle response can't clear it; an idle load is authoritative
       // for the fresh page, so clear directly (Codex P2).
-      if (bootstrap.turn_state.in_flight) markWorking();
-      else if (bootstrap.turn_state.in_flight === false) setWorking(false);
+      if (bootstrap.turn_state.foreground === 'running') markWorking();
+      else if (bootstrap.turn_state.foreground === 'idle') setWorking(false);
     } catch (err: any) {
       // Only surface the error if we're still on the session that failed — a
       // stale failure must not stamp an error onto the chat the user moved to.
@@ -650,6 +664,7 @@ export const ChatPage: React.FC = () => {
       highlightTimerRef.current = null;
     }
     setWorking(false);
+    setRuntimeState(emptyRuntimeState());
     setQueue([]);
     setInitialDraft(null);
     // Drop any pending grace-resync so it can't fire against the new session.
@@ -696,19 +711,24 @@ export const ChatPage: React.FC = () => {
       onTurnStart: (data) => {
         // markWorking (not setWorking): bump the epoch so a syncTurnState idle
         // reading already in flight can't clear this freshly-started turn.
-        if (data.session_id === sessionIdRef.current) markWorking();
+        if (data.session_id === sessionIdRef.current) {
+          setRuntimeState((current) => ({ ...current, in_flight: true, foreground: 'running' }));
+          markWorking();
+        }
       },
       onTurnEnd: (data) => {
         // The controller confirms the turn settled (terminal result, agent error,
         // or user cancel) — the authoritative end of the working state. There is
         // no turn-duration timeout, so this only fires on a REAL terminal signal.
         if (data.session_id === sessionIdRef.current) {
+          setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle' }));
           setWorking(false);
           // The first turn binds the native; pick it up so the header's backend
           // lock engages without a reload. A failed first turn leaves no native
           // (the refresh confirms that), keeping the backend switchable so the
           // user can recover by re-routing.
           void refreshSessionRowUntilNativeBound();
+          void syncTurnState();
         }
       },
       onQueueUpdated: (data) => {
@@ -784,7 +804,11 @@ export const ChatPage: React.FC = () => {
     };
   }, [sessionId, reconcile, refreshQueue, syncTurnState]);
 
-  // Reconcile (don't kill) while a turn is in flight: there is no turn-duration
+  useEffect(() => {
+    setRuntimeState((current) => ({ ...current, pending_input_count: queue.length }));
+  }, [queue.length]);
+
+  // Reconcile (don't kill) while foreground or background work is present: there is no turn-duration
   // timeout, so a long agent can run for hours and must keep Stop + the indicator
   // the whole time. Instead of a force-clear timer, poll the controller's
   // authoritative ``GET /turn-state`` on an interval while ``working`` is true AND
@@ -794,13 +818,17 @@ export const ChatPage: React.FC = () => {
   // flips false / on unmount; skipped while hidden (visibilitychange already
   // reconciles on resume).
   useEffect(() => {
-    if (!working) return;
+    const hasBackgroundState =
+      runtimeState.background_activities.length > 0 ||
+      runtimeState.pending_activity_output_count > 0 ||
+      runtimeState.connection === 'reconnecting';
+    if (!working && !hasBackgroundState) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       void syncTurnState();
-    }, WORKING_RECONCILE_INTERVAL_MS);
+    }, hasBackgroundState ? ACTIVITY_RECONCILE_INTERVAL_MS : WORKING_RECONCILE_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [working, syncTurnState]);
+  }, [working, runtimeState.background_activities.length, runtimeState.pending_activity_output_count, runtimeState.connection, syncTurnState]);
 
   const sendMessage = useCallback(
     async (
@@ -1480,6 +1508,7 @@ export const ChatPage: React.FC = () => {
             ) : null
           }
         />
+        <ActivityStrip state={runtimeState} />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         {sessionId && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
@@ -1576,6 +1605,36 @@ const QueueRow: React.FC<{
       >
         <X className="size-3.5" />
       </Button>
+    </div>
+  );
+};
+
+const ActivityStrip: React.FC<{ state: SessionRuntimeState }> = ({ state }) => {
+  const { t } = useTranslation();
+  const active = state.background_activities;
+  const pendingOutputs = state.pending_activity_output_count;
+  if (active.length === 0 && pendingOutputs === 0) return null;
+
+  const firstDescription = active.find((item) => item.description)?.description;
+  const connectionVisible =
+    active.length > 0 &&
+    (state.connection === 'reconnecting' || state.connection === 'disconnected');
+  return (
+    <div className="shrink-0 border-t border-border/70 bg-surface-2/60 px-4 py-1.5 md:px-8">
+      <div className="mx-auto flex min-h-7 w-full max-w-[1080px] items-center gap-2 text-[11px] text-muted">
+        <Activity className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
+        <span className="min-w-0 truncate" title={firstDescription ?? undefined}>
+          {active.length > 0
+            ? t('chat.activities.running', { count: active.length })
+            : t('chat.activities.delivering', { count: pendingOutputs })}
+          {firstDescription ? ` · ${firstDescription}` : ''}
+        </span>
+        {connectionVisible ? (
+          <span className="ml-auto shrink-0 text-gold">
+            {t(`chat.activities.connection.${state.connection}`)}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 };

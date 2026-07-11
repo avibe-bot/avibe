@@ -12,6 +12,7 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
+from core.message_output import terminal_output_for, terminal_turn_output
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -80,6 +81,7 @@ class MessageHandler(BaseHandler):
     async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
+        request: AgentRequest | None = None
         # Tracks whether we actually dispatched an agent turn (whose reply
         # streams in asynchronously). If we leave this method WITHOUT having
         # dispatched — early returns, missing/disabled backend, errors — no
@@ -508,7 +510,13 @@ class MessageHandler(BaseHandler):
                 # turn through the OUTBOUND status chokepoint: an empty terminal
                 # error result turns the dot red + releases the SSE waiter (the
                 # missing-agent message was already shown above). No separate latch.
-                await self.controller.emit_agent_message(context, "result", "", is_error=True)
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    output=terminal_output_for(request),
+                )
                 # Clean up reaction on error
                 await self._remove_ack_reaction(context, request)
                 return f"agent '{agent_name}' is not available"
@@ -519,15 +527,15 @@ class MessageHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Error processing user message: {e}", exc_info=True)
             # Clean up reaction on any exception
-            # Use try/except to safely access possibly-unbound local variables
             try:
-                try:
-                    # Try using request object if it was created. This also
-                    # clears typing indicators, which do not have a reaction ID.
-                    await self._remove_ack_reaction(context, request)  # type: ignore[possibly-undefined]
-                except NameError:
-                    if processing_indicator is not None:
-                        await self.controller.processing_indicator.finish(processing_indicator)
+                # Use the request once it exists; otherwise finish any indicator
+                # selected during pre-dispatch context preparation.
+                if request is not None:
+                    await self._remove_ack_reaction(context, request)
+                elif processing_indicator is not None:
+                    await self.controller.processing_indicator.finish(
+                        processing_indicator
+                    )
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
             error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
@@ -537,7 +545,17 @@ class MessageHandler(BaseHandler):
             # ...then settle the failed turn through the OUTBOUND status chokepoint:
             # an empty terminal error result turns the dot red + releases the SSE
             # waiter (the visible error was sent + streamed above). No separate latch.
-            await self.controller.emit_agent_message(context, "result", "", is_error=True)
+            await self.controller.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                output=(
+                    terminal_output_for(request)
+                    if request is not None
+                    else terminal_turn_output()
+                ),
+            )
             return str(e)
         finally:
             if not agent_dispatched:

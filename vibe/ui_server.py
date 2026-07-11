@@ -5623,6 +5623,62 @@ def sessions_get(session_id: str):
         return jsonify({"error": str(err)}), 404
 
 
+def _session_runtime_projection(
+    body: dict[str, Any] | None,
+    *,
+    pending_input_count: int | None = None,
+    controller_available: bool | None = True,
+) -> dict[str, Any]:
+    """Normalize the controller's orthogonal Session runtime axes for the UI."""
+
+    payload = body if isinstance(body, dict) else {}
+    raw_foreground = str(payload.get("foreground") or "").strip()
+    if raw_foreground not in {"idle", "running"}:
+        if controller_available is None:
+            foreground = "unknown"
+        else:
+            foreground = "running" if bool(payload.get("in_flight")) else "idle"
+    else:
+        foreground = raw_foreground
+
+    raw_connection = str(payload.get("connection") or "").strip()
+    if raw_connection not in {"connected", "reconnecting", "disconnected", "unknown"}:
+        raw_connection = "disconnected" if controller_available is False else "unknown"
+
+    if pending_input_count is None:
+        try:
+            pending_input_count = max(0, int(payload.get("pending_input_count") or 0))
+        except (TypeError, ValueError):
+            pending_input_count = 0
+    try:
+        pending_output_count = max(
+            0,
+            int(payload.get("pending_activity_output_count") or 0),
+        )
+    except (TypeError, ValueError):
+        pending_output_count = 0
+    raw_activities = payload.get("background_activities")
+    activities = (
+        [dict(item) for item in raw_activities if isinstance(item, dict)]
+        if isinstance(raw_activities, list)
+        else []
+    )
+    projection: dict[str, Any] = {
+        # Retained as a read-only compatibility alias for older clients.
+        "in_flight": None if foreground == "unknown" else foreground == "running",
+        "foreground": foreground,
+        "native_turn_started": bool(payload.get("native_turn_started")),
+        "pending_input_count": pending_input_count,
+        "background_activities": activities,
+        "pending_activity_output_count": pending_output_count,
+        "connection": raw_connection,
+    }
+    backend = str(payload.get("backend") or "").strip()
+    if backend:
+        projection["backend"] = backend
+    return projection
+
+
 @app.route("/api/sessions/<session_id>/bootstrap", methods=["GET"])
 async def sessions_bootstrap(session_id: str):
     """First-screen payload for the Workbench Chat page.
@@ -5670,11 +5726,22 @@ async def sessions_bootstrap(session_id: str):
     try:
         turn_result = await internal_client.turn_state(session_id)
         turn_body = turn_result.get("body") or {}
-        turn_state = {"in_flight": bool(turn_body.get("in_flight"))}
+        turn_state = _session_runtime_projection(
+            turn_body,
+            pending_input_count=len(queued),
+        )
     except internal_client.InternalServerUnavailable:
-        turn_state = {"in_flight": False}
+        turn_state = _session_runtime_projection(
+            None,
+            pending_input_count=len(queued),
+            controller_available=False,
+        )
     except internal_client.InternalServerTimeout:
-        turn_state = {"in_flight": None}
+        turn_state = _session_runtime_projection(
+            None,
+            pending_input_count=len(queued),
+            controller_available=None,
+        )
 
     return jsonify(
         {
@@ -6896,15 +6963,18 @@ def sessions_mark_read(session_id: str):
 
 @app.route("/api/sessions/<session_id>/turn-state", methods=["GET"])
 async def sessions_turn_state(session_id: str):
-    """Whether a turn is currently in flight (so a freshly loaded / reconnected
-    Chat page can restore its Stop/working state). Degrades to idle if the
-    controller socket is unreachable."""
+    """Return independent foreground, Inbox, Activity, and connection facts."""
     from vibe import internal_client
 
     try:
         result = await internal_client.turn_state(session_id)
     except internal_client.InternalServerUnavailable:
-        return jsonify({"in_flight": False})
+        return jsonify(
+            _session_runtime_projection(
+                None,
+                controller_available=False,
+            )
+        )
     except internal_client.InternalServerTimeout:
         return (
             jsonify(
@@ -6918,11 +6988,13 @@ async def sessions_turn_state(session_id: str):
             504,
         )
     body = result.get("body") or {}
-    in_flight = bool(body.get("in_flight"))
+    projection = _session_runtime_projection(body)
+    in_flight = projection["foreground"] == "running"
     recovered = False
     if not in_flight:
         recovered = _recover_stale_session_status(session_id)
-    return jsonify({"in_flight": in_flight, "recovered_agent_status": recovered})
+    projection["recovered_agent_status"] = recovered
+    return jsonify(projection)
 
 
 @app.route("/api/sessions/<session_id>/queue", methods=["GET"])

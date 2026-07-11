@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import select
@@ -29,6 +30,7 @@ from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.pagination import PageRequest
+from storage.session_activities import SQLiteSessionActivityStore
 
 
 class _StubScheduler:
@@ -2339,6 +2341,546 @@ def test_failed_activity_intent_survives_until_last_owned_activity_finishes(
     assert "deferred_terminal_status" not in terminal["result_payload"]
 
 
+def test_restart_delivers_persisted_activity_summary_and_settles_run_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id=session_id,
+        activity_id="task-complete",
+        kind="background_task",
+        run_id=request.id,
+    )
+    first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-complete",
+        status="completed",
+        metadata={"summary": "Recovered task result"},
+        expects_output=True,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    emitted: list[tuple[str, bool, bool]] = []
+
+    async def emit_agent_message(context, message_type, text, *, output, **_kwargs):
+        emitted.append((text, output.detached, output.completes_turn))
+        result = sqlite_store.record_run_output(
+            request.id,
+            output_id=str(output.idempotency_key),
+            text=text,
+            terminal_status="succeeded" if output.settles_run else None,
+            provenance=output.provenance(context),
+        )
+        assert result["terminal_transition"] is True
+        return "recovered-message"
+
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    controller.agent_service = SimpleNamespace(activities=recovered_registry)
+    controller.emit_agent_message = emit_agent_message
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    running = request_store.get_run(request.id)
+    assert running is not None
+    assert running["status"] == "running"
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert terminal["status"] == "succeeded"
+    assert emitted == [("Recovered task result", True, False)]
+    assert activity_store.list_activities() == []
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+    assert emitted == [("Recovered task result", True, False)]
+
+
+def test_recovered_terminal_waits_for_pending_activity_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    for activity_id in ("task-failed", "task-output"):
+        first_registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id=session_id,
+            activity_id=activity_id,
+            kind="background_task",
+            run_id=request.id,
+        )
+    failed = first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+    assert failed is not None
+    output = first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-output",
+        status="completed",
+        metadata={"summary": "Recovered output before failure callback"},
+        expects_output=True,
+    )
+    assert output is not None
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    statuses_during_delivery: list[str] = []
+
+    async def emit_agent_message(context, _message_type, text, *, output, **_kwargs):
+        current = request_store.get_run(request.id)
+        assert current is not None
+        statuses_during_delivery.append(current["status"])
+        result = sqlite_store.record_run_output(
+            request.id,
+            output_id=str(output.idempotency_key),
+            text=text,
+            terminal_status="succeeded" if output.settles_run else None,
+            provenance=output.provenance(context),
+        )
+        assert result["terminal_transition"] is True
+        return "recovered-message"
+
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    controller.agent_service = SimpleNamespace(activities=recovered_registry)
+    controller.emit_agent_message = emit_agent_message
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    before_output = request_store.get_run(request.id)
+    assert before_output is not None
+    assert before_output["status"] == "running"
+    assert before_output["result_payload"]["deferred_terminal_status"] == "failed"
+    assert len(activity_store.list_activities()) == 2
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert statuses_during_delivery == ["running"]
+    assert terminal["status"] == "failed"
+    assert terminal["result_text"] == "Recovered output before failure callback"
+    assert activity_store.list_activities() == []
+
+
+def test_recovered_terminal_settlement_failure_does_not_abort_startup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="target-session",
+        activity_id="task-failed",
+        kind="background_task",
+        run_id=request.id,
+    )
+    failed = first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+    assert failed is not None
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    original_defer = request_store.defer_run_terminal
+    attempts = 0
+
+    def transient_defer_failure(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("database is locked")
+        return original_defer(*args, **kwargs)
+
+    request_store.defer_run_terminal = transient_defer_failure
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=recovered_registry),
+    )
+
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    assert attempts == 1
+    assert len(service._pending_recovered_activity_terminals) == 1
+    assert len(activity_store.list_activities()) == 1
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert attempts == 2
+    assert terminal["status"] == "failed"
+    assert terminal["error"] == "Background Activity task-failed failed"
+    assert service._pending_recovered_activity_terminals == []
+    assert activity_store.list_activities() == []
+
+
+def test_restart_preserves_activity_delivery_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+    from storage.sessions_service import SQLiteSessionsService
+
+    ensure_sqlite_state()
+    session_target = parse_session_key(
+        "slack::channel::C-SOURCE::thread::171717.123"
+    )
+    sessions = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        session_id = sessions.reserve_agent_session(
+            scope_key=session_target.session_scope,
+            agent_backend="claude",
+            session_anchor=session_anchor_for_target(session_target),
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        session_key=session_target.to_key(),
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id=session_id,
+        activity_id="task-routed",
+        kind="background_task",
+        run_id=request.id,
+        metadata={"delivery_key_external": "slack::channel::C-DESTINATION"},
+    )
+    first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-routed",
+        status="completed",
+        metadata={"summary": "Recovered routed result"},
+        expects_output=True,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    emitted_contexts: list[MessageContext] = []
+
+    async def emit_agent_message(context, _message_type, text, *, output, **_kwargs):
+        emitted_contexts.append(context)
+        result = sqlite_store.record_run_output(
+            request.id,
+            output_id=str(output.idempotency_key),
+            text=text,
+            terminal_status="succeeded" if output.settles_run else None,
+            provenance=output.provenance(context),
+        )
+        assert result["terminal_transition"] is True
+        return "recovered-routed-message"
+
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None)
+    )
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        im_clients={},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        agent_service=SimpleNamespace(activities=recovered_registry),
+        emit_agent_message=emit_agent_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    assert len(emitted_contexts) == 1
+    context = emitted_contexts[0]
+    assert context.thread_id == "171717.123"
+    assert context.platform_specific["delivery_key_external"] == (
+        "slack::channel::C-DESTINATION"
+    )
+    assert context.platform_specific["delivery_override"]["channel_id"] == (
+        "C-DESTINATION"
+    )
+    assert context.platform_specific["delivery_override"]["thread_id"] is None
+    assert request_store.get_run(request.id)["status"] == "succeeded"
+    assert activity_store.list_activities() == []
+
+
+def test_recovered_silent_directive_activity_settles_without_emit() -> None:
+    activity = SimpleNamespace(
+        id="task-silent",
+        session_id="session-1",
+        metadata={"summary": "<silent>internal completion</silent>"},
+    )
+    registry = SimpleNamespace(ack_completed_output=Mock())
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=registry),
+        emit_agent_message=AsyncMock(),
+    )
+    service._settle_activity_without_output = Mock()
+
+    asyncio.run(service._deliver_recovered_activity_output(activity))
+
+    service._settle_activity_without_output.assert_called_once_with(activity)
+    registry.ack_completed_output.assert_called_once_with(activity)
+    service.controller.emit_agent_message.assert_not_awaited()
+
+
+def test_restart_no_delivery_activity_settles_real_run_without_emit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        metadata={"no_delivery": True},
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id=session_id,
+        activity_id="task-private",
+        kind="background_task",
+        run_id=request.id,
+    )
+    first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-private",
+        status="completed",
+        metadata={"summary": "Private task result"},
+        expects_output=True,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    controller.agent_service = SimpleNamespace(activities=recovered_registry)
+    controller.emit_agent_message = AsyncMock()
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert terminal["status"] == "succeeded"
+    assert terminal["result_text"] in {None, ""}
+    assert not terminal["result_payload"].get("outputs")
+    controller.emit_agent_message.assert_not_awaited()
+    assert activity_store.list_activities() == []
+
+
+def test_restart_settles_terminal_activity_without_inventing_visible_text(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="target-session",
+        activity_id="task-silent",
+        kind="background_task",
+        run_id=request.id,
+    )
+    first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-silent",
+        status="completed",
+        expects_output=True,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=recovered_registry),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert terminal["status"] == "succeeded"
+    assert terminal["result_text"] in {None, ""}
+    assert activity_store.list_activities() == []
+
+
+def test_restart_marks_live_activity_disconnected_and_cancels_owned_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="target-session",
+        activity_id="task-live",
+        kind="background_task",
+        run_id=request.id,
+    )
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=recovered_registry),
+    )
+    ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert terminal["status"] == "canceled"
+    assert terminal["error"] == "Background Activity task-live disconnected"
+    assert activity_store.list_activities() == []
+
+
 def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
@@ -3478,7 +4020,12 @@ def _avibe_controller_double(*, gate, handle_scheduled_message):
     )
 
 
-def _make_avibe_session(monkeypatch, tmp_path) -> str:
+def _make_avibe_session(
+    monkeypatch,
+    tmp_path,
+    *,
+    metadata: dict | None = None,
+) -> str:
     """Create a real avibe workbench session so ``resolve_session_id_target``
     resolves it to ``platform='avibe'`` (the gate trigger)."""
     from core.services import sessions as sessions_service
@@ -3513,7 +4060,11 @@ def _make_avibe_session(monkeypatch, tmp_path) -> str:
             )
         )
         session = sessions_service.create_session(
-            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+            metadata=metadata,
         )
     return session["id"]
 

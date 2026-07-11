@@ -25,10 +25,20 @@ class _StubController:
         return self._token_field
 
     async def emit_agent_message(
-        self, context, message_type, text, parse_mode="markdown", *, is_error=False, level="normal", result_footer=None
+        self,
+        context,
+        message_type,
+        text,
+        parse_mode="markdown",
+        *,
+        is_error=False,
+        level="normal",
+        result_footer=None,
+        output=None,
     ):
         self.messages.append((message_type, text, parse_mode))
         self.result_footers.append(result_footer)
+        return "message-id"
 
 
 class _StubAgent(BaseAgent):
@@ -44,7 +54,7 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         agent = _StubAgent(controller)
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
 
-        await agent.emit_result_message(
+        message_id = await agent.emit_result_message(
             context,
             "<silent>not relevant</silent>",
             subtype="success",
@@ -52,6 +62,7 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(controller.messages, [("result", "", "markdown")])
+        self.assertEqual(message_id, "message-id")
 
     async def test_no_visible_result_with_duration_hidden_settles_via_outbound(self):
         # show_duration off + empty result/suffix is still a TERMINAL turn: it is

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
+from core.message_output import terminal_output_for, terminal_turn_output
 
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -22,12 +23,24 @@ STALE_STOP_REASONS = {"not_active", "runtime_unavailable"}
 class AgentService:
     """Registry and dispatcher for agent implementations."""
 
-    def __init__(self, controller):
+    def __init__(
+        self,
+        controller,
+        *,
+        activities: SessionActivityRegistry | None = None,
+    ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
-        self.activities = SessionActivityRegistry()
+        self.activities = activities or SessionActivityRegistry()
+        set_output_settled_callback = getattr(
+            self.activities,
+            "set_output_settled_callback",
+            None,
+        )
+        if callable(set_output_settled_callback):
+            set_output_settled_callback(self._on_activity_output_settled)
         # Strong refs to fire-and-forget tasks (e.g. the cancellation tidy) so the
         # event loop doesn't GC them before they run (asyncio only weak-refs tasks).
         self._background_tasks: set[asyncio.Task] = set()
@@ -79,26 +92,40 @@ class AgentService:
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
-    def on_activity_terminal(self, activity: Any) -> None:
-        """Let the Run owner react after the registry removed one Activity."""
+    def _on_activity_output_settled(self, activity: Any) -> None:
+        agent = self.agents.get(str(getattr(activity, "backend", "") or ""))
+        notify = getattr(agent, "on_activity_output_settled", None)
+        if callable(notify):
+            notify(str(getattr(activity, "runtime_key", "") or ""))
+
+    def on_activity_terminal(self, activity: Any) -> bool:
+        """Let the Run owner acknowledge one terminal Activity."""
 
         service = getattr(self.controller, "scheduled_task_service", None)
         settle = getattr(service, "settle_activity_runs", None)
         if not callable(settle):
-            return
+            return False
         try:
             settle(activity)
+            if str(getattr(activity, "status", "") or "") != "completed":
+                self.activities.ack_recovered_terminal(activity)
+            return True
         except Exception:
             logger.warning(
                 "Failed to settle Runs for terminal Activity %s",
                 getattr(activity, "id", ""),
                 exc_info=True,
             )
+            return False
 
     def end_activity_runtime(self, backend: str, runtime_key: str) -> list[Any]:
         """Terminate one backend connection's Activities and notify Run owners."""
 
-        completed = self.activities.end_runtime(backend, runtime_key)
+        completed = self.activities.end_runtime(
+            backend,
+            runtime_key,
+            retain_terminal_snapshots=True,
+        )
         for activity in completed:
             self.on_activity_terminal(activity)
         return completed
@@ -245,7 +272,14 @@ class AgentService:
 
                     async def _tidy_on_cancel() -> None:
                         try:
-                            await emit(request.context, "result", "", is_error=True, level="silent")
+                            await emit(
+                                request.context,
+                                "result",
+                                "",
+                                is_error=True,
+                                level="silent",
+                                output=terminal_output_for(request),
+                            )
                         except Exception:
                             logger.debug("Failed to emit terminal tidy on cancellation", exc_info=True)
                         finally:
@@ -270,7 +304,14 @@ class AgentService:
                 emit = getattr(self.controller, "emit_agent_message", None)
                 if callable(emit):
                     try:
-                        await emit(request.context, "result", "", is_error=True, level="silent")
+                        await emit(
+                            request.context,
+                            "result",
+                            "",
+                            is_error=True,
+                            level="silent",
+                            output=terminal_output_for(request),
+                        )
                     except Exception:
                         logger.debug("Failed to emit terminal result for backend exception", exc_info=True)
             finally:
@@ -507,7 +548,14 @@ class AgentService:
             context = gate.context
             if context is not None and callable(emit):
                 try:
-                    await emit(context, "result", "", is_error=True, level="silent")
+                    await emit(
+                        context,
+                        "result",
+                        "",
+                        is_error=True,
+                        level="silent",
+                        output=terminal_turn_output(),
+                    )
                 except Exception:
                     logger.debug("Failed to settle forced backend turn %s", runtime_key, exc_info=True)
             self.release_runtime_turn_key(runtime_key, token)

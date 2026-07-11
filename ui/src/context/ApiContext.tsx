@@ -530,7 +530,7 @@ export type ApiContextType = {
   listSessionQueue: (sessionId: string, options?: { cache?: boolean }) => Promise<{ queued: WorkbenchMessage[] }>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
-  getTurnState: (sessionId: string) => Promise<{ in_flight: boolean | null }>;
+  getTurnState: (sessionId: string) => Promise<SessionRuntimeState>;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; cache?: boolean }) => Promise<InboxFeedResult>;
@@ -953,6 +953,30 @@ export type MessageSearchResult = {
   session_count: number;
 };
 
+export type SessionActivityState = {
+  id: string;
+  backend: string;
+  runtime_key: string;
+  session_id: string | null;
+  kind: string;
+  status: string;
+  description: string | null;
+  started_at: string;
+  updated_at: string;
+};
+
+export type SessionRuntimeState = {
+  in_flight: boolean | null;
+  foreground: 'idle' | 'running' | 'unknown';
+  native_turn_started: boolean;
+  pending_input_count: number;
+  background_activities: SessionActivityState[];
+  pending_activity_output_count: number;
+  connection: 'connected' | 'reconnecting' | 'disconnected' | 'unknown';
+  backend?: string;
+  recovered_agent_status?: boolean;
+};
+
 export type WorkbenchSessionBootstrap = {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
@@ -963,7 +987,7 @@ export type WorkbenchSessionBootstrap = {
   next_before_id?: string | null;
   queued: WorkbenchMessage[];
   draft: { text: string };
-  turn_state: { in_flight: boolean | null };
+  turn_state: SessionRuntimeState;
 };
 
 // One row of the per-session ("Slack-like") inbox feed from ``GET /api/inbox``.
@@ -2306,7 +2330,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const res = await apiFetch(path);
       if (res.status === 504) {
         readCacheRef.current.delete(path);
-        return { in_flight: null };
+        return {
+          in_flight: null,
+          foreground: 'unknown',
+          native_turn_started: false,
+          pending_input_count: 0,
+          background_activities: [],
+          pending_activity_output_count: 0,
+          connection: 'unknown',
+        };
       }
       if (!res.ok) {
         await handleApiError(res, path);

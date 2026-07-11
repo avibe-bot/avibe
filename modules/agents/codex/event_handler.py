@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibe.i18n import t as i18n_t
+from core.message_output import terminal_output_for
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
@@ -173,6 +174,7 @@ class CodexEventHandler:
                         "result",
                         message,
                         is_error=True,
+                        output=terminal_output_for(tracked_request),
                     )
                 # handled == True persists the durable recovery notify centrally in
                 # ``maybe_emit_auth_recovery_message`` (the auth service is the single
@@ -356,6 +358,7 @@ class CodexEventHandler:
                         "result",
                         text,
                         is_error=True,
+                        output=terminal_output_for(request),
                     )
                 turn_state.terminal_error_notified = True
             else:
@@ -375,6 +378,7 @@ class CodexEventHandler:
                 "result",
                 text,
                 is_error=True,
+                output=terminal_output_for(request),
             )
 
     def _extract_error_message(self, error: Any) -> str:

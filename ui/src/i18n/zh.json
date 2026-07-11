@@ -2210,6 +2210,14 @@
       "zoomIn": "放大",
       "zoomOut": "缩小"
     },
+    "activities": {
+      "running": "后台工作 · {{count}}",
+      "delivering": "正在投递后台输出 · {{count}}",
+      "connection": {
+        "reconnecting": "重连中",
+        "disconnected": "已断开"
+      }
+    },
     "queue": {
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",

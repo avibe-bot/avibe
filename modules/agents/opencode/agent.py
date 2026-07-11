@@ -14,6 +14,7 @@ import time
 from typing import Dict, Optional
 
 from core.avibe_cloud import avibe_cloud_url_available
+from core.message_output import terminal_output_for
 from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
@@ -203,6 +204,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 "result",
                 f"Failed to start OpenCode server: {e}",
                 is_error=True,
+                output=terminal_output_for(request),
             )
             await self._remove_ack_reaction(request)
             return
@@ -216,7 +218,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
             # fork a fresh session and lose context.
-            await self.controller.emit_agent_message(request.context, "result", f"❌ {e}", is_error=True)
+            await self.controller.emit_agent_message(
+                request.context,
+                "result",
+                f"❌ {e}",
+                is_error=True,
+                output=terminal_output_for(request),
+            )
             await self._remove_ack_reaction(request)
             return
         except Exception as e:
@@ -231,7 +239,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context, "opencode", message
             )
             if not handled:
-                await self.controller.emit_agent_message(request.context, "result", message, is_error=True)
+                await self.controller.emit_agent_message(
+                    request.context,
+                    "result",
+                    message,
+                    is_error=True,
+                    output=terminal_output_for(request),
+                )
             await self._remove_ack_reaction(request)
             return
         if not session_id:
@@ -240,6 +254,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 "result",
                 "Failed to obtain OpenCode session ID",
                 is_error=True,
+                output=terminal_output_for(request),
             )
             await self._remove_ack_reaction(request)
             return
@@ -468,6 +483,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     "result",
                     message,
                     is_error=True,
+                    output=terminal_output_for(request),
                 )
             # handled == True persists the durable recovery notify centrally in
             # ``maybe_emit_auth_recovery_message`` (which also latches the turn
@@ -506,7 +522,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # user-facing message: a single SILENT result settles the dot to idle +
         # releases the SSE waiter through the outbound chokepoint without a bubble
         # (``level="silent"`` makes that explicit rather than faking it via empty text).
-        await self.controller.emit_agent_message(request.context, "result", "", level="silent")
+        await self.controller.emit_agent_message(
+            request.context,
+            "result",
+            "",
+            level="silent",
+            output=terminal_output_for(request),
+        )
         logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
         return True
 

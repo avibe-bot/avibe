@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from config.v2_config import DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
 from core.message_context import build_context_session_key
+from core.message_output import terminal_output_for, terminal_turn_output
 from modules.agents.base import AgentRequest
 from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
@@ -162,6 +163,7 @@ class OpenCodePollLoop:
             message,
             is_error=True,
             level="silent",
+            output=terminal_turn_output(),
         )
 
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
@@ -311,7 +313,13 @@ class OpenCodePollLoop:
                         logger.warning("Aborting OpenCode session %s after disabled question tool call", session_id)
                         # Terminal abort → error RESULT so the outbound chokepoint
                         # turns the dot red (not a bare notify that never settles it).
-                        await self._agent.controller.emit_agent_message(request.context, "result", message, is_error=True)
+                        await self._agent.controller.emit_agent_message(
+                            request.context,
+                            "result",
+                            message,
+                            is_error=True,
+                            output=terminal_output_for(request),
+                        )
                         try:
                             await server.abort_session(session_id, request.working_path)
                         except Exception as abort_err:
@@ -416,6 +424,7 @@ class OpenCodePollLoop:
                                 "result",
                                 message,
                                 is_error=True,
+                                output=terminal_output_for(request),
                             )
                         # Terminal: stop polling AND signal the caller NOT to emit the
                         # "(No response from OpenCode)" warning result — that warning is
@@ -552,7 +561,13 @@ class OpenCodePollLoop:
                                 session_id,
                             )
                             # Terminal abort → error RESULT (settles the dot red).
-                            await self._agent.controller.emit_agent_message(context, "result", message, is_error=True)
+                            await self._agent.controller.emit_agent_message(
+                                context,
+                                "result",
+                                message,
+                                is_error=True,
+                                output=terminal_turn_output(),
+                            )
                             try:
                                 await server.abort_session(session_id, poll_info.working_path)
                             except Exception as abort_err:
@@ -619,6 +634,7 @@ class OpenCodePollLoop:
                                             "result",
                                             message,
                                             is_error=True,
+                                            output=terminal_turn_output(),
                                         )
                                     self._agent.sessions.remove_active_poll(session_id)
                                     await self.remove_restored_ack(poll_info)
@@ -714,4 +730,5 @@ class OpenCodePollLoop:
                     "result",
                     message,
                     is_error=True,
+                    output=terminal_turn_output(),
                 )

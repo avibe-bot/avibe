@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
-from core.message_output import MessageOutput
+from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,12 @@ class AgentRequest:
     # returns False so Workbench can distinguish a stale missing runtime from an
     # interrupt refusal/failure.
     stop_failure_reason: Optional[str] = None
-    # Optional output semantics for backend-initiated or multi-output turns.
-    output: Optional[MessageOutput] = None
+    # Explicit output semantics for the Turn. Backend-initiated/multi-output
+    # paths override this instead of relying on the visible Message role.
+    output: Optional[MessageOutput] = field(default_factory=terminal_turn_output)
+    # Producer-owned lifecycle object retained until durable output delivery is
+    # acknowledged. The shared dispatcher sees only ``output`` provenance.
+    output_activity: Optional[Any] = None
 
 
 @dataclass
@@ -115,6 +119,11 @@ class BaseAgent(ABC):
     def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
         """Return runtime identities scoped to a persisted Avibe settings key."""
         return set()
+
+    def on_activity_output_settled(self, runtime_key: str) -> None:
+        """Wake backend-local admission blocked on acknowledged Activity output."""
+
+        return None
 
     def backend_alive(self, context: Any) -> Optional[bool]:
         """Best-effort liveness of this backend for the given turn context.
@@ -466,10 +475,12 @@ class BaseAgent(ABC):
         suffix: Optional[str] = None,
         request: Optional[AgentRequest] = None,
         output: MessageOutput | None = None,
-    ) -> None:
+    ) -> Optional[str]:
         if output is None and request is not None:
             output = request.output
-        settles_request = output is None or (output.completes_turn and not output.detached)
+        if output is None:
+            output = terminal_turn_output()
+        settles_request = output.completes_turn and not output.detached
         # An error result subtype (e.g. Claude's ``error_max_turns`` /
         # ``error_during_execution``) is a FAILED turn. Carry that on the terminal
         # ``result`` emit via ``is_error`` so the outbound chokepoint flips the dot
@@ -485,19 +496,20 @@ class BaseAgent(ABC):
         visible_result = strip_silent_blocks(raw_result)
         visible_suffix = strip_silent_blocks(raw_suffix) if raw_suffix else None
         has_silent_directive = "<silent" in raw_result.lower() or "<silent" in raw_suffix.lower()
+        message_id: Optional[str] = None
 
         if has_silent_directive and not visible_result.strip() and not (visible_suffix or "").strip():
-            await self.controller.emit_agent_message(
+            message_id = await self.controller.emit_agent_message(
                 context,
                 "result",
                 "",
                 parse_mode=parse_mode,
                 is_error=is_error,
-                **({"output": output} if output is not None else {}),
+                output=output,
             )
             if request and settles_request:
                 await self._remove_ack_reaction(request)
-            return
+            return message_id
 
         # When show_duration is disabled, skip the entire result line
         # unless there is actual result_text or suffix to deliver.
@@ -509,13 +521,13 @@ class BaseAgent(ABC):
                 parts.append(visible_suffix)
             if parts:
                 formatted = "\n".join(parts)
-                await self.controller.emit_agent_message(
+                message_id = await self.controller.emit_agent_message(
                     context,
                     "result",
                     formatted,
                     parse_mode=parse_mode,
                     is_error=is_error,
-                    **({"output": output} if output is not None else {}),
+                    output=output,
                 )
             else:
                 # No visible text (show_duration off + empty result/suffix) is still
@@ -523,13 +535,13 @@ class BaseAgent(ABC):
                 # (empty result → dot idle / failed AND releases the web-Chat stream
                 # waiter), mirroring the silent-directive path above — otherwise the
                 # dot stays green and the stream hangs until the 600s timeout (Codex P2).
-                await self.controller.emit_agent_message(
+                message_id = await self.controller.emit_agent_message(
                     context,
                     "result",
                     "",
                     parse_mode=parse_mode,
                     is_error=is_error,
-                    **({"output": output} if output is not None else {}),
+                    output=output,
                 )
         else:
             token_field = ""
@@ -562,19 +574,20 @@ class BaseAgent(ABC):
             if not body.strip() and result_footer:
                 body = result_footer
                 result_footer = None
-            await self.controller.emit_agent_message(
+            message_id = await self.controller.emit_agent_message(
                 context,
                 "result",
                 body,
                 parse_mode=parse_mode,
                 is_error=is_error,
                 result_footer=result_footer,
-                **({"output": output} if output is not None else {}),
+                output=output,
             )
 
         # Remove ack reaction after result is sent
         if request and settles_request:
             await self._remove_ack_reaction(request)
+        return message_id
 
     @abstractmethod
     async def handle_message(self, request: AgentRequest) -> None:
