@@ -1,7 +1,7 @@
 import asyncio
-import hashlib
 import logging
 import os
+import uuid
 from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
@@ -828,7 +828,7 @@ class ClaudeAgent(BaseAgent):
                                     subtype=getattr(message, "subtype", "") or "",
                                     duration_ms=getattr(message, "duration_ms", 0),
                                     parse_mode="markdown",
-                                    output=self._unsolicited_message_output(message, result_text),
+                                    output=self._unsolicited_message_output(message),
                                 )
                             continue
                         self._pending_assistant_message.pop(composite_key, None)
@@ -1266,8 +1266,11 @@ class ClaudeAgent(BaseAgent):
     def _end_activity_runtime(self, composite_key: str) -> None:
         service = getattr(self.controller, "agent_service", None)
         end_runtime = getattr(service, "end_activity_runtime", None)
+        completed = []
         if callable(end_runtime) and composite_key:
-            end_runtime(self.name, composite_key)
+            completed = end_runtime(self.name, composite_key) or []
+        if completed:
+            self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
 
     @staticmethod
@@ -1472,12 +1475,31 @@ class ClaudeAgent(BaseAgent):
         )
 
     @staticmethod
-    def _unsolicited_message_output(message, text: str) -> MessageOutput:
-        native_id = str(getattr(message, "uuid", "") or "").strip()
-        if native_id:
-            identity = native_id
-        else:
-            identity = hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+    def _unsolicited_message_output(message) -> MessageOutput:
+        native_id = str(
+            getattr(message, "uuid", "")
+            or getattr(message, "message_id", "")
+            or ""
+        ).strip()
+        identity = native_id
+        if not identity:
+            session_id = str(getattr(message, "session_id", "") or "").strip()
+            num_turns = getattr(message, "num_turns", None)
+            if session_id and num_turns is not None:
+                frame_identity = ":".join(
+                    [
+                        session_id,
+                        str(num_turns),
+                        str(getattr(message, "duration_ms", "")),
+                        str(getattr(message, "duration_api_ms", "")),
+                        str(getattr(message, "subtype", "")),
+                    ]
+                )
+                identity = uuid.uuid5(uuid.NAMESPACE_OID, frame_identity).hex
+            else:
+                # Older SDK frames expose no stable identity. Allocate one once
+                # for this MessageOutput instead of deduplicating by visible text.
+                identity = uuid.uuid4().hex
         return MessageOutput(
             completes_turn=False,
             completes_run=False,
@@ -1502,7 +1524,7 @@ class ClaudeAgent(BaseAgent):
             context,
             text,
             parse_mode="markdown",
-            output=self._unsolicited_message_output(None, text),
+            output=self._unsolicited_message_output(None),
         )
 
     async def _flush_detached_activity_output(
@@ -1539,16 +1561,16 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         context: MessageContext,
-    ) -> None:
+    ) -> bool:
         """Deliver task notifications that ended the receiver without a Result."""
 
         registry = self._activity_registry()
         if registry is None:
-            return
+            return False
         while True:
             activity = registry.claim_completed_output(self.name, composite_key)
             if activity is None:
-                return
+                return False
             pending = self._pending_requests.get(composite_key) or []
             pending_request = pending[0] if pending else None
             pending_turn_id = str(
@@ -1573,7 +1595,7 @@ class ClaudeAgent(BaseAgent):
                 # in flight. Leave it for the receiver so that later output is
                 # detached from, and cannot complete, this newer Turn.
                 registry.requeue_completed_output(activity)
-                return
+                return True
             result_text = str(activity.metadata.get("summary") or "").strip()
             if same_turn:
                 matched_request = self._pop_pending_request(composite_key)
@@ -1632,12 +1654,14 @@ class ClaudeAgent(BaseAgent):
             return
 
         async def _flush_after_grace() -> None:
+            retry = False
             try:
                 await asyncio.sleep(self.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS)
-                await self._flush_completed_activity_outputs(composite_key, context)
+                retry = await self._flush_completed_activity_outputs(composite_key, context)
             except asyncio.CancelledError:
                 raise
             except Exception:
+                retry = True
                 logger.warning(
                     "Failed to flush completed Claude Activities for %s",
                     composite_key,
@@ -1646,6 +1670,8 @@ class ClaudeAgent(BaseAgent):
             finally:
                 if self._activity_flush_tasks.get(composite_key) is task:
                     self._activity_flush_tasks.pop(composite_key, None)
+            if retry:
+                self._schedule_completed_activity_flush(composite_key, context)
 
         task = asyncio.create_task(_flush_after_grace())
         self._activity_flush_tasks[composite_key] = task
