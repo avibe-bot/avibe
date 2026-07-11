@@ -465,12 +465,13 @@ jobs:
           docker run --rm --platform "$TARGET_PLATFORM" \
             -e GIT_VERSION -e TARGET_ARCH \
             -v "$PWD:/work" -w "/work/git-$GIT_VERSION" alpine:3.22 sh -euxc '
-              apk add --no-cache build-base file zlib-dev zlib-static
+              # Keep the musl recipe aligned with Alpine aports/main/git.
+              apk add --no-cache build-base file linux-headers zlib-dev zlib-static
               make -j"$(getconf _NPROCESSORS_ONLN)" git \
                 NO_CURL=YesPlease NO_EXPAT=YesPlease NO_GETTEXT=YesPlease \
                 NO_PERL=YesPlease NO_PYTHON=YesPlease NO_TCLTK=YesPlease \
                 NO_OPENSSL=YesPlease NO_ICONV=YesPlease NO_REGEX=NeedsStartEnd \
-                NO_RUST=YesPlease \
+                NO_RUST=YesPlease NO_SYS_POLL_H=1 \
                 SKIP_DASHED_BUILT_INS=YesPlease RUNTIME_PREFIX=YesPlease \
                 template_dir= gitexecdir=bin \
                 CFLAGS=-Os LDFLAGS=-static
