@@ -464,10 +464,14 @@ class OpenCodeServerManager:
         pid = info.get("pid")
         if not isinstance(pid, int):
             return False
-        if info.get("port") == self.port:
-            return True
+        if info.get("port") != self.port:
+            return False
         cmd = self._get_pid_command(pid)
-        return bool(cmd and self._is_opencode_serve_cmd(cmd, self.port))
+        if cmd:
+            return self._is_opencode_serve_cmd(cmd, self.port)
+        if self._pid_owns_listening_port(pid, self.port):
+            return True
+        return False
 
     def _pid_file_has_caller_context_binding(self, info: Optional[Dict[str, Any]]) -> bool:
         if not self._pid_file_references_current_server(info):
@@ -1285,7 +1289,10 @@ class OpenCodeServerManager:
         if not isinstance(pid, int) or not isinstance(port, int):
             return
         command = runtime.get_process_command(pid)
-        if command and cls._is_opencode_serve_cmd(command, port):
+        trusted_pid_file = bool(command and cls._is_opencode_serve_cmd(command, port)) or (
+            command is None and cls._pid_owns_listening_port(pid, port)
+        )
+        if trusted_pid_file:
             cls._terminate_pid_tree_sync(pid)
         try:
             pid_file.unlink(missing_ok=True)

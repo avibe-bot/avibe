@@ -1063,6 +1063,46 @@ def test_backend_drain_flushes_deferred_session_after_cutover():
     assert "codex" not in manager._draining_backends
 
 
+def test_backend_drain_blocks_direct_queue_flush():
+    controller = _build_controller_double()
+    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "ses_codex",
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+    manager = session_turns.SessionTurnManager(controller, build_context=lambda _session_id: context)
+    manager._run = AsyncMock()  # type: ignore[method-assign]
+    manager.begin_backend_drain("codex")
+
+    assert asyncio.run(manager.flush_queue("ses_codex")) is False
+    manager._run.assert_not_awaited()
+    assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+
+
+def test_stop_during_backend_drain_keeps_existing_queue_parked():
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "ses_codex",
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+
+    async def _go():
+        task = asyncio.create_task(asyncio.sleep(60))
+        manager.in_flight["ses_codex"] = session_turns.Turn(task=task, context=context)
+        manager.begin_backend_drain("codex")
+        manager._deferred_restart_sessions["codex"].add("ses_codex")
+        result = await manager.cancel("ses_codex")
+        await asyncio.gather(task, return_exceptions=True)
+        return result
+
+    result = asyncio.run(_go())
+
+    assert result["status"] == "cancel_requested"
+    assert manager._deferred_restart_sessions == {"codex": set()}
+
+
 # ---------------------------------------------------------------------
 # Dispatcher hook contract
 # ---------------------------------------------------------------------

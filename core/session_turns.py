@@ -818,6 +818,18 @@ class SessionTurnManager:
 
         if not session_id:
             return False
+        if self._build_context is None:
+            logger.error("queue flush: no build_context bound for session=%s", session_id)
+            return False
+        try:
+            context = await asyncio.to_thread(self._build_context, session_id)
+        except Exception:
+            logger.exception("queue flush: failed to build context for session=%s", session_id)
+            return False
+        backend = self._context_backend(context)
+        if backend in self._draining_backends:
+            self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
+            return False
 
         is_scheduled = False
         scheduled_text = ""
@@ -979,17 +991,6 @@ class SessionTurnManager:
             if inbox_row is not None:
                 bus.publish("inbox.session.updated", inbox_row)
         bus.publish("queue.updated", {"session_id": session_id})
-
-        # Rebuild routing from the CURRENT session row so a flushed follow-up uses the
-        # session's latest agent / model / effort (Codex P2).
-        if self._build_context is None:
-            logger.error("queue flush: no build_context bound for session=%s", session_id)
-            return False
-        try:
-            context = await asyncio.to_thread(self._build_context, session_id)
-        except Exception:
-            logger.exception("queue flush: failed to build context for session=%s", session_id)
-            return False
 
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
@@ -1228,6 +1229,10 @@ class SessionTurnManager:
                     bus.publish("turn.end", {"session_id": session_id})
                 if self.controller is not None:
                     self.controller.set_agent_status(session_id, "idle")
+                backend = self._context_backend(turn.context)
+                deferred = self._deferred_restart_sessions.get(backend)
+                if deferred is not None:
+                    deferred.discard(session_id)
                 return {
                     "ok": True,
                     "session_id": session_id,
@@ -1239,6 +1244,10 @@ class SessionTurnManager:
             # later natural completion can flush normally.
             turn.stop_no_flush = False
             return {"ok": False, "code": "stop_failed", "session_id": session_id, "reason": reason or None}
+        backend = self._context_backend(turn.context)
+        deferred = self._deferred_restart_sessions.get(backend)
+        if deferred is not None:
+            deferred.discard(session_id)
         turn.task.cancel()
         return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
 
