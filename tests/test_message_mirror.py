@@ -17,6 +17,7 @@ rely on:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -114,6 +115,41 @@ def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     # No session resolved on this synthetic context -> falls back to the
     # channel scope auto-created on first inbound; both rows share it.
     assert agent_row["scope_id"] == user_row["scope_id"]
+
+
+def test_agent_output_provenance_is_hidden_metadata_and_deduplicated(isolated_state):
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+
+    first = persist_agent_message(
+        ctx,
+        "result",
+        "background result",
+        metadata={"activity_id": "task-1", "detached": True},
+        native_message_id="agent-output:claude:task-1:completion",
+    )
+    duplicate = persist_agent_message(
+        ctx,
+        "result",
+        "background result",
+        metadata={"activity_id": "task-1", "detached": True},
+        native_message_id="agent-output:claude:task-1:completion",
+    )
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(messages).where(messages.c.author == "agent")
+        ).mappings().all()
+
+    assert first is not None
+    assert duplicate is None
+    assert len(rows) == 1
+    assert rows[0]["content_text"] == "background result"
+    assert json.loads(rows[0]["metadata_json"]) == {
+        "activity_id": "task-1",
+        "detached": True,
+    }
 
 
 def test_persist_agent_reuses_cached_sqlite_engine(isolated_state, monkeypatch):

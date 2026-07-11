@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_output import MessageOutput
 from modules.im import MessageContext
 
 
@@ -128,6 +130,130 @@ class _StubController:
 
 
 class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
+        controller = _StubController(platform="slack")
+        controller.agent_service = type(
+            "Service",
+            (),
+            {
+                "emit_matches_runtime_turn": lambda self, context: False,
+                "release_runtime_turn": mock.Mock(),
+            },
+        )()
+        controller.session_turns = type(
+            "Turns",
+            (),
+            {"on_terminal_result": mock.Mock()},
+        )()
+        controller.mark_turn_complete = mock.Mock()
+        turn_chunk = mock.AsyncMock()
+        controller.get_turn_sink = lambda key: {
+            "on_chunk": turn_chunk,
+            "done_event": asyncio.Event(),
+            "turn_token": "newer-turn",
+        }
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "old-turn",
+                "turn_token": "old-turn",
+            },
+        )
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "late background result",
+                output=MessageOutput(
+                    completes_turn=False,
+                    detached=True,
+                    idempotency_key="task-1:completion",
+                    activity_id="task-1",
+                    sequence=1,
+                ),
+            )
+
+        self.assertEqual(message_id, "msg-1")
+        self.assertEqual(controller.im_client.sent_messages[0][1], "late background result")
+        controller.session_turns.on_terminal_result.assert_not_called()
+        controller.mark_turn_complete.assert_not_called()
+        controller.agent_service.release_runtime_turn.assert_not_called()
+        turn_chunk.assert_not_awaited()
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.kwargs["metadata"]["activity_id"], "task-1")
+        self.assertTrue(persist.call_args.kwargs["metadata"]["detached"])
+
+    async def test_one_turn_can_emit_multiple_outputs_and_complete_once(self):
+        controller = _StubController(platform="slack")
+        controller.agent_service = type(
+            "Service",
+            (),
+            {
+                "emit_matches_runtime_turn": lambda self, context: True,
+                "release_runtime_turn": mock.Mock(),
+            },
+        )()
+        controller.session_turns = type(
+            "Turns",
+            (),
+            {"on_terminal_result": mock.Mock()},
+        )()
+        done = asyncio.Event()
+        controller.get_turn_sink = lambda key: {
+            "on_chunk": mock.AsyncMock(),
+            "done_event": done,
+            "turn_token": "turn-1",
+        }
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-1",
+            },
+        )
+
+        await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "first output",
+            output=MessageOutput(
+                completes_turn=False,
+                idempotency_key="output-1",
+                sequence=1,
+            ),
+        )
+        self.assertFalse(done.is_set())
+        controller.session_turns.on_terminal_result.assert_not_called()
+        controller.agent_service.release_runtime_turn.assert_not_called()
+
+        await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "final output",
+            output=MessageOutput(
+                completes_turn=True,
+                idempotency_key="output-2",
+                sequence=2,
+            ),
+        )
+
+        self.assertTrue(done.is_set())
+        self.assertEqual(
+            [item[1] for item in controller.im_client.sent_messages],
+            ["first output", "final output"],
+        )
+        controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
+        controller.agent_service.release_runtime_turn.assert_called_once_with(context)
+
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()
         controller = _StubController(platform="slack", im_client=im_client)

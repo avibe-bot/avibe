@@ -1989,6 +1989,104 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["message"] == "complete delegated result"
 
 
+def test_agent_run_forwards_multiple_outputs_and_completes_once(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+    )
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    first = sqlite_store.record_run_output(
+        request.id,
+        output_id="output-1",
+        text="first callback output",
+        sequence=1,
+        provenance={"run_id": request.id},
+    )
+    service.forward_run_outputs([request.id])
+    running = request_store.get_run(request.id)
+
+    assert first["recorded"] is True
+    assert first["terminal_transition"] is False
+    assert running is not None
+    assert running["status"] == "running"
+    assert running["callback_status"] == "pending"
+    assert running["result_payload"]["deferred_terminal_status"] == "succeeded"
+
+    second = sqlite_store.record_run_output(
+        request.id,
+        output_id="output-2",
+        text="second callback output",
+        sequence=2,
+        provenance={"run_id": request.id},
+        terminal_status="succeeded",
+    )
+    service.forward_run_outputs([request.id])
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    completed_at = terminal["completed_at"]
+
+    duplicate = sqlite_store.record_run_output(
+        request.id,
+        output_id="output-2",
+        text="second callback output",
+        sequence=2,
+        provenance={"run_id": request.id},
+        terminal_status="succeeded",
+    )
+    service.forward_run_outputs([request.id])
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original is not None
+    assert second["recorded"] is True
+    assert second["terminal_transition"] is True
+    assert duplicate["recorded"] is False
+    assert duplicate["terminal_transition"] is False
+    assert original["status"] == "succeeded"
+    assert original["completed_at"] == completed_at
+    assert original["callback_status"] == "sent"
+    assert "deferred_terminal_status" not in original["result_payload"]
+    assert original["result_text"] == "first callback output\n\nsecond callback output"
+    assert [item["id"] for item in original["result_payload"]["outputs"]] == [
+        "output-1",
+        "output-2",
+    ]
+
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    assert [run["message"] for run in callback_runs] == [
+        "first callback output",
+        "second callback output",
+    ]
+    assert {run["metadata"]["callback_output_id"] for run in callback_runs} == {
+        "output-1",
+        "output-2",
+    }
+
+
 def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)

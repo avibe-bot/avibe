@@ -23,6 +23,9 @@ try:
         PermissionResultAllow,
         ResultMessage,
         SystemMessage,
+        TaskNotificationMessage,
+        TaskProgressMessage,
+        TaskStartedMessage,
         TextBlock,
         ToolResultBlock,
         ToolUseBlock,
@@ -90,6 +93,15 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in minimal test
         pass
 
     class ResultMessage:
+        pass
+
+    class TaskStartedMessage(SystemMessage):
+        pass
+
+    class TaskProgressMessage(SystemMessage):
+        pass
+
+    class TaskNotificationMessage(SystemMessage):
         pass
 
     class TextBlock:

@@ -3,12 +3,14 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.message_dispatcher as message_dispatcher_module
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_output import MessageOutput
 from modules.im import MessageContext
 
 
@@ -79,6 +81,80 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owned_activity_defers_run_terminal_but_not_later_detached_output(self):
+        controller = _StubController()
+        blocking = [True]
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(
+                has_blocking_run_activity=lambda run_id: blocking[0],
+            ),
+            emit_matches_runtime_turn=lambda context: True,
+            release_runtime_turn=lambda context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-owned",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def defer_run_terminal(self, run_id, *, terminal_status):
+                calls.append(("defer", run_id, terminal_status))
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append(("output", run_id, kwargs["output_id"], kwargs["terminal_status"]))
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "started background work",
+                output=MessageOutput(
+                    completes_turn=True,
+                    completes_run=True,
+                    idempotency_key="output-1",
+                    sequence=1,
+                ),
+            )
+            blocking[0] = False
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "background work finished",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=True,
+                    detached=True,
+                    idempotency_key="output-2",
+                    sequence=2,
+                ),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("defer", "run-owned", "succeeded"),
+                ("output", "run-owned", "output-1", None),
+                ("output", "run-owned", "output-2", "succeeded"),
+            ],
+        )
+
     async def test_result_message_finalizes_scheduled_delivery(self):
         controller = _StubController()
         dispatcher = ConsolidatedMessageDispatcher(controller)

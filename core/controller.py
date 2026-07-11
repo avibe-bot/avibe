@@ -26,6 +26,7 @@ from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.runtime_commands import RuntimeCommandWatcher
 from core.scheduled_tasks import ScheduledTaskService
@@ -1263,6 +1264,7 @@ class Controller:
         level: str = "normal",
         status_label: Optional[str] = None,
         result_footer: Optional[str] = None,
+        output: MessageOutput | None = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         return await self.message_dispatcher.emit_agent_message(
@@ -1274,6 +1276,7 @@ class Controller:
             level=level,
             status_label=status_label,
             result_footer=result_footer,
+            output=output,
         )
 
     def note_session_tokens(self, context: MessageContext, *, total: int) -> None:

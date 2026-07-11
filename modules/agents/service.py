@@ -4,6 +4,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from core.session_activities import SessionActivityRegistry
+
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
     AGENT_RUNTIME_TURN_TOKEN,
@@ -25,6 +27,7 @@ class AgentService:
         self.agents: Dict[str, BaseAgent] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
+        self.activities = SessionActivityRegistry()
         # Strong refs to fire-and-forget tasks (e.g. the cancellation tidy) so the
         # event loop doesn't GC them before they run (asyncio only weak-refs tasks).
         self._background_tasks: set[asyncio.Task] = set()

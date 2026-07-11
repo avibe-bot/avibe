@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy.exc import IntegrityError
 
@@ -175,7 +175,9 @@ def persist_agent_message(
     text: str,
     *,
     quick_replies: Optional[list[str]] = None,
-) -> None:
+    metadata: Optional[dict[str, Any]] = None,
+    native_message_id: Optional[str] = None,
+) -> Optional[dict]:
     """Persist one agent output into the workbench ``messages`` store.
 
     Unified across **all** platforms (including avibe, which has no IM mirror)
@@ -283,6 +285,8 @@ def persist_agent_message(
                 author_name=agent_name,
                 message_type=message_type,
                 text=text,
+                metadata=metadata,
+                native_message_id=native_message_id,
                 parent_native_message_id=context.thread_id,
                 content=content,
             )
@@ -311,8 +315,35 @@ def persist_agent_message(
                 maybe_notify_inbox_message(appended_row, inbox_row)
             except Exception:
                 logger.debug("web push notification scheduling failed", exc_info=True)
+        return appended_row
     except Exception:
         logger.exception("persist_agent_message: failure on platform=%s", context.platform)
+        return None
+
+
+def agent_message_exists(context: MessageContext, native_message_id: str | None) -> bool:
+    """Check a stable output identity before external delivery.
+
+    The database unique constraint remains the final race guard. This early
+    check prevents ordinary callback or backend retries from posting the same
+    durable output to an IM surface twice.
+    """
+
+    platform = str(context.platform or "").strip()
+    identity = str(native_message_id or "").strip()
+    if not platform or not identity:
+        return False
+    try:
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            return messages_service.native_message_exists(
+                conn,
+                platform=platform,
+                native_message_id=identity,
+            )
+    except Exception:
+        logger.debug("agent_message_exists: lookup failed open", exc_info=True)
+        return False
 
 
 def mirror_harness_inbound(context: MessageContext, text: str) -> None:

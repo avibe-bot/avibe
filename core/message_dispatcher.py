@@ -6,8 +6,9 @@ embedded in ``Controller.emit_agent_message``.
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import hashlib
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,8 @@ from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
-from core.message_mirror import persist_agent_message
+from core.message_mirror import agent_message_exists, persist_agent_message
+from core.message_output import MessageOutput, output_for_message
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.session_turns import emit_matches_active_turn
 from storage.background import SQLiteBackgroundTaskStore
@@ -49,7 +51,15 @@ def _run_is_cancelled(run: Any) -> bool:
     return status in {"canceled", "cancelled"}
 
 
-async def _stream_chunk(controller, context, *, text: str, message_id: Optional[str], kind: str) -> None:
+async def _stream_chunk(
+    controller,
+    context,
+    *,
+    text: str,
+    message_id: Optional[str],
+    kind: str,
+    completes_turn: bool | None = None,
+) -> None:
     """Forward one durable agent message to the live streaming turn sink.
 
     A web Chat caller registers a per-session sink in
@@ -58,8 +68,9 @@ async def _stream_chunk(controller, context, *, text: str, message_id: Optional[
     even though the agent's receiver runs on a background task carrying a
     stale per-turn context. We resolve the sink by *session key* (stable
     across a session's turns) rather than off the context, so reused agent
-    sessions stream correctly too. A ``result`` emit also marks the turn
-    complete so ``dispatch_turn`` can close the stream right after it. No
+    sessions stream correctly too. A terminal ``result`` emit also marks the
+    turn complete so ``dispatch_turn`` can close the stream right after it;
+    multi-output callers explicitly pass ``completes_turn=False``. No
     sink (IM / CLI turns) => no-op, byte-identical to master.
     """
 
@@ -85,7 +96,9 @@ async def _stream_chunk(controller, context, *, text: str, message_id: Optional[
         # A misbehaving SSE consumer must not block the underlying agent
         # reply. Log + swallow, same posture as ``mirror_outbound``.
         logger.exception("turn on_chunk raised; dropping chunk kind=%s", kind)
-    if kind == "result":
+    if completes_turn is None:
+        completes_turn = kind == "result"
+    if completes_turn:
         # The result is the turn's final answer — release the streaming dispatch
         # so it can close the SSE stream right after this chunk. Unlike chunk
         # forwarding above, the COMPLETION signal IS turn-token-gated (mirrors
@@ -970,17 +983,69 @@ class ConsolidatedMessageDispatcher:
         text: str,
         message_id: str | None,
         terminal_status: str | None,
+        output_semantics: MessageOutput,
+        provenance: dict[str, Any],
     ) -> None:
         for run_id in run_ids:
             get_run = getattr(store, "get_run", None)
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
-            store.record_run_message(
-                run_id,
-                text=text,
-                message_id=message_id,
-                terminal_status=terminal_status,
-            )
+            run_terminal_status = terminal_status
+            if run_terminal_status and self._run_has_blocking_activity(run_id):
+                defer_terminal = getattr(store, "defer_run_terminal", None)
+                if callable(defer_terminal):
+                    defer_terminal(run_id, terminal_status=run_terminal_status)
+                run_terminal_status = None
+            record_output = getattr(store, "record_run_output", None)
+            if callable(record_output):
+                output_id = str(output_semantics.idempotency_key or "").strip()
+                if not output_id and output_semantics.sequence is not None:
+                    output_id = f"sequence:{output_semantics.sequence}"
+                if not output_id and run_terminal_status:
+                    output_id = "terminal"
+                if not output_id:
+                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+                    output_id = f"content:{digest}"
+                record_output(
+                    run_id,
+                    output_id=output_id,
+                    text=text,
+                    message_id=message_id,
+                    sequence=output_semantics.sequence,
+                    provenance=provenance,
+                    terminal_status=run_terminal_status,
+                )
+            else:
+                # Compatibility for isolated stores and older persisted-state
+                # adapters while the shared SQLite path owns the output ledger.
+                store.record_run_message(
+                    run_id,
+                    text=text,
+                    message_id=message_id,
+                    terminal_status=run_terminal_status,
+                )
+
+    def _run_has_blocking_activity(self, run_id: str) -> bool:
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activities", None)
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        if not callable(has_blocker):
+            return False
+        try:
+            return bool(has_blocker(run_id))
+        except Exception:
+            logger.warning("Failed to inspect owned Activities for Run %s", run_id, exc_info=True)
+            return True
+
+    def _forward_agent_run_outputs(self, run_ids: list[str]) -> None:
+        service = getattr(self.controller, "scheduled_task_service", None)
+        forward = getattr(service, "forward_run_outputs", None)
+        if not callable(forward):
+            return
+        try:
+            forward(run_ids)
+        except Exception:
+            logger.warning("Failed to forward Agent Run outputs for %s", ",".join(run_ids), exc_info=True)
 
     def _record_agent_run_terminal_result(
         self,
@@ -989,6 +1054,7 @@ class ConsolidatedMessageDispatcher:
         message_id: str | None,
         *,
         is_error: bool,
+        output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
     ) -> None:
         payload = context.platform_specific or {}
@@ -997,6 +1063,10 @@ class ConsolidatedMessageDispatcher:
         run_ids = _coalesced_task_execution_ids(payload)
         if not run_ids:
             return
+        semantics = output_semantics or MessageOutput(completes_turn=True)
+        terminal_status = None
+        if semantics.settles_run:
+            terminal_status = "failed" if is_error else "succeeded"
         store = None
         try:
             store = SQLiteBackgroundTaskStore()
@@ -1005,13 +1075,16 @@ class ConsolidatedMessageDispatcher:
                 run_ids=run_ids,
                 text=text,
                 message_id=message_id,
-                terminal_status="failed" if is_error else "succeeded",
+                terminal_status=terminal_status,
+                output_semantics=semantics,
+                provenance=semantics.provenance(context),
             )
         except Exception as err:
             logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
         finally:
             if store is not None:
                 store.close()
+        self._forward_agent_run_outputs(run_ids)
 
     def _record_suppressed_agent_run_terminal_result(
         self,
@@ -1020,12 +1093,14 @@ class ConsolidatedMessageDispatcher:
         message_id: str | None,
         *,
         is_error: bool,
+        output_semantics: MessageOutput | None = None,
     ) -> None:
         self._record_agent_run_terminal_result(
             context,
             text,
             message_id,
             is_error=is_error,
+            output_semantics=output_semantics,
             log_label="suppressed agent run terminal result",
         )
 
@@ -1215,6 +1290,7 @@ class ConsolidatedMessageDispatcher:
         level: str = "normal",
         status_label: Optional[str] = None,
         result_footer: Optional[str] = None,
+        output: MessageOutput | None = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -1251,12 +1327,25 @@ class ConsolidatedMessageDispatcher:
         terminal ``result`` (the show_duration duration + token usage). It rides
         as the platform subtext footer and, in concise mode, supersedes the status
         bubble's own terminal footer so the outcome line stays consistent.
+
+        ``output`` separates Message delivery from lifecycle authority. The
+        compatibility default remains one terminal result. Explicit nonterminal
+        outputs remain in the current Turn, while detached outputs are delivered
+        to the Session/IM surface without touching a newer Turn or its stream.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
 
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
+        output_semantics = output_for_message(canonical_type, output)
+        current_runtime_turn = self._is_current_runtime_turn(context)
+        mutates_turn_lifecycle = (
+            canonical_type == "result"
+            and output_semantics.completes_turn
+            and not output_semantics.detached
+            and current_runtime_turn
+        )
 
         # Terminal status-bubble reason word for the done/orphan footer:
         # a clean turn is "done" (✅); a failure is "stopped" (⏹) when it was an
@@ -1272,16 +1361,17 @@ class ConsolidatedMessageDispatcher:
         # ``getattr`` keeps it a no-op for controllers without the hook (mirrors
         # ``_signal_turn_complete``).
         if canonical_type == "result":
-            if not self._is_current_runtime_turn(context):
+            if not current_runtime_turn and not output_semantics.detached:
                 logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
                 return None
             # Settle the avibe dot for the ACTIVE turn's terminal result (idle, or
             # failed on is_error) via the turn owner, which applies the active-turn
             # guard + skips non-avibe contexts. Runtime gate release happens after
             # the result path clears/persists/streams its own state.
-            manager = getattr(self.controller, "session_turns", None)
-            if manager is not None:
-                manager.on_terminal_result(context, is_error=is_error)
+            if mutates_turn_lifecycle:
+                manager = getattr(self.controller, "session_turns", None)
+                if manager is not None:
+                    manager.on_terminal_result(context, is_error=is_error)
         text = strip_silent_blocks(text)
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
@@ -1290,7 +1380,7 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
-                if canonical_type == "result":
+                if mutates_turn_lifecycle:
                     # A terminal result — even silent/empty — still means the turn
                     # finished: release the streaming SSE waiter so it closes now
                     # instead of hanging until the safety timeout, with no visible chunk.
@@ -1303,11 +1393,12 @@ class ConsolidatedMessageDispatcher:
                         text,
                         None,
                         is_error=is_error,
+                        output_semantics=output_semantics,
                     )
                     self._signal_turn_complete(context)
                 return None
             finally:
-                if canonical_type == "result":
+                if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
                     self._release_runtime_turn(context)
 
@@ -1317,6 +1408,11 @@ class ConsolidatedMessageDispatcher:
         # cross-platform history) — persist_agent_message attributes IM rows to
         # this target's scope.
         target_context = self._get_target_context(context)
+        output_metadata = output_semantics.provenance(context) if output is not None else None
+        native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
+        if native_output_id and agent_message_exists(target_context, native_output_id):
+            logger.info("Skipping duplicate agent output %s", native_output_id)
+            return None
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -1359,6 +1455,7 @@ class ConsolidatedMessageDispatcher:
                         recorded_text,
                         message_id,
                         is_error=is_error,
+                        output_semantics=output_semantics,
                     )
                 elif canonical_type == "result" or (context.platform_specific or {}).get("task_trigger_kind") != "agent_run":
                     self._record_suppressed_run_message(
@@ -1367,7 +1464,7 @@ class ConsolidatedMessageDispatcher:
                         message_id,
                         terminal_status=terminal_status,
                     )
-                if canonical_type == "result":
+                if mutates_turn_lifecycle:
                     # A suppressed result still ends the turn; collapse any concise
                     # status bubble posted to a real channel so it doesn't stay stuck.
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
@@ -1375,7 +1472,7 @@ class ConsolidatedMessageDispatcher:
                     self._signal_turn_complete(context)
                 return message_id
             finally:
-                if canonical_type == "result":
+                if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
                     self._release_runtime_turn(context)
 
@@ -1404,7 +1501,7 @@ class ConsolidatedMessageDispatcher:
                 # an edit of the bubble) so the IM fires a push notification; the
                 # transient bubble is then deleted (or collapsed to a marker when the
                 # platform can't delete) by ``_retire_status_bubble`` below.
-                status_bubble_id = self._concise_status_bubble_id(context)
+                status_bubble_id = self._concise_status_bubble_id(context) if mutates_turn_lifecycle else None
                 status_consolidated_key = self._get_consolidated_message_key(context) if status_bubble_id else None
                 # S3: stop the heartbeat + finalize the key BEFORE delivery so a late
                 # heartbeat tick / in-flight process emit can't resurrect the bubble
@@ -1440,8 +1537,8 @@ class ConsolidatedMessageDispatcher:
                 # a reloaded transcript / inbox / agent-run record keeps the
                 # duration/token info (it used to live in the result body). It is
                 # set for BOTH platform kinds; only the DELIVERY form differs.
-                folded_footer: Optional[str] = result_footer or None
-                if result_footer:
+                folded_footer: Optional[str] = result_footer if mutates_turn_lifecycle else None
+                if folded_footer:
                     # Gate on the DELIVERY TARGET's capabilities, not the source
                     # context: a delivery_override can redirect a Slack/Discord/Lark
                     # turn to a non-subtext target (or vice versa), and the footer
@@ -1449,10 +1546,10 @@ class ConsolidatedMessageDispatcher:
                     if self._capabilities(target_context).supports_status_bubble:
                         # Subtext-capable: deliver as the grey subtext footer (body
                         # stays clean); persistence still folds it in below.
-                        done_footer = result_footer
+                        done_footer = folded_footer
                     else:
                         # No subtext rendering: fold onto the delivered body too.
-                        display_text = self._fold_footer(display_text, result_footer)
+                        display_text = self._fold_footer(display_text, folded_footer)
                 # Pass subtext to RAW send_message calls only when set, so an adapter
                 # whose send_message predates the subtext kwarg is never handed it
                 # (the helper paths apply the same guard internally).
@@ -1587,7 +1684,7 @@ class ConsolidatedMessageDispatcher:
                 if enhanced and enhanced.files:
                     await self._upload_file_links(im_client, target_context, enhanced.files)
 
-                if scheduled_anchor_message_id:
+                if scheduled_anchor_message_id and mutates_turn_lifecycle:
                     try:
                         self.controller.session_handler.finalize_scheduled_delivery(context, scheduled_anchor_message_id)
                     except Exception as err:
@@ -1612,10 +1709,11 @@ class ConsolidatedMessageDispatcher:
                 # a fresh log message instead of appending to the previous one.
                 # Use the key captured at the top of this branch when present so
                 # teardown can't drift onto a recomputed key (C5).
-                if status_consolidated_key:
-                    await self._drop_status_keys(status_consolidated_key)
-                else:
-                    await self._clear_consolidated_state(context)
+                if mutates_turn_lifecycle:
+                    if status_consolidated_key:
+                        await self._drop_status_keys(status_consolidated_key)
+                    else:
+                        await self._clear_consolidated_state(context)
 
                 # The stored text keeps the footnote for BOTH platform kinds:
                 # ``display_text`` already carries it on non-subtext platforms (folded
@@ -1630,6 +1728,7 @@ class ConsolidatedMessageDispatcher:
                     persisted_result_text,
                     primary_message_id,
                     is_error=is_error,
+                    output_semantics=output_semantics,
                 )
 
                 # Persist the delivered result (cleaned text == what was shown).
@@ -1658,18 +1757,29 @@ class ConsolidatedMessageDispatcher:
                             result_type,
                             avibe_text,
                             quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            metadata=output_metadata,
+                            native_message_id=native_output_id,
                         )
                     else:
                         persist_agent_message(
-                            target_context, result_type, persisted_result_text
+                            target_context,
+                            result_type,
+                            persisted_result_text,
+                            metadata=output_metadata,
+                            native_message_id=native_output_id,
                         )
 
-                if primary_message_id and display_text:
+                if primary_message_id and display_text and not output_semantics.detached:
                     # Stream the delivered result to live consumers (avibe SSE).
                     await _stream_chunk(
-                        self.controller, context, text=display_text, message_id=primary_message_id, kind="result"
+                        self.controller,
+                        context,
+                        text=display_text,
+                        message_id=primary_message_id,
+                        kind="result",
+                        completes_turn=mutates_turn_lifecycle,
                     )
-                else:
+                elif mutates_turn_lifecycle:
                     # A terminal result still completes the turn even if every IM
                     # delivery path failed and therefore produced no durable message id.
                     # Without this release, direct agent_run and avibe turn waiters keep
@@ -1678,8 +1788,9 @@ class ConsolidatedMessageDispatcher:
 
                 return primary_message_id
             finally:
-                await self._finish_processing_indicator_turn(context)
-                self._release_runtime_turn(context)
+                if mutates_turn_lifecycle:
+                    await self._finish_processing_indicator_turn(context)
+                    self._release_runtime_turn(context)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"

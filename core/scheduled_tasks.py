@@ -300,6 +300,7 @@ def enqueue_session_callback(
     message: str,
     source_actor: str,
     parent_run_id: Optional[str] = None,
+    output_id: Optional[str] = None,
 ) -> Optional["TaskExecutionRequest"]:
     """Enqueue a callback turn into an existing agent session — the shared entry used by Agent
     Run / watch / scheduled-task callbacks and vault-request auto-resume. Resolves the session's
@@ -310,6 +311,13 @@ def enqueue_session_callback(
     session_id = (session_id or "").strip()
     if not session_id or not (message or "").strip():
         return None
+    if parent_run_id:
+        existing = request_store.find_callback_run(
+            parent_run_id=parent_run_id,
+            source_actor=source_actor,
+        )
+        if existing is not None:
+            return TaskExecutionRequest.from_dict(existing)
     target = resolve_session_id_target(session_id)
     return request_store.enqueue_agent_run(
         session_id=session_id,
@@ -324,6 +332,14 @@ def enqueue_session_callback(
         source_kind="callback",
         source_actor=source_actor,
         parent_run_id=parent_run_id,
+        metadata={
+            key: value
+            for key, value in {
+                "callback_parent_run_id": parent_run_id,
+                "callback_output_id": output_id,
+            }.items()
+            if value is not None
+        },
     )
 
 
@@ -1056,6 +1072,27 @@ class TaskExecutionStore:
         ]
         return sorted(runs, key=lambda item: (item.get("completed_at") or "", item.get("id") or ""))[:limit]
 
+    def find_callback_run(
+        self,
+        *,
+        parent_run_id: str,
+        source_actor: str,
+    ) -> Optional[dict[str, Any]]:
+        if self._sqlite is not None:
+            return self._sqlite.find_callback_run(
+                parent_run_id=parent_run_id,
+                source_actor=source_actor,
+            )
+        for run in self._list_file_runs():
+            if (
+                run.get("request_type") == "agent_run"
+                and run.get("source_kind") == "callback"
+                and run.get("parent_run_id") == parent_run_id
+                and run.get("source_actor") == source_actor
+            ):
+                return run
+        return None
+
     def update_callback_status(
         self,
         run_id: str,
@@ -1740,6 +1777,43 @@ class ScheduledTaskService:
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
             self._drain_dirty = True
 
+    @staticmethod
+    def _structured_run_outputs(run: dict[str, Any]) -> list[dict[str, Any]]:
+        payload = run.get("result_payload")
+        outputs = payload.get("outputs") if isinstance(payload, dict) else None
+        if not isinstance(outputs, list):
+            return []
+        return [dict(item) for item in outputs if isinstance(item, dict)]
+
+    def forward_run_outputs(self, run_ids: list[str]) -> list[TaskExecutionRequest]:
+        """Forward every newly recorded output under the parent Run's callback policy."""
+
+        callbacks: list[TaskExecutionRequest] = []
+        for run_id in dict.fromkeys(str(value or "").strip() for value in run_ids):
+            if not run_id:
+                continue
+            run = self.request_store.get_run(run_id)
+            if not run or not str(run.get("callback_session_id") or "").strip():
+                continue
+            for output in self._structured_run_outputs(run):
+                output_id = str(output.get("id") or "").strip()
+                message = str(output.get("text") or "").strip()
+                if not output_id or not message:
+                    continue
+                source_actor = f"{run_id}:output:{output_id}"
+                callback = enqueue_session_callback(
+                    self.request_store,
+                    session_id=str(run["callback_session_id"]),
+                    message=message,
+                    source_actor=source_actor,
+                    parent_run_id=run_id,
+                    output_id=output_id,
+                )
+                if callback is not None:
+                    callbacks.append(callback)
+                    self._drain_dirty = True
+        return callbacks
+
     async def _drain_vault_callbacks(self) -> None:
         """Auto-resume the requesting session when a vault request reaches a terminal state.
 
@@ -1811,6 +1885,9 @@ class ScheduledTaskService:
         if not callback_session_id:
             return None
         run_id = str(run.get("id") or "")
+        output_callbacks = self.forward_run_outputs([run_id])
+        if output_callbacks:
+            return output_callbacks[-1]
         return enqueue_session_callback(
             self.request_store,
             session_id=callback_session_id,

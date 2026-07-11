@@ -1,7 +1,7 @@
 version: 1
 capability:
   id: message_delivery
-  name: scheduled result delivery
+  name: full-duplex message delivery
   canonical_tests:
     - tests/scenarios/message_delivery/test_message_delivery_scenarios.py
   shared_harness:
@@ -25,6 +25,24 @@ scenarios:
     kind: happy_path
     layer: scenario
     test: tests/scenarios/message_delivery/test_message_delivery_scenarios.py::test_scheduled_result_delivery_override_scenario_uses_parent_channel_target
+  - id: MESSAGE-DELIVERY-003
+    name: Claude background output is delivered without settling a newer user Turn
+    status: covered
+    kind: concurrency
+    layer: scenario
+    test: tests/scenarios/message_delivery/test_message_delivery_scenarios.py::MessageDeliveryScenarioTests::test_background_output_scenario_does_not_settle_newer_turn
+  - id: MESSAGE-DELIVERY-004
+    name: One Turn emits multiple output Messages and completes once
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/scenarios/message_delivery/test_message_delivery_scenarios.py::MessageDeliveryScenarioTests::test_one_turn_multiple_outputs_scenario_completes_once
+  - id: MESSAGE-DELIVERY-005
+    name: One Run forwards multiple callback outputs and completes once
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_scheduled_tasks.py::test_agent_run_forwards_multiple_outputs_and_completes_once
 next_priority:
   - MESSAGE-DELIVERY-101
   - MESSAGE-DELIVERY-102

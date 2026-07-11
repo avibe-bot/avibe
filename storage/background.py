@@ -1196,6 +1196,185 @@ class SQLiteBackgroundTaskStore:
                 )
         _publish_run_rows_updated([row_to_publish])
 
+    def record_run_output(
+        self,
+        run_id: str,
+        *,
+        output_id: str,
+        text: str,
+        message_id: str | None = None,
+        sequence: int | None = None,
+        provenance: Optional[dict[str, Any]] = None,
+        terminal_status: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Append one idempotent Run output and optionally settle the Run once."""
+
+        now = updated_at or _utc_now_iso()
+        identity = str(output_id or "").strip()
+        if not identity:
+            raise ValueError("output_id is required")
+        recorded = False
+        terminal_transition = False
+        run_payload: Optional[dict[str, Any]] = None
+        row_to_publish = None
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row:
+                return {
+                    "recorded": False,
+                    "terminal_transition": False,
+                    "run": None,
+                }
+
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if not isinstance(result_payload, dict):
+                result_payload = {}
+            payload_changed = False
+            if terminal_status and "deferred_terminal_status" in result_payload:
+                result_payload.pop("deferred_terminal_status", None)
+                payload_changed = True
+            raw_outputs = result_payload.get("outputs")
+            outputs = [dict(item) for item in raw_outputs if isinstance(item, dict)] if isinstance(raw_outputs, list) else []
+            visible_text = str(text or "")
+            if visible_text.strip() and not any(str(item.get("id") or "") == identity for item in outputs):
+                output_entry: dict[str, Any] = {
+                    "id": identity,
+                    "text": visible_text,
+                }
+                if message_id:
+                    output_entry["message_id"] = message_id
+                if sequence is not None:
+                    output_entry["sequence"] = sequence
+                if provenance:
+                    output_entry["provenance"] = dict(provenance)
+                outputs.append(output_entry)
+                result_payload["outputs"] = outputs
+                recorded = True
+                payload_changed = True
+
+            existing_text = str(row["result_text"] or "")
+            if payload_changed:
+                result_text = f"{existing_text}\n\n{visible_text}" if existing_text else visible_text
+            else:
+                result_text = existing_text
+            message_ids = _json_loads(row["message_ids_json"], [])
+            if not isinstance(message_ids, list):
+                message_ids = []
+            if recorded and message_id and message_id not in message_ids:
+                message_ids.append(message_id)
+
+            if recorded:
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(
+                        result_text=result_text,
+                        result_payload_json=_json_dumps(result_payload),
+                        message_ids_json=_json_dumps(message_ids),
+                        updated_at=now,
+                    )
+                )
+            if terminal_status:
+                transition = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .where(
+                        agent_runs.c.status.in_(
+                            _status_query_values("queued")
+                            + _status_query_values("running")
+                        )
+                    )
+                    .values(
+                        status=normalize_run_status(terminal_status),
+                        completed_at=now,
+                        updated_at=now,
+                    )
+                )
+                terminal_transition = bool(transition.rowcount)
+
+            if payload_changed or terminal_transition:
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                    ).mappings().one()
+                )
+                run_payload = self._run_from_row(row_to_publish)
+            else:
+                run_payload = self._run_from_row(row)
+        _publish_run_rows_updated([row_to_publish])
+        return {
+            "recorded": recorded,
+            "terminal_transition": terminal_transition,
+            "run": run_payload,
+        }
+
+    def defer_run_terminal(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """Remember a terminal intent while an owned Activity still blocks it."""
+
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row or normalize_run_status(row["status"]) in {
+                "succeeded",
+                "failed",
+                "canceled",
+            }:
+                return False
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if not isinstance(result_payload, dict):
+                result_payload = {}
+            normalized = normalize_run_status(terminal_status)
+            if result_payload.get("deferred_terminal_status") == normalized:
+                return False
+            result_payload["deferred_terminal_status"] = normalized
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .values(
+                    result_payload_json=_json_dumps(result_payload),
+                    updated_at=now,
+                )
+            )
+            row_to_publish = dict(
+                conn.execute(
+                    select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                ).mappings().one()
+            )
+        _publish_run_rows_updated([row_to_publish])
+        return True
+
+    def find_callback_run(
+        self,
+        *,
+        parent_run_id: str,
+        source_actor: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return the callback Run for one structured parent-output identity."""
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.run_type == "agent_run")
+                .where(agent_runs.c.source_kind == "callback")
+                .where(agent_runs.c.parent_run_id == parent_run_id)
+                .where(agent_runs.c.source_actor == source_actor)
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).mappings().first()
+            return self._run_from_row(row) if row else None
+
     def recover_processing_runs(self) -> None:
         with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()

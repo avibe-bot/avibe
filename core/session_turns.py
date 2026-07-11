@@ -1017,9 +1017,7 @@ class SessionTurnManager:
         return True
 
     def turn_state(self, session_id: str) -> dict:
-        """Whether a turn is currently RUNNING for the session. The fire-and-forget
-        dispatch survives browser disconnects, so a freshly loaded / reconnected
-        Chat page asks this to restore its working / Stop state (Codex P2)."""
+        """Compose orthogonal foreground, inbox, Activity, and connection facts."""
         entry = self.in_flight.get(session_id)
         active = entry is not None and not entry.task.done()
         native_turn_started = False
@@ -1033,11 +1031,33 @@ class SessionTurnManager:
             started = getattr(service, "runtime_turn_started", None)
             if callable(started):
                 native_turn_started = started(entry.context) is True
+        pending_input_count = 0
+        try:
+            with self._sqlite_engine().begin() as conn:
+                pending_input_count = len(messages_service.list_queued(conn, session_id))
+        except Exception:
+            logger.debug("turn_state: failed to read queued input count", exc_info=True)
+        activity_state: dict[str, Any] = {
+            "background_activities": [],
+            "connection": "unknown",
+        }
+        service = getattr(self.controller, "agent_service", None) if self.controller is not None else None
+        registry = getattr(service, "activities", None)
+        project = getattr(registry, "session_state", None)
+        if callable(project):
+            try:
+                activity_state = project(session_id)
+            except Exception:
+                logger.debug("turn_state: failed to project Activity state", exc_info=True)
         result = {
             "ok": True,
             "session_id": session_id,
             "in_flight": active,
             "native_turn_started": native_turn_started,
+            "foreground": "running" if active else "idle",
+            "pending_input_count": pending_input_count,
+            "background_activities": activity_state.get("background_activities", []),
+            "connection": activity_state.get("connection", "unknown"),
         }
         if backend:
             result["backend"] = backend
