@@ -2036,17 +2036,12 @@ def create_secret(
         raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
-    provision_row, _existing_secret = _preflight_secret_create_name(
-        conn,
-        name=name,
-        provision_request_id=provision_request_id,
-    )
-
-    if establishing_vmk and protection == "protected":
-        # A deferred SQLite transaction does not take the writer lock for the
-        # existence check below. This metadata upsert is establishment's first
-        # write, so concurrent initializers serialize before checking. The row is
-        # only a mutex; protected-secret existence remains the source of truth.
+    establishing_protected_vault = establishing_vmk and protection == "protected"
+    if establishing_protected_vault:
+        # This must be the transaction's first database access: a deferred SQLite
+        # transaction cannot safely promote an older read snapshot after another
+        # initializer commits. The row is only a mutex; protected-secret existence
+        # remains the source of truth.
         lock_updated_at = _now()
         lock_stmt = sqlite_insert(state_meta).values(
             key=PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY,
@@ -2062,6 +2057,14 @@ def create_secret(
                 },
             )
         )
+
+    provision_row, _existing_secret = _preflight_secret_create_name(
+        conn,
+        name=name,
+        provision_request_id=provision_request_id,
+    )
+
+    if establishing_protected_vault:
         if (
             conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)).first()
             is not None

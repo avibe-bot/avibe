@@ -391,6 +391,8 @@ def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkey
     pre_guard_barrier = threading.Barrier(2)
     post_guard_barrier = threading.Barrier(2)
     lock_seen = threading.Event()
+    database_access_before_lock = threading.Event()
+    thread_state = threading.local()
 
     def is_init_lock(statement: str, parameters) -> bool:
         return statement.lstrip().upper().startswith("INSERT INTO STATE_META") and init_lock_key in parameters
@@ -401,12 +403,16 @@ def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkey
 
     def synchronize_before_guard(_conn, _cursor, statement, parameters, _context, _executemany):
         if is_init_lock(statement, parameters):
+            thread_state.init_lock_seen = True
             lock_seen.set()
             lock_barrier.wait(timeout=5)
-        elif not lock_seen.is_set() and is_protected_guard(statement):
-            # On the unfixed implementation, force both deferred transactions
-            # through the empty-vault read before either reaches its first write.
-            pre_guard_barrier.wait(timeout=5)
+        else:
+            if not getattr(thread_state, "init_lock_seen", False):
+                database_access_before_lock.set()
+            if not lock_seen.is_set() and is_protected_guard(statement):
+                # On the unfixed implementation, force both deferred transactions
+                # through the empty-vault read before either reaches its first write.
+                pre_guard_barrier.wait(timeout=5)
 
     def synchronize_after_guard(_conn, _cursor, statement, _parameters, _context, _executemany):
         if not lock_seen.is_set() and is_protected_guard(statement):
@@ -441,6 +447,7 @@ def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkey
     assert len(successes) == 1
     assert len(failures) == 1
     assert isinstance(failures[0], vs.VaultAlreadyInitializedError)
+    assert not database_access_before_lock.is_set()
 
     with vault.connect() as conn:
         protected_names = list(
