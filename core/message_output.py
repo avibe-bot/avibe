@@ -23,6 +23,7 @@ class MessageOutput:
     causation_id: str | None = None
     sequence: int | None = None
     run_id: str | None = None
+    requires_delivery_for_run_settlement: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property

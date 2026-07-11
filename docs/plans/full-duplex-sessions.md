@@ -143,7 +143,10 @@ Session output without reusing the settled Turn token; the failure tidy closes
 only that Turn, while the retry retains Run-completion authority. Recovered
 terminal Activities wait behind any output still owed by the same Run. Output
 containing only `<silent>` directives uses the same silent Run-settlement path
-as an empty summary.
+as an empty summary. Activity output follows a durable handoff order: persist the
+Outbox snapshot, deliver and persist the Message, settle the Run and its callback
+outputs, then delete the snapshot. A failed snapshot write, Run write, or delete
+keeps the Activity active, queued, or claimed for an idempotent retry.
 
 ## Other backend protocol disposition
 

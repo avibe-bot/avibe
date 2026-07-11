@@ -1606,8 +1606,16 @@ class ScheduledTaskService:
                 ):
                     self._pending_recovered_activity_terminals.append(activity)
                     continue
-                if callable(ack_terminal):
-                    ack_terminal(activity)
+                try:
+                    if callable(ack_terminal):
+                        ack_terminal(activity)
+                except Exception:
+                    self._pending_recovered_activity_terminals.append(activity)
+                    logger.warning(
+                        "Failed to acknowledge recovered terminal Activity %s during startup",
+                        getattr(activity, "id", ""),
+                        exc_info=True,
+                    )
 
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
         for run in self.request_store.list_deferred_runs():

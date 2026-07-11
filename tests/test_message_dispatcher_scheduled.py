@@ -194,6 +194,161 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(message_id)
         self.assertEqual(calls, [("run-empty", "", "succeeded")])
 
+    async def test_activity_run_settlement_waits_for_successful_delivery(self):
+        controller = _StubController()
+        controller.im_client = _FailingIMClient()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: False),
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+        recorded = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                recorded.append((run_id, kwargs))
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+            patch.object(message_dispatcher_module, "persist_agent_message") as persist,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not durably persisted"):
+                await dispatcher.emit_agent_message(
+                    context,
+                    "result",
+                    "background work finished",
+                    output=MessageOutput(
+                        completes_turn=False,
+                        completes_run=True,
+                        detached=True,
+                        idempotency_key="activity-output",
+                        run_id="run-origin",
+                        requires_delivery_for_run_settlement=True,
+                    ),
+                )
+
+        self.assertEqual(recorded, [])
+        persist.assert_not_called()
+
+    async def test_activity_run_store_failure_propagates_after_message_persistence(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: False),
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+        events = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **_kwargs):
+                events.append(("run", run_id))
+                raise RuntimeError("run store unavailable")
+
+            def close(self):
+                pass
+
+        def persist(*_args, **_kwargs):
+            events.append(("message", "persisted"))
+            return {"id": "message-row"}
+
+        with (
+            patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+            patch.object(message_dispatcher_module, "persist_agent_message", side_effect=persist),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "run store unavailable"):
+                await dispatcher.emit_agent_message(
+                    context,
+                    "result",
+                    "background work finished",
+                    output=MessageOutput(
+                        completes_turn=False,
+                        completes_run=True,
+                        detached=True,
+                        idempotency_key="activity-output",
+                        run_id="run-origin",
+                        requires_delivery_for_run_settlement=True,
+                    ),
+                )
+
+        self.assertEqual(events, [("message", "persisted"), ("run", "run-origin")])
+
+    async def test_activity_run_settlement_follows_message_persistence(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: False),
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+        events = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                events.append(("run", run_id, kwargs["terminal_status"]))
+
+            def close(self):
+                pass
+
+        def persist(*_args, **_kwargs):
+            events.append(("message", "persisted"))
+            return {"id": "message-row"}
+
+        with (
+            patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+            patch.object(message_dispatcher_module, "persist_agent_message", side_effect=persist),
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "background work finished",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=True,
+                    detached=True,
+                    idempotency_key="activity-output",
+                    run_id="run-origin",
+                    requires_delivery_for_run_settlement=True,
+                ),
+            )
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(
+            events,
+            [("message", "persisted"), ("run", "run-origin", "succeeded")],
+        )
+
     async def test_owned_activity_defers_run_terminal_but_not_later_detached_output(self):
         controller = _StubController()
         blocking = [True]

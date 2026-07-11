@@ -820,14 +820,14 @@ class ClaudeAgent(BaseAgent):
                                     subtype=getattr(message, "subtype", "") or "",
                                     duration_ms=getattr(message, "duration_ms", 0),
                                 )
+                                registry = self._activity_registry()
+                                if registry is not None:
+                                    registry.ack_completed_output(detached_activity)
                             except Exception:
                                 registry = self._activity_registry()
                                 if registry is not None:
                                     registry.requeue_completed_output(detached_activity)
                                 raise
-                            registry = self._activity_registry()
-                            if registry is not None:
-                                registry.ack_completed_output(detached_activity)
                             # The detached Activity output has no authority over
                             # a newer pending request. Its Turn stays owned by its
                             # own backend query and liveness/timeout path.
@@ -1690,14 +1690,14 @@ class ClaudeAgent(BaseAgent):
                 detached=True,
                 completes_turn=False,
             )
+            registry = self._activity_registry()
+            if registry is not None:
+                registry.ack_completed_output(activity)
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
                 registry.requeue_completed_output(activity)
             raise
-        registry = self._activity_registry()
-        if registry is not None:
-            registry.ack_completed_output(activity)
         self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
 
@@ -1753,12 +1753,11 @@ class ClaudeAgent(BaseAgent):
                         completes_turn=True,
                         request=matched_request,
                     )
+                    registry.ack_completed_output(activity)
                 except Exception:
                     registry.requeue_completed_output(activity)
                     await self._settle_activity_turn_after_delivery_failure(context)
                     raise
-                else:
-                    registry.ack_completed_output(activity)
                 finally:
                     await self._remove_result_pending_reaction(
                         composite_key,
@@ -1779,10 +1778,10 @@ class ClaudeAgent(BaseAgent):
                     detached=True,
                     completes_turn=False,
                 )
+                registry.ack_completed_output(activity)
             except Exception:
                 registry.requeue_completed_output(activity)
                 raise
-            registry.ack_completed_output(activity)
             self._mark_session_idle_if_runtime_free(composite_key)
             self._signal_activity_output_settled(composite_key)
 

@@ -115,6 +115,7 @@ def activity_completion_output(
         causation_id=activity.parent_activity_id,
         sequence=1,
         run_id=activity.run_id,
+        requires_delivery_for_run_settlement=True,
         metadata={
             "activity_kind": activity.kind,
             "activity_status": activity.status,
@@ -177,6 +178,7 @@ class SessionActivityRegistry:
             upsert(activity.to_dict(), phase=phase)
         except Exception:
             logger.warning("Failed to persist Activity %s", activity.id, exc_info=True)
+            raise
 
     def _delete_activity(self, activity: SessionActivity) -> None:
         delete = getattr(self._store, "delete_activity", None)
@@ -190,6 +192,7 @@ class SessionActivityRegistry:
             )
         except Exception:
             logger.warning("Failed to delete Activity snapshot %s", activity.id, exc_info=True)
+            raise
 
     def _persist_connection(
         self,
@@ -355,8 +358,8 @@ class SessionActivityRegistry:
                     updated_at=now,
                     completed_at=None,
                 )
-            self._active[key] = activity
             self._persist_activity(activity, phase="active")
+            self._active[key] = activity
             return activity
 
     def progress(
@@ -402,7 +405,7 @@ class SessionActivityRegistry:
         normalized = status if status in TERMINAL_ACTIVITY_STATUSES else "completed"
         now = _now_iso()
         with self._lock:
-            existing = self._active.pop(key, None)
+            existing = self._active.get(key)
             if existing is None:
                 return None
             merged = dict(existing.metadata)
@@ -415,14 +418,17 @@ class SessionActivityRegistry:
                 completed_at=now,
             )
             if expects_output:
+                self._persist_activity(completed, phase="awaiting_output")
+                self._active.pop(key, None)
                 self._completed_outputs[(str(backend), str(runtime_key))].append(
                     (time.monotonic(), completed)
                 )
-                self._persist_activity(completed, phase="awaiting_output")
             elif retain_terminal_snapshot:
                 self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
+                self._active.pop(key, None)
             else:
                 self._delete_activity(completed)
+                self._active.pop(key, None)
             return completed
 
     def active_for_runtime(self, backend: str, runtime_key: str) -> list[SessionActivity]:
@@ -483,8 +489,12 @@ class SessionActivityRegistry:
                     if not queue:
                         self._completed_outputs.pop(key, None)
                     return activity
+                try:
+                    self._delete_activity(activity)
+                except Exception:
+                    queue.appendleft((completed_at, activity))
+                    raise
                 self._recovered_output_ids.discard(activity_key)
-                self._delete_activity(activity)
             if not queue:
                 self._completed_outputs.pop(key, None)
         return None
@@ -514,7 +524,6 @@ class SessionActivityRegistry:
                 queue.append(item)
             if recovered:
                 self._recovered_output_ids.add(activity_key)
-            self._persist_activity(activity, phase="awaiting_output")
         return True
 
     def ack_completed_output(self, activity: SessionActivity) -> bool:
@@ -522,11 +531,12 @@ class SessionActivityRegistry:
 
         activity_key = self._activity_key(activity)
         with self._lock:
-            claimed = self._claimed_completed_outputs.pop(activity_key, None)
+            claimed = self._claimed_completed_outputs.get(activity_key)
             if claimed is None:
                 return False
+            self._delete_activity(claimed[0])
+            self._claimed_completed_outputs.pop(activity_key, None)
             self._recovered_output_ids.discard(activity_key)
-            self._delete_activity(activity)
             callback = self._output_settled_callback
         if callback is not None:
             try:
@@ -635,6 +645,7 @@ class SessionActivityRegistry:
                     retain_terminal_snapshots=True,
                 )
             )
+        now = _now_iso()
         with self._lock:
             pending_by_key = {
                 self._activity_key(activity): activity
@@ -649,25 +660,23 @@ class SessionActivityRegistry:
                     if key[0] == identity
                 }
             )
+            terminated_pending = [
+                replace(
+                    activity,
+                    status=status if status in TERMINAL_ACTIVITY_STATUSES else "killed",
+                    updated_at=now,
+                    completed_at=now,
+                )
+                for activity in pending_by_key.values()
+            ]
+            for activity in terminated_pending:
+                self._persist_activity(activity, phase=TERMINAL_SNAPSHOT_PHASE)
             for key in [key for key in self._completed_outputs if key[0] == identity]:
                 self._completed_outputs.pop(key, None)
             for key in [key for key in self._claimed_completed_outputs if key[0] == identity]:
                 self._claimed_completed_outputs.pop(key, None)
-            pending = list(pending_by_key.values())
-        now = _now_iso()
-        terminated_pending = [
-            replace(
-                activity,
-                status=status if status in TERMINAL_ACTIVITY_STATUSES else "killed",
-                updated_at=now,
-                completed_at=now,
-            )
-            for activity in pending
-        ]
-        with self._lock:
             for activity in terminated_pending:
                 self._recovered_output_ids.discard(self._activity_key(activity))
-                self._persist_activity(activity, phase=TERMINAL_SNAPSHOT_PHASE)
         completed.extend(terminated_pending)
         return completed
 

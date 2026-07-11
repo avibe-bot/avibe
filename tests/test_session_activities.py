@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from core.session_activities import (
     SessionActivity,
     SessionActivityRegistry,
@@ -94,6 +96,73 @@ def test_activity_output_native_id_is_stable_across_recovery_contexts():
     assert live_id == recovered_id
     assert live_id is not None
     assert live_id.startswith("agent-output:claude:activity:task-1:")
+    assert output.requires_delivery_for_run_settlement is True
+
+
+def test_activity_completion_persistence_failure_keeps_output_unclaimable():
+    def upsert_activity(_activity, *, phase):
+        if phase == "awaiting_output":
+            raise RuntimeError("database is locked")
+
+    store = SimpleNamespace(
+        upsert_activity=upsert_activity,
+        delete_activity=mock.Mock(),
+    )
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+
+    with pytest.raises(RuntimeError, match="database is locked"):
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id="task-1",
+            status="completed",
+            expects_output=True,
+        )
+
+    assert [item.id for item in registry.active_for_runtime("claude", "runtime-1")] == [
+        "task-1"
+    ]
+    assert registry.has_completed_output("claude", "runtime-1") is False
+
+
+def test_activity_ack_keeps_claim_until_snapshot_delete_succeeds():
+    delete_activity = mock.Mock(side_effect=RuntimeError("database is locked"))
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=delete_activity,
+    )
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+
+    with pytest.raises(RuntimeError, match="database is locked"):
+        registry.ack_completed_output(claimed)
+
+    assert registry.has_completed_output("claude", "runtime-1") is True
+    delete_activity.side_effect = None
+    assert registry.ack_completed_output(claimed) is True
+    assert registry.has_completed_output("claude", "runtime-1") is False
 
 
 def test_activity_updates_are_independent_and_runtime_disconnect_terminates_all():
