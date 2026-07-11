@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { useNewSession } from '../../lib/useNewSession';
+import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
 import { Composer } from './Composer';
 import { NewProjectDialog } from './NewProjectDialog';
@@ -24,6 +25,7 @@ interface NewSessionSheetProps {
 export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose, onOpen }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const authorizeRouteAction = useUnsavedChangesActionGuard();
   // active: open → the hook reloads + resets per-open (the sheet is permanently
   // mounted by AppShell, so stale submit/error state must not leak across opens).
   const ns = useNewSession({
@@ -50,11 +52,23 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
   };
 
   const send = async (text: string): Promise<boolean> => {
+    // Creating the session is irreversible and its target route does not exist until the API
+    // succeeds. Confirm before that mutation, then let its one resulting navigation bypass the
+    // router blocker so the user sees exactly one prompt.
+    const canCreate = text.trim() !== '' && ns.loaded && ns.target !== null && !ns.sending;
+    const authorization = canCreate ? authorizeRouteAction() : undefined;
+    if (authorization === null) return false;
+
     const result = await ns.send(text);
     if (result) {
       setPendingDraft('');
+      const navigateToSession = () =>
+        navigate(`/chat/${encodeURIComponent(result.sessionId)}`, {
+          state: { initialMessage: result.initialMessage },
+        });
+      if (authorization) authorization.runNavigation(navigateToSession);
+      else navigateToSession();
       onClose();
-      navigate(`/chat/${encodeURIComponent(result.sessionId)}`, { state: { initialMessage: result.initialMessage } });
       return true;
     }
     // No project to target → stash the prompt and route to the New Project flow.

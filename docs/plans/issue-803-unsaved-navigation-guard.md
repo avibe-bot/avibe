@@ -24,6 +24,9 @@ router blocker. Preserve hard-unload protection and keep windowed-app close beha
   pass through the central blocker; window close guards remain unchanged.
 - Keep unread clearing owned by the mounted `ChatPage`, not navigation click handlers, so a blocked
   transition cannot mutate session state before the user confirms it.
+- Let data-mutating actions that need a generated route pre-authorize exactly one synchronous
+  navigation through the same Provider. Cancel happens before mutation and successful actions do not
+  trigger a second prompt or leave a reusable bypass behind.
 
 ## Verification
 
@@ -34,6 +37,7 @@ router blocker. Preserve hard-unload protection and keep windowed-app close beha
 - [x] Mobile bottom navigation and Back
 - [x] Imperative navigation, clean navigation, and hard-unload listener
 - [x] Canceled session navigation sends no mark-read request; confirmed navigation marks once
+- [x] Canceled new-session action creates nothing; confirmed creation navigates with one prompt
 - [x] Setup/auth/remote redirect, lazy Apps routes, and legacy redirects
 - [x] Local Incus worktree service and mobile blocker smoke
 

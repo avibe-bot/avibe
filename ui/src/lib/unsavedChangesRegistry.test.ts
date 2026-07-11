@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  createUnsavedChangesNavigationGate,
   getUnsavedChangesMessage,
   setUnsavedChangesRegistration,
   type UnsavedChangesRegistry,
@@ -29,5 +30,32 @@ describe('unsaved changes registry', () => {
 
     setUnsavedChangesRegistration(registry, 'older-surface', null);
     expect(getUnsavedChangesMessage(registry)).toBeNull();
+  });
+
+  it('cancels a route action before mutation and leaves navigation blocked', () => {
+    const gate = createUnsavedChangesNavigationGate();
+    const authorization = gate.authorize('discard?', () => false);
+
+    expect(authorization).toBeNull();
+    expect(gate.shouldBlock(true)).toBe(true);
+  });
+
+  it('authorizes exactly one synchronous navigation after a confirmed action', () => {
+    const gate = createUnsavedChangesNavigationGate();
+    const authorization = gate.authorize('discard?', () => true);
+
+    expect(authorization).not.toBeNull();
+    authorization?.runNavigation(() => {
+      expect(gate.shouldBlock(true)).toBe(false);
+    });
+    expect(gate.shouldBlock(true)).toBe(true);
+  });
+
+  it('does not retain an authorization when its callback never navigates', () => {
+    const gate = createUnsavedChangesNavigationGate();
+    const authorization = gate.authorize('discard?', () => true);
+
+    authorization?.runNavigation(() => undefined);
+    expect(gate.shouldBlock(true)).toBe(true);
   });
 });
