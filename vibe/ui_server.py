@@ -7756,6 +7756,11 @@ def _is_show_page_entry_asset(asset_path: str) -> bool:
     return relative in {"", "index.html"}
 
 
+def _is_show_page_dot_path(asset_path: str) -> bool:
+    decoded = unquote((asset_path or "").strip("/"))
+    return any(segment.startswith(".") for segment in re.split(r"[\\/]", decoded) if segment)
+
+
 def _show_page_recovery_response(session_id: str):
     from core.show_pages import show_page_runtime_recovery_html
 
@@ -7767,7 +7772,7 @@ def _show_page_file_response(root: Path, asset_path: str):
     if not relative:
         relative = "index.html"
     decoded = unquote(relative)
-    if any(segment.startswith(".") for segment in re.split(r"[\\/]", decoded) if segment):
+    if _is_show_page_dot_path(decoded):
         return _show_page_file_not_found_response()
     candidate = (root / decoded).resolve()
     root_resolved = root.resolve()
@@ -8720,6 +8725,8 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "private":
             return _show_page_not_found_response()
+        if _is_show_page_dot_path(asset_path):
+            return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
@@ -8789,6 +8796,8 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
+        if _is_show_page_dot_path(asset_path):
+            return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method != "GET":
                 return jsonify({"ok": False, "code": "public_show_events_read_only"}), 403

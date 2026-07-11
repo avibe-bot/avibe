@@ -57,6 +57,9 @@ SHOW_GIT_AGENT_CONTRACT = (
     "Never move HEAD, switch branches, rewrite history, or run gc; if you do, the platform self-heals with the worktree as truth.",
     "Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks. If the workspace contains the user's own repo (real `.git` directory), do not commit/push on their behalf; platform history keeps running in the background.",
 )
+SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT = (
+    "Automatic Show Page history is unavailable because Git could not be resolved for this process. Continue editing normally, but do not use history or restore commands for this workspace.",
+)
 
 
 class ShowGitError(RuntimeError):
@@ -76,10 +79,13 @@ class _ActiveTurnCheckpoint:
     started_at: str
 
 
-def format_agent_contract(*, numbered: bool = False) -> str:
+def format_agent_contract(*, numbered: bool = False, checkpointing_available: bool | None = None) -> str:
+    if checkpointing_available is None:
+        checkpointing_available = resolve_git() is not None
+    lines = SHOW_GIT_AGENT_CONTRACT if checkpointing_available else SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT
     if numbered:
-        return "\n".join(f"{index}. {line}" for index, line in enumerate(SHOW_GIT_AGENT_CONTRACT, start=1))
-    return "\n".join(f"- {line}" for line in SHOW_GIT_AGENT_CONTRACT)
+        return "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
+    return "\n".join(f"- {line}" for line in lines)
 
 
 def _single_line(value: Any) -> str:

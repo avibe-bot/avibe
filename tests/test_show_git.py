@@ -492,6 +492,34 @@ def test_turn_event_subscriber_keeps_start_message_when_next_pending_can_arrive(
     ]
 
 
+def test_duplicate_turn_events_do_not_create_duplicate_checkpoint_commits(resolved_git, monkeypatch):
+    session_id = "ses_bus_duplicate"
+    workspace = _workspace(session_id)
+    (workspace / "page.txt").write_text("before\n", encoding="utf-8")
+    monkeypatch.setattr(
+        show_git,
+        "load_turn_checkpoint_context",
+        lambda _session_id, **_kwargs: TurnCheckpointContext(message="edit page"),
+    )
+    service = ShowGitCheckpointService(resolved_git)
+    bus = InboxEventBus()
+    service.start(bus)
+
+    bus.publish("turn.start", {"session_id": session_id})
+    bus.publish("turn.start", {"session_id": session_id})
+    (workspace / "page.txt").write_text("after\n", encoding="utf-8")
+    bus.publish("turn.end", {"session_id": session_id})
+    bus.publish("turn.end", {"session_id": session_id})
+    service.stop()
+
+    repo = _repo(session_id, resolved_git)
+    assert _platform_git(repo, "rev-list", "--count", "main").stdout.strip() == "2"
+    assert _platform_git(repo, "log", "--format=%s").stdout.splitlines() == [
+        "edit page",
+        "adopt existing workspace",
+    ]
+
+
 def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     from sqlalchemy import update
 

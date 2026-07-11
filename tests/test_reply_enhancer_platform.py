@@ -473,6 +473,24 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Keep entries short, deduplicated, and free of secrets unless the user explicitly asks.", prompt)
         self.assertIn("use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history", prompt)
 
+    def test_show_pages_prompt_reports_history_unavailable_without_git(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.show_git.resolve_git", return_value=None),
+        ):
+            prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+
+        self.assertIn("Automatic Show Page history is unavailable", prompt)
+        self.assertNotIn("History is saved automatically around each turn", prompt)
+        self.assertNotIn("git restore --source", prompt)
+
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
         context = MessageContext(
             user_id="U1",

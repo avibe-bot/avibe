@@ -15,17 +15,19 @@ branch to the existing worktree at each session turn boundary.
 - Lazily adopt only existing workspaces into external gitdirs under
   `~/.avibe/show-git/`; write the workspace `.git` pointer only when Avibe owns
   it, and use shadow checkpoints beside user-managed repositories.
-- Subscribe in the controller to `turn.start` and `turn.end`; checkpoints never
-  create Show Page workspaces or modify the turn publisher.
+- Subscribe in the controller to `turn.start` and `turn.end`; normalize the
+  legacy streaming Show dispatch onto that bus without touching the shared turn
+  manager, and never create Show Page workspaces from checkpoint paths.
 - Isolate every platform Git invocation from ambient Git environment, global
   configuration, signing, hooks, and automatic GC.
-- Self-heal Avibe-owned state, bound retained history, deny dot-leading static
-  asset segments, and publish the native-Git contract in agent guidance.
+- Self-heal Avibe-owned state, bound retained history, deny dot-leading asset
+  segments before runtime proxying and static fallback, and publish the
+  native-Git contract only when checkpoint Git is available.
 
 ## Validation
 
 - Focused unit coverage for resolution, adoption/ownership, checkpoint
   semantics, repair, pruning, event wiring, and Git environment isolation.
-- Route coverage for private and public static fallbacks.
+- Route coverage for private/public runtime proxy and static fallback boundaries.
 - Incus edit/overwrite/restore/forward-commit verification remains an
   integration-pass check after the coordinated milestone lands.

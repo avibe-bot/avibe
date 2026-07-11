@@ -72,7 +72,7 @@ def create_app(controller: "Controller") -> FastAPI:
     Factored out so tests can mount the same routes against a fake
     controller without spinning up uvicorn.
     """
-    from core.inbox_events import mark_controller_process
+    from core.inbox_events import bus, mark_controller_process
 
     mark_controller_process()
 
@@ -299,12 +299,23 @@ def create_app(controller: "Controller") -> FastAPI:
                 logger.exception("internal dispatch failed for session=%s", session_id)
                 await chunk_queue.put({"kind": "error", "text": str(err)})
             finally:
+                # This legacy streaming route invokes dispatch_turn directly, so it
+                # bypasses SessionTurnManager._run_turn, which owns lifecycle bus
+                # events for Chat/scheduled turns. The two paths are exclusive:
+                # streaming lifecycle is owned here; manager lifecycle stays in
+                # core/session_turns.py. Publishing before the sentinel also makes
+                # post-turn subscribers finish before queued work can be flushed.
+                if isinstance(session_id, str) and session_id:
+                    bus.publish("turn.end", {"session_id": session_id})
                 # Sentinel signals end-of-stream to the consumer below.
                 await chunk_queue.put(None)
 
         task = asyncio.create_task(_runner(), name="internal-dispatch")
         if isinstance(session_id, str) and session_id:
             in_flight[session_id] = Turn(task=task, context=context)
+            # create_task cannot run until this coroutine yields, so synchronous
+            # pre-turn subscribers complete before the backend can touch files.
+            bus.publish("turn.start", {"session_id": session_id})
 
         async def _stream():
             saw_cancel = False

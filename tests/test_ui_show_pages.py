@@ -568,6 +568,23 @@ def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeyp
     assert b'src="./src/main.tsx"' not in response.content
 
 
+def test_private_show_page_recovery_reports_history_unavailable_without_git(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_git.resolve_git", lambda: None)
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
+    try:
+        response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert b"Automatic Show Page history is unavailable" in response.content
+    assert b"History is saved automatically around each turn" not in response.content
+    assert b"git restore --source" not in response.content
+
+
 def test_private_show_page_static_fallback_denies_dot_leading_segments(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -592,6 +609,26 @@ def test_private_show_page_static_fallback_denies_dot_leading_segments(monkeypat
     assert nested_response.status_code == 404
     assert b"private history" not in git_response.content
     assert b"private draft" not in nested_response.content
+
+
+def test_private_show_page_denies_dot_path_before_runtime_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    (paths.get_show_pages_dir() / "ses123" / ".git").write_text(
+        "gitdir: /tmp/show-git/ses123.git\n",
+        encoding="utf-8",
+    )
+    manager = _FakeShowRuntimeManager(body=b"leaked pointer")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get("/show/ses123/.git", base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert b"show-git" not in response.content
+    assert manager.calls == []
 
 
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
@@ -2889,6 +2926,30 @@ def test_public_show_page_static_fallback_denies_dot_leading_segments(monkeypatc
 
     assert response.status_code == 404
     assert b"public history" not in response.content
+
+
+def test_public_show_page_denies_dot_path_before_runtime_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    (paths.get_show_pages_dir() / "ses123" / ".git").write_text(
+        "gitdir: /tmp/show-git/ses123.git\n",
+        encoding="utf-8",
+    )
+    manager = _FakeShowRuntimeManager(body=b"leaked pointer")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/.git",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert b"show-git" not in response.content
+    assert manager.calls == []
 
 
 def test_public_show_page_redirects_without_trailing_slash(monkeypatch, tmp_path):
