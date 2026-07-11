@@ -12,6 +12,7 @@
       "name": "git-2.55.0-darwin-arm64.tar.gz",
       "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-darwin-arm64.tar.gz",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "size": null,
       "bin_path": "bin/git"
     },
@@ -19,6 +20,7 @@
       "name": "git-2.55.0-darwin-x64.tar.gz",
       "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-darwin-x64.tar.gz",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "size": null,
       "bin_path": "bin/git"
     },
@@ -26,6 +28,7 @@
       "name": "git-2.55.0-linux-arm64.tar.gz",
       "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-linux-arm64.tar.gz",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "size": null,
       "bin_path": "bin/git"
     },
@@ -33,6 +36,7 @@
       "name": "git-2.55.0-linux-x64.tar.gz",
       "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-linux-x64.tar.gz",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "size": null,
       "bin_path": "bin/git"
     }

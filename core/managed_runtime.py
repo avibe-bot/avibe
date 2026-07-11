@@ -20,6 +20,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
 from typing import Any
 
+from storage.lock import MigrationFileLock, MigrationLockTimeout
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class ManagedRuntimeArchive:
     name: str
     url: str
     sha256: str
+    binary_sha256: str
     size: int | None
     bin_path: str
 
@@ -82,9 +85,15 @@ class ManagedRuntimeManager:
         self.offline = offline
         self._install_reason: str | None = None
         self._install_lock = install_lock_for(spec.runtime_id)
+        self._install_file_lock_path = self.runtime_dir / ".install.lock"
 
     def ensure(self, *, force: bool = False) -> dict[str, Any]:
-        if not self._install_lock.acquire(blocking=False):
+        try:
+            file_lock = self._acquire_mutation_lock()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to acquire managed %s runtime lock", self.spec.runtime_id)
+            return self._failure(self._reason("install_lock_failed"), message=str(exc))
+        if file_lock is None:
             return self._failure(
                 self._reason("install_already_running"),
                 message=f"{self.spec.runtime_id} install or repair is already running; try again shortly.",
@@ -144,6 +153,13 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                     )
+                binary_sha256 = file_sha256(staged_binary)
+                if binary_sha256 != archive.binary_sha256:
+                    return self._failure(
+                        self._reason("binary_checksum_mismatch"),
+                        manifest=manifest,
+                        archive=archive,
+                    )
                 if not self._binary_matches_manifest(staged_binary, manifest):
                     return self._failure(
                         self._reason("binary_not_runnable"),
@@ -151,7 +167,6 @@ class ManagedRuntimeManager:
                         archive=archive,
                     )
 
-                binary_sha256 = file_sha256(staged_binary)
                 if install_dir.exists():
                     shutil.rmtree(install_dir)
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -187,7 +202,7 @@ class ManagedRuntimeManager:
                 if staging_dir.exists():
                     shutil.rmtree(staging_dir, ignore_errors=True)
         finally:
-            self._install_lock.release()
+            self._release_mutation_lock(file_lock)
 
     def resolve_binary(self) -> Path | None:
         """Resolve an already installed runtime without performing network I/O."""
@@ -214,13 +229,12 @@ class ManagedRuntimeManager:
         archive = manifest.archives.get(platform_tag) if manifest else None
         install_dir = self._manifest_install_dir(manifest, archive) if manifest and archive else None
         binary = self.resolve_binary() if manifest and archive else None
-        binary_version = self._binary_version(binary) if binary else None
         return {
             "id": self.spec.runtime_id,
             "provider": "manifest",
             "platform": platform_tag,
             "installed": binary is not None,
-            "version": binary_version or (manifest.runtime_version if manifest else None),
+            "version": manifest.runtime_version if manifest else None,
             "status": "ready" if binary else "missing",
             "path": str(binary) if binary else None,
             "install_dir": str(install_dir) if install_dir else None,
@@ -230,6 +244,28 @@ class ManagedRuntimeManager:
         }
 
     def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
+        try:
+            file_lock = self._acquire_mutation_lock()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to acquire managed %s runtime lock", self.spec.runtime_id)
+            return {
+                "ok": False,
+                "removed": [],
+                "reason": self._reason("clean_lock_failed"),
+                "message": str(exc),
+            }
+        if file_lock is None:
+            return {
+                "ok": False,
+                "removed": [],
+                "reason": self._reason("install_already_running"),
+            }
+        try:
+            return self._clean_locked(keep_previous=keep_previous)
+        finally:
+            self._release_mutation_lock(file_lock)
+
+    def _clean_locked(self, *, keep_previous: int) -> dict[str, Any]:
         removed: list[str] = []
         for staging_dir in self.runtime_dir.glob("install-*"):
             if staging_dir.is_dir():
@@ -352,12 +388,15 @@ class ManagedRuntimeManager:
                 name = str(item["name"])
                 url = str(item["url"])
                 sha256 = str(item["sha256"]).lower()
+                binary_sha256 = str(item["binary_sha256"]).lower()
                 bin_path = str(item.get("bin_path") or self.spec.default_bin_path)
                 size = int(item["size"]) if item.get("size") is not None else None
                 if Path(name).name != name or not name:
                     raise ValueError("unsafe archive name")
                 if not _SHA256_RE.fullmatch(sha256):
                     raise ValueError("invalid archive sha256")
+                if not _SHA256_RE.fullmatch(binary_sha256):
+                    raise ValueError("invalid binary sha256")
                 if size is not None and size < 0:
                     raise ValueError("invalid archive size")
                 if archive_path_is_unsafe(bin_path):
@@ -367,6 +406,7 @@ class ManagedRuntimeManager:
                     name=name,
                     url=url,
                     sha256=sha256,
+                    binary_sha256=binary_sha256,
                     size=size,
                     bin_path=bin_path,
                 )
@@ -471,10 +511,11 @@ class ManagedRuntimeManager:
             and metadata.get("platform") == archive.platform
             and metadata.get("archive_sha256") == archive.sha256
             and metadata.get("bin_path") == archive.bin_path
-            and metadata.get("binary_sha256") == file_sha256(binary)
+            and metadata.get("binary_sha256") == archive.binary_sha256
+            and file_sha256(binary) == archive.binary_sha256
         ):
             return None
-        return binary if self._binary_matches_manifest(binary, manifest) else None
+        return binary
 
     def _write_manifest_install_metadata(
         self,
@@ -559,6 +600,7 @@ class ManagedRuntimeManager:
             "name": archive.name,
             "url": archive.url,
             "sha256": archive.sha256,
+            "binary_sha256": archive.binary_sha256,
             "size": archive.size,
             "bin_path": archive.bin_path,
         }
@@ -630,6 +672,26 @@ class ManagedRuntimeManager:
 
     def _reason(self, suffix: str) -> str:
         return f"{self.spec.runtime_id}_{suffix}"
+
+    def _acquire_mutation_lock(self) -> MigrationFileLock | None:
+        if not self._install_lock.acquire(blocking=False):
+            return None
+        try:
+            file_lock = MigrationFileLock(self._install_file_lock_path, timeout_seconds=0)
+            file_lock.acquire()
+        except MigrationLockTimeout:
+            self._install_lock.release()
+            return None
+        except Exception:
+            self._install_lock.release()
+            raise
+        return file_lock
+
+    def _release_mutation_lock(self, file_lock: MigrationFileLock) -> None:
+        try:
+            file_lock.release()
+        finally:
+            self._install_lock.release()
 
 
 def runtime_platform_tag() -> str:

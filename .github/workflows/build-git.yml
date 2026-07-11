@@ -726,6 +726,7 @@ jobs:
           import json
           import os
           import re
+          import tarfile
           from pathlib import Path
 
           version = os.environ["GIT_VERSION"]
@@ -741,10 +742,16 @@ jobs:
               path = next(Path("dist").glob(f"git-{version}-{platform}.tar.gz"), None)
               if path is None:
                   raise SystemExit(f"missing archive for {platform}")
+              with tarfile.open(path, "r:gz") as archive:
+                  binary = archive.extractfile("bin/git")
+                  if binary is None:
+                      raise SystemExit(f"missing bin/git in {path}")
+                  binary_sha256 = hashlib.sha256(binary.read()).hexdigest()
               archives[platform] = {
                   "name": path.name,
                   "url": f"https://github.com/avibe-bot/avibe/releases/download/{release_tag}/{path.name}",
                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "binary_sha256": binary_sha256,
                   "size": path.stat().st_size,
                   "bin_path": "bin/git",
               }

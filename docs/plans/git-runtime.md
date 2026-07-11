@@ -9,15 +9,17 @@ must not be executed before `xcode-select -p` confirms the tools are installed.
 ## Design
 
 - Add a reusable managed-runtime core for manifest loading, archive download,
-  SHA-256 verification, safe extraction, versioned installation, and cleanup.
+  archive and binary SHA-256 verification, safe extraction, versioned
+  installation, cross-process mutation locking, and cleanup.
 - Keep tmux and Show Runtime unchanged in this PR; Git is the first consumer of
   the extracted core, which limits migration risk while establishing the common
   boundary for a follow-up.
 - Install Git under
   `~/.avibe/runtime/git/versions/<version>/<platform>/<fingerprint>/bin/git`.
-- Resolve an installed and metadata-verified vendored binary without network
-  access. Status reports both the platform resolution (vendored first) and the
-  Agent PATH resolution (system first), so the two contracts stay explicit.
+- Resolve an installed binary against the immutable binary hash in the active
+  manifest without network access or execution. Status classifies system Git
+  paths without executing PATH-selected binaries and reports both the platform
+  resolution (vendored first) and planned Agent resolution (system first).
 - Support `VIBE_GIT_MANIFEST_PATH`, `VIBE_GIT_MANIFEST_URL`, and
   `VIBE_GIT_OFFLINE` for development, out-of-band updates, and offline use.
 - Keep Agent PATH injection out of this PR. The current caller-context object
@@ -45,8 +47,13 @@ and proves that `push` is rejected.
 The packaged manifest remains `release_state: pending` with zero placeholders
 until the orchestrator runs the workflow with tag `git-runtime-v2.55.0-1`.
 Pending manifests never download or install. The published workflow artifact
-must replace `vibe/git_runtime_manifest.json` so real archive sizes and SHA-256
-digests ship in the final integration commit.
+must replace `vibe/git_runtime_manifest.json` so real archive sizes plus archive
+and binary SHA-256 digests ship in the final integration commit.
+
+Offline resolution deliberately fails closed across manifest version changes:
+an install is reusable only when it matches the active trusted manifest. Avibe
+does not trust mutable local metadata as a cross-version fallback root; a
+multi-version manifest schema can be added later if real usage justifies it.
 
 ## Deferred Work
 

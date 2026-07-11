@@ -12,6 +12,7 @@ import pytest
 
 from core import git_runtime, managed_runtime
 from core.git_runtime import GitRuntimeManager
+from storage.lock import MigrationFileLock
 
 
 def _write_git_archive(tmp_path: Path, *, version: str = "2.55.0") -> Path:
@@ -34,11 +35,19 @@ def _write_manifest(
     archive: Path,
     *,
     sha256: str | None = None,
+    binary_sha256: str | None = None,
     release_state: str = "published",
+    version: str = "2.55.0",
 ) -> Path:
+    if binary_sha256 is None:
+        with tarfile.open(archive, "r:gz") as tar:
+            binary = tar.extractfile("bin/git")
+            if binary is None:
+                raise ValueError("test archive is missing bin/git")
+            binary_sha256 = hashlib.sha256(binary.read()).hexdigest()
     manifest = {
         "schema_version": 1,
-        "git_version": "2.55.0",
+        "git_version": version,
         "source": "test",
         "source_url": "file://test",
         "release_state": release_state,
@@ -47,6 +56,7 @@ def _write_manifest(
                 "name": archive.name,
                 "url": archive.as_uri(),
                 "sha256": sha256 or hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "binary_sha256": binary_sha256,
                 "size": archive.stat().st_size,
                 "bin_path": "bin/git",
             }
@@ -67,6 +77,24 @@ def test_manifest_parses_and_exposes_archive(tmp_path: Path, monkeypatch: pytest
     assert status["version"] == "2.55.0"
     assert status["manifest"]["git_version"] == "2.55.0"
     assert status["archive"]["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert status["archive"]["binary_sha256"] == json.loads(manifest.read_text(encoding="utf-8"))[
+        "archives"
+    ][managed_runtime.runtime_platform_tag()]["binary_sha256"]
+
+
+def test_manifest_requires_pinned_binary_sha256(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    archive = _write_git_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    del payload["archives"][managed_runtime.runtime_platform_tag()]["binary_sha256"]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = GitRuntimeManager(manifest_path=manifest).status()
+
+    assert status["installed"] is False
+    assert status["manifest"] is None
+    assert status["reason"] == "git_manifest_invalid"
 
 
 def test_install_verifies_archive_and_uses_versioned_layout(
@@ -130,6 +158,32 @@ def test_managers_for_same_runtime_share_install_lock(tmp_path: Path) -> None:
     assert first._install_lock is second._install_lock
 
 
+def test_install_and_clean_refuse_runtime_file_lock_held_elsewhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    archive = _write_git_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = GitRuntimeManager(manifest_path=manifest)
+    external_lock = MigrationFileLock(manager._install_file_lock_path)
+    external_lock.acquire()
+    try:
+        install_result = manager.ensure()
+        clean_result = manager.clean()
+    finally:
+        external_lock.release()
+
+    assert install_result["ok"] is False
+    assert install_result["reason"] == "git_install_already_running"
+    assert install_result["skipped"] is True
+    assert clean_result == {
+        "ok": False,
+        "removed": [],
+        "reason": "git_install_already_running",
+    }
+
+
 def test_checksum_mismatch_installs_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     archive = _write_git_archive(tmp_path)
@@ -143,6 +197,22 @@ def test_checksum_mismatch_installs_nothing(tmp_path: Path, monkeypatch: pytest.
     assert manager.resolve_git_path() is None
 
 
+def test_binary_checksum_mismatch_installs_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    archive = _write_git_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive, binary_sha256="1" * 64)
+    manager = GitRuntimeManager(manifest_path=manifest)
+
+    result = manager.ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_binary_checksum_mismatch"
+    assert manager.resolve_git_path() is None
+
+
 def test_install_rejects_archive_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("AVIBE_HOME", str(home))
@@ -152,7 +222,7 @@ def test_install_rejects_archive_path_traversal(tmp_path: Path, monkeypatch: pyt
         member = tarfile.TarInfo("../escaped")
         member.size = len(payload)
         tar.addfile(member, io.BytesIO(payload))
-    manifest = _write_manifest(tmp_path, archive)
+    manifest = _write_manifest(tmp_path, archive, binary_sha256="0" * 64)
 
     result = GitRuntimeManager(manifest_path=manifest).ensure()
 
@@ -171,6 +241,10 @@ def test_resolve_rejects_tampered_installed_binary(tmp_path: Path, monkeypatch: 
     installed = Path(result["path"])
 
     installed.write_text(installed.read_text(encoding="utf-8") + "# tampered\n", encoding="utf-8")
+    metadata_path = Path(result["install_dir"]) / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["binary_sha256"] = hashlib.sha256(installed.read_bytes()).hexdigest()
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
     assert manager.resolve_git_path() is None
 
@@ -222,6 +296,28 @@ def test_offline_environment_flag_is_honored(tmp_path: Path, monkeypatch: pytest
     assert GitRuntimeManager().offline is True
 
 
+def test_offline_manifest_upgrade_fails_closed_instead_of_trusting_previous_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    first_archive = _write_git_archive(tmp_path / "first", version="2.55.0")
+    first_manifest = _write_manifest(tmp_path / "first", first_archive, version="2.55.0")
+    first = GitRuntimeManager(manifest_path=first_manifest).ensure()
+    assert first["ok"] is True
+
+    next_archive = _write_git_archive(tmp_path / "next", version="2.56.0")
+    next_manifest = _write_manifest(tmp_path / "next", next_archive, version="2.56.0")
+    upgraded = GitRuntimeManager(manifest_path=next_manifest, offline=True)
+
+    assert upgraded.resolve_git_path() is None
+    result = upgraded.ensure()
+    assert result["ok"] is False
+    assert result["reason"] == "git_archive_unavailable_offline"
+    assert Path(first["path"]).is_file()
+
+
 def test_resolve_missing_runtime_never_fetches_remote_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -265,24 +361,21 @@ def test_status_reports_platform_and_agent_resolution_orders(
             return vendored
 
         def status(self) -> dict[str, object]:
-            return {"installed": True, "path": str(vendored)}
+            return {"installed": True, "path": str(vendored), "version": "vendored-version"}
 
     monkeypatch.setattr(git_runtime, "get_git_runtime_manager", lambda: FakeManager())
     monkeypatch.setattr(git_runtime, "resolve_system_git_path", lambda: system)
-    monkeypatch.setattr(
-        git_runtime,
-        "_probe_git_version",
-        lambda path: "vendored-version" if path == vendored else "system-version",
-    )
+    monkeypatch.setattr(git_runtime, "_probe_git_version", lambda path: pytest.fail("status executed Git"))
 
     status = git_runtime.git_runtime_status()
 
     assert status["resolution"] == "vendored"
     assert status["path"] == str(vendored)
+    assert status["version"] == "vendored-version"
     assert status["agent"] == {
         "resolution": "system",
         "path": str(system),
-        "version": "system-version",
+        "version": None,
     }
 
 
@@ -354,7 +447,7 @@ def test_macos_system_git_is_available_after_clt_check(monkeypatch: pytest.Monke
     monkeypatch.setattr(git_runtime.subprocess, "run", fake_run)
 
     assert git_runtime.resolve_system_git_path(env={"PATH": "/usr/bin"}) == Path("/usr/bin/git")
-    assert calls == [["/usr/bin/xcode-select", "-p"], ["/usr/bin/git", "--version"]]
+    assert calls == [["/usr/bin/xcode-select", "-p"]]
 
 
 def test_macos_system_git_ignores_decoy_xcode_select(
@@ -400,11 +493,11 @@ def test_macos_system_git_ignores_decoy_xcode_select(
 
     assert git_runtime.resolve_system_git_path(env={"PATH": target_path}) == Path("/usr/bin/git")
     assert lookups == [("git", target_path)]
-    assert calls == [["/usr/bin/xcode-select", "-p"], ["/usr/bin/git", "--version"]]
+    assert calls == [["/usr/bin/xcode-select", "-p"]]
     assert not marker.exists()
 
 
-def test_macos_non_system_git_does_not_require_clt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_macos_non_system_git_is_classified_without_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(git_runtime.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(
@@ -428,4 +521,4 @@ def test_macos_non_system_git_does_not_require_clt(monkeypatch: pytest.MonkeyPat
     assert git_runtime.resolve_system_git_path(env={"PATH": "/opt/homebrew/bin"}) == Path(
         "/opt/homebrew/bin/git"
     )
-    assert calls == [["/opt/homebrew/bin/git", "--version"]]
+    assert calls == []

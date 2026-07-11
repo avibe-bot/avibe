@@ -124,8 +124,8 @@ def git_runtime_status() -> dict[str, Any]:
     vendored = manager.resolve_git_path()
     managed_status = manager.status()
     system = resolve_system_git_path()
-    vendored_version = _probe_git_version(vendored)
-    system_version = _probe_git_version(system)
+    vendored_version = str(managed_status.get("version") or "") or None
+    system_version = None
     if vendored is not None:
         resolution = "vendored"
         resolved_path = vendored
@@ -198,7 +198,7 @@ def resolve_system_git_path(*, env: Mapping[str, str] | None = None) -> Path | N
             return None
         if proc.returncode != 0 or not (proc.stdout or "").strip():
             return None
-    return candidate_path if _probe_git_version(candidate_path) is not None else None
+    return candidate_path
 
 
 def _probe_git_version(binary: Path | None) -> str | None:
