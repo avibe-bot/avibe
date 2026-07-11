@@ -523,13 +523,32 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
 
 
 def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
-    files = {
+    # Runtime-owned app shell + always-present workspace files. Each is written
+    # once and skipped if it already exists, so an existing workspace keeps its
+    # own copies (see the skip-if-exists loop below).
+    files: dict[str, str] = {
         "index.html": _default_index_html(session_id),
         "src/main.tsx": _default_main_tsx(),
-        "src/App.tsx": _default_app_tsx(),
         "src/styles.css": _default_styles_css(),
         "api/health.ts": _default_api_health_ts(),
     }
+    # Multi-page demo. Only seed it into a FRESH workspace — one that does not yet
+    # have its own ``src/App.tsx``. This keeps existing single-page workspaces
+    # byte-for-byte unchanged (we never drop router/pages files next to a page the
+    # agent already authored) while a brand-new Show Page starts as a working
+    # multi-page app the agent can inspect, run, extend, or replace. Adding a page
+    # later is just a new file under ``src/pages/`` — the router discovers it and
+    # the runtime-owned shell (``index.html`` / ``src/main.tsx``) is never touched.
+    if not (page_dir / "src" / "App.tsx").exists():
+        files.update(
+            {
+                "src/App.tsx": _default_app_tsx(),
+                "src/router.tsx": _default_router_tsx(),
+                "src/pages/index.tsx": _default_page_home_tsx(),
+                "src/pages/items/index.tsx": _default_page_items_index_tsx(),
+                "src/pages/items/[id].tsx": _default_page_item_detail_tsx(),
+            }
+        )
     for relative_path, contents in files.items():
         target = page_dir / relative_path
         if target.exists():
@@ -837,110 +856,393 @@ createRoot(document.getElementById("root")!).render(
 
 
 def _default_app_tsx() -> str:
-    # Placeholder shown while the agent has not authored the page yet. On the
-    # private /show/ surface the Vite runtime hot-swaps this with the real page
-    # as soon as the agent rewrites src/App.tsx, so the copy says it appears
-    # automatically; the public /p/ surface serves a static build with HMR
-    # disabled, so there the copy asks the viewer to refresh instead. We also
-    # offer the same prompt we auto-send, in case the user wants to nudge.
-    return """import { useEffect, useState } from "react"
-import { Button } from "@/components/ui/button"
-import { ThemeProvider } from "@avibe/show-ui/theme"
+    # The default multi-page demo (agent-editable). It composes the shared layout
+    # (nav derived from the discovered pages) with the routed page. This file and
+    # everything under src/pages/ + src/router.tsx are a starting point: the agent
+    # can restyle the nav, add pages, or replace the whole thing. The runtime-owned
+    # app shell (index.html + src/main.tsx) is never edited to add a page.
+    return """import { ThemeProvider } from "@avibe/show-ui/theme"
+import { cn } from "@/lib/utils"
+import { Link, RouterView, navItems, useRoutePath } from "./router"
 
-const NUDGE_PROMPT = "Please visualize this session as a Show Page."
-
-const COPY = {
-  en: {
-    lang: "en",
-    badge: "Show Page",
-    title: "Building your Show Page",
-    bodyLive: "Your agent is turning this session into a visual page. It will appear here automatically once it is ready.",
-    bodyStatic: "Your agent is turning this session into a visual page. Refresh this page once it is ready to see it.",
-    nudge: "Taking a while? Send this to your agent:",
-    copy: "Copy",
-    copied: "Copied",
-  },
-  zh: {
-    lang: "zh",
-    badge: "Show Page",
-    title: "正在生成 Show Page",
-    bodyLive: "Agent 正在把这次会话整理成一个可视化页面，完成后会自动显示在这里，不用刷新。",
-    bodyStatic: "Agent 正在把这次会话整理成一个可视化页面，完成后刷新一下页面就能看到。",
-    nudge: "等太久了？把这句话发给 Agent 催一下：",
-    copy: "复制",
-    copied: "已复制",
-  },
-}
-
-function pickCopy() {
-  const lang = (typeof navigator !== "undefined" && navigator.language) || "en"
-  return lang.toLowerCase().startsWith("zh") ? COPY.zh : COPY.en
-}
-
-// The private /show/ surface keeps Vite HMR, so the real page hot-swaps in on
-// its own. The public /p/ surface serves a static build (HMR disabled), so a
-// viewer there has to refresh to pick up the agent's page.
-function isLiveSurface() {
-  return typeof window !== "undefined" && window.location.pathname.includes("/show/")
+function Nav() {
+  const path = useRoutePath()
+  return (
+    <nav className="flex flex-wrap items-center gap-1">
+      {navItems.map((item) => {
+        const active = path === item.to || (item.to !== "/" && path.startsWith(item.to + "/"))
+        return (
+          <Link
+            key={item.to}
+            to={item.to}
+            className={cn(
+              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              active
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            {item.label}
+          </Link>
+        )
+      })}
+    </nav>
+  )
 }
 
 export default function App() {
-  const t = pickCopy()
-  const [copied, setCopied] = useState(false)
-  const live = isLiveSurface()
-
-  useEffect(() => {
-    document.documentElement.lang = t.lang
-  }, [t.lang])
-
-  async function copyPrompt() {
-    let ok = false
-    try {
-      await navigator.clipboard.writeText(NUDGE_PROMPT)
-      ok = true
-    } catch {
-      const field = document.getElementById("show-nudge-prompt")
-      if (field instanceof HTMLInputElement) {
-        field.select()
-        ok = document.execCommand("copy")
-      }
-    }
-    if (!ok) return
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 2000)
-  }
-
   return (
     <ThemeProvider preset="zinc">
-      <main className="show-shell">
-        <section className="show-card">
-          <div className="show-pulse" aria-hidden="true">
-            <span className="show-pulse-ring" />
-            <span className="show-pulse-ring delay" />
-            <span className="show-pulse-core" />
+      <div className="min-h-screen bg-background text-foreground">
+        <header className="sticky top-0 z-10 border-b border-border bg-background/85 backdrop-blur">
+          <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <Link to="/" className="text-sm font-semibold tracking-tight">
+              Show Page
+            </Link>
+            <Nav />
           </div>
-          <span className="show-badge">{t.badge}</span>
-          <h1 className="show-title">{t.title}</h1>
-          <p className="show-body">{live ? t.bodyLive : t.bodyStatic}</p>
-          <div className="show-nudge">
-            <label className="show-nudge-label" htmlFor="show-nudge-prompt">
-              {t.nudge}
-            </label>
-            <div className="show-nudge-row">
-              <input
-                id="show-nudge-prompt"
-                className="show-nudge-input"
-                value={NUDGE_PROMPT}
-                readOnly
-              />
-              <Button className="show-nudge-copy" onClick={() => void copyPrompt()}>
-                {copied ? t.copied : t.copy}
-              </Button>
-            </div>
-          </div>
-        </section>
-      </main>
+        </header>
+        <main className="mx-auto max-w-3xl px-4 py-8">
+          <RouterView />
+        </main>
+      </div>
     </ThemeProvider>
+  )
+}
+"""
+
+
+def _default_router_tsx() -> str:
+    # A tiny, dependency-free hash router with file-based page discovery.
+    #
+    # Why hash routing: a Show Page is served as a client-only app mounted under a
+    # path prefix (/show/<id>/ privately, /p/<share>/ publicly, both proxied to the
+    # same managed Vite dev server). With hash routes the browser only ever requests
+    # the app root, so deep-linking and refreshing a nested route work identically in
+    # both serving modes with no server cooperation, and relative URLs (assets,
+    # ./api/* handlers, event endpoints) always resolve. The trade-off is a "#" in
+    # the URL, which stays bookmarkable and PWA-installable.
+    #
+    # Why file-based discovery: adding a route is just adding a file under src/pages/.
+    # A folder becomes a nested path segment and a [param] file becomes a dynamic
+    # segment, so the scaffold is not locked into a flat page list. Nothing here or in
+    # the app shell needs editing to add a page.
+    return """import type { ComponentType, ReactNode } from "react"
+import { useSyncExternalStore } from "react"
+
+export type PageMeta = {
+  // Label shown in the nav. Falls back to a title-cased path when omitted.
+  title?: string
+  // Sort order within the nav (lower first).
+  order?: number
+  // Set false to keep a static page out of the nav (it stays directly linkable).
+  nav?: boolean
+}
+
+export type PageProps = {
+  // Values captured from [param] segments, e.g. { id: "42" } for /items/42.
+  params: Record<string, string>
+}
+
+type PageModule = {
+  default: ComponentType<PageProps>
+  meta?: PageMeta
+}
+
+type Segment = { name: string; dynamic: boolean }
+type Route = {
+  path: string
+  segments: Segment[]
+  Component: ComponentType<PageProps>
+  meta: PageMeta
+  dynamic: boolean
+}
+
+const PAGES_PREFIX = "./pages/"
+const PAGE_SUFFIX = ".tsx"
+
+// Eagerly import every page module at build time. This is the discovery
+// mechanism: a new file under src/pages/ automatically registers a route.
+const modules = import.meta.glob<PageModule>("./pages/**/*.tsx", { eager: true })
+
+// "./pages/items/[id].tsx" -> "/items/:id"; "./pages/index.tsx" -> "/".
+// Returns null for framework files (any segment starting with "_"), which lets
+// an agent colocate non-page helpers under src/pages/ without creating a route.
+function filePathToRoute(file: string): string | null {
+  const relative = file.slice(PAGES_PREFIX.length, file.length - PAGE_SUFFIX.length)
+  const parts = relative.split("/")
+  if (parts[parts.length - 1] === "index") parts.pop()
+  if (parts.some((part) => part.startsWith("_"))) return null
+  const path = parts
+    .map((part) => (part.startsWith("[") && part.endsWith("]") ? ":" + part.slice(1, -1) : part))
+    .join("/")
+  return path ? "/" + path : "/"
+}
+
+function toSegments(path: string): Segment[] {
+  if (path === "/") return []
+  return path
+    .slice(1)
+    .split("/")
+    .map((part) => (part.startsWith(":") ? { name: part.slice(1), dynamic: true } : { name: part, dynamic: false }))
+}
+
+function titleCase(value: string): string {
+  return value.replace(/[-_]/g, " ").replace(/\\b\\w/g, (c) => c.toUpperCase())
+}
+
+// Per-segment specificity mask: "0" for a static segment, "1" for a dynamic one.
+// Routes are sorted ascending by this mask (compared left to right), so among
+// routes of the same length a static segment always beats a [param] at the same
+// position — e.g. /items/new wins over /items/:id, and /users/:id/edit wins over
+// /users/:id/:action.
+function routeSpecificity(segments: Segment[]): string {
+  return segments.map((segment) => (segment.dynamic ? "1" : "0")).join("")
+}
+
+export const routes: Route[] = Object.entries(modules)
+  .map(([file, mod]): Route | null => {
+    const path = filePathToRoute(file)
+    if (!path || typeof mod.default !== "function") return null
+    const segments = toSegments(path)
+    return { path, segments, Component: mod.default, meta: mod.meta ?? {}, dynamic: segments.some((s) => s.dynamic) }
+  })
+  .filter((route): route is Route => route !== null)
+  .sort((a, b) => {
+    const specA = routeSpecificity(a.segments)
+    const specB = routeSpecificity(b.segments)
+    if (specA !== specB) return specA < specB ? -1 : 1
+    return a.path.localeCompare(b.path)
+  })
+
+export const navItems: { to: string; label: string }[] = routes
+  .filter((route) => !route.dynamic && route.meta.nav !== false)
+  .sort((a, b) => (a.meta.order ?? 0) - (b.meta.order ?? 0) || a.path.localeCompare(b.path))
+  .map((route) => ({
+    to: route.path,
+    label: route.meta.title ?? (route.path === "/" ? "Home" : titleCase(route.path.slice(1).split("/").pop() || "")),
+  }))
+
+function matchRoute(path: string): { route: Route | null; params: Record<string, string> } {
+  const parts = path === "/" ? [] : path.slice(1).split("/")
+  for (const route of routes) {
+    if (route.segments.length !== parts.length) continue
+    const params: Record<string, string> = {}
+    let matched = true
+    for (let i = 0; i < parts.length; i++) {
+      const segment = route.segments[i]
+      if (segment.dynamic) params[segment.name] = decodeURIComponent(parts[i])
+      else if (segment.name !== parts[i]) {
+        matched = false
+        break
+      }
+    }
+    if (matched) return { route, params }
+  }
+  return { route: null, params: {} }
+}
+
+function readHashPath(): string {
+  const hash = window.location.hash
+  const raw = (hash.startsWith("#") ? hash.slice(1) : hash).split("?")[0]
+  if (!raw) return "/"
+  const path = raw.startsWith("/") ? raw : "/" + raw
+  // Normalize a trailing slash so "/items/" matches the "/items" route.
+  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path
+}
+
+function subscribe(onChange: () => void): () => void {
+  window.addEventListener("hashchange", onChange)
+  return () => window.removeEventListener("hashchange", onChange)
+}
+
+export function useRoutePath(): string {
+  return useSyncExternalStore(subscribe, readHashPath, () => "/")
+}
+
+export function navigate(to: string): void {
+  window.location.hash = to.startsWith("/") ? to : "/" + to
+}
+
+export function Link({ to, className, children }: { to: string; className?: string; children: ReactNode }) {
+  // A plain hash anchor: the browser updates the fragment and fires "hashchange"
+  // without a full navigation, so no click handler or pushState is needed.
+  return (
+    <a href={"#" + to} className={className}>
+      {children}
+    </a>
+  )
+}
+
+export function RouterView() {
+  const path = useRoutePath()
+  const { route, params } = matchRoute(path)
+  if (!route) {
+    return (
+      <div className="rounded-lg border border-border bg-card p-6 text-card-foreground">
+        <h1 className="text-lg font-semibold">Page not found</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          No route matches <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
+        </p>
+        <p className="mt-4 text-sm">
+          <a className="font-medium underline underline-offset-4" href="#/">
+            Back to Home
+          </a>
+        </p>
+      </div>
+    )
+  }
+  const Page = route.Component
+  return <Page params={params} />
+}
+"""
+
+
+def _default_page_home_tsx() -> str:
+    # Demo landing page. Generic on purpose: it teaches the "add a file = add a
+    # page" pattern without implying a page must map to a topic, feature, or
+    # history. The agent is free to replace or remove it.
+    return """import { Badge } from "@/components/ui/badge"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Link } from "../router"
+
+export const meta = { title: "Home", order: 0 }
+
+const codeClass = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+
+export default function Home() {
+  return (
+    <div className="space-y-6">
+      <div className="space-y-2">
+        <Badge>Starter</Badge>
+        <h1 className="text-2xl font-semibold tracking-tight">A multi-page Show Page</h1>
+        <p className="text-muted-foreground">
+          This workspace starts as a small multi-page app so routing is ready to use. It is only
+          a starting point — restyle it, extend it, or replace it with whatever structure fits
+          your app: flat pages, sections, or nested routes.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Add a page</CardTitle>
+          <CardDescription>Routing is file-based — no config and no app-shell edits.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-muted-foreground">
+          <p>
+            Create a file under <code className={codeClass}>src/pages/</code>. Its location becomes
+            the route:
+          </p>
+          <ul className="space-y-1">
+            <li>
+              <code className={codeClass}>src/pages/about.tsx</code> → <code className={codeClass}>#/about</code>
+            </li>
+            <li>
+              <code className={codeClass}>src/pages/items/index.tsx</code> → <code className={codeClass}>#/items</code>
+            </li>
+            <li>
+              <code className={codeClass}>src/pages/items/[id].tsx</code> → <code className={codeClass}>#/items/:id</code>
+              {" "}(nested + dynamic)
+            </li>
+          </ul>
+          <p>
+            Export a default component. Add an optional <code className={codeClass}>meta</code> to set
+            its nav label and order.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Nested routing</CardTitle>
+          <CardDescription>Folders become nested paths; [param] files capture values.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link to="/items" className="font-medium text-foreground underline underline-offset-4">
+            Open the Items demo →
+          </Link>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+"""
+
+
+def _default_page_items_index_tsx() -> str:
+    # Demo list page under a folder, so the route is nested (#/items) and links
+    # into a dynamic child route (#/items/:id).
+    return """import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Link } from "../../router"
+
+export const meta = { title: "Items", order: 1 }
+
+const items = [
+  { id: "1", name: "First item", hint: "A demo record" },
+  { id: "2", name: "Second item", hint: "Another demo record" },
+  { id: "3", name: "Third item", hint: "One more demo record" },
+]
+
+export default function Items() {
+  return (
+    <div className="space-y-6">
+      <div className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">Items</h1>
+        <p className="text-muted-foreground">
+          Each item links to a nested route such as <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">#/items/1</code>.
+          Open one, then reload — the deep link loads directly.
+        </p>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        {items.map((item) => (
+          <Link key={item.id} to={"/items/" + item.id} className="block">
+            <Card className="h-full transition-colors hover:border-primary/50">
+              <CardHeader>
+                <CardTitle className="text-base">{item.name}</CardTitle>
+                <CardDescription>{item.hint}</CardDescription>
+              </CardHeader>
+            </Card>
+          </Link>
+        ))}
+      </div>
+    </div>
+  )
+}
+"""
+
+
+def _default_page_item_detail_tsx() -> str:
+    # Demo dynamic route: src/pages/items/[id].tsx -> /items/:id. Reads the id
+    # param and is directly deep-linkable / refreshable.
+    return """import { Badge } from "@/components/ui/badge"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Link, type PageProps } from "../../router"
+
+const codeClass = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+
+export default function ItemDetail({ params }: PageProps) {
+  return (
+    <div className="space-y-6">
+      <Link to="/items" className="text-sm text-muted-foreground underline underline-offset-4">
+        ← Back to Items
+      </Link>
+
+      <Card>
+        <CardHeader>
+          <Badge>Nested route</Badge>
+          <CardTitle>Item {params.id}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm text-muted-foreground">
+          <p>
+            This page is <code className={codeClass}>src/pages/items/[id].tsx</code>, matched from the
+            URL. The <code className={codeClass}>id</code> parameter is{" "}
+            <code className={codeClass}>{params.id}</code>.
+          </p>
+          <p>Reload the page — this deep link resolves on the client, in private and public modes.</p>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 """
@@ -954,149 +1256,14 @@ def _default_styles_css() -> str:
   color-scheme: light;
 }
 
+/*
+ * The default multi-page demo styles itself with Tailwind utility classes and the
+ * @avibe/show-ui shadcn components, so this entry only needs the two imports above
+ * (keep them first) plus a small base. Add global CSS here as the app grows.
+ */
 body {
   margin: 0;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: hsl(var(--avs-foreground));
-  background:
-    radial-gradient(130% 130% at 50% -20%, hsl(var(--avs-ring) / 0.10), transparent 55%),
-    hsl(var(--avs-muted));
-}
-
-.show-shell {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  box-sizing: border-box;
-}
-
-.show-card {
-  width: min(440px, 100%);
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 14px;
-  padding: clamp(28px, 6vw, 44px);
-  border: 1px solid hsl(var(--avs-border));
-  border-radius: calc(var(--avs-radius, 0.5rem) + 10px);
-  background: hsl(var(--avs-background));
-  box-shadow: 0 24px 70px -32px hsl(var(--avs-foreground) / 0.30);
-}
-
-.show-pulse {
-  position: relative;
-  width: 52px;
-  height: 52px;
-  display: grid;
-  place-items: center;
-}
-
-.show-pulse-core {
-  width: 13px;
-  height: 13px;
-  border-radius: 999px;
-  background: hsl(var(--avs-ring));
-  box-shadow: 0 0 0 4px hsl(var(--avs-ring) / 0.14);
-}
-
-.show-pulse-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  border: 2px solid hsl(var(--avs-ring));
-  opacity: 0;
-  animation: show-ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
-}
-
-.show-pulse-ring.delay {
-  animation-delay: 0.9s;
-}
-
-.show-badge {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: hsl(var(--avs-muted-foreground));
-}
-
-.show-title {
-  margin: 0;
-  font-size: clamp(20px, 4.5vw, 24px);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.show-body {
-  margin: 0;
-  max-width: 34ch;
-  line-height: 1.6;
-  color: hsl(var(--avs-muted-foreground));
-}
-
-.show-nudge {
-  width: 100%;
-  margin-top: 6px;
-  padding-top: 18px;
-  border-top: 1px solid hsl(var(--avs-border));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  text-align: left;
-}
-
-.show-nudge-label {
-  font-size: 13px;
-  color: hsl(var(--avs-muted-foreground));
-}
-
-.show-nudge-row {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.show-nudge-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 38px;
-  padding: 0 12px;
-  border: 1px solid hsl(var(--avs-border));
-  border-radius: 8px;
-  background: hsl(var(--avs-muted));
-  color: hsl(var(--avs-foreground));
-  font-size: 13px;
-}
-
-.show-nudge-input:focus-visible {
-  outline: 2px solid hsl(var(--avs-ring));
-  outline-offset: 1px;
-}
-
-.show-nudge-copy {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-@keyframes show-ping {
-  0% {
-    transform: scale(0.4);
-    opacity: 0.55;
-  }
-  100% {
-    transform: scale(1.05);
-    opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .show-pulse-ring {
-    animation: none;
-    opacity: 0;
-  }
 }
 """
 

@@ -93,8 +93,8 @@ History contract:
 $show_git_agent_contract
 
 Guidance:
-- New Show Page workspaces are managed React/Vite apps. Edit `src/App.tsx`, `src/styles.css`, and optional `api/*.ts` handler files. Do not replace `index.html` or `src/main.tsx` unless you are repairing the app shell.
-- The standard structure is `index.html`, `src/main.tsx`, `src/App.tsx`, `src/styles.css`, and optional `api/*.ts`; treat `index.html` and `src/main.tsx` as the runtime-owned app shell.
+- New Show Page workspaces are managed React/Vite apps that start as a small, working multi-page demo. Routing is file-based: add a route by creating a file under `src/pages/` — a folder becomes a nested path segment and a `[param]` file a dynamic segment. Customize the nav and layout in `src/App.tsx`, styles in `src/styles.css`, and add optional `api/*.ts` handlers. The demo is only a starting point, not a required structure: extend it, replace it, or remove it, and organize pages however fits the app.
+- Treat `index.html` and `src/main.tsx` as the runtime-owned app shell — you never edit them to add a page, and should not replace them unless repairing the shell. `src/router.tsx` is a small file-based hash router you can keep as-is (adding a page needs no change to it) or customize.
 - Hot reload is available while `/show/<session-id>/` is open. Users will see page changes live. Prefer component-level changes that preserve React state.
 - Built-in UI imports include shadcn-style aliases such as `@/components/ui/button`, `@/components/ui/card`, `@/components/ui/badge`, `@/components/ui/dialog`, `@/components/ui/input`, `@/components/ui/progress`, plus `@avibe/show-ui/theme` for theme presets and CSS variables.
 - Tailwind CSS v4 utility classes are built in and work in any `className`, including to restyle the built-in `@/components/ui/*` components (a utility overrides the component default). `src/styles.css` is the CSS entry and must keep `@import "tailwindcss";` and `@import "@avibe/show-ui/theme.css";` at the top; theme through the `@avibe/show-ui/theme` CSS variables.
