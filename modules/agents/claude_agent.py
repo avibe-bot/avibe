@@ -1533,18 +1533,25 @@ class ClaudeAgent(BaseAgent):
         if not token:
             # The gate is CONTENDED — a user turn holds it, or one is queued on it
             # and we must not block the receiver behind that waiter (deadlock; see
-            # begin_agent_initiated_turn). If a turn actually holds the gate the
-            # output rides that turn's machinery; in the narrow free-but-queued
-            # window the outbound guard drops it. Log so that (rare, sub-tick) loss
-            # is visible instead of silent — full preservation across a queued user
-            # turn is a tracked follow-up.
+            # begin_agent_initiated_turn). Deliver the completed Activity summary
+            # immediately as detached output. Keeping it in the result-sequence map
+            # would let a missing background Result poison the next user Result.
             logger.info(
                 "Agent-initiated output for %s not opened: runtime gate contended "
                 "(a user turn holds or is queued on it)",
                 composite_key,
             )
             if completed_activity is not None:
-                self._detached_activity_outputs[composite_key] = completed_activity
+                await self.emit_result_message(
+                    context,
+                    str(completed_activity.metadata.get("summary") or "").strip(),
+                    parse_mode="markdown",
+                    output=self._activity_message_output(
+                        completed_activity,
+                        detached=True,
+                        completes_turn=False,
+                    ),
+                )
             return
         # Mark the session ACTIVE so this in-flight agent-initiated turn gets the
         # SAME idle-eviction exemption a user turn gets in ``handle_message``.
