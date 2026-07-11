@@ -362,6 +362,36 @@ def test_agent_path_injection_only_when_system_git_is_absent(
     assert env["PATH"].split(os.pathsep)[0] == str(vendored.parent)
 
 
+def test_agent_path_injection_preserves_target_environment_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        def resolve_git_path(self) -> Path:
+            return vendored
+
+    seen_paths: list[str] = []
+
+    def missing_system_git(*, env):
+        seen_paths.append(env["PATH"])
+        return None
+
+    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
+    env = {"PATH": "/backend/tools:/backend/bin"}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={"PATH": "/service/bin"},
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert seen_paths == ["/backend/tools:/backend/bin"]
+    assert env["PATH"] == f"{vendored.parent}:/backend/tools:/backend/bin"
+
+
 def test_agent_path_injection_never_shadows_system_git(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

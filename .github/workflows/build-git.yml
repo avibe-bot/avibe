@@ -257,6 +257,160 @@ jobs:
                    return 0;
            }
 
+          --- a/run-command.c
+          +++ b/run-command.c
+          @@ -680,6 +680,18 @@
+                   int fdin[2], fdout[2], fderr[2];
+                   int failed_errno;
+                   const char *str;
+          +
+          +        if (!cmd->git_cmd) {
+          +                if (cmd->in > 0)
+          +                        close(cmd->in);
+          +                if (cmd->out > 0)
+          +                        close(cmd->out);
+          +                if (cmd->err > 0)
+          +                        close(cmd->err);
+          +                child_process_clear(cmd);
+          +                errno = EPERM;
+          +                return -1;
+          +        }
+
+                   /*
+                    * In case of errors we must keep the promise to close FDs
+          --- a/commit.c
+          +++ b/commit.c
+          @@ -1749,6 +1749,7 @@
+                   struct object_id *parent_buf = NULL, *compat_oid = NULL;
+                   struct object_id compat_oid_buf;
+                   size_t i, nparents;
+          +        sign_commit = NULL;
+
+                   /* Not having i18n.commitencoding is the same as having utf-8 */
+                   encoding_is_utf8 = is_encoding_utf8(git_commit_encoding);
+          --- a/diff.c
+          +++ b/diff.c
+          @@ -557,20 +557,7 @@
+
+           static const struct external_diff *external_diff(void)
+           {
+          -        static struct external_diff external_diff_env, *external_diff_ptr;
+          -        static int done_preparing = 0;
+          -
+          -        if (done_preparing)
+          -                return external_diff_ptr;
+          -        external_diff_env.cmd = xstrdup_or_null(getenv("GIT_EXTERNAL_DIFF"));
+          -        if (git_env_bool("GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE", 0))
+          -                external_diff_env.trust_exit_code = 1;
+          -        if (external_diff_env.cmd)
+          -                external_diff_ptr = &external_diff_env;
+          -        else if (external_diff_cfg.cmd)
+          -                external_diff_ptr = &external_diff_cfg;
+          -        done_preparing = 1;
+          -        return external_diff_ptr;
+          +        return NULL;
+           }
+
+           /*
+          @@ -3762,11 +3749,9 @@
+           struct userdiff_driver *get_textconv(struct repository *r,
+                                                struct diff_filespec *one)
+           {
+          -        if (!DIFF_FILE_VALID(one))
+          -                return NULL;
+          -
+          -        diff_filespec_load_driver(one, r->index);
+          -        return userdiff_get_textconv(r, one->driver);
+          +        (void)r;
+          +        (void)one;
+          +        return NULL;
+           }
+
+           static struct string_list *additional_headers(struct diff_options *o,
+          --- a/fsmonitor-settings.c
+          +++ b/fsmonitor-settings.c
+          @@ -102,48 +102,9 @@
+
+           static void lookup_fsmonitor_settings(struct repository *r)
+           {
+          -        const char *const_str;
+          -        char *to_free = NULL;
+          -        int bool_value;
+          -
+                   if (r->settings.fsmonitor)
+                           return;
+          -
+          -        /*
+          -         * Overload the existing "core.fsmonitor" config setting (which
+          -         * has historically been either unset or a hook pathname) to
+          -         * now allow a boolean value to enable the builtin FSMonitor
+          -         * or to turn everything off.  (This does imply that you can't
+          -         * use a hook script named "true" or "false", but that's OK.)
+          -         */
+          -        switch (repo_config_get_maybe_bool(r, "core.fsmonitor", &bool_value)) {
+          -
+          -        case 0: /* config value was set to <bool> */
+          -                if (bool_value)
+          -                        fsm_settings__set_ipc(r);
+          -                else
+          -                        fsm_settings__set_disabled(r);
+          -                return;
+          -
+          -        case 1: /* config value was unset */
+          -                const_str = getenv("GIT_TEST_FSMONITOR");
+          -                break;
+          -
+          -        case -1: /* config value set to an arbitrary string */
+          -                if (repo_config_get_pathname(r, "core.fsmonitor", &to_free))
+          -                        return; /* should not happen */
+          -                const_str = to_free;
+          -                break;
+          -
+          -        default: /* should not happen */
+          -                return;
+          -        }
+          -
+          -        if (const_str && *const_str)
+          -                fsm_settings__set_hook(r, const_str);
+          -        else
+          -                fsm_settings__set_disabled(r);
+          -        free(to_free);
+          +        fsm_settings__set_disabled(r);
+           }
+
+           enum fsmonitor_mode fsm_settings__get_mode(struct repository *r)
+          --- a/pager.c
+          +++ b/pager.c
+          @@ -84,26 +84,9 @@
+
+           const char *git_pager(struct repository *r, int stdout_is_tty)
+           {
+          -        const char *pager;
+          -
+          -        if (!stdout_is_tty)
+          -                return NULL;
+          -
+          -        pager = getenv("GIT_PAGER");
+          -        if (!pager) {
+          -                if (!pager_program)
+          -                        read_early_config(r,
+          -                                          core_pager_config, NULL);
+          -                pager = pager_program;
+          -        }
+          -        if (!pager)
+          -                pager = getenv("PAGER");
+          -        if (!pager)
+          -                pager = DEFAULT_PAGER;
+          -        if (!*pager || !strcmp(pager, "cat"))
+          -                pager = NULL;
+          -
+          -        return pager;
+          +        (void)r;
+          +        (void)stdout_is_tty;
+          +        return NULL;
+           }
+
+           static void setup_pager_env(struct strvec *env)
           --- a/setup.c
           +++ b/setup.c
           @@ -2262,7 +2262,7 @@
@@ -345,9 +499,15 @@ jobs:
               filter_script="$scratch/filter.sh"
               printf "#!/bin/sh\ntouch \"%s\"\ncat\n" "$filter_marker" > "$filter_script"
               chmod +x "$filter_script"
+              sign_marker="$scratch/sign-ran"
+              sign_script="$scratch/sign.sh"
+              printf "#!/bin/sh\ntouch \"%s\"\nexit 1\n" "$sign_marker" > "$sign_script"
+              chmod +x "$sign_script"
               "$git_bin" -C "$scratch/repo" config filter.avibe.clean "$filter_script"
               "$git_bin" -C "$scratch/repo" config filter.avibe.required true
-              printf "*.filtered filter=avibe\n" > "$scratch/repo/.gitattributes"
+              "$git_bin" -C "$scratch/repo" config commit.gpgsign true
+              "$git_bin" -C "$scratch/repo" config gpg.program "$sign_script"
+              printf "*.filtered filter=avibe diff=avibe\n" > "$scratch/repo/.gitattributes"
               printf "filter input\n" > "$scratch/repo/payload.filtered"
               "$git_bin" -C "$scratch/repo" add .gitattributes payload.filtered
               "$git_bin" -C "$scratch/repo" \
@@ -355,11 +515,39 @@ jobs:
                 commit -m hardening-smoke
               test ! -e "$hook_marker"
               test ! -e "$filter_marker"
+              test ! -e "$sign_marker"
+              fsmonitor_marker="$scratch/fsmonitor-ran"
+              fsmonitor_script="$scratch/fsmonitor.sh"
+              printf "#!/bin/sh\ntouch \"%s\"\nexit 1\n" "$fsmonitor_marker" > "$fsmonitor_script"
+              chmod +x "$fsmonitor_script"
+              "$git_bin" -C "$scratch/repo" config core.fsmonitor "$fsmonitor_script"
               "$git_bin" -C "$scratch/repo" status --short
+              test ! -e "$fsmonitor_marker"
               "$git_bin" -C "$scratch/repo" log --oneline -1
+              pager_marker="$scratch/pager-ran"
+              pager_script="$scratch/pager.sh"
+              printf "#!/bin/sh\ntouch \"%s\"\ncat\n" "$pager_marker" > "$pager_script"
+              chmod +x "$pager_script"
+              GIT_PAGER="$pager_script" "$git_bin" -C "$scratch/repo" --paginate log --oneline -1
+              test ! -e "$pager_marker"
               printf "second\n" >> "$scratch/repo/example.txt"
-              "$git_bin" -C "$scratch/repo" diff -- example.txt
-              "$git_bin" -C "$scratch/repo" restore -- example.txt
+              diff_marker="$scratch/diff-ran"
+              diff_script="$scratch/diff.sh"
+              printf "#!/bin/sh\ntouch \"%s\"\nexit 1\n" "$diff_marker" > "$diff_script"
+              chmod +x "$diff_script"
+              "$git_bin" -C "$scratch/repo" config diff.external "$diff_script"
+              GIT_EXTERNAL_DIFF="$diff_script" "$git_bin" -C "$scratch/repo" diff -- example.txt
+              test ! -e "$diff_marker"
+              "$git_bin" -C "$scratch/repo" config --unset diff.external
+              textconv_marker="$scratch/textconv-ran"
+              textconv_script="$scratch/textconv.sh"
+              printf "#!/bin/sh\ntouch \"%s\"\ncat \"\$1\"\n" "$textconv_marker" > "$textconv_script"
+              chmod +x "$textconv_script"
+              "$git_bin" -C "$scratch/repo" config diff.avibe.textconv "$textconv_script"
+              printf "filter second\n" >> "$scratch/repo/payload.filtered"
+              "$git_bin" -C "$scratch/repo" diff --textconv -- payload.filtered
+              test ! -e "$textconv_marker"
+              "$git_bin" -C "$scratch/repo" restore -- example.txt payload.filtered
               PATH=/nonexistent "$git_bin" -C "$scratch/repo" gc
               test -z "$("$git_bin" -C "$scratch/repo" status --porcelain)"
               "$git_bin" init --bare "$scratch/remote"
@@ -447,9 +635,15 @@ jobs:
           filter_script="$scratch/filter.sh"
           printf "#!/bin/sh\ntouch \"%s\"\ncat\n" "$filter_marker" > "$filter_script"
           chmod +x "$filter_script"
+          sign_marker="$scratch/sign-ran"
+          sign_script="$scratch/sign.sh"
+          printf "#!/bin/sh\ntouch \"%s\"\nexit 1\n" "$sign_marker" > "$sign_script"
+          chmod +x "$sign_script"
           "$git_bin" -C "$scratch/repo" config filter.avibe.clean "$filter_script"
           "$git_bin" -C "$scratch/repo" config filter.avibe.required true
-          printf "*.filtered filter=avibe\n" > "$scratch/repo/.gitattributes"
+          "$git_bin" -C "$scratch/repo" config commit.gpgsign true
+          "$git_bin" -C "$scratch/repo" config gpg.program "$sign_script"
+          printf "*.filtered filter=avibe diff=avibe\n" > "$scratch/repo/.gitattributes"
           printf "filter input\n" > "$scratch/repo/payload.filtered"
           "$git_bin" -C "$scratch/repo" add .gitattributes payload.filtered
           "$git_bin" -C "$scratch/repo" \
@@ -457,11 +651,39 @@ jobs:
             commit -m hardening-smoke
           test ! -e "$hook_marker"
           test ! -e "$filter_marker"
+          test ! -e "$sign_marker"
+          fsmonitor_marker="$scratch/fsmonitor-ran"
+          fsmonitor_script="$scratch/fsmonitor.sh"
+          printf "#!/bin/sh\ntouch \"%s\"\nexit 1\n" "$fsmonitor_marker" > "$fsmonitor_script"
+          chmod +x "$fsmonitor_script"
+          "$git_bin" -C "$scratch/repo" config core.fsmonitor "$fsmonitor_script"
           "$git_bin" -C "$scratch/repo" status --short
+          test ! -e "$fsmonitor_marker"
           "$git_bin" -C "$scratch/repo" log --oneline -1
+          pager_marker="$scratch/pager-ran"
+          pager_script="$scratch/pager.sh"
+          printf "#!/bin/sh\ntouch \"%s\"\ncat\n" "$pager_marker" > "$pager_script"
+          chmod +x "$pager_script"
+          GIT_PAGER="$pager_script" "$git_bin" -C "$scratch/repo" --paginate log --oneline -1
+          test ! -e "$pager_marker"
           printf "second\n" >> "$scratch/repo/example.txt"
-          "$git_bin" -C "$scratch/repo" diff -- example.txt
-          "$git_bin" -C "$scratch/repo" restore -- example.txt
+          diff_marker="$scratch/diff-ran"
+          diff_script="$scratch/diff.sh"
+          printf "#!/bin/sh\ntouch \"%s\"\nexit 1\n" "$diff_marker" > "$diff_script"
+          chmod +x "$diff_script"
+          "$git_bin" -C "$scratch/repo" config diff.external "$diff_script"
+          GIT_EXTERNAL_DIFF="$diff_script" "$git_bin" -C "$scratch/repo" diff -- example.txt
+          test ! -e "$diff_marker"
+          "$git_bin" -C "$scratch/repo" config --unset diff.external
+          textconv_marker="$scratch/textconv-ran"
+          textconv_script="$scratch/textconv.sh"
+          printf "#!/bin/sh\ntouch \"%s\"\ncat \"\$1\"\n" "$textconv_marker" > "$textconv_script"
+          chmod +x "$textconv_script"
+          "$git_bin" -C "$scratch/repo" config diff.avibe.textconv "$textconv_script"
+          printf "filter second\n" >> "$scratch/repo/payload.filtered"
+          "$git_bin" -C "$scratch/repo" diff --textconv -- payload.filtered
+          test ! -e "$textconv_marker"
+          "$git_bin" -C "$scratch/repo" restore -- example.txt payload.filtered
           PATH=/nonexistent "$git_bin" -C "$scratch/repo" gc
           test -z "$("$git_bin" -C "$scratch/repo" status --porcelain)"
           "$git_bin" init --bare "$scratch/remote"

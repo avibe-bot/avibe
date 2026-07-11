@@ -10121,6 +10121,15 @@ def _git_runtime_status() -> dict:
         }
 
 
+def _git_prepare_satisfies_strict(result: dict) -> bool:
+    if result.get("ok"):
+        return True
+    return result.get("reason") in {
+        "git_platform_unsupported",
+        "git_runtime_unpublished",
+    }
+
+
 def _print_runtime_status(payload: dict) -> None:
     print("Show Runtime:")
     print(f"  Provider: {payload.get('provider')}")
@@ -10215,9 +10224,7 @@ def cmd_runtime(args) -> int:
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
                     file=sys.stderr,
                 )
-        strict_ok = bool(payload.get("ok")) and (
-            bool(git.get("ok")) or git.get("reason") == "git_runtime_unpublished"
-        )
+        strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))

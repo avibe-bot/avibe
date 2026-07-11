@@ -6,7 +6,6 @@ from core.caller_context import (
     AVIBE_NATIVE_SESSION_ID_ENV,
     AVIBE_RUN_ID_ENV,
     AVIBE_SESSION_ID_ENV,
-    CallerContext,
     caller_context_from_env,
     caller_context_from_platform_payload,
 )
@@ -35,7 +34,9 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
         "backend": "codex",
         "native_session_id": "thread789",
     }
-    assert context.to_env()[AVIBE_SESSION_ID_ENV] == "ses123"
+    caller_env = context.to_env()
+    assert caller_env[AVIBE_SESSION_ID_ENV] == "ses123"
+    assert "PATH" not in caller_env
 
 
 def test_caller_context_from_platform_payload_prefers_agent_session_target() -> None:
@@ -75,19 +76,3 @@ def test_caller_context_from_platform_payload_preserves_callback_source() -> Non
 
     assert context is not None
     assert context.source == "callback"
-
-
-def test_caller_context_env_uses_shared_git_runtime_path_seam(monkeypatch) -> None:
-    calls: list[dict[str, str]] = []
-
-    def fake_prepend(env) -> bool:
-        calls.append(env)
-        env["PATH"] = "/managed/git/bin:/usr/bin"
-        return True
-
-    monkeypatch.setattr("core.git_runtime.prepend_vendored_git_to_path", fake_prepend)
-
-    env = CallerContext(session_id="ses123", backend="codex").to_env()
-
-    assert calls == [env]
-    assert env["PATH"].startswith("/managed/git/bin")

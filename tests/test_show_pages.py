@@ -236,6 +236,24 @@ def test_runtime_prepare_cli_strict_allows_pending_git_publication(monkeypatch, 
     assert "git_runtime_unpublished" in capsys.readouterr().err
 
 
+def test_runtime_prepare_cli_strict_allows_unsupported_git_platform(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare", "--strict"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        git_result={"ok": False, "reason": "git_platform_unsupported"},
+    )
+
+    assert cli.cmd_runtime(args) == 0
+    assert "git_platform_unsupported" in capsys.readouterr().err
+
+
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])

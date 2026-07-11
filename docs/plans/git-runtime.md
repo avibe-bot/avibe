@@ -20,9 +20,11 @@ must not be executed before `xcode-select -p` confirms the tools are installed.
   Agent PATH resolution (system first), so the two contracts stay explicit.
 - Support `VIBE_GIT_MANIFEST_PATH`, `VIBE_GIT_MANIFEST_URL`, and
   `VIBE_GIT_OFFLINE` for development, out-of-band updates, and offline use.
-- Add the vendored `bin` directory to Agent shell environments only when no
-  safe system Git is present. The caller-context environment builder is shared
-  by Claude, Codex, and OpenCode, avoiding backend-specific wiring.
+- Expose a helper that prepends the vendored `bin` directory to a concrete
+  target environment only when no safe system Git is present. The current
+  caller-context object is provenance, not the backend's final environment;
+  wiring is deferred to the post-#864 integration so backend PATH entries are
+  not overwritten.
 
 ## Build Boundary
 
@@ -31,11 +33,13 @@ builds one stripped multicall binary per supported platform. Linux uses musl
 static linking; macOS links only Apple system libraries. Build flags remove
 curl, expat, gettext, Perl, Python, Tcl/Tk, OpenSSL, and Rust surfaces.
 
-The pinned source is additionally constrained so remote-capable commands,
-external Git subcommands, shell aliases, hooks, and configured content filters
-fail closed or are ignored. The workflow exercises `init`, `add`, `commit`,
-`status`, `log`, `diff`, `restore`, and `gc`; proves hook/filter helpers do not
-run; and proves that `push` is rejected.
+The pinned source is additionally constrained so remote-capable commands and
+all non-Git child processes fail closed. Signing, pagers, fsmonitor helpers,
+external diff/textconv, external Git subcommands, shell aliases, hooks, and
+configured content filters are disabled or ignored so the retained operations
+stay deterministic. The workflow exercises `init`, `add`, `commit`, `status`,
+`log`, `diff`, `restore`, and `gc`; proves hostile helper markers do not run;
+and proves that `push` is rejected.
 
 ## Publication Gate
 
