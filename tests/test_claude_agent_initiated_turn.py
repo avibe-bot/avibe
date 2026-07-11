@@ -125,6 +125,19 @@ def _completed_task_notification_client():
     return _Client()
 
 
+def _completed_task_notification_then_wait_client(release: asyncio.Event):
+    class _Client:
+        def receive_messages(self):
+            async def _iterate():
+                yield TaskStartedMessage()
+                yield TaskNotificationMessage()
+                await release.wait()
+
+            return _iterate()
+
+    return _Client()
+
+
 def _fallback_client(data):
     class ModelRefusalFallbackMessage:
         subtype = "model_refusal_fallback"
@@ -347,6 +360,51 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(output.completes_run)
         self.assertIsNone(service.activities.claim_completed_output("claude", composite_key))
 
+    async def test_completed_task_notification_flushes_while_receiver_stays_open(self):
+        agent, service = _build_agent()
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
+        composite_key = "session-live-flush:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "old-turn",
+                "turn_token": "origin-turn",
+                "agent_session_id": "sess-live-flush",
+            },
+        )
+        emitted = asyncio.Event()
+
+        async def _emit(*_args, **_kwargs):
+            emitted.set()
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit)
+        release = asyncio.Event()
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _completed_task_notification_then_wait_client(release),
+                "session-live-flush",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        try:
+            await asyncio.wait_for(emitted.wait(), timeout=1)
+            self.assertFalse(receiver.done())
+            output = agent.emit_result_message.await_args.kwargs["output"]
+            self.assertTrue(output.detached)
+            self.assertFalse(output.completes_turn)
+            self.assertTrue(output.completes_run)
+            self.assertIsNone(
+                service.activities.claim_completed_output("claude", composite_key)
+            )
+        finally:
+            release.set()
+            await receiver
+
     async def test_task_start_uses_current_request_run_not_stale_receiver_run(self):
         agent, service = _build_agent()
         composite_key = "session-lineage:/tmp/work"
@@ -516,6 +574,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.provenance(receiver_context)["turn_id"], "origin-turn")
         self.assertEqual(agent._pending_requests[composite_key], [user_request])
         self.assertEqual(agent._pending_assistant_message[composite_key], "newer turn draft")
+        # Hard #862 invariant: background delivery cannot settle a newer Turn.
         self.assertEqual(gate.token, "USER-TURN")
         self.assertTrue(gate.lock.locked())
         agent.controller.emit_agent_message.assert_not_awaited()

@@ -259,6 +259,12 @@ class SessionActivityRegistry:
             self._completed_outputs.pop(key, None)
         return None
 
+    def has_completed_output(self, backend: str, runtime_key: str) -> bool:
+        """Whether a completed Activity is waiting for user-visible output."""
+
+        with self._lock:
+            return bool(self._completed_outputs.get((str(backend), str(runtime_key))))
+
     def end_runtime(
         self,
         backend: str,

@@ -33,6 +33,9 @@ class ClaudeAgent(BaseAgent):
     """Existing Claude Code integration extracted into an agent backend."""
 
     name = "claude"
+    # Preserve the usual task-notification -> assistant/result association while
+    # bounding terminal-only notifications on the otherwise long-lived stream.
+    ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 30.0
 
     # AskUserQuestion support is disabled - SDK cannot respond programmatically
     # Set to True when SDK adds support (see issue #10168)
@@ -57,6 +60,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._detached_activity_outputs: dict[str, SessionActivity] = {}
         self._detached_assistant_text: dict[str, str] = {}
+        self._activity_flush_tasks: dict[str, asyncio.Task] = {}
 
         # Question handler for AskUserQuestion support (disabled)
         # NOTE: Uncomment when SDK adds AskUserQuestion support
@@ -559,6 +563,12 @@ class ClaudeAgent(BaseAgent):
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
 
                     if self._handle_activity_message(message, composite_key, context):
+                        registry = self._activity_registry()
+                        if registry is not None and registry.has_completed_output(
+                            self.name,
+                            composite_key,
+                        ):
+                            self._schedule_completed_activity_flush(composite_key, context)
                         continue
 
                     if self.claude_client._is_skip_message(message):
@@ -777,6 +787,9 @@ class ClaudeAgent(BaseAgent):
                                     completes_turn=False,
                                 ),
                             )
+                            # The detached Activity output has no authority over
+                            # a newer pending request. Its Turn stays owned by its
+                            # own backend query and liveness/timeout path.
                             self._mark_session_idle_if_no_pending_requests(composite_key)
                             continue
                         self._pending_assistant_message.pop(composite_key, None)
@@ -1448,6 +1461,34 @@ class ClaudeAgent(BaseAgent):
                 ),
             )
             self._mark_session_idle_if_no_pending_requests(composite_key)
+
+    def _schedule_completed_activity_flush(
+        self,
+        composite_key: str,
+        context: MessageContext,
+    ) -> None:
+        existing = self._activity_flush_tasks.get(composite_key)
+        if existing is not None and not existing.done():
+            return
+
+        async def _flush_after_grace() -> None:
+            try:
+                await asyncio.sleep(self.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS)
+                await self._flush_completed_activity_outputs(composite_key, context)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Failed to flush completed Claude Activities for %s",
+                    composite_key,
+                    exc_info=True,
+                )
+            finally:
+                if self._activity_flush_tasks.get(composite_key) is task:
+                    self._activity_flush_tasks.pop(composite_key, None)
+
+        task = asyncio.create_task(_flush_after_grace())
+        self._activity_flush_tasks[composite_key] = task
 
     async def _maybe_begin_agent_initiated_turn(
         self,

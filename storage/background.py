@@ -96,10 +96,26 @@ _LIKE_ESCAPE = "\\"
 DEFINITION_STATUS_COUNTS = ("all", "enabled", "disabled")
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
+_TERMINAL_STATUS_PRIORITY = {
+    "succeeded": 0,
+    "canceled": 1,
+    "failed": 2,
+}
 
 
 def normalize_run_status(status: Any) -> str:
     return RUN_STATUS_ALIASES.get(str(status or "").strip(), str(status or "").strip() or "queued")
+
+
+def _stronger_terminal_status(current: Any, incoming: Any) -> str:
+    current_status = normalize_run_status(current)
+    incoming_status = normalize_run_status(incoming)
+    if _TERMINAL_STATUS_PRIORITY.get(current_status, -1) >= _TERMINAL_STATUS_PRIORITY.get(
+        incoming_status,
+        -1,
+    ):
+        return current_status
+    return incoming_status
 
 
 def _status_query_values(status: str) -> list[str]:
@@ -1233,8 +1249,12 @@ class SQLiteBackgroundTaskStore:
             if not isinstance(result_payload, dict):
                 result_payload = {}
             payload_changed = False
+            effective_terminal_status = terminal_status
             if terminal_status and "deferred_terminal_status" in result_payload:
-                result_payload.pop("deferred_terminal_status", None)
+                effective_terminal_status = _stronger_terminal_status(
+                    result_payload.pop("deferred_terminal_status", None),
+                    terminal_status,
+                )
                 payload_changed = True
             raw_outputs = result_payload.get("outputs")
             outputs = [dict(item) for item in raw_outputs if isinstance(item, dict)] if isinstance(raw_outputs, list) else []
@@ -1281,7 +1301,7 @@ class SQLiteBackgroundTaskStore:
                     .where(agent_runs.c.id == run_id)
                     .values(**values)
                 )
-            if terminal_status:
+            if effective_terminal_status:
                 transition = conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
@@ -1292,7 +1312,7 @@ class SQLiteBackgroundTaskStore:
                         )
                     )
                     .values(
-                        status=normalize_run_status(terminal_status),
+                        status=normalize_run_status(effective_terminal_status),
                         completed_at=now,
                         updated_at=now,
                     )
@@ -1339,7 +1359,10 @@ class SQLiteBackgroundTaskStore:
             result_payload = _json_loads(row["result_payload_json"], {})
             if not isinstance(result_payload, dict):
                 result_payload = {}
-            normalized = normalize_run_status(terminal_status)
+            normalized = _stronger_terminal_status(
+                result_payload.get("deferred_terminal_status"),
+                terminal_status,
+            )
             if result_payload.get("deferred_terminal_status") == normalized:
                 return False
             result_payload["deferred_terminal_status"] = normalized
@@ -1385,7 +1408,11 @@ class SQLiteBackgroundTaskStore:
             if not deferred_status:
                 return False
             result_payload.pop("deferred_terminal_status", None)
-            status = normalize_run_status(terminal_status or deferred_status)
+            status = (
+                _stronger_terminal_status(deferred_status, terminal_status)
+                if terminal_status
+                else normalize_run_status(deferred_status)
+            )
             values: dict[str, Any] = {
                 "status": status,
                 "completed_at": now,

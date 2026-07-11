@@ -1097,7 +1097,7 @@ class TaskExecutionStore:
         self,
         run_id: str,
         *,
-        terminal_status: str,
+        terminal_status: Optional[str] = None,
         error: Optional[str] = None,
     ) -> bool:
         if self._sqlite is None:
@@ -1106,6 +1106,14 @@ class TaskExecutionStore:
             run_id,
             terminal_status=terminal_status,
             error=error,
+        )
+
+    def defer_run_terminal(self, run_id: str, *, terminal_status: str) -> bool:
+        if self._sqlite is None:
+            return False
+        return self._sqlite.defer_run_terminal(
+            run_id,
+            terminal_status=terminal_status,
         )
 
     def update_callback_status(
@@ -1854,12 +1862,15 @@ class ScheduledTaskService:
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
         settled: list[str] = []
         for run_id in run_ids:
+            self.request_store.defer_run_terminal(
+                run_id,
+                terminal_status=terminal_status,
+            )
             if callable(has_blocker) and has_blocker(run_id):
                 continue
             error = f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
             if self.request_store.settle_deferred_run(
                 run_id,
-                terminal_status=terminal_status,
                 error=error,
             ):
                 settled.append(run_id)

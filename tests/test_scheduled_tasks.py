@@ -2198,6 +2198,80 @@ def test_terminal_owned_activity_settles_deferred_run_once(
     assert request_store.get_run(request.id)["completed_at"] == completed_at
 
 
+def test_failed_activity_intent_survives_until_last_owned_activity_finishes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    registry = SessionActivityRegistry()
+    controller.agent_service = SimpleNamespace(activities=registry)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert request_store.claim(request.id) is not None
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+    for activity_id in ("task-failed", "task-running"):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="target-session",
+            activity_id=activity_id,
+            kind="background_task",
+            run_id=request.id,
+        )
+
+    failed = registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+    )
+    assert failed is not None
+    assert service.settle_activity_runs(failed) == []
+    running = request_store.get_run(request.id)
+    assert running is not None
+    assert running["status"] == "running"
+    assert running["result_payload"]["deferred_terminal_status"] == "failed"
+
+    completed = registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-running",
+        status="completed",
+    )
+    assert completed is not None
+    assert service.settle_activity_runs(completed) == []
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    result = sqlite_store.record_run_output(
+        request.id,
+        output_id="task-running:completion",
+        text="The other task completed",
+        terminal_status="succeeded",
+    )
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert result["terminal_transition"] is True
+    assert terminal["status"] == "failed"
+    assert "deferred_terminal_status" not in terminal["result_payload"]
+
+
 def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
