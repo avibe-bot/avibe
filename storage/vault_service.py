@@ -2057,6 +2057,11 @@ def create_secret(
                 },
             )
         )
+        if (
+            conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)).first()
+            is not None
+        ):
+            raise VaultAlreadyInitializedError("a protected vault already exists; unlock it instead of re-initializing")
 
     provision_row, _existing_secret = _preflight_secret_create_name(
         conn,
@@ -2065,11 +2070,6 @@ def create_secret(
     )
 
     if establishing_protected_vault:
-        if (
-            conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)).first()
-            is not None
-        ):
-            raise VaultAlreadyInitializedError("a protected vault already exists; unlock it instead of re-initializing")
         if not isinstance(authz_factor_registration, dict):
             raise ProtectedAuthzSetupRequiredError("protected vault establishment requires a passkey authorization factor")
 

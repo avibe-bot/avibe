@@ -426,7 +426,7 @@ def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkey
             with vault.begin() as conn:
                 return vs.create_secret(
                     conn,
-                    name=f"CONCURRENT_PROTECTED_{index}",
+                    name="CONCURRENT_PROTECTED",
                     sealed=_sealed(f"concurrent-{index}"),
                     protection="protected",
                     establishing_vmk=True,
