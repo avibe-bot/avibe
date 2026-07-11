@@ -92,7 +92,12 @@ version-file = "vibe/_version.py"
 
 [tool.hatch.build]
 # Include generated assets even though they are in .gitignore (build artifacts)
-artifacts = ["ui/dist/**", "vibe/show_runtime_manifest.json", "vibe/tmux_runtime_manifest.json"]
+artifacts = [
+    "ui/dist/**",
+    "vibe/show_runtime_manifest.json",
+    "vibe/tmux_runtime_manifest.json",
+    "vibe/git_runtime_manifest.json",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["vibe", "config", "core", "modules", "storage"]
@@ -113,6 +118,7 @@ include = [
     "ui/dist/**",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
+    "vibe/git_runtime_manifest.json",
     "README.md",
     "LICENSE",
 ]

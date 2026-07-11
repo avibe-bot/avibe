@@ -33,6 +33,12 @@ class CallerContext:
             env[AVIBE_CALLER_BACKEND_ENV] = self.backend
         if self.native_session_id:
             env[AVIBE_NATIVE_SESSION_ID_ENV] = self.native_session_id
+        # This is the shared Agent-shell environment seam used by Claude,
+        # Codex, and OpenCode. Keep a developer's system Git authoritative;
+        # only gitless sessions receive the verified managed runtime on PATH.
+        from core.git_runtime import prepend_vendored_git_to_path
+
+        prepend_vendored_git_to_path(env)
         return env
 
     def to_metadata(self) -> dict[str, str]:

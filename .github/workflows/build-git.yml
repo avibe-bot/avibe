@@ -1,0 +1,439 @@
+name: Build local-only Git runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional git-runtime-v<version>-<revision> tag to publish"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  GIT_VERSION: "2.55.0"
+  GIT_SOURCE_URL: "https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz"
+  GIT_SOURCE_SHA256: "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357"
+  GIT_RELEASE_REVISION: "1"
+
+jobs:
+  source:
+    name: Verify and constrain source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and verify upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          curl --fail --location --silent --show-error \
+            --output "source/git-$GIT_VERSION.tar.xz" "$GIT_SOURCE_URL"
+          echo "$GIT_SOURCE_SHA256  source/git-$GIT_VERSION.tar.xz" | sha256sum --check -
+          tar -xJf "source/git-$GIT_VERSION.tar.xz" -C source
+
+      - name: Remove remote and external command surfaces
+        shell: bash
+        working-directory: source/git-${{ env.GIT_VERSION }}
+        run: |
+          set -euo pipefail
+          patch --ignore-whitespace -p1 <<'PATCH'
+          --- a/git.c
+          +++ b/git.c
+          @@ -382,30 +382,7 @@
+                                   fprintf_ln(stderr, _("'%s' is aliased to '%s'"),
+                                              alias_command, alias_string);
+                           if (alias_string[0] == '!') {
+          -                        struct child_process child = CHILD_PROCESS_INIT;
+          -                        int nongit_ok;
+          -
+          -                        /* Aliases expect GIT_PREFIX, GIT_DIR etc to be set */
+          -                        setup_git_directory_gently(the_repository, &nongit_ok);
+          -
+          -                        commit_pager_choice();
+          -
+          -                        child.use_shell = 1;
+          -                        child.clean_on_exit = 1;
+          -                        child.wait_after_clean = 1;
+          -                        child.trace2_child_class = "shell_alias";
+          -                        strvec_push(&child.args, alias_string + 1);
+          -                        strvec_pushv(&child.args, args->v + 1);
+          -
+          -                        trace2_cmd_alias(alias_command, child.args.v);
+          -                        trace2_cmd_name("_run_shell_alias_");
+          -
+          -                        ret = run_command(&child);
+          -                        if (ret >= 0)   /* normal exit */
+          -                                exit(ret);
+          -
+          -                        die_errno(_("while expanding alias '%s': '%s'"),
+          -                                  alias_command, alias_string + 1);
+          +                        die(_("shell aliases are disabled in the Avibe local-only Git runtime"));
+                           }
+                           count = split_cmdline(alias_string, &new_argv);
+                           if (count < 0)
+          @@ -463,6 +440,34 @@
+                   return ret;
+           }
+
+          +static int avibe_remote_command(const char *command, int argc, const char **argv)
+          +{
+          +        static const char *const disabled[] = {
+          +                "archive", "backfill", "clone", "daemon", "fetch", "fetch-pack",
+          +                "http-backend",
+          +                "imap-send", "ls-remote", "pull", "push",
+          +                "receive-pack", "remote", "remote-ext", "remote-fd",
+          +                "request-pull", "send-email", "send-pack", "submodule", "upload-archive",
+          +                "upload-pack",
+          +        };
+          +        int maintenance_auto = 0;
+          +
+          +        if (!strcmp(command, "maintenance")) {
+          +                for (int i = 1; i < argc; i++) {
+          +                        if (strstr(argv[i], "prefetch"))
+          +                                return 1;
+          +                        if (!strcmp(argv[i], "--auto"))
+          +                                maintenance_auto = 1;
+          +                }
+          +                return !maintenance_auto;
+          +        }
+          +
+          +        for (size_t i = 0; i < ARRAY_SIZE(disabled); i++)
+          +                if (!strcmp(command, disabled[i]))
+          +                        return 1;
+          +        return 0;
+          +}
+          +
+           static int run_builtin(struct cmd_struct *p, int argc, const char **argv, struct repository *repo)
+           {
+                   int status, help;
+          @@ -470,6 +475,14 @@
+                   struct stat st;
+                   const char *prefix;
+                   int run_setup = (p->option & (RUN_SETUP | RUN_SETUP_GENTLY));
+          +
+          +        if (!strcmp(p->cmd, "maintenance") &&
+          +            !avibe_remote_command(p->cmd, argc, argv))
+          +                return 0;
+          +
+          +        if (avibe_remote_command(p->cmd, argc, argv))
+          +                die(_("remote-capable command '%s' is disabled in the Avibe local-only Git runtime"),
+          +                    p->cmd);
+
+                   help = argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help-all"));
+                   if (help && (run_setup & RUN_SETUP))
+          @@ -788,45 +801,8 @@
+
+           static void execv_dashed_external(const char **argv)
+           {
+          -        struct child_process cmd = CHILD_PROCESS_INIT;
+          -        int status;
+          -
+          -        if (use_pager == -1 && !is_builtin(argv[0]))
+          -                use_pager = check_pager_config(the_repository, argv[0]);
+          -        commit_pager_choice();
+          -
+          -        strvec_pushf(&cmd.args, "git-%s", argv[0]);
+          -        strvec_pushv(&cmd.args, argv + 1);
+          -        cmd.clean_on_exit = 1;
+          -        cmd.wait_after_clean = 1;
+          -        cmd.silent_exec_failure = 1;
+          -        cmd.trace2_child_class = "dashed";
+          -
+          -        trace2_cmd_name("_run_dashed_");
+          -
+          -        /*
+          -         * The code in run_command() logs trace2 child_start/child_exit
+          -         * events, so we do not need to report exec/exec_result events here.
+          -         */
+          -        trace_argv_printf(cmd.args.v, "trace: exec:");
+          -
+          -        /*
+          -         * If we fail because the command is not found, it is
+          -         * OK to return. Otherwise, we just pass along the status code,
+          -         * or our usual generic code if we were not even able to exec
+          -         * the program.
+          -         */
+          -        status = run_command(&cmd);
+          -
+          -        /*
+          -         * If the child process ran and we are now going to exit, emit a
+          -         * generic string as our trace2 command verb to indicate that we
+          -         * launched a dashed command.
+          -         */
+          -        if (status >= 0)
+          -                exit(status);
+          -        else if (errno != ENOENT)
+          -                exit(128);
+          +        die(_("external command 'git-%s' is disabled in the Avibe local-only Git runtime"),
+          +            argv[0]);
+           }
+
+           static int is_deprecated_command(const char *cmd)
+          --- a/setup.c
+          +++ b/setup.c
+          @@ -2262,7 +2262,7 @@
+                           }
+                           template_dir = data.path;
+                   }
+          -        if (!template_dir) {
+          +        if (!template_dir && *DEFAULT_GIT_TEMPLATE_DIR) {
+                           static char *dir;
+
+                           if (!dir)
+          PATCH
+
+      - name: Package verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf git-source-patched.tar.gz -C source "git-$GIT_VERSION"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: git-source-patched
+          path: git-source-patched.tar.gz
+
+  build-linux:
+    name: linux-${{ matrix.arch }}
+    needs: source
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: git-source-patched
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Build and verify static local-only Git
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          tar -xzf git-source-patched.tar.gz
+          docker run --rm --platform "$TARGET_PLATFORM" \
+            -e GIT_VERSION -e TARGET_ARCH \
+            -v "$PWD:/work" -w "/work/git-$GIT_VERSION" alpine:3.22 sh -euxc '
+              apk add --no-cache build-base file zlib-dev zlib-static
+              make -j"$(getconf _NPROCESSORS_ONLN)" git \
+                NO_CURL=YesPlease NO_EXPAT=YesPlease NO_GETTEXT=YesPlease \
+                NO_PERL=YesPlease NO_PYTHON=YesPlease NO_TCLTK=YesPlease \
+                NO_OPENSSL=YesPlease NO_ICONV=YesPlease NO_RUST=YesPlease \
+                SKIP_DASHED_BUILT_INS=YesPlease RUNTIME_PREFIX=YesPlease \
+                template_dir= gitexecdir=bin \
+                CFLAGS=-Os LDFLAGS=-static
+              mkdir -p /work/package/bin /work/dist
+              cp git /work/package/bin/git
+              strip /work/package/bin/git
+              file /work/package/bin/git | grep -q "statically linked"
+
+              git_bin=/work/package/bin/git
+              scratch="$(mktemp -d)"
+              export HOME="$scratch/home"
+              export GIT_CONFIG_NOSYSTEM=1
+              export GIT_CONFIG_GLOBAL=/dev/null
+              export PATH="/work/package/bin:/usr/bin:/bin"
+              mkdir -p "$HOME"
+              "$git_bin" init "$scratch/repo"
+              printf "first\n" > "$scratch/repo/example.txt"
+              "$git_bin" -C "$scratch/repo" add example.txt
+              "$git_bin" -C "$scratch/repo" \
+                -c user.name=Avibe -c user.email=runtime@avibe.local \
+                commit -m initial
+              "$git_bin" -C "$scratch/repo" status --short
+              "$git_bin" -C "$scratch/repo" log --oneline -1
+              printf "second\n" >> "$scratch/repo/example.txt"
+              "$git_bin" -C "$scratch/repo" diff -- example.txt
+              "$git_bin" -C "$scratch/repo" restore -- example.txt
+              PATH=/nonexistent "$git_bin" -C "$scratch/repo" gc
+              test -z "$("$git_bin" -C "$scratch/repo" status --porcelain)"
+              "$git_bin" init --bare "$scratch/remote"
+              if remote_error="$("$git_bin" -C "$scratch/repo" push "$scratch/remote" HEAD 2>&1)"; then
+                echo "remote push unexpectedly succeeded" >&2
+                exit 1
+              fi
+              printf "%s\n" "$remote_error" | grep -Fq "remote-capable command 'push' is disabled"
+
+              archive="/work/dist/git-$GIT_VERSION-linux-$TARGET_ARCH.tar.gz"
+              tar -czf "$archive" -C /work/package bin/git
+              (cd /work/dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
+            '
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: git-runtime-linux-${{ matrix.arch }}
+          path: dist/git-*.tar.gz*
+
+  build-macos:
+    name: darwin-${{ matrix.arch }}
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: git-source-patched
+
+      - name: Build and verify relocatable local-only Git
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          tar -xzf git-source-patched.tar.gz
+          cd "git-$GIT_VERSION"
+          make -j"$(sysctl -n hw.ncpu)" git \
+            NO_CURL=YesPlease NO_EXPAT=YesPlease NO_GETTEXT=YesPlease \
+            NO_PERL=YesPlease NO_PYTHON=YesPlease NO_TCLTK=YesPlease \
+            NO_OPENSSL=YesPlease NO_RUST=YesPlease \
+            SKIP_DASHED_BUILT_INS=YesPlease RUNTIME_PREFIX=YesPlease \
+            template_dir= gitexecdir=bin \
+            CFLAGS=-Os LDFLAGS=-Wl,-dead_strip
+          mkdir -p ../package/bin ../dist
+          cp git ../package/bin/git
+          strip -x ../package/bin/git
+          codesign --force --sign - ../package/bin/git
+          file ../package/bin/git | grep -q "Mach-O 64-bit executable"
+          otool -L ../package/bin/git | tail -n +2 | awk '{print $1}' | while read -r dependency; do
+            case "$dependency" in
+              /usr/lib/*|/System/Library/*) ;;
+              *)
+                echo "non-system dependency: $dependency" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          git_bin="$PWD/../package/bin/git"
+          scratch="$(mktemp -d)"
+          export HOME="$scratch/home"
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export PATH="$PWD/../package/bin:/usr/bin:/bin"
+          mkdir -p "$HOME"
+          "$git_bin" init "$scratch/repo"
+          printf "first\n" > "$scratch/repo/example.txt"
+          "$git_bin" -C "$scratch/repo" add example.txt
+          "$git_bin" -C "$scratch/repo" \
+            -c user.name=Avibe -c user.email=runtime@avibe.local \
+            commit -m initial
+          "$git_bin" -C "$scratch/repo" status --short
+          "$git_bin" -C "$scratch/repo" log --oneline -1
+          printf "second\n" >> "$scratch/repo/example.txt"
+          "$git_bin" -C "$scratch/repo" diff -- example.txt
+          "$git_bin" -C "$scratch/repo" restore -- example.txt
+          PATH=/nonexistent "$git_bin" -C "$scratch/repo" gc
+          test -z "$("$git_bin" -C "$scratch/repo" status --porcelain)"
+          "$git_bin" init --bare "$scratch/remote"
+          if remote_error="$("$git_bin" -C "$scratch/repo" push "$scratch/remote" HEAD 2>&1)"; then
+            echo "remote push unexpectedly succeeded" >&2
+            exit 1
+          fi
+          printf "%s\n" "$remote_error" | grep -Fq "remote-capable command 'push' is disabled"
+
+          archive="$PWD/../dist/git-$GIT_VERSION-darwin-$TARGET_ARCH.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$archive" -C ../package bin/git
+          (cd ../dist && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: git-runtime-darwin-${{ matrix.arch }}
+          path: dist/git-*.tar.gz*
+
+  manifest:
+    name: Manifest and optional release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: git-runtime-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate pinned runtime manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["GIT_VERSION"]
+          source_url = os.environ["GIT_SOURCE_URL"]
+          source_sha256 = os.environ["GIT_SOURCE_SHA256"]
+          release_tag = os.environ.get("RELEASE_TAG") or f"git-runtime-v{version}-{os.environ['GIT_RELEASE_REVISION']}"
+          requested_tag = os.environ.get("RELEASE_TAG") or ""
+          if requested_tag and not re.fullmatch(rf"git-runtime-v{re.escape(version)}-[1-9][0-9]*", requested_tag):
+              raise SystemExit(f"invalid release tag: {requested_tag}")
+
+          archives = {}
+          for platform in ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"):
+              path = next(Path("dist").glob(f"git-{version}-{platform}.tar.gz"), None)
+              if path is None:
+                  raise SystemExit(f"missing archive for {platform}")
+              archives[platform] = {
+                  "name": path.name,
+                  "url": f"https://github.com/avibe-bot/avibe/releases/download/{release_tag}/{path.name}",
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "size": path.stat().st_size,
+                  "bin_path": "bin/git",
+              }
+
+          manifest = {
+              "schema_version": 1,
+              "git_version": version,
+              "source": "kernel.org/git",
+              "source_url": source_url,
+              "source_sha256": source_sha256,
+              "release_tag": release_tag,
+              "release_state": "published" if requested_tag else "pending",
+              "local_ops_only": True,
+              "archives": archives,
+          }
+          Path("dist/git-runtime-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: git-runtime-manifest
+          path: dist/git-runtime-manifest.json
+
+      - name: Publish runtime release assets
+        if: inputs.release_tag != ''
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "Avibe local-only Git runtime ${{ env.GIT_VERSION }} (build ${{ env.GIT_RELEASE_REVISION }})"
+          body: |
+            Avibe-managed local-only Git runtime built from the pinned upstream source tarball.
+            Remote-capable commands, external Git commands, and shell aliases are disabled.
+          files: |
+            dist/git-*.tar.gz
+            dist/git-*.tar.gz.sha256
+            dist/git-runtime-manifest.json

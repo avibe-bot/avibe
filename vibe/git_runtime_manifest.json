@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "git_version": "2.55.0",
+  "source": "kernel.org/git",
+  "source_url": "https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz",
+  "source_sha256": "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357",
+  "release_tag": "git-runtime-v2.55.0-1",
+  "release_state": "pending",
+  "local_ops_only": true,
+  "archives": {
+    "darwin-arm64": {
+      "name": "git-2.55.0-darwin-arm64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-darwin-arm64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": null,
+      "bin_path": "bin/git"
+    },
+    "darwin-x64": {
+      "name": "git-2.55.0-darwin-x64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-darwin-x64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": null,
+      "bin_path": "bin/git"
+    },
+    "linux-arm64": {
+      "name": "git-2.55.0-linux-arm64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-linux-arm64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": null,
+      "bin_path": "bin/git"
+    },
+    "linux-x64": {
+      "name": "git-2.55.0-linux-x64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-2.55.0-linux-x64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": null,
+      "bin_path": "bin/git"
+    }
+  }
+}

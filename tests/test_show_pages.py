@@ -16,8 +16,15 @@ class _FakeShowRuntimeResult:
     reason: str | None = None
 
 
-def _stub_runtime_prepare_dependencies(monkeypatch, *, askill_result=None, avault_result=None, tmux_result=None):
-    calls = {"askill": [], "avault": [], "tmux": []}
+def _stub_runtime_prepare_dependencies(
+    monkeypatch,
+    *,
+    askill_result=None,
+    avault_result=None,
+    tmux_result=None,
+    git_result=None,
+):
+    calls = {"askill": [], "avault": [], "tmux": [], "git": []}
 
     def fake_askill(offline=False):
         calls["askill"].append({"offline": offline})
@@ -31,9 +38,14 @@ def _stub_runtime_prepare_dependencies(monkeypatch, *, askill_result=None, avaul
         calls["tmux"].append({"offline": offline, "force": force})
         return tmux_result or {"ok": True, "installed": True}
 
+    def fake_git(offline=None, force=False):
+        calls["git"].append({"offline": offline, "force": force})
+        return git_result or {"ok": True, "installed": True}
+
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
     return calls
 
 
@@ -85,7 +97,9 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
     assert payload["askill"] == {"ok": True, "installed": True}
     assert payload["avault"] == {"ok": True, "installed": True}
     assert payload["tmux"] == {"ok": True, "installed": True}
+    assert payload["git"] == {"ok": True, "installed": True}
     assert calls["tmux"] == [{"offline": False, "force": False}]
+    assert calls["git"] == [{"offline": None, "force": False}]
 
 
 def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
@@ -103,6 +117,7 @@ def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
 
     assert cli.cmd_runtime(args) == 0
     assert calls["tmux"] == [{"offline": False, "force": False}]
+    assert calls["git"] == [{"offline": None, "force": False}]
 
 
 def test_runtime_manager_from_args_preserves_offline_environment(monkeypatch, tmp_path):
@@ -114,6 +129,53 @@ def test_runtime_manager_from_args_preserves_offline_environment(monkeypatch, tm
     manager = cli._show_runtime_manager_from_args(args)
 
     assert manager.offline is True
+
+
+def test_runtime_status_reports_effective_git_resolution(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "status", "--json"])
+
+    class FakeRuntimeManager:
+        def status(self):
+            return {"provider": "manifest-cache", "installed": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_git_runtime_status",
+        lambda: {
+            "id": "git",
+            "resolution": "vendored",
+            "path": "/tmp/runtime/git/bin/git",
+            "version": "2.55.0",
+        },
+    )
+
+    assert cli.cmd_runtime(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["git"]["resolution"] == "vendored"
+    assert payload["git"]["path"].endswith("/bin/git")
+
+
+def test_runtime_clean_cleans_git_runtime(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "clean", "--json", "--keep-previous", "2"])
+
+    class FakeRuntimeManager:
+        def clean(self, *, keep_previous=1):
+            assert keep_previous == 2
+            return {"ok": True, "removed": ["show-old"]}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_clean_git_runtime",
+        lambda *, keep_previous: {"ok": True, "removed": [f"git-old-{keep_previous}"]},
+    )
+
+    assert cli.cmd_runtime(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["git"]["removed"] == ["git-old-2"]
 
 
 def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys):
@@ -135,7 +197,7 @@ def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])
-    seen = {"askill": None, "avault": None, "tmux": None}
+    seen = {"askill": None, "avault": None, "tmux": None, "git": None}
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
@@ -154,16 +216,27 @@ def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
         seen["tmux"] = {"offline": offline, "force": force}
         return {"ok": True, "skipped": True, "reason": "offline"}
 
+    def fake_git(offline=None, force=False):
+        seen["git"] = {"offline": offline, "force": force}
+        return {"ok": True, "installed": True}
+
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert seen == {"askill": True, "avault": True, "tmux": {"offline": True, "force": False}}
+    assert seen == {
+        "askill": True,
+        "avault": True,
+        "tmux": {"offline": True, "force": False},
+        "git": {"offline": True, "force": False},
+    }
     assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
     assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
+    assert payload["git"] == {"ok": True, "installed": True}
 
 
 def test_runtime_prepare_cli_prints_status_skipped_tmux_as_skipped(monkeypatch, capsys):

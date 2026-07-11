@@ -10106,6 +10106,21 @@ def _show_runtime_manager_from_args(args):
     )
 
 
+def _git_runtime_status() -> dict:
+    try:
+        from core.git_runtime import git_runtime_status
+
+        return git_runtime_status()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "id": "git",
+            "resolution": "none",
+            "path": None,
+            "version": None,
+            "reason": str(exc),
+        }
+
+
 def _print_runtime_status(payload: dict) -> None:
     print("Show Runtime:")
     print(f"  Provider: {payload.get('provider')}")
@@ -10125,6 +10140,15 @@ def _print_runtime_status(payload: dict) -> None:
         print(f"  Install dir: {payload.get('install_dir')}")
     if payload.get("reason"):
         print(f"  Reason: {payload.get('reason')}")
+    git = payload.get("git") or {}
+    print("Git Runtime:")
+    print(f"  Resolution: {git.get('resolution') or 'none'}")
+    print(f"  Version: {git.get('version') or 'unknown'}")
+    if git.get("path"):
+        print(f"  Path: {git['path']}")
+    managed_git = git.get("managed") or {}
+    if managed_git.get("reason"):
+        print(f"  Managed runtime: {managed_git['reason']}")
 
 
 def cmd_runtime(args) -> int:
@@ -10132,6 +10156,7 @@ def cmd_runtime(args) -> int:
     command = getattr(args, "runtime_command", None)
     if command == "status":
         payload = manager.status()
+        payload["git"] = _git_runtime_status()
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -10142,10 +10167,12 @@ def cmd_runtime(args) -> int:
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
         askill = _ensure_askill_during_prepare(offline=bool(offline))
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
+        git = _ensure_git_during_prepare(offline=offline, force=getattr(args, "force", False))
         avault = _ensure_avault_during_prepare(offline=bool(offline))
         payload["askill"] = askill
         payload["avault"] = avault
         payload["tmux"] = tmux
+        payload["git"] = git
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -10175,14 +10202,26 @@ def cmd_runtime(args) -> int:
                 print("tmux installed." if tmux.get("changed") else "tmux ready.")
             else:
                 print(f"tmux not ready: {tmux.get('message') or tmux.get('reason') or 'install failed'}", file=sys.stderr)
+            if git.get("skipped"):
+                print(f"git runtime: skipped ({git.get('reason') or 'skipped'}).")
+            elif git.get("ok"):
+                print("git runtime installed." if git.get("changed") else "git runtime ready.")
+            else:
+                print(
+                    f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
+                    file=sys.stderr,
+                )
         return 1 if getattr(args, "strict", False) and not payload.get("ok") else 0
     if command == "clean":
         payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
+        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))
+        payload["git"] = git
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
             removed = payload.get("removed") or []
             print(f"Removed {len(removed)} Show Runtime cache item(s).")
+            print(f"Removed {len(git.get('removed') or [])} Git Runtime cache item(s).")
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
@@ -10258,6 +10297,26 @@ def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> d
         return ensure_tmux_installed(force=force)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
+
+
+def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
+    """Prepare verified vendored Git without making it a service-start requirement."""
+
+    try:
+        from core.git_runtime import GitRuntimeManager
+
+        return GitRuntimeManager(offline=offline).ensure(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _clean_git_runtime(*, keep_previous: int) -> dict:
+    try:
+        from core.git_runtime import get_git_runtime_manager
+
+        return get_git_runtime_manager().clean(keep_previous=keep_previous)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "removed": [], "message": str(exc)}
 
 
 def _ensure_avault_during_prepare(offline: bool = False) -> dict:
@@ -10371,8 +10430,8 @@ def build_parser():
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
     runtime_parser = subparsers.add_parser(
         "runtime",
-        help="Inspect and prepare the managed Show Runtime",
-        description="Inspect, prepare, and clean the global Show Runtime cache used by Show Pages.",
+        help="Inspect and prepare managed runtimes",
+        description="Inspect, prepare, and clean the managed runtimes used by Avibe.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe runtime --help",
     )
@@ -10389,7 +10448,7 @@ def build_parser():
         manifest_group.add_argument("--manifest", help="Read a development manifest from a local path.")
         manifest_group.add_argument("--manifest-url", help="Read a development manifest from a URL.")
 
-    runtime_status_parser = runtime_subparsers.add_parser("status", help="Show managed Show Runtime status")
+    runtime_status_parser = runtime_subparsers.add_parser("status", help="Show managed runtime status")
     add_runtime_provider_args(runtime_status_parser)
     runtime_status_parser.add_argument("--offline", action="store_true", help="Do not fetch a remote manifest.")
     runtime_status_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
@@ -10404,7 +10463,7 @@ def build_parser():
     runtime_prepare_parser.add_argument("--strict", action="store_true", help="Return a non-zero exit code when preparation fails.")
     runtime_prepare_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
-    runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale Show Runtime cache entries")
+    runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(
