@@ -754,6 +754,11 @@ def test_fresh_workspace_scaffolds_multipage_demo(monkeypatch, tmp_path):
     assert "routeSpecificity" in router
     assert "navItems" in router
     assert "export function RouterView" in router
+    # A malformed hash param must degrade gracefully, not throw and blank the app.
+    assert "safeDecode" in router
+    # Pages exported as React exotic components (memo/forwardRef) are accepted.
+    assert "isRenderablePage" in router
+    assert "$$typeof" in router
 
     # Demo pages: a home, a nested list, and a nested dynamic detail route.
     home = (page_dir / "src" / "pages" / "index.tsx").read_text(encoding="utf-8")

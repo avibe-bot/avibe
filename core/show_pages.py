@@ -1016,10 +1016,20 @@ function routeSpecificity(segments: Segment[]): string {
   return segments.map((segment) => (segment.dynamic ? "1" : "0")).join("")
 }
 
+// A page's default export is renderable if it is a function component or a React
+// "exotic" component (memo/forwardRef/lazy/…) — an object carrying $$typeof.
+// Rejecting by `typeof === "function"` alone would drop memo()/forwardRef() pages.
+function isRenderablePage(value: unknown): value is ComponentType<PageProps> {
+  return (
+    typeof value === "function" ||
+    (typeof value === "object" && value !== null && "$$typeof" in value)
+  )
+}
+
 export const routes: Route[] = Object.entries(modules)
   .map(([file, mod]): Route | null => {
     const path = filePathToRoute(file)
-    if (!path || typeof mod.default !== "function") return null
+    if (!path || !isRenderablePage(mod.default)) return null
     const segments = toSegments(path)
     return { path, segments, Component: mod.default, meta: mod.meta ?? {}, dynamic: segments.some((s) => s.dynamic) }
   })
@@ -1039,6 +1049,17 @@ export const navItems: { to: string; label: string }[] = routes
     label: route.meta.title ?? (route.path === "/" ? "Home" : titleCase(route.path.slice(1).split("/").pop() || "")),
   }))
 
+// decodeURIComponent throws on a malformed escape (e.g. a link built with a raw
+// "%", like #/items/50%); fall back to the raw segment so a bad param degrades to
+// that page instead of throwing during render and blanking the whole app.
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 function matchRoute(path: string): { route: Route | null; params: Record<string, string> } {
   const parts = path === "/" ? [] : path.slice(1).split("/")
   for (const route of routes) {
@@ -1047,7 +1068,7 @@ function matchRoute(path: string): { route: Route | null; params: Record<string,
     let matched = true
     for (let i = 0; i < parts.length; i++) {
       const segment = route.segments[i]
-      if (segment.dynamic) params[segment.name] = decodeURIComponent(parts[i])
+      if (segment.dynamic) params[segment.name] = safeDecode(parts[i])
       else if (segment.name !== parts[i]) {
         matched = false
         break
