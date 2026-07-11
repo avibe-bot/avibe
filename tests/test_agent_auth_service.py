@@ -6,7 +6,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -214,7 +214,13 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             )
 
         self.assertTrue(handled)
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "result",
+            "",
+            is_error=True,
+            output=ANY,
+        )
 
     async def test_maybe_emit_auth_recovery_message_defers_non_auth_error_to_caller(self):
         # A NON-auth terminal error returns False: the calling backend emits its

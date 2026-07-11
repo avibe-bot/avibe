@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
-from core.message_output import MessageOutput
+from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,12 @@ class AgentRequest:
     # returns False so Workbench can distinguish a stale missing runtime from an
     # interrupt refusal/failure.
     stop_failure_reason: Optional[str] = None
-    # Optional output semantics for backend-initiated or multi-output turns.
-    output: Optional[MessageOutput] = None
+    # Explicit output semantics for the Turn. Backend-initiated/multi-output
+    # paths override this instead of relying on the visible Message role.
+    output: Optional[MessageOutput] = field(default_factory=terminal_turn_output)
+    # Producer-owned lifecycle object retained until durable output delivery is
+    # acknowledged. The shared dispatcher sees only ``output`` provenance.
+    output_activity: Optional[Any] = None
 
 
 @dataclass
@@ -469,7 +473,9 @@ class BaseAgent(ABC):
     ) -> None:
         if output is None and request is not None:
             output = request.output
-        settles_request = output is None or (output.completes_turn and not output.detached)
+        if output is None:
+            output = terminal_turn_output()
+        settles_request = output.completes_turn and not output.detached
         # An error result subtype (e.g. Claude's ``error_max_turns`` /
         # ``error_during_execution``) is a FAILED turn. Carry that on the terminal
         # ``result`` emit via ``is_error`` so the outbound chokepoint flips the dot
@@ -493,7 +499,7 @@ class BaseAgent(ABC):
                 "",
                 parse_mode=parse_mode,
                 is_error=is_error,
-                **({"output": output} if output is not None else {}),
+                output=output,
             )
             if request and settles_request:
                 await self._remove_ack_reaction(request)
@@ -515,7 +521,7 @@ class BaseAgent(ABC):
                     formatted,
                     parse_mode=parse_mode,
                     is_error=is_error,
-                    **({"output": output} if output is not None else {}),
+                    output=output,
                 )
             else:
                 # No visible text (show_duration off + empty result/suffix) is still
@@ -529,7 +535,7 @@ class BaseAgent(ABC):
                     "",
                     parse_mode=parse_mode,
                     is_error=is_error,
-                    **({"output": output} if output is not None else {}),
+                    output=output,
                 )
         else:
             token_field = ""
@@ -569,7 +575,7 @@ class BaseAgent(ABC):
                 parse_mode=parse_mode,
                 is_error=is_error,
                 result_footer=result_footer,
-                **({"output": output} if output is not None else {}),
+                output=output,
             )
 
         # Remove ack reaction after result is sent

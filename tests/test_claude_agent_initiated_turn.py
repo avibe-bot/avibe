@@ -345,9 +345,9 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertFalse(waiter.done())
 
-        self.assertIsNotNone(
-            service.activities.claim_completed_output("claude", composite_key)
-        )
+        claimed = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(claimed)
+        service.activities.ack_completed_output(claimed)
         agent._signal_activity_output_settled(composite_key)
         await asyncio.wait_for(waiter, timeout=1)
 

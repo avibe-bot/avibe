@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -185,6 +185,7 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             "result",
             "❌ Codex turn failed: unexpected status 401 Unauthorized:",
             is_error=True,
+            output=ANY,
         )
 
         await handler._on_turn_completed(
@@ -230,6 +231,7 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             "result",
             "❌ Codex turn failed: fallback message",
             is_error=True,
+            output=ANY,
         )
         agent._remove_ack_reaction.assert_awaited_once_with(request)
 

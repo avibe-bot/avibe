@@ -5,8 +5,8 @@ import uuid
 from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
-from core.message_output import MessageOutput
-from core.session_activities import SessionActivity
+from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
+from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
@@ -196,7 +196,13 @@ class ClaudeAgent(BaseAgent):
             # web-Chat stream waiter (the visible error was sent + persisted
             # above), instead of waiting out the safety timeout. No-op off-workbench.
             try:
-                await self.controller.emit_agent_message(context, "result", "", is_error=True)
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    output=terminal_output_for(request),
+                )
             finally:
                 self._release_service_runtime_turn(context)
         finally:
@@ -392,7 +398,9 @@ class ClaudeAgent(BaseAgent):
         self._suppressed_synthetic_results.discard(composite_key)
         if not preserve_pending_request_state:
             self._pending_reactions.pop(composite_key, None)
-            self._pending_requests.pop(composite_key, None)
+            pending_requests = self._pending_requests.pop(composite_key, None) or []
+            for pending_request in pending_requests:
+                self._requeue_request_activity(pending_request)
         cleanup = getattr(self.session_handler, "cleanup_session", None)
         if callable(cleanup):
             await cleanup(composite_key, current_receiver_task=current_receiver_task)
@@ -422,6 +430,7 @@ class ClaudeAgent(BaseAgent):
         result can adopt the stale request/token.
         """
         pending_request = self._pop_pending_request(composite_key)
+        self._requeue_request_activity(pending_request)
         context = getattr(pending_request, "context", None)
         if context is not None:
             self._adopt_pending_turn_token(context, pending_request)
@@ -453,6 +462,7 @@ class ClaudeAgent(BaseAgent):
                     "",
                     is_error=True,
                     level="silent",
+                    output=terminal_output_for(pending_request),
                 )
             except Exception:
                 logger.debug(
@@ -491,6 +501,7 @@ class ClaudeAgent(BaseAgent):
             return False
 
         stopped_request = self._pop_pending_request(composite_key)
+        self._requeue_request_activity(stopped_request)
         self._adopt_pending_turn_token(request.context, stopped_request)
         if stopped_request is not None:
             try:
@@ -517,7 +528,13 @@ class ClaudeAgent(BaseAgent):
             # WITHOUT a bubble. Emit only after cleanup so the next turn cannot
             # acquire the gate and reuse a client that this stop is still
             # disconnecting.
-            await self.controller.emit_agent_message(request.context, "result", "", level="silent")
+            await self.controller.emit_agent_message(
+                request.context,
+                "result",
+                "",
+                level="silent",
+                output=terminal_output_for(request),
+            )
         except Exception as err:
             logger.error("Failed to emit Claude stop result for session %s: %s", composite_key, err, exc_info=True)
             self._release_service_runtime_turn(request.context)
@@ -810,6 +827,9 @@ class ClaudeAgent(BaseAgent):
                                 if registry is not None:
                                     registry.requeue_completed_output(detached_activity)
                                 raise
+                            registry = self._activity_registry()
+                            if registry is not None:
+                                registry.ack_completed_output(detached_activity)
                             # The detached Activity output has no authority over
                             # a newer pending request. Its Turn stays owned by its
                             # own backend query and liveness/timeout path.
@@ -863,6 +883,7 @@ class ClaudeAgent(BaseAgent):
                         # so sending both would duplicate the content.
 
                         pending_request = self._pop_pending_request(composite_key)
+                        output_activity = getattr(pending_request, "output_activity", None)
 
                         # The receiver is long-lived and reused across a session's
                         # turns, so ``context`` still carries the FIRST turn's
@@ -890,6 +911,10 @@ class ClaudeAgent(BaseAgent):
                                 parse_mode="markdown",
                                 request=pending_request,
                             )
+                            if output_activity is not None:
+                                registry = self._activity_registry()
+                                if registry is not None:
+                                    registry.ack_completed_output(output_activity)
                             native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
                                 context,
                                 self.name,
@@ -901,6 +926,10 @@ class ClaudeAgent(BaseAgent):
                                 self._maybe_backfill_session_title(pending_request, native_session_id)
                         except Exception:
                             emit_failed = True
+                            if output_activity is not None:
+                                registry = self._activity_registry()
+                                if registry is not None:
+                                    registry.requeue_completed_output(output_activity)
                             raise
                         finally:
                             # Settle the turn regardless of an emit/backfill
@@ -998,7 +1027,13 @@ class ClaudeAgent(BaseAgent):
                 # releases the SSE waiter) instead of letting the avibe Chat hang to
                 # the 600s stream timeout and then settle idle. No-op off-workbench
                 # (Codex P2).
-                await self.controller.emit_agent_message(context, "result", "", is_error=True)
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    output=terminal_turn_output(),
+                )
             self._release_service_runtime_turn(context)
         # NOTE: no `finally` cleanup of pending reactions here.
         # When the receiver ends normally (stream exhausted after a result),
@@ -1036,6 +1071,7 @@ class ClaudeAgent(BaseAgent):
         if not pending_token:
             self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
             return
+        self._requeue_request_activity(pending_request)
         logger.warning("Claude receiver ended without a result for session %s", composite_key)
         self._adopt_pending_turn_token(context, pending_request)
         await self._remove_specific_pending_reaction(composite_key, context, pending_request)
@@ -1050,7 +1086,13 @@ class ClaudeAgent(BaseAgent):
             preserve_pending_request_state=True,
         )
         try:
-            await self.controller.emit_agent_message(context, "result", "", is_error=True)
+            await self.controller.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                output=terminal_output_for(pending_request),
+            )
         finally:
             self._release_service_runtime_turn(context)
 
@@ -1067,13 +1109,20 @@ class ClaudeAgent(BaseAgent):
             return False
 
         pending_request = self._pop_pending_request(composite_key)
+        self._requeue_request_activity(pending_request)
         self._adopt_pending_turn_token(context, pending_request)
         logger.warning(
             "Claude malformed tool-use synthetic API error for session %s suppressed from user-visible transcript: %s",
             composite_key,
             text or "<empty>",
         )
-        await self.controller.emit_agent_message(context, "result", "", is_error=True)
+        await self.controller.emit_agent_message(
+            context,
+            "result",
+            "",
+            is_error=True,
+            output=terminal_output_for(pending_request),
+        )
         if pending_request is not None:
             await self._remove_ack_reaction(pending_request)
         self._last_assistant_text.pop(composite_key, None)
@@ -1200,6 +1249,7 @@ class ClaudeAgent(BaseAgent):
         and release its Chat stream now. Called from auth-failure terminal paths
         after the recovery notify has been persisted."""
         failed_request = self._pop_pending_request(composite_key)
+        self._requeue_request_activity(failed_request)
         self._adopt_pending_turn_token(context, failed_request)
         _mark = getattr(self.controller, "mark_turn_complete", None)
         if callable(_mark):
@@ -1211,6 +1261,13 @@ class ClaudeAgent(BaseAgent):
     def _activity_registry(self):
         service = getattr(self.controller, "agent_service", None)
         return getattr(service, "activities", None)
+
+    def _requeue_request_activity(self, request: AgentRequest | None) -> None:
+        activity = getattr(request, "output_activity", None)
+        registry = self._activity_registry()
+        if activity is not None and registry is not None:
+            registry.requeue_completed_output(activity)
+            request.output_activity = None
 
     def _activity_output_pending(self, composite_key: str) -> bool:
         registry = self._activity_registry()
@@ -1454,24 +1511,10 @@ class ClaudeAgent(BaseAgent):
         detached: bool,
         completes_turn: bool,
     ) -> MessageOutput:
-        return MessageOutput(
-            completes_turn=completes_turn,
-            completes_run=True,
+        return activity_completion_output(
+            activity,
             detached=detached,
-            idempotency_key=(
-                f"claude-task:{activity.runtime_key}:{activity.id}:completion"
-            ),
-            activity_id=activity.id,
-            causation_id=activity.parent_activity_id,
-            sequence=1,
-            run_id=activity.run_id,
-            metadata={
-                "activity_kind": activity.kind,
-                "activity_status": activity.status,
-                "backend": activity.backend,
-                "run_ids": activity.metadata.get("run_ids"),
-                "turn_id": activity.turn_id,
-            },
+            completes_turn=completes_turn,
         )
 
     @staticmethod
@@ -1554,6 +1597,9 @@ class ClaudeAgent(BaseAgent):
             if registry is not None:
                 registry.requeue_completed_output(activity)
             raise
+        registry = self._activity_registry()
+        if registry is not None:
+            registry.ack_completed_output(activity)
         self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
 
@@ -1615,6 +1661,8 @@ class ClaudeAgent(BaseAgent):
                 except Exception:
                     registry.requeue_completed_output(activity)
                     raise
+                else:
+                    registry.ack_completed_output(activity)
                 finally:
                     await self._remove_result_pending_reaction(
                         composite_key,
@@ -1641,6 +1689,7 @@ class ClaudeAgent(BaseAgent):
             except Exception:
                 registry.requeue_completed_output(activity)
                 raise
+            registry.ack_completed_output(activity)
             self._mark_session_idle_if_runtime_free(composite_key)
             self._signal_activity_output_settled(composite_key)
 
@@ -1744,6 +1793,7 @@ class ClaudeAgent(BaseAgent):
                     detached=False,
                     completes_turn=True,
                 )
+                pending_request.output_activity = completed_activity
                 return None
             self._detached_activity_outputs[composite_key] = completed_activity
             logger.info(
@@ -1808,6 +1858,7 @@ class ClaudeAgent(BaseAgent):
                 if completed_activity is not None
                 else None
             ),
+            output_activity=completed_activity,
         )
         self._pending_requests.setdefault(composite_key, []).append(request)
         logger.info(
@@ -1883,6 +1934,7 @@ class ClaudeAgent(BaseAgent):
                     logger.debug(f"Failed to remove reaction ack: {err}")
         if requests:
             for request in requests:
+                self._requeue_request_activity(request)
                 await self._remove_ack_reaction(request)
 
     def get_relative_path(self, abs_path: str, context: Optional[MessageContext] = None) -> str:

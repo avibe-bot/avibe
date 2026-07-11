@@ -32,6 +32,7 @@ from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import messages
+from core.message_output import terminal_turn_output
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -771,7 +772,13 @@ class SessionTurnManager:
                     # any backend turn (missing/disabled backend) → empty error result
                     # → dot red. This is a real terminal FAILURE, not a timeout.
                     if failed:
-                        await self.controller.emit_agent_message(context, "result", "", is_error=True)
+                        await self.controller.emit_agent_message(
+                            context,
+                            "result",
+                            "",
+                            is_error=True,
+                            output=terminal_turn_output(),
+                        )
                     # Flush intents ride on the popped Turn (set by cancel / send_now),
                     # so they retire with it — no parallel set to discard. Don't flush
                     # after a plain Stop (keep the queue) or a terminal failure; send-now
@@ -1103,6 +1110,7 @@ class SessionTurnManager:
             logger.debug("turn_state: failed to read queued input count", exc_info=True)
         activity_state: dict[str, Any] = {
             "background_activities": [],
+            "pending_activity_output_count": 0,
             "connection": "unknown",
         }
         service = getattr(self.controller, "agent_service", None) if self.controller is not None else None
@@ -1121,6 +1129,10 @@ class SessionTurnManager:
             "foreground": "running" if active else "idle",
             "pending_input_count": pending_input_count,
             "background_activities": activity_state.get("background_activities", []),
+            "pending_activity_output_count": activity_state.get(
+                "pending_activity_output_count",
+                0,
+            ),
             "connection": activity_state.get("connection", "unknown"),
         }
         if backend:

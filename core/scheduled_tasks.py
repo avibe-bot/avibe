@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
 from core.message_context import resolve_context_platform
+from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
@@ -1072,6 +1073,18 @@ class TaskExecutionStore:
         ]
         return sorted(runs, key=lambda item: (item.get("completed_at") or "", item.get("id") or ""))[:limit]
 
+    def list_deferred_runs(self) -> list[dict[str, Any]]:
+        if self._sqlite is not None:
+            return self._sqlite.list_deferred_runs()
+        return [
+            run
+            for run in self._list_file_runs()
+            if isinstance(run.get("result_payload"), dict)
+            and run["result_payload"].get("deferred_terminal_status")
+            and (_normalize_requested_run_status(run.get("status")) or run.get("status"))
+            not in TERMINAL_RUN_STATUSES
+        ]
+
     def find_callback_run(
         self,
         *,
@@ -1545,7 +1558,127 @@ class ScheduledTaskService:
         self._session_lock_cache: Dict[str, str] = {}
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
+        self._recover_activity_lifecycle()
         self.request_store.recover_processing()
+
+    @staticmethod
+    def _activity_run_ids(activity: Any) -> list[str]:
+        run_ids: list[str] = []
+        primary = str(getattr(activity, "run_id", "") or "").strip()
+        if primary:
+            run_ids.append(primary)
+        metadata = getattr(activity, "metadata", None) or {}
+        values = metadata.get("run_ids") if isinstance(metadata, dict) else None
+        if isinstance(values, list):
+            for value in values:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+        return run_ids
+
+    def _activity_registry(self) -> Any:
+        return getattr(getattr(self.controller, "agent_service", None), "activities", None)
+
+    def _recover_activity_lifecycle(self) -> None:
+        """Reconcile persisted Activity blockers before queued-Run recovery."""
+
+        registry = self._activity_registry()
+        drain_terminals = getattr(registry, "drain_recovered_terminals", None)
+        if callable(drain_terminals):
+            for activity in drain_terminals():
+                self.settle_activity_runs(activity)
+
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        has_pending_output = getattr(registry, "has_pending_run_output", None)
+        for run in self.request_store.list_deferred_runs():
+            run_id = str(run.get("id") or "").strip()
+            if not run_id:
+                continue
+            if callable(has_blocker) and has_blocker(run_id):
+                continue
+            if callable(has_pending_output) and has_pending_output(run_id):
+                continue
+            if self.request_store.settle_deferred_run(run_id):
+                self._drain_dirty = True
+
+    def _settle_activity_without_output(self, activity: Any) -> None:
+        """Finish an Activity Run without manufacturing user-visible text."""
+
+        for run_id in self._activity_run_ids(activity):
+            self.request_store.defer_run_terminal(
+                run_id,
+                terminal_status="succeeded",
+            )
+            if self.request_store.settle_deferred_run(run_id):
+                self._drain_dirty = True
+
+    async def _deliver_recovered_activity_output(self, activity: Any) -> None:
+        registry = self._activity_registry()
+        summary = str((getattr(activity, "metadata", None) or {}).get("summary") or "").strip()
+        session_id = str(getattr(activity, "session_id", "") or "").strip()
+        if not summary or not session_id:
+            self._settle_activity_without_output(activity)
+            registry.ack_completed_output(activity)
+            return
+
+        try:
+            target = resolve_session_id_target(session_id)
+        except ValueError:
+            logger.info(
+                "Recovered Activity %s has no live Session route; settling without output",
+                getattr(activity, "id", ""),
+            )
+            self._settle_activity_without_output(activity)
+            registry.ack_completed_output(activity)
+            return
+
+        context = await self._build_context(
+            target.session_key,
+            execution_id=f"activity:{getattr(activity, 'backend', '')}:{getattr(activity, 'id', '')}",
+            trigger_kind="activity_recovery",
+            session_id=session_id,
+            agent_name=target.agent_name,
+            target_info=target,
+            metadata={
+                "source_kind": "activity_recovery",
+                "source_actor": getattr(activity, "id", None),
+            },
+        )
+        message_id = await self.controller.emit_agent_message(
+            context,
+            "result",
+            summary,
+            output=activity_completion_output(
+                activity,
+                detached=True,
+                completes_turn=False,
+            ),
+        )
+        if message_id is None:
+            raise RuntimeError("recovered Activity output was not persisted or delivered")
+        registry.ack_completed_output(activity)
+
+    async def _drain_recovered_activity_outputs(self) -> None:
+        registry = self._activity_registry()
+        runtimes = getattr(registry, "recovered_output_runtimes", None)
+        claim = getattr(registry, "claim_completed_output", None)
+        if not callable(runtimes) or not callable(claim):
+            return
+        for backend, runtime_key in runtimes():
+            while True:
+                activity = claim(backend, runtime_key, recovered_only=True)
+                if activity is None:
+                    break
+                try:
+                    await self._deliver_recovered_activity_output(activity)
+                except Exception:
+                    registry.requeue_completed_output(activity, recovered=True)
+                    logger.warning(
+                        "Failed to deliver recovered Activity output %s",
+                        getattr(activity, "id", ""),
+                        exc_info=True,
+                    )
+                    break
 
     def validate_platform(self, platform: str) -> None:
         # The real IM platforms have a settings manager; ``avibe`` (the web
@@ -1646,6 +1779,7 @@ class ScheduledTaskService:
             if not self._owns_service_instance():
                 return
             try:
+                await self._drain_recovered_activity_outputs()
                 store_changed = self.store.maybe_reload()
                 request_store_changed = self.request_store.maybe_reload()
                 should_drain = store_changed or request_store_changed or self._drain_dirty

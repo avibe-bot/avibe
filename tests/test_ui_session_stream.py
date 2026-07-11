@@ -497,7 +497,25 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
 
     async def in_flight(session_id_inner):
         assert session_id_inner == session_id
-        return {"status_code": 200, "body": {"in_flight": True}}
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": True,
+                "foreground": "running",
+                "pending_input_count": 1,
+                "background_activities": [
+                    {
+                        "id": "task-1",
+                        "backend": "claude",
+                        "runtime_key": "runtime-1",
+                        "kind": "background_task",
+                        "status": "running",
+                    }
+                ],
+                "pending_activity_output_count": 0,
+                "connection": "connected",
+            },
+        }
 
     with (
         patch("vibe.internal_client.turn_state", in_flight),
@@ -523,6 +541,10 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["queued"][0]["text"] == "follow-up"
     assert body["draft"]["text"] == "draft text"
     assert body["turn_state"]["in_flight"] is True
+    assert body["turn_state"]["foreground"] == "running"
+    assert body["turn_state"]["pending_input_count"] == 1
+    assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
+    assert body["turn_state"]["connection"] == "connected"
 
 
 def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_path):
@@ -693,6 +715,48 @@ def test_turn_state_idle_recovers_stale_running_status(isolated_state, tmp_path)
     assert body["recovered_agent_status"] is True
     with engine.connect() as conn:
         assert sessions_service.get_session(conn, session_id)["agent_status"] == "idle"
+
+
+def test_turn_state_route_preserves_orthogonal_runtime_axes(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    async def projected(session_id_inner):
+        assert session_id_inner == session_id
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "native_turn_started": False,
+                "pending_input_count": 2,
+                "background_activities": [
+                    {
+                        "id": "task-1",
+                        "backend": "claude",
+                        "runtime_key": "runtime-1",
+                        "kind": "background_task",
+                        "status": "running",
+                    }
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "reconnecting",
+            },
+        }
+
+    with patch("vibe.internal_client.turn_state", projected):
+        client = app.test_client()
+        response = client.get(f"/api/sessions/{session_id}/turn-state")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["foreground"] == "idle"
+    assert body["in_flight"] is False
+    assert body["pending_input_count"] == 2
+    assert body["pending_activity_output_count"] == 1
+    assert [item["id"] for item in body["background_activities"]] == ["task-1"]
+    assert body["connection"] == "reconnecting"
 
 
 def test_turn_state_idle_does_not_recover_failed_status(isolated_state, tmp_path):

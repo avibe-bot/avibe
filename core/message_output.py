@@ -1,8 +1,8 @@
 """Message-output semantics shared by every agent backend.
 
 The visible Message and the lifecycle event it may cause are deliberately
-separate. Existing result callers use the compatibility default (complete the
-current Turn); backends opt into non-terminal or detached output explicitly.
+separate. Live runtime paths carry explicit lifecycle authority; one quarantined
+dispatcher fallback preserves older callers that still use terminal ``result``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any, Mapping
 class MessageOutput:
     """Lifecycle and hidden provenance for one user-visible agent output."""
 
-    completes_turn: bool = True
+    completes_turn: bool = False
     completes_run: bool | None = None
     detached: bool = False
     idempotency_key: str | None = None
@@ -73,8 +73,28 @@ class MessageOutput:
 
 
 def output_for_message(message_type: str, output: MessageOutput | None) -> MessageOutput:
-    """Return explicit semantics, preserving the legacy terminal-result contract."""
+    """Normalize output semantics at the legacy dispatcher boundary.
+
+    Live backend and shared-core paths provide explicit ``MessageOutput``. The
+    result fallback remains only as a compatibility adapter for external callers
+    while the visible Message role and lifecycle authority evolve separately.
+    """
 
     if output is not None:
         return output
-    return MessageOutput(completes_turn=(message_type == "result"))
+    if message_type == "result":
+        return terminal_turn_output()
+    return MessageOutput(completes_turn=False, completes_run=False)
+
+
+def terminal_turn_output() -> MessageOutput:
+    """Explicitly grant one output authority to settle its Turn and Run."""
+
+    return MessageOutput(completes_turn=True, completes_run=True)
+
+
+def terminal_output_for(request: Any) -> MessageOutput:
+    """Use a request's explicit output policy or the terminal Turn default."""
+
+    output = getattr(request, "output", None)
+    return output if isinstance(output, MessageOutput) else terminal_turn_output()

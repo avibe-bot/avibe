@@ -34,6 +34,7 @@ from modules.agents.opencode.message_processor import (
 from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from core.resource_governance import governor_from_controller
+from core.message_output import terminal_turn_output
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
@@ -917,7 +918,13 @@ class AgentAuthService:
         # without adding a second visible message (the recovery button above is the
         # visible one). No-op off-workbench.
         try:
-            await self.controller.emit_agent_message(context, "result", "", is_error=True)
+            await self.controller.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                output=terminal_turn_output(),
+            )
         except Exception:
             logger.debug("auth recovery: failed to settle turn status", exc_info=True)
         return True

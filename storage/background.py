@@ -920,6 +920,29 @@ class SQLiteBackgroundTaskStore:
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             return self._run_from_row(row) if row else None
 
+    def list_deferred_runs(self) -> list[dict[str, Any]]:
+        """Return non-terminal Runs carrying a durable terminal intent."""
+
+        with self.engine.connect() as conn:
+            rows = list(
+                conn.execute(
+                    select(agent_runs)
+                    .where(
+                        agent_runs.c.status.in_(
+                            _status_query_values("queued")
+                            + _status_query_values("running")
+                        )
+                    )
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                ).mappings()
+            )
+        deferred: list[dict[str, Any]] = []
+        for row in rows:
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                deferred.append(self._run_from_row(row))
+        return deferred
+
     def list_pending_callbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
         terminal_statuses = _status_query_values("succeeded") + _status_query_values("failed") + _status_query_values("canceled")
         with self.engine.connect() as conn:
@@ -1467,18 +1490,25 @@ class SQLiteBackgroundTaskStore:
             now = _utc_now_iso()
             rows = list(
                 conn.execute(
-                    select(agent_runs.c.id)
+                    select(agent_runs.c.id, agent_runs.c.result_payload_json)
                     .where(agent_runs.c.status.in_(_status_query_values("running")))
                     .where(agent_runs.c.run_type != "watch_runtime")
                 ).mappings()
             )
-            recovered_ids = [str(row["id"]) for row in rows]
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.status.in_(_status_query_values("running")))
-                .where(agent_runs.c.run_type != "watch_runtime")
-                .values(status="queued", started_at=None, pid=None, updated_at=now)
-            )
+            recovered_ids = []
+            for row in rows:
+                result_payload = _json_loads(row["result_payload_json"], {})
+                if isinstance(result_payload, dict) and result_payload.get(
+                    "deferred_terminal_status"
+                ):
+                    continue
+                recovered_ids.append(str(row["id"]))
+            if recovered_ids:
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id.in_(recovered_ids))
+                    .values(status="queued", started_at=None, pid=None, updated_at=now)
+                )
             _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
             _defer_run_ids_updated_from_connection(conn, recovered_ids)
 

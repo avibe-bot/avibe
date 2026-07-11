@@ -301,7 +301,10 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
                 output=output,
             )
 
-        self.assertIsNone(message_id)
+        self.assertEqual(
+            message_id,
+            "agent-output:unknown:runtime-1:terminal-output",
+        )
         self.assertEqual(controller.im_client.sent_messages, [])
         controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
         dispatcher._record_agent_run_terminal_result.assert_called_once_with(

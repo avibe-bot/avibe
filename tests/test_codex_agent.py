@@ -7,7 +7,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -621,7 +621,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         # Force-reaped stuck turns must settle Workbench status + runtime gate
         # through the shared terminal-result chokepoint.
         agent.controller.emit_agent_message.assert_awaited_once_with(
-            "ctx-1", "result", "", is_error=True, level="silent"
+            "ctx-1", "result", "", is_error=True, level="silent", output=ANY
         )
         self.assertEqual(agent._event_handler.release_calls, [])
 
@@ -641,7 +641,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evicted, 1)
         self.assertEqual(stop_calls, ["stop"])
         agent.controller.emit_agent_message.assert_awaited_once_with(
-            "ctx-latest", "result", "", is_error=True, level="silent"
+            "ctx-latest", "result", "", is_error=True, level="silent", output=ANY
         )
         self.assertEqual(agent._event_handler.release_calls, [])
 
@@ -911,6 +911,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
             "result",
             "❌ Failed to interrupt previous Codex turn: interrupt failed",
             is_error=True,
+            output=ANY,
         )
 
     async def test_handle_message_recovers_from_broken_transport_once(self):

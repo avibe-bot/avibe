@@ -641,11 +641,18 @@ class Controller:
         self.message_handler.set_session_handler(self.session_handler)
 
     def _init_agents(self):
+        from core.session_activities import SessionActivityRegistry
         from modules.agents.claude_agent import ClaudeAgent
         from modules.agents.codex import CodexAgent
         from modules.agents.opencode import OpenCodeAgent
+        from storage.db import get_cached_sqlite_engine
+        from storage.session_activities import SQLiteSessionActivityStore
 
-        self.agent_service = AgentService(self)
+        activity_store = SQLiteSessionActivityStore(get_cached_sqlite_engine())
+        self.agent_service = AgentService(
+            self,
+            activities=SessionActivityRegistry(activity_store),
+        )
         self.agent_service.register(ClaudeAgent(self))
         if self.config.codex:
             try:

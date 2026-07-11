@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
+from core.message_output import terminal_output_for
 
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -22,12 +23,17 @@ STALE_STOP_REASONS = {"not_active", "runtime_unavailable"}
 class AgentService:
     """Registry and dispatcher for agent implementations."""
 
-    def __init__(self, controller):
+    def __init__(
+        self,
+        controller,
+        *,
+        activities: SessionActivityRegistry | None = None,
+    ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
-        self.activities = SessionActivityRegistry()
+        self.activities = activities or SessionActivityRegistry()
         # Strong refs to fire-and-forget tasks (e.g. the cancellation tidy) so the
         # event loop doesn't GC them before they run (asyncio only weak-refs tasks).
         self._background_tasks: set[asyncio.Task] = set()
@@ -245,7 +251,14 @@ class AgentService:
 
                     async def _tidy_on_cancel() -> None:
                         try:
-                            await emit(request.context, "result", "", is_error=True, level="silent")
+                            await emit(
+                                request.context,
+                                "result",
+                                "",
+                                is_error=True,
+                                level="silent",
+                                output=terminal_output_for(request),
+                            )
                         except Exception:
                             logger.debug("Failed to emit terminal tidy on cancellation", exc_info=True)
                         finally:
@@ -270,7 +283,14 @@ class AgentService:
                 emit = getattr(self.controller, "emit_agent_message", None)
                 if callable(emit):
                     try:
-                        await emit(request.context, "result", "", is_error=True, level="silent")
+                        await emit(
+                            request.context,
+                            "result",
+                            "",
+                            is_error=True,
+                            level="silent",
+                            output=terminal_output_for(request),
+                        )
                     except Exception:
                         logger.debug("Failed to emit terminal result for backend exception", exc_info=True)
             finally:

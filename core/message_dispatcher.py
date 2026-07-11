@@ -1455,7 +1455,11 @@ class ConsolidatedMessageDispatcher:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(context)
-                return None
+                # A previously persisted output is a successful idempotent
+                # delivery attempt. Return its stable identity so a recovered
+                # Activity can acknowledge its durable Outbox snapshot instead
+                # of retrying forever after a crash between emit and ack.
+                return native_output_id
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
