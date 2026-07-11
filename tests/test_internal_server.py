@@ -164,6 +164,50 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/events", ("POST",)) in routes
 
 
+def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):
+    """The Show-page stream owns one bus lifecycle because it bypasses the FSM."""
+    from core import inbox_events
+
+    context = MessageContext(user_id="workbench", channel_id="ses_show", platform="avibe")
+
+    async def _build_payload(_payload):
+        return "edit the show page", context
+
+    async def _dispatch_turn(_controller, _context, _text, *, on_chunk=None):
+        assert on_chunk is not None
+        await on_chunk({"kind": "result", "text": "done"})
+
+    monkeypatch.setattr(internal_server, "_build_dispatch_payload", _build_payload)
+    monkeypatch.setattr(internal_server, "dispatch_turn", _dispatch_turn)
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+    lifecycle = []
+
+    async def _go():
+        subscription_id = inbox_events.bus.subscribe_callback(
+            lambda event_type, data: lifecycle.append((event_type, data))
+            if event_type in {"turn.start", "turn.end"}
+            else None
+        )
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return await client.post(
+                    "/internal/dispatch",
+                    json={"session_id": "ses_show", "text": "edit the show page"},
+                )
+        finally:
+            inbox_events.bus.unsubscribe(subscription_id)
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert lifecycle == [
+        ("turn.start", {"session_id": "ses_show"}),
+        ("turn.end", {"session_id": "ses_show"}),
+    ]
+
+
 # ---------------------------------------------------------------------
 # ASGI round-trips
 # ---------------------------------------------------------------------

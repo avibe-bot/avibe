@@ -7736,6 +7736,12 @@ def _show_page_not_found_response():
     return jsonify({"error": "not_found"}), 404
 
 
+def _show_page_file_not_found_response():
+    response = jsonify({"error": "not_found"})
+    response.status_code = 404
+    return response
+
+
 def _show_page_runtime_unavailable_response():
     return jsonify({"error": "show_runtime_unavailable"}), 503
 
@@ -7750,6 +7756,71 @@ def _is_show_page_entry_asset(asset_path: str) -> bool:
     return relative in {"", "index.html"}
 
 
+def _decode_show_page_asset_path(asset_path: str) -> str:
+    decoded = (asset_path or "").strip("/")
+    for _ in range(3):
+        updated = unquote(decoded)
+        if updated == decoded:
+            break
+        decoded = updated
+    return decoded.replace("\\", "/")
+
+
+def _is_show_page_dot_path(asset_path: str) -> bool:
+    decoded = _decode_show_page_asset_path(asset_path)
+    return any(segment.startswith(".") for segment in decoded.split("/") if segment)
+
+
+def _is_show_runtime_sensitive_file_segment(segment: str) -> bool:
+    lowered = segment.lower()
+    return (
+        lowered == ".git"
+        or lowered == ".env"
+        or lowered.startswith(".env.")
+        or lowered.endswith((".pem", ".crt", ".key"))
+    )
+
+
+def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bool:
+    decoded = _decode_show_page_asset_path(asset_path)
+    segments = [segment for segment in decoded.split("/") if segment]
+    if any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments):
+        return True
+    dot_segments = [index for index, segment in enumerate(segments) if segment.startswith(".")]
+    if not dot_segments:
+        return False
+    if any(segment in {".", ".."} for segment in segments):
+        return True
+
+    vite_dependency = (
+        (len(segments) >= 4 and segments[:3] == ["node_modules", ".vite", "deps"] and dot_segments == [1])
+        or (len(segments) >= 3 and segments[:2] == [".vite", "deps"] and dot_segments == [0])
+    )
+    if vite_dependency:
+        return False
+
+    if not decoded.startswith("@fs/"):
+        return True
+
+    raw_fs_path = decoded.removeprefix("@fs/")
+    fs_path = Path(raw_fs_path)
+    if fs_path.is_absolute():
+        target = fs_path.resolve(strict=False)
+        workspace = paths.get_show_page_dir(session_id).resolve(strict=False)
+        try:
+            workspace_relative = target.relative_to(workspace)
+        except ValueError:
+            # Runtime dependency roots can legitimately live below dot directories
+            # such as ~/.avibe. The Show Runtime owns their allowlist and still denies
+            # sensitive filenames; only workspace-relative dot paths are all private.
+            return False
+        return any(part.startswith(".") for part in workspace_relative.parts)
+
+    # A Vite @fs path is normally absolute. Retain the synthetic relative cache
+    # form used by prewarming/tests, but do not generally relax relative dot paths.
+    return not _is_relocated_vite_dep_path(decoded)
+
+
 def _show_page_recovery_response(session_id: str):
     from core.show_pages import show_page_runtime_recovery_html
 
@@ -7760,12 +7831,18 @@ def _show_page_file_response(root: Path, asset_path: str):
     relative = (asset_path or "").strip("/")
     if not relative:
         relative = "index.html"
-    candidate = (root / unquote(relative)).resolve()
+    decoded = _decode_show_page_asset_path(relative)
+    segments = [segment for segment in decoded.split("/") if segment]
+    if _is_show_page_dot_path(decoded) or any(
+        _is_show_runtime_sensitive_file_segment(segment) for segment in segments
+    ):
+        return _show_page_file_not_found_response()
+    candidate = (root / decoded).resolve()
     root_resolved = root.resolve()
     if candidate != root_resolved and root_resolved not in candidate.parents:
-        return jsonify({"error": "not_found"}), 404
+        return _show_page_file_not_found_response()
     if not candidate.exists() or not candidate.is_file():
-        return _show_page_not_found_response()
+        return _show_page_file_not_found_response()
     mime_type, _ = mimetypes.guess_type(str(candidate))
     response = send_file(candidate, mimetype=mime_type or "application/octet-stream")
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -8711,6 +8788,8 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "private":
             return _show_page_not_found_response()
+        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
+            return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
@@ -8780,6 +8859,8 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
+        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
+            return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method != "GET":
                 return jsonify({"ok": False, "code": "public_show_events_read_only"}), 403

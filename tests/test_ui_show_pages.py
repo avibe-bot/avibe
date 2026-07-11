@@ -551,6 +551,7 @@ def test_public_show_page_does_not_inject_write_runtime_config(monkeypatch, tmp_
 
 def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: True)
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
@@ -563,7 +564,199 @@ def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeyp
     assert b"Loading Show Page" in response.content
     assert b"Ready to visualize" in response.content
     assert b"Copy prompt" in response.content
+    assert b"History is saved automatically around each turn" in response.content
+    assert b"Never add remotes, push, or publish" in response.content
     assert b'src="./src/main.tsx"' not in response.content
+
+
+def test_private_show_page_recovery_reports_history_unavailable_without_git(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: False)
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
+    try:
+        response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert b"Automatic Show Page history is unavailable" in response.content
+    assert b"History is saved automatically around each turn" not in response.content
+    assert b"git restore --source" not in response.content
+
+
+def test_private_show_page_recovery_uses_self_managed_history_contract(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: True)
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    (paths.get_show_pages_dir() / "ses123" / ".git").mkdir()
+    set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
+    try:
+        response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert b"shadow history continues automatically" in response.content
+    assert b"not Avibe history" in response.content
+    assert b"Only if the user explicitly asks to recover from Avibe history" in response.content
+    assert b"History is saved automatically around each turn" not in response.content
+    assert b"Restore only via" not in response.content
+
+
+def test_private_show_page_static_fallback_denies_dot_leading_segments(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = paths.get_show_pages_dir() / "ses123"
+    (page_dir / ".git").mkdir()
+    (page_dir / ".git" / "HEAD").write_text("private history", encoding="utf-8")
+    (page_dir / "assets" / ".draft").mkdir(parents=True)
+    (page_dir / "assets" / ".draft" / "secret.txt").write_text("private draft", encoding="utf-8")
+    set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
+    try:
+        client = app.test_client()
+        git_response = client.get("/show/ses123/.git/HEAD", base_url="http://127.0.0.1:5123")
+        nested_response = client.get(
+            "/show/ses123/assets/.draft/secret.txt",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert git_response.status_code == 404
+    assert nested_response.status_code == 404
+    assert b"private history" not in git_response.content
+    assert b"private draft" not in nested_response.content
+
+
+def test_private_show_page_denies_dot_path_before_runtime_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    (paths.get_show_pages_dir() / "ses123" / ".git").write_text(
+        "gitdir: /tmp/show-git/ses123.git\n",
+        encoding="utf-8",
+    )
+    manager = _FakeShowRuntimeManager(body=b"leaked pointer")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get("/show/ses123/.git", base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert b"show-git" not in response.content
+    assert manager.calls == []
+
+
+def test_private_show_page_proxies_vite_dependency_dot_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        body=b"export const react = true",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/node_modules/.vite/deps/react.js",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export const react = true"
+    assert manager.calls[0][1] == "/sessions/ses123/app/node_modules/.vite/deps/react.js"
+
+
+def test_private_show_page_proxies_root_vite_dependency_dot_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        body=b"export const react = true",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/.vite/deps/react.js",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export const react = true"
+    assert manager.calls[0][1] == "/sessions/ses123/app/.vite/deps/react.js"
+
+
+def test_private_show_page_denies_sensitive_file_before_runtime_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(body=b"private key")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/config/server.key",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
+def test_private_show_page_proxies_workspace_at_fs_path_below_dot_home(monkeypatch, tmp_path):
+    avibe_home = tmp_path / ".avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    _save_config(avibe_home)
+    _create_show_page("ses123", "private")
+    source_path = paths.get_show_page_dir("ses123") / "src" / "App.tsx"
+    manager = _FakeShowRuntimeManager(
+        body=b"export default function App() {}",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/@fs/{source_path.as_posix()}",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export default function App() {}"
+    assert manager.calls
+    assert manager.calls[0][1].endswith(f"/@fs/{source_path.as_posix()}")
+
+
+def test_private_show_page_denies_workspace_dot_path_through_at_fs(monkeypatch, tmp_path):
+    avibe_home = tmp_path / ".avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    _save_config(avibe_home)
+    _create_show_page("ses123", "private")
+    hidden_path = paths.get_show_page_dir("ses123") / ".draft" / "secret.ts"
+    manager = _FakeShowRuntimeManager(body=b"export const secret = true")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/@fs/{hidden_path.as_posix()}",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
 
 
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
@@ -2840,6 +3033,100 @@ def test_public_show_page_api_does_not_fall_back_to_static(monkeypatch, tmp_path
     assert response.status_code == 503
     assert response.get_json()["error"] == "show_runtime_unavailable"
     assert b"secret" not in response.content
+
+
+def test_public_show_page_static_fallback_denies_dot_leading_segments(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    page_dir = paths.get_show_pages_dir() / "ses123"
+    (page_dir / ".git").mkdir()
+    (page_dir / ".git" / "config").write_text("public history", encoding="utf-8")
+    set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/.git/config",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert b"public history" not in response.content
+
+
+def test_public_show_page_denies_dot_path_before_runtime_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    (paths.get_show_pages_dir() / "ses123" / ".git").write_text(
+        "gitdir: /tmp/show-git/ses123.git\n",
+        encoding="utf-8",
+    )
+    manager = _FakeShowRuntimeManager(body=b"leaked pointer")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/.git",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert b"show-git" not in response.content
+    assert manager.calls == []
+
+
+def test_public_show_page_proxies_vite_dependency_dot_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=b"export const react = true",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/node_modules/.vite/deps/react.js",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export const react = true"
+    assert manager.calls[0][1] == "/sessions/ses123/app/node_modules/.vite/deps/react.js"
+
+
+def test_public_show_page_proxies_relocated_vite_cache_at_fs_path(monkeypatch, tmp_path):
+    avibe_home = tmp_path / ".avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    _save_config(avibe_home)
+    share_id = _create_show_page("ses123", "public")
+    dependency_path = paths.get_runtime_dir() / "show-runtime" / ".vite-cache" / "deps" / "react.js"
+    manager = _FakeShowRuntimeManager(
+        body=b"export const react = true",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/@fs/{dependency_path.as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export const react = true"
+    assert manager.calls
+    assert manager.calls[0][1].endswith(f"/@fs/{dependency_path.as_posix()}")
 
 
 def test_public_show_page_redirects_without_trailing_slash(monkeypatch, tmp_path):

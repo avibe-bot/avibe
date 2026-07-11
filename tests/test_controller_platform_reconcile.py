@@ -189,6 +189,29 @@ def test_reconcile_adds_platform_with_callbacks_before_start(monkeypatch):
     assert controller.im_client.clients["discord"].settings_manager.platform == "discord"
 
 
+def test_im_message_callback_marks_checkpoint_turn_before_dispatch(monkeypatch):
+    controller = _controller(_config(["slack"]))
+    marked = []
+    dispatched = []
+    controller.show_git_checkpoint_service = SimpleNamespace(mark_im_turn=lambda context: marked.append(context))
+
+    async def _dispatch(_controller, context, text):
+        dispatched.append((context, text))
+
+    monkeypatch.setattr("core.services.dispatch.dispatch_turn", _dispatch)
+    controller._setup_callbacks()
+    context = MessageContext(user_id="U", channel_id="C", platform="slack")
+
+    async def _run_callback():
+        await controller.im_client.clients["slack"].on_message_callback(context, "hello")
+        await asyncio.sleep(0)
+
+    asyncio.run(_run_callback())
+
+    assert marked == [context]
+    assert dispatched == [(context, "hello")]
+
+
 def test_reconcile_removes_platform_and_keeps_workbench_delivery(monkeypatch):
     monkeypatch.setattr("core.controller.get_platform_descriptor", lambda platform: _Descriptor(platform))
     controller = _controller(_config(["slack", "discord"]))

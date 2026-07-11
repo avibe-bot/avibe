@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ def is_controller_process() -> bool:
 class InboxEventBus:
     def __init__(self) -> None:
         self._subscribers: dict[int, tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = {}
+        self._callbacks: dict[int, Callable[[str, Any], None]] = {}
         self._next_id = 0
         self._lock = threading.Lock()
 
@@ -49,9 +50,24 @@ class InboxEventBus:
             self._subscribers[sub_id] = (loop, queue)
         return sub_id, queue
 
+    def subscribe_callback(self, callback: Callable[[str, Any], None]) -> int:
+        """Register an in-process callback run synchronously before queue fan-out.
+
+        Turn-boundary owners use this path when the work triggered by an event
+        must finish before the publisher continues. Exceptions are isolated so a
+        diagnostic/checkpoint subscriber can never break message delivery.
+        """
+
+        with self._lock:
+            sub_id = self._next_id
+            self._next_id += 1
+            self._callbacks[sub_id] = callback
+        return sub_id
+
     def unsubscribe(self, sub_id: int) -> None:
         with self._lock:
             self._subscribers.pop(sub_id, None)
+            self._callbacks.pop(sub_id, None)
 
     def subscriber_count(self) -> int:
         with self._lock:
@@ -61,8 +77,12 @@ class InboxEventBus:
         """Fan ``(event_type, data)`` out to every subscriber. No-op when none."""
         with self._lock:
             subs = list(self._subscribers.values())
-        if not subs:
-            return
+            callbacks = list(self._callbacks.values())
+        for callback in callbacks:
+            try:
+                callback(event_type, data)
+            except Exception:
+                logger.exception("inbox event callback failed for %s", event_type)
         for loop, queue in subs:
             try:
                 loop.call_soon_threadsafe(self._put_nowait, queue, event_type, data)

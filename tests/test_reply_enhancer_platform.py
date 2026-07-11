@@ -357,7 +357,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.show_git.show_git_checkpointing_active", return_value=True),
+        ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,
                 context=context,
@@ -369,6 +372,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`vibe show path`", prompt)
         self.assertIn("`vibe show status`", prompt)
         self.assertIn("`vibe show update --visibility private`", prompt)
+        self.assertIn("History is saved automatically around each turn", prompt)
+        self.assertIn("`git -C <workspace> status / log / diff / show`", prompt)
+        self.assertIn("Restore only via `git restore --source=<ref> -- <path>`", prompt)
+        self.assertIn("Never move HEAD, switch branches, rewrite history, or run gc", prompt)
+        self.assertIn("Never add remotes, push, or publish the workspace anywhere", prompt)
         self.assertNotIn("`vibe show path --session-id sesk8m4q2p7x`", prompt)
         self.assertIn("Make the page work reasonably on mobile", prompt)
         self.assertIn("managed React/Vite apps", prompt)
@@ -467,6 +475,55 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only record durable, factual, reusable information there.", prompt)
         self.assertIn("Keep entries short, deduplicated, and free of secrets unless the user explicitly asks.", prompt)
         self.assertIn("use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history", prompt)
+
+    def test_show_pages_prompt_reports_history_unavailable_without_git(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.show_git.show_git_checkpointing_active", return_value=False),
+        ):
+            prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+
+        self.assertIn("Automatic Show Page history is unavailable", prompt)
+        self.assertNotIn("History is saved automatically around each turn", prompt)
+        self.assertNotIn("git restore --source", prompt)
+
+    def test_show_pages_prompt_rechecks_mid_session_ownership_flip(self):
+        session_id = "sesk8m4q2p7x"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": session_id},
+        )
+        workspace = paths.get_show_page_dir(session_id)
+        workspace.mkdir(parents=True)
+
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.show_git.show_git_checkpointing_active", return_value=True),
+        ):
+            managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+            (workspace / ".git").mkdir()
+            self_managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+            (workspace / ".git").rmdir()
+            managed_again_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+
+        self.assertIn("History is saved automatically around each turn", managed_prompt)
+        self.assertNotIn("shadow history continues automatically", managed_prompt)
+        self.assertIn("Avibe's shadow history continues automatically", self_managed_prompt)
+        self.assertIn("addresses the **user's repo**, not Avibe history", self_managed_prompt)
+        self.assertIn("Only if the user explicitly asks to recover from Avibe history", self_managed_prompt)
+        self.assertNotIn("Read freely: `git -C <workspace>", self_managed_prompt)
+        self.assertNotIn("Restore only via `git restore", self_managed_prompt)
+        self.assertIn("History is saved automatically around each turn", managed_again_prompt)
+        self.assertNotIn("shadow history continues automatically", managed_again_prompt)
 
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
         context = MessageContext(
