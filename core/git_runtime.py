@@ -121,28 +121,47 @@ def git_runtime_status() -> dict[str, Any]:
     manager = get_git_runtime_manager()
     vendored = manager.resolve_git_path()
     managed_status = manager.status()
-    if vendored is not None:
-        return {
-            "id": "git",
-            "resolution": "vendored",
-            "path": str(vendored),
-            "version": _probe_git_version(vendored),
-            "managed": managed_status,
-        }
     system = resolve_system_git_path()
+    vendored_version = _probe_git_version(vendored)
+    system_version = _probe_git_version(system)
+    if vendored is not None:
+        resolution = "vendored"
+        resolved_path = vendored
+        resolved_version = vendored_version
+    elif system is not None:
+        resolution = "system"
+        resolved_path = system
+        resolved_version = system_version
+    else:
+        resolution = "none"
+        resolved_path = None
+        resolved_version = None
+
     if system is not None:
-        return {
-            "id": "git",
-            "resolution": "system",
-            "path": str(system),
-            "version": _probe_git_version(system),
-            "managed": managed_status,
-        }
+        agent_resolution = "system"
+        agent_path = system
+        agent_version = system_version
+    elif vendored is not None:
+        agent_resolution = "vendored"
+        agent_path = vendored
+        agent_version = vendored_version
+    else:
+        agent_resolution = "none"
+        agent_path = None
+        agent_version = None
+
     return {
         "id": "git",
-        "resolution": "none",
-        "path": None,
-        "version": None,
+        # Platform-owned features follow #669's vendored -> system order.
+        "resolution": resolution,
+        "path": str(resolved_path) if resolved_path else None,
+        "version": resolved_version,
+        # Agent shells preserve a developer's system Git and only fall back to vendored.
+        "agent": {
+            "resolution": agent_resolution,
+            "path": str(agent_path) if agent_path else None,
+            "version": agent_version,
+        },
         "managed": managed_status,
     }
 

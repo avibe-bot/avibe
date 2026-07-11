@@ -10146,6 +10146,10 @@ def _print_runtime_status(payload: dict) -> None:
     print(f"  Version: {git.get('version') or 'unknown'}")
     if git.get("path"):
         print(f"  Path: {git['path']}")
+    agent_git = git.get("agent") or {}
+    print(f"  Agent PATH resolution: {agent_git.get('resolution') or 'none'}")
+    if agent_git.get("path"):
+        print(f"  Agent PATH: {agent_git['path']}")
     managed_git = git.get("managed") or {}
     if managed_git.get("reason"):
         print(f"  Managed runtime: {managed_git['reason']}")
@@ -10211,7 +10215,10 @@ def cmd_runtime(args) -> int:
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
                     file=sys.stderr,
                 )
-        return 1 if getattr(args, "strict", False) and not payload.get("ok") else 0
+        strict_ok = bool(payload.get("ok")) and (
+            bool(git.get("ok")) or git.get("reason") == "git_runtime_unpublished"
+        )
+        return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
         git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))

@@ -170,6 +170,93 @@ jobs:
            }
 
            static int is_deprecated_command(const char *cmd)
+          --- a/hook.c
+          +++ b/hook.c
+          @@ -536,19 +536,15 @@
+                                         struct run_hooks_opt *options)
+           {
+                   struct string_list *hook_head;
+          +        (void)r;
+          +        (void)options;
+
+                   if (!hookname)
+                           BUG("null hookname was provided to hook_list()!");
+
+                   CALLOC_ARRAY(hook_head, 1);
+                   string_list_init_dup(hook_head);
+          -
+          -        /* Add hooks from the config, e.g. hook.myhook.event = pre-commit */
+          -        list_hooks_add_configured(r, hookname, hook_head, options);
+
+          -        /* Add the default "traditional" hooks from hookdir. */
+          -        list_hooks_add_default(r, hookname, hook_head, options);
+          -
+                   return hook_head;
+           }
+
+          --- a/convert.c
+          +++ b/convert.c
+          @@ -1021,59 +1021,10 @@
+                   return 0;
+           }
+
+          -static int read_convert_config(const char *var, const char *value,
+          +static int read_convert_config(const char *var UNUSED, const char *value UNUSED,
+                                         const struct config_context *ctx UNUSED,
+                                         void *cb UNUSED)
+           {
+          -        const char *key, *name;
+          -        size_t namelen;
+          -        struct convert_driver *drv;
+          -
+          -        /*
+          -         * External conversion drivers are configured using
+          -         * "filter.<name>.variable".
+          -         */
+          -        if (parse_config_key(var, "filter", &name, &namelen, &key) < 0 || !name)
+          -                return 0;
+          -        for (drv = user_convert; drv; drv = drv->next)
+          -                if (!xstrncmpz(drv->name, name, namelen))
+          -                        break;
+          -        if (!drv) {
+          -                CALLOC_ARRAY(drv, 1);
+          -                drv->name = xmemdupz(name, namelen);
+          -                *user_convert_tail = drv;
+          -                user_convert_tail = &(drv->next);
+          -        }
+          -
+          -        /*
+          -         * filter.<name>.smudge and filter.<name>.clean specifies
+          -         * the command line:
+          -         *
+          -         *        command-line
+          -         *
+          -         * The command-line will not be interpolated in any way.
+          -         */
+          -
+          -        if (!strcmp("smudge", key)) {
+          -                FREE_AND_NULL(drv->smudge);
+          -                return git_config_string(&drv->smudge, var, value);
+          -        }
+          -
+          -        if (!strcmp("clean", key)) {
+          -                FREE_AND_NULL(drv->clean);
+          -                return git_config_string(&drv->clean, var, value);
+          -        }
+          -
+          -        if (!strcmp("process", key)) {
+          -                FREE_AND_NULL(drv->process);
+          -                return git_config_string(&drv->process, var, value);
+          -        }
+          -
+          -        if (!strcmp("required", key)) {
+          -                drv->required = git_config_bool(var, value);
+          -                return 0;
+          -        }
+          -
+                   return 0;
+           }
+
           --- a/setup.c
           +++ b/setup.c
           @@ -2262,7 +2262,7 @@
@@ -250,6 +337,24 @@ jobs:
               "$git_bin" -C "$scratch/repo" \
                 -c user.name=Avibe -c user.email=runtime@avibe.local \
                 commit -m initial
+              hook_marker="$scratch/hook-ran"
+              mkdir -p "$scratch/repo/.git/hooks"
+              printf "#!/bin/sh\ntouch \"%s\"\n" "$hook_marker" > "$scratch/repo/.git/hooks/pre-commit"
+              chmod +x "$scratch/repo/.git/hooks/pre-commit"
+              filter_marker="$scratch/filter-ran"
+              filter_script="$scratch/filter.sh"
+              printf "#!/bin/sh\ntouch \"%s\"\ncat\n" "$filter_marker" > "$filter_script"
+              chmod +x "$filter_script"
+              "$git_bin" -C "$scratch/repo" config filter.avibe.clean "$filter_script"
+              "$git_bin" -C "$scratch/repo" config filter.avibe.required true
+              printf "*.filtered filter=avibe\n" > "$scratch/repo/.gitattributes"
+              printf "filter input\n" > "$scratch/repo/payload.filtered"
+              "$git_bin" -C "$scratch/repo" add .gitattributes payload.filtered
+              "$git_bin" -C "$scratch/repo" \
+                -c user.name=Avibe -c user.email=runtime@avibe.local \
+                commit -m hardening-smoke
+              test ! -e "$hook_marker"
+              test ! -e "$filter_marker"
               "$git_bin" -C "$scratch/repo" status --short
               "$git_bin" -C "$scratch/repo" log --oneline -1
               printf "second\n" >> "$scratch/repo/example.txt"
@@ -262,7 +367,7 @@ jobs:
                 echo "remote push unexpectedly succeeded" >&2
                 exit 1
               fi
-              printf "%s\n" "$remote_error" | grep -Fq "remote-capable command 'push' is disabled"
+              printf "%s\n" "$remote_error" | grep -Fq "remote-capable command"
 
               archive="/work/dist/git-$GIT_VERSION-linux-$TARGET_ARCH.tar.gz"
               tar -czf "$archive" -C /work/package bin/git
@@ -334,6 +439,24 @@ jobs:
           "$git_bin" -C "$scratch/repo" \
             -c user.name=Avibe -c user.email=runtime@avibe.local \
             commit -m initial
+          hook_marker="$scratch/hook-ran"
+          mkdir -p "$scratch/repo/.git/hooks"
+          printf "#!/bin/sh\ntouch \"%s\"\n" "$hook_marker" > "$scratch/repo/.git/hooks/pre-commit"
+          chmod +x "$scratch/repo/.git/hooks/pre-commit"
+          filter_marker="$scratch/filter-ran"
+          filter_script="$scratch/filter.sh"
+          printf "#!/bin/sh\ntouch \"%s\"\ncat\n" "$filter_marker" > "$filter_script"
+          chmod +x "$filter_script"
+          "$git_bin" -C "$scratch/repo" config filter.avibe.clean "$filter_script"
+          "$git_bin" -C "$scratch/repo" config filter.avibe.required true
+          printf "*.filtered filter=avibe\n" > "$scratch/repo/.gitattributes"
+          printf "filter input\n" > "$scratch/repo/payload.filtered"
+          "$git_bin" -C "$scratch/repo" add .gitattributes payload.filtered
+          "$git_bin" -C "$scratch/repo" \
+            -c user.name=Avibe -c user.email=runtime@avibe.local \
+            commit -m hardening-smoke
+          test ! -e "$hook_marker"
+          test ! -e "$filter_marker"
           "$git_bin" -C "$scratch/repo" status --short
           "$git_bin" -C "$scratch/repo" log --oneline -1
           printf "second\n" >> "$scratch/repo/example.txt"

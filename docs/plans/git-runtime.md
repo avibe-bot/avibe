@@ -16,7 +16,8 @@ must not be executed before `xcode-select -p` confirms the tools are installed.
 - Install Git under
   `~/.avibe/runtime/git/versions/<version>/<platform>/<fingerprint>/bin/git`.
 - Resolve an installed and metadata-verified vendored binary without network
-  access. Resolution then reports vendored, CLT-aware system Git, or none.
+  access. Status reports both the platform resolution (vendored first) and the
+  Agent PATH resolution (system first), so the two contracts stay explicit.
 - Support `VIBE_GIT_MANIFEST_PATH`, `VIBE_GIT_MANIFEST_URL`, and
   `VIBE_GIT_OFFLINE` for development, out-of-band updates, and offline use.
 - Add the vendored `bin` directory to Agent shell environments only when no
@@ -31,9 +32,10 @@ static linking; macOS links only Apple system libraries. Build flags remove
 curl, expat, gettext, Perl, Python, Tcl/Tk, OpenSSL, and Rust surfaces.
 
 The pinned source is additionally constrained so remote-capable commands,
-external Git subcommands, and shell aliases fail closed. The workflow exercises
-`init`, `add`, `commit`, `status`, `log`, `diff`, `restore`, and `gc`, and proves
-that `push` is rejected.
+external Git subcommands, shell aliases, hooks, and configured content filters
+fail closed or are ignored. The workflow exercises `init`, `add`, `commit`,
+`status`, `log`, `diff`, `restore`, and `gc`; proves hook/filter helpers do not
+run; and proves that `push` is rejected.
 
 ## Publication Gate
 

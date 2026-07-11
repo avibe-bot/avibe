@@ -148,6 +148,11 @@ def test_runtime_status_reports_effective_git_resolution(monkeypatch, capsys):
             "resolution": "vendored",
             "path": "/tmp/runtime/git/bin/git",
             "version": "2.55.0",
+            "agent": {
+                "resolution": "system",
+                "path": "/usr/bin/git",
+                "version": "2.50.1",
+            },
         },
     )
 
@@ -155,6 +160,7 @@ def test_runtime_status_reports_effective_git_resolution(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["git"]["resolution"] == "vendored"
     assert payload["git"]["path"].endswith("/bin/git")
+    assert payload["git"]["agent"]["resolution"] == "system"
 
 
 def test_runtime_clean_cleans_git_runtime(monkeypatch, capsys):
@@ -192,6 +198,42 @@ def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys
     assert cli.cmd_runtime(args) == 1
     assert "runtime_archive_download_failed" in capsys.readouterr().err
     assert calls["tmux"] == [{"offline": False, "force": False}]
+
+
+def test_runtime_prepare_cli_strict_fails_when_git_prepare_fails(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare", "--strict"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        git_result={"ok": False, "reason": "git_archive_checksum_mismatch"},
+    )
+
+    assert cli.cmd_runtime(args) == 1
+    assert "git_archive_checksum_mismatch" in capsys.readouterr().err
+
+
+def test_runtime_prepare_cli_strict_allows_pending_git_publication(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare", "--strict"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        git_result={"ok": False, "reason": "git_runtime_unpublished"},
+    )
+
+    assert cli.cmd_runtime(args) == 0
+    assert "git_runtime_unpublished" in capsys.readouterr().err
 
 
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):

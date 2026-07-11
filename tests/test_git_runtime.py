@@ -224,6 +224,39 @@ def test_pending_manifest_fails_closed_before_download(tmp_path: Path, monkeypat
     assert result["reason"] == "git_runtime_unpublished"
 
 
+def test_status_reports_platform_and_agent_resolution_orders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+    system = tmp_path / "system" / "bin" / "git"
+
+    class FakeManager:
+        def resolve_git_path(self) -> Path:
+            return vendored
+
+        def status(self) -> dict[str, object]:
+            return {"installed": True, "path": str(vendored)}
+
+    monkeypatch.setattr(git_runtime, "get_git_runtime_manager", lambda: FakeManager())
+    monkeypatch.setattr(git_runtime, "resolve_system_git_path", lambda: system)
+    monkeypatch.setattr(
+        git_runtime,
+        "_probe_git_version",
+        lambda path: "vendored-version" if path == vendored else "system-version",
+    )
+
+    status = git_runtime.git_runtime_status()
+
+    assert status["resolution"] == "vendored"
+    assert status["path"] == str(vendored)
+    assert status["agent"] == {
+        "resolution": "system",
+        "path": str(system),
+        "version": "system-version",
+    }
+
+
 def test_macos_system_git_checks_clt_before_executing_git(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(git_runtime.platform, "system", lambda: "Darwin")
