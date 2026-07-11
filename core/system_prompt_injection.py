@@ -13,6 +13,7 @@ from typing import Any, Iterable, Optional
 from config import paths
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
+from core.show_git import format_agent_contract
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,9 @@ Change visibility:
 
 For more usage details, run `vibe show --help` or a subcommand help such as `vibe show update --help`.
 $avibe_cloud_guidance_section
+History contract:
+$show_git_agent_contract
+
 Guidance:
 - New Show Page workspaces are managed React/Vite apps. Edit `src/App.tsx`, `src/styles.css`, and optional `api/*.ts` handler files. Do not replace `index.html` or `src/main.tsx` unless you are repairing the app shell.
 - The standard structure is `index.html`, `src/main.tsx`, `src/App.tsx`, `src/styles.css`, and optional `api/*.ts`; treat `index.html` and `src/main.tsx` as the runtime-owned app shell.
@@ -456,6 +460,7 @@ def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: s
     return Template(_SHOW_PAGES_PROMPT).substitute(
         default_session_id=default_session_id,
         avibe_cloud_guidance_section=f"\n{avibe_cloud_guidance}\n" if avibe_cloud_guidance else "\n",
+        show_git_agent_contract=format_agent_contract(numbered=True),
     )
 
 

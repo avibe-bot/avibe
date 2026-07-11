@@ -30,6 +30,7 @@ from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.runtime_commands import RuntimeCommandWatcher
 from core.scheduled_tasks import ScheduledTaskService
+from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
@@ -247,6 +248,7 @@ class Controller:
         self.scheduled_task_service = ScheduledTaskService(self)
         self.watch_service = ManagedWatchService(self)
         self.runtime_command_watcher = RuntimeCommandWatcher(self)
+        self.show_git_checkpoint_service = ShowGitCheckpointService()
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
@@ -1306,6 +1308,7 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            self.show_git_checkpoint_service.start()
             self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
             self._im_thread.start()
             # Internal Unix-socket ASGI server for the Web UI / future
@@ -1449,6 +1452,7 @@ class Controller:
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        self.show_git_checkpoint_service.stop()
 
         try:
             codex_agent = self.agent_service.agents.get("codex")

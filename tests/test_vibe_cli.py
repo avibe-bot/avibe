@@ -207,6 +207,26 @@ def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     assert payload["restart"]["error"] == "start command timed out after 30 seconds"
 
 
+def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
+    monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["show_git_checkpoints"] == "degraded: Git executable unavailable"
+
+
+def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
+    monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
+
+    assert cli._show_git_checkpoint_items() == [
+        {
+            "status": "warn",
+            "message": "Show Page checkpointing is degraded because Git is unavailable",
+            "code": "runtime.show_git_unavailable",
+        }
+    ]
+
+
 def test_stop_process_handles_missing_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     runtime.ensure_dirs()

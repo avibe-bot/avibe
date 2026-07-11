@@ -73,6 +73,39 @@ def test_publish_without_subscribers_is_noop():
     InboxEventBus().publish("inbox.session.updated", {"x": 1})
 
 
+def test_synchronous_callback_runs_before_queue_fanout_and_is_unsubscribed():
+    async def scenario():
+        bus = InboxEventBus()
+        order = []
+        callback_id = bus.subscribe_callback(lambda event_type, data: order.append((event_type, data)))
+        _, queue = bus.subscribe()
+        bus.publish("turn.start", {"session_id": "s1"})
+        assert order == [("turn.start", {"session_id": "s1"})]
+        queued = await asyncio.wait_for(queue.get(), timeout=1.0)
+        bus.unsubscribe(callback_id)
+        bus.publish("turn.end", {"session_id": "s1"})
+        return order, queued
+
+    order, queued = asyncio.run(scenario())
+    assert order == [("turn.start", {"session_id": "s1"})]
+    assert queued == ("turn.start", {"session_id": "s1"})
+
+
+def test_synchronous_callback_failure_does_not_break_queue_delivery():
+    async def scenario():
+        bus = InboxEventBus()
+
+        def fail(_event_type, _data):
+            raise RuntimeError("checkpoint failed")
+
+        bus.subscribe_callback(fail)
+        _, queue = bus.subscribe()
+        bus.publish("turn.end", {"session_id": "s1"})
+        return await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert asyncio.run(scenario()) == ("turn.end", {"session_id": "s1"})
+
+
 def test_sqlite_background_store_publishes_run_updates(tmp_path):
     async def scenario():
         from core import inbox_events

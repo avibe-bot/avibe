@@ -792,6 +792,24 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
     return items
 
 
+def _show_git_checkpoint_items() -> list[dict]:
+    from core.git_binary import resolve_git
+
+    try:
+        available = resolve_git() is not None
+    except Exception:
+        available = False
+    if available:
+        return []
+    return [
+        {
+            "status": "warn",
+            "message": "Show Page checkpointing is degraded because Git is unavailable",
+            "code": "runtime.show_git_unavailable",
+        }
+    ]
+
+
 def _remote_examples_text() -> str:
     return dedent(
         """\
@@ -8224,6 +8242,7 @@ def _doctor(*, deep: bool = False):
         *_service_install_family_items(detect_extra_processes=deep),
         *_restart_state_items(),
         *_runtime_architecture_items(),
+        *_show_git_checkpoint_items(),
     ]:
         runtime_items.append(item)
         status = item.get("status")

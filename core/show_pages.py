@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from config.v2_config import V2Config
 from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
+from core.show_git import format_agent_contract
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import agent_sessions, show_pages
@@ -580,7 +581,9 @@ def show_page_runtime_recovery_html(session_id: str) -> str:
         "with a polished React page. Use the shadcn-style components from @/components/ui and "
         "@avibe/show-ui. Do not edit index.html unless it is required. If the browser shows "
         "Ready to visualize, check src/App.tsx, src/main.tsx, src/styles.css, and the Vite/browser "
-        "console for compile or runtime errors. Make the page responsive and verify it renders."
+        "console for compile or runtime errors. Make the page responsive and verify it renders.\n\n"
+        "Show Page history contract:\n"
+        f"{format_agent_contract(numbered=True)}"
     )
     escaped_prompt = _escape_html(prompt)
     return f"""<!doctype html>

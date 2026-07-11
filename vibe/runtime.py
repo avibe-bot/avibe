@@ -1097,6 +1097,15 @@ def render_status(*, detect_extra_processes: bool = True):
     restart_status = read_json(get_restart_status_path())
     if restart_status:
         status["restart"] = restart_status
+    try:
+        from core.git_binary import resolve_git
+
+        if resolve_git() is None:
+            status["show_git_checkpoints"] = "degraded: Git executable unavailable"
+        else:
+            status.pop("show_git_checkpoints", None)
+    except Exception:
+        status["show_git_checkpoints"] = "degraded: Git resolution failed"
     return json.dumps(status, indent=2)
 
 

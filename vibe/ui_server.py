@@ -7736,6 +7736,12 @@ def _show_page_not_found_response():
     return jsonify({"error": "not_found"}), 404
 
 
+def _show_page_file_not_found_response():
+    response = jsonify({"error": "not_found"})
+    response.status_code = 404
+    return response
+
+
 def _show_page_runtime_unavailable_response():
     return jsonify({"error": "show_runtime_unavailable"}), 503
 
@@ -7760,12 +7766,15 @@ def _show_page_file_response(root: Path, asset_path: str):
     relative = (asset_path or "").strip("/")
     if not relative:
         relative = "index.html"
-    candidate = (root / unquote(relative)).resolve()
+    decoded = unquote(relative)
+    if any(segment.startswith(".") for segment in re.split(r"[\\/]", decoded) if segment):
+        return _show_page_file_not_found_response()
+    candidate = (root / decoded).resolve()
     root_resolved = root.resolve()
     if candidate != root_resolved and root_resolved not in candidate.parents:
-        return jsonify({"error": "not_found"}), 404
+        return _show_page_file_not_found_response()
     if not candidate.exists() or not candidate.is_file():
-        return _show_page_not_found_response()
+        return _show_page_file_not_found_response()
     mime_type, _ = mimetypes.guess_type(str(candidate))
     response = send_file(candidate, mimetype=mime_type or "application/octet-stream")
     response.headers["X-Content-Type-Options"] = "nosniff"
