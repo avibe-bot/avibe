@@ -59,7 +59,8 @@ On controller restart:
 
 - active native work becomes `disconnected`; any owned Run reaches its existing
   failure/cancellation policy exactly once, and its snapshot remains durable
-  until that Run policy is acknowledged;
+  until that Run policy is acknowledged, whether the transition comes from a
+  controller restart, a normal backend disconnect, or a forced restart;
 - completed output remains pending with its stable producer identity;
 - a stored summary is delivered once as detached Session output, without
   lifecycle authority over any newer Turn;
@@ -136,7 +137,9 @@ admission. A terminal-only task notification is delivered after a bounded grace
 period; a timed flush never consumes Activity provenance from underneath a
 newer pending native request. Queued completions survive both runtime disconnect
 and controller restart so a late flush can still deliver and settle their origin
-Run.
+Run. A same-Turn summary retry retains the pending request and its lifecycle
+authority until delivery succeeds. Output containing only `<silent>` directives
+uses the same silent Run-settlement path as an empty summary.
 
 ## Other backend protocol disposition
 

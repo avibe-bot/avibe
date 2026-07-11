@@ -120,9 +120,14 @@ class AgentService:
     def end_activity_runtime(self, backend: str, runtime_key: str) -> list[Any]:
         """Terminate one backend connection's Activities and notify Run owners."""
 
-        completed = self.activities.end_runtime(backend, runtime_key)
+        completed = self.activities.end_runtime(
+            backend,
+            runtime_key,
+            retain_terminal_snapshots=True,
+        )
         for activity in completed:
-            self.on_activity_terminal(activity)
+            if self.on_activity_terminal(activity):
+                self.activities.ack_recovered_terminal(activity)
         return completed
 
     def get(self, agent_name: Optional[str]) -> BaseAgent:

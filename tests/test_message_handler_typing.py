@@ -274,6 +274,39 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pre_request_failure_uses_plain_terminal_output(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.emit_agent_message = AsyncMock(return_value=None)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._prepare_turn_context = AsyncMock(
+            side_effect=RuntimeError("context preparation failed")
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+        )
+
+        error = await handler._handle_turn(
+            context,
+            "hello",
+            source=handler.TURN_SOURCE_HUMAN,
+        )
+
+        self.assertEqual(error, "context preparation failed")
+        controller.emit_agent_message.assert_awaited_once()
+        call = controller.emit_agent_message.await_args
+        self.assertEqual(call.args[:3], (context, "result", ""))
+        output = call.kwargs["output"]
+        self.assertTrue(output.completes_turn)
+        self.assertTrue(output.settles_run)
+        self.assertIsNone(output.activity_id)
+
     async def test_wechat_forces_typing_even_when_ack_mode_is_message(self):
         controller = _StubController(platform="wechat", ack_mode="message", typing_result=True)
         handler = MessageHandler(controller)

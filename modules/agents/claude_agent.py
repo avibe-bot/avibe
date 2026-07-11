@@ -6,6 +6,7 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
+from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
@@ -1581,7 +1582,7 @@ class ClaudeAgent(BaseAgent):
             completes_turn=completes_turn,
         )
         visible_text = str(text or "")
-        if not visible_text.strip():
+        if not strip_silent_blocks(visible_text).strip():
             await self.controller.emit_agent_message(
                 context,
                 "result",
@@ -1725,7 +1726,7 @@ class ClaudeAgent(BaseAgent):
                 return True
             result_text = str(activity.metadata.get("summary") or "").strip()
             if same_turn:
-                matched_request = self._pop_pending_request(composite_key)
+                matched_request = pending_request
                 self._adopt_pending_turn_token(context, matched_request)
                 try:
                     await self._emit_activity_result(
@@ -1739,18 +1740,17 @@ class ClaudeAgent(BaseAgent):
                 except Exception:
                     registry.requeue_completed_output(activity)
                     raise
-                else:
-                    registry.ack_completed_output(activity)
-                finally:
-                    await self._remove_result_pending_reaction(
-                        composite_key,
-                        context,
-                        matched_request,
-                    )
-                    self._last_assistant_text.pop(composite_key, None)
-                    self._pending_assistant_message.pop(composite_key, None)
-                    self._mark_session_idle_if_no_pending_requests(composite_key)
-                    self._signal_activity_output_settled(composite_key)
+                registry.ack_completed_output(activity)
+                self._pop_pending_request(composite_key)
+                await self._remove_result_pending_reaction(
+                    composite_key,
+                    context,
+                    matched_request,
+                )
+                self._last_assistant_text.pop(composite_key, None)
+                self._pending_assistant_message.pop(composite_key, None)
+                self._mark_session_idle_if_no_pending_requests(composite_key)
+                self._signal_activity_output_settled(composite_key)
                 continue
 
             try:

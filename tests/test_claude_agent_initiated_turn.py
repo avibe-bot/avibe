@@ -542,6 +542,42 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(output.completes_run)
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
 
+    async def test_silent_only_completed_activity_settles_without_retry(self):
+        agent, service = _build_agent()
+        composite_key = "session-silent-directive:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-silent-directive"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-silent-directive",
+            activity_id="task-silent",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-silent",
+            status="completed",
+            metadata={"summary": "<silent>no visible follow-up</silent>"},
+            expects_output=True,
+        )
+        agent.emit_result_message = AsyncMock()
+        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
+
+        self.assertFalse(should_retry)
+        agent.emit_result_message.assert_not_awaited()
+        silent_call = agent.controller.emit_agent_message.await_args
+        self.assertEqual(silent_call.args[:3], (context, "result", ""))
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+
     async def test_timed_flush_keeps_activity_for_a_newer_pending_turn(self):
         agent, service = _build_agent()
         composite_key = "session-deferred-flush:/tmp/work"
@@ -697,6 +733,54 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
         self.assertFalse(agent._activity_output_pending(composite_key))
+
+    async def test_same_turn_summary_retry_keeps_pending_request(self):
+        agent, service = _build_agent()
+        composite_key = "session-same-turn-retry:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={"turn_token": "origin-turn"})
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-same-turn-retry"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-same-turn-retry",
+            activity_id="task-690",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-690",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        agent.emit_result_message = AsyncMock(
+            side_effect=[None, "delivered-message-id"],
+        )
+        agent._remove_result_pending_reaction = AsyncMock()
+
+        with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
+            await agent._flush_completed_activity_outputs(composite_key, context)
+
+        self.assertEqual(agent._pending_requests[composite_key], [pending_request])
+        agent._remove_result_pending_reaction.assert_not_awaited()
+        self.assertTrue(service.activities.has_completed_output("claude", composite_key))
+
+        await agent._flush_completed_activity_outputs(composite_key, context)
+
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        agent._remove_result_pending_reaction.assert_awaited_once_with(
+            composite_key,
+            context,
+            pending_request,
+        )
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
 
     async def test_runtime_disconnect_marks_session_idle_after_activity_cleanup(self):
         mark_idle_calls: list[str] = []

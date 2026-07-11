@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from core.message_output import terminal_turn_output
+from core.session_activities import SessionActivityRegistry
 from modules.agents.service import AgentService
+from storage.db import create_sqlite_engine
+from storage.importer import ensure_sqlite_state
+from storage.session_activities import SQLiteSessionActivityStore
 
 
 class _RuntimeAgent:
@@ -212,6 +217,8 @@ def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() ->
         kind="background_task",
         run_id="run-1",
     )
+    original_ack = service.activities.ack_recovered_terminal
+    service.activities.ack_recovered_terminal = Mock(wraps=original_ack)
 
     service.end_activity_runtime("claude", "runtime-1")
 
@@ -220,6 +227,46 @@ def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() ->
     assert activity.id == "task-1"
     assert activity.run_id == "run-1"
     assert activity.status == "disconnected"
+    service.activities.ack_recovered_terminal.assert_called_once_with(activity)
+
+
+def test_activity_runtime_disconnect_retains_snapshot_until_run_settles(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(
+            settle_activity_runs=Mock(side_effect=RuntimeError("store unavailable")),
+        ),
+    )
+    service = AgentService(
+        controller,
+        activities=SessionActivityRegistry(store),
+    )
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="session-1",
+        activity_id="task-1",
+        kind="background_task",
+        run_id="run-1",
+    )
+
+    service.end_activity_runtime("claude", "runtime-1")
+
+    records = store.list_activities()
+    assert len(records) == 1
+    assert records[0]["phase"] == "terminal"
+    assert records[0]["activity"]["status"] == "disconnected"
+    recovered = SessionActivityRegistry(store)
+    terminal = recovered.drain_recovered_terminals()
+    assert [(item.id, item.run_id, item.status) for item in terminal] == [
+        ("task-1", "run-1", "disconnected"),
+    ]
+    engine.dispose()
 
 
 def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:
