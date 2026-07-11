@@ -25,7 +25,16 @@ class _StubController:
         return self._token_field
 
     async def emit_agent_message(
-        self, context, message_type, text, parse_mode="markdown", *, is_error=False, level="normal", result_footer=None
+        self,
+        context,
+        message_type,
+        text,
+        parse_mode="markdown",
+        *,
+        is_error=False,
+        level="normal",
+        result_footer=None,
+        output=None,
     ):
         self.messages.append((message_type, text, parse_mode))
         self.result_footers.append(result_footer)

@@ -1233,7 +1233,17 @@ def test_opencode_poll_aborts_disabled_question_toolcall():
         def _t(self, key):
             return f"translated:{key}"
 
-        async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+        ):
             emitted.append((message_type, text))
 
     class _Agent:
@@ -1324,7 +1334,17 @@ def test_opencode_poll_emits_error_result_on_retry_exhaustion():
         def _t(self, key):
             return f"translated:{key}"
 
-        async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+        ):
             emitted.append((message_type, is_error))
 
     class _Agent:
@@ -1413,7 +1433,17 @@ def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_me
                 return "provider:{provider}/{model}/{variant}:{detail}".format(**kwargs)
             return f"translated:{key}"
 
-        async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+        ):
             emitted.append((message_type, text, is_error, level))
 
     class _Agent:
@@ -1532,7 +1562,17 @@ def test_opencode_restored_poll_preserves_model_details_for_empty_terminal_probe
                 return "provider:{provider}/{model}/{variant}:{detail}".format(**kwargs)
             return f"translated:{key}"
 
-        async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+        ):
             emitted.append((message_type, text, is_error, level))
 
     class _Sessions:

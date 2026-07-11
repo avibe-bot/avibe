@@ -192,7 +192,17 @@ class _StubController:
     def update_thread_message_id(self, context):
         return None
 
-    async def emit_agent_message(self, context, message_type, text, parse_mode="markdown", *, is_error=False, level="normal"):
+    async def emit_agent_message(
+        self,
+        context,
+        message_type,
+        text,
+        parse_mode="markdown",
+        *,
+        is_error=False,
+        level="normal",
+        output=None,
+    ):
         # Terminal error results settle the dot + release the SSE waiter via the
         # outbound chokepoint; a no-op here (these are IM turns, no workbench dot).
         return None
