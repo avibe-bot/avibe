@@ -1093,6 +1093,21 @@ class TaskExecutionStore:
                 return run
         return None
 
+    def settle_deferred_run(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        error: Optional[str] = None,
+    ) -> bool:
+        if self._sqlite is None:
+            return False
+        return self._sqlite.settle_deferred_run(
+            run_id,
+            terminal_status=terminal_status,
+            error=error,
+        )
+
     def update_callback_status(
         self,
         run_id: str,
@@ -1813,6 +1828,44 @@ class ScheduledTaskService:
                     callbacks.append(callback)
                     self._drain_dirty = True
         return callbacks
+
+    def settle_activity_runs(self, activity: Any) -> list[str]:
+        """Settle deferred Runs when a failed/stopped owned Activity is last."""
+
+        activity_status = str(getattr(activity, "status", "") or "").strip().lower()
+        if activity_status == "completed":
+            # A completed Claude task may still produce a user-visible follow-up;
+            # that Message owns Run settlement so output and callback stay aligned.
+            return []
+        terminal_status = "failed" if activity_status == "failed" else "canceled"
+        metadata = getattr(activity, "metadata", None) or {}
+        run_ids: list[str] = []
+        primary = str(getattr(activity, "run_id", "") or "").strip()
+        if primary:
+            run_ids.append(primary)
+        values = metadata.get("run_ids") if isinstance(metadata, dict) else None
+        if isinstance(values, list):
+            for value in values:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+
+        registry = getattr(getattr(self.controller, "agent_service", None), "activities", None)
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        settled: list[str] = []
+        for run_id in run_ids:
+            if callable(has_blocker) and has_blocker(run_id):
+                continue
+            error = f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
+            if self.request_store.settle_deferred_run(
+                run_id,
+                terminal_status=terminal_status,
+                error=error,
+            ):
+                settled.append(run_id)
+        if settled:
+            self._drain_dirty = True
+        return settled
 
     async def _drain_vault_callbacks(self) -> None:
         """Auto-resume the requesting session when a vault request reaches a terminal state.

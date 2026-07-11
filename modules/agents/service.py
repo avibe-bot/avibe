@@ -36,6 +36,22 @@ class AgentService:
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
+    def on_activity_terminal(self, activity: Any) -> None:
+        """Let the Run owner react after the registry removed one Activity."""
+
+        service = getattr(self.controller, "scheduled_task_service", None)
+        settle = getattr(service, "settle_activity_runs", None)
+        if not callable(settle):
+            return
+        try:
+            settle(activity)
+        except Exception:
+            logger.warning(
+                "Failed to settle Runs for terminal Activity %s",
+                getattr(activity, "id", ""),
+                exc_info=True,
+            )
+
     def get(self, agent_name: Optional[str]) -> BaseAgent:
         target = agent_name or self.default_agent
         if target in self.agents:

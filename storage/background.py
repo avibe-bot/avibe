@@ -1355,6 +1355,62 @@ class SQLiteBackgroundTaskStore:
         _publish_run_rows_updated([row_to_publish])
         return True
 
+    def settle_deferred_run(
+        self,
+        run_id: str,
+        *,
+        terminal_status: Optional[str] = None,
+        error: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """Apply one stored terminal intent after owned Activities become terminal."""
+
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        transitioned = False
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row:
+                return False
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if not isinstance(result_payload, dict):
+                return False
+            deferred_status = str(result_payload.get("deferred_terminal_status") or "").strip()
+            if not deferred_status:
+                return False
+            result_payload.pop("deferred_terminal_status", None)
+            status = normalize_run_status(terminal_status or deferred_status)
+            values: dict[str, Any] = {
+                "status": status,
+                "completed_at": now,
+                "updated_at": now,
+                "result_payload_json": _json_dumps(result_payload),
+            }
+            if error is not None:
+                values["error"] = error
+            transition = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued")
+                        + _status_query_values("running")
+                    )
+                )
+                .values(**values)
+            )
+            transitioned = bool(transition.rowcount)
+            if transitioned:
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                    ).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return transitioned
+
     def find_callback_run(
         self,
         *,

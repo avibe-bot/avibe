@@ -113,6 +113,18 @@ def _task_notification_then_result_client():
     return _Client()
 
 
+def _completed_task_notification_client():
+    class _Client:
+        def receive_messages(self):
+            async def _iterate():
+                yield TaskStartedMessage()
+                yield TaskNotificationMessage()
+
+            return _iterate()
+
+    return _Client()
+
+
 def _fallback_client(data):
     class ModelRefusalFallbackMessage:
         subtype = "model_refusal_fallback"
@@ -277,6 +289,64 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_only_task_event_keeps_current_turn_origin(self):
+        agent, service = _build_agent()
+        composite_key = "session-terminal-only:/tmp/work"
+        pending_context = SimpleNamespace(
+            platform_specific={"turn_token": "current-turn"},
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=pending_context)]
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-terminal-only"},
+        )
+
+        self.assertTrue(
+            agent._handle_activity_message(
+                TaskNotificationMessage(),
+                composite_key,
+                context,
+            )
+        )
+
+        activity = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(activity)
+        self.assertEqual(activity.turn_id, "current-turn")
+
+    async def test_completed_task_notification_at_eof_delivers_summary(self):
+        agent, service = _build_agent()
+        composite_key = "session-eof:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "old-turn",
+                "turn_token": "origin-turn",
+                "agent_session_id": "sess-eof",
+            },
+        )
+        agent.emit_result_message = AsyncMock()
+
+        await agent._receive_messages(
+            _completed_task_notification_client(),
+            "session-eof",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            "Background verification finished",
+        )
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertTrue(output.detached)
+        self.assertFalse(output.completes_turn)
+        self.assertTrue(output.completes_run)
+        self.assertIsNone(service.activities.claim_completed_output("claude", composite_key))
+
     async def test_task_start_uses_current_request_run_not_stale_receiver_run(self):
         agent, service = _build_agent()
         composite_key = "session-lineage:/tmp/work"
@@ -309,6 +379,68 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity.run_id, "run-current")
         self.assertEqual(activity.turn_id, "current-turn")
         self.assertEqual(activity.metadata["run_ids"], ["run-current"])
+
+    async def test_task_progress_keeps_original_run_lineage(self):
+        agent, service = _build_agent()
+        composite_key = "session-progress-lineage:/tmp/work"
+        origin_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-origin",
+                "turn_token": "turn-origin",
+            }
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=origin_context)]
+        receiver_context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-progress-lineage"},
+        )
+        self.assertTrue(
+            agent._handle_activity_message(
+                TaskStartedMessage(),
+                composite_key,
+                receiver_context,
+            )
+        )
+
+        newer_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-newer",
+                "turn_token": "turn-newer",
+            }
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=newer_context)]
+        progress = SimpleNamespace(
+            subtype="task_progress",
+            task_id="task-690",
+            description="Still working",
+            data={},
+        )
+        self.assertTrue(
+            agent._handle_activity_message(
+                progress,
+                composite_key,
+                receiver_context,
+            )
+        )
+
+        activity = service.activities.active_for_runtime("claude", composite_key)[0]
+        self.assertEqual(activity.run_id, "run-origin")
+        self.assertEqual(activity.turn_id, "turn-origin")
+        self.assertEqual(activity.metadata["run_ids"], ["run-origin"])
+
+        self.assertTrue(
+            agent._handle_activity_message(
+                TaskNotificationMessage(),
+                composite_key,
+                receiver_context,
+            )
+        )
+        completed = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed.run_id, "run-origin")
+        self.assertEqual(completed.turn_id, "turn-origin")
+        self.assertEqual(completed.metadata["run_ids"], ["run-origin"])
 
     async def test_failed_task_does_not_claim_a_missing_followup_output(self):
         mark_idle_calls: list[str] = []

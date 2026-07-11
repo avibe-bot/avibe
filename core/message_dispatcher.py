@@ -1414,9 +1414,6 @@ class ConsolidatedMessageDispatcher:
         target_context = self._get_target_context(context)
         output_metadata = output_semantics.provenance(context) if output is not None else None
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
-        if native_output_id and agent_message_exists(target_context, native_output_id):
-            logger.info("Skipping duplicate agent output %s", native_output_id)
-            return None
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -1429,6 +1426,31 @@ class ConsolidatedMessageDispatcher:
             quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
             enhanced = process_reply(text, include_quick_replies=quick_replies_on)
             persist_text = enhanced.text if enhanced.text.strip() else text
+
+        if native_output_id and agent_message_exists(target_context, native_output_id):
+            logger.info("Skipping duplicate agent output %s", native_output_id)
+            try:
+                if canonical_type == "result" and output_semantics.settles_run:
+                    duplicate_result_text = self._fold_footer(
+                        persist_text,
+                        result_footer if mutates_turn_lifecycle else None,
+                    )
+                    self._record_agent_run_terminal_result(
+                        context,
+                        duplicate_result_text,
+                        None,
+                        is_error=is_error,
+                        output_semantics=output_semantics,
+                    )
+                if mutates_turn_lifecycle:
+                    await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
+                    await self._clear_consolidated_state(context)
+                    self._signal_turn_complete(context)
+                return None
+            finally:
+                if mutates_turn_lifecycle:
+                    await self._finish_processing_indicator_turn(context)
+                    self._release_runtime_turn(context)
 
         # Persistence is decided per delivery path below, not here, so that:
         #   * suppressed scheduled runs (intentionally private) never leak into

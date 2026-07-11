@@ -119,3 +119,31 @@ def test_missing_sdk_permission_allow_fallback_is_non_throwing(monkeypatch):
     assert result.behavior == "allow"
     assert result.updated_input is None
     assert result.updated_permissions is None
+
+
+def test_older_sdk_without_task_message_classes_stays_available(monkeypatch):
+    original_import = builtins.__import__
+    task_types = {
+        "TaskNotificationMessage",
+        "TaskProgressMessage",
+        "TaskStartedMessage",
+    }
+
+    def _hide_task_types(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "claude_agent_sdk" and task_types.intersection(fromlist or ()):
+            raise ImportError("older SDK has no task message classes")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _hide_task_types)
+    module_path = Path(__file__).resolve().parents[1] / "modules" / "claude_sdk_compat.py"
+    spec = importlib.util.spec_from_file_location("claude_sdk_compat_older", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+    assert module.CLAUDE_SDK_AVAILABLE is True
+    assert issubclass(module.TaskStartedMessage, module.SystemMessage)
+    assert issubclass(module.TaskProgressMessage, module.SystemMessage)
+    assert issubclass(module.TaskNotificationMessage, module.SystemMessage)

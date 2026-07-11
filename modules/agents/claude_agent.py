@@ -883,6 +883,7 @@ class ClaudeAgent(BaseAgent):
                 except Exception as e:
                     logger.error(f"Error processing message from Claude: {e}", exc_info=True)
                     continue
+            await self._flush_completed_activity_outputs(composite_key, context)
             await self._handle_receiver_eof(composite_key, context)
         except asyncio.CancelledError:
             # Receiver task was explicitly cancelled (e.g. /stop, /clear,
@@ -1244,6 +1245,15 @@ class ClaudeAgent(BaseAgent):
         if registry is None:
             return True
 
+        existing_activity = next(
+            (
+                activity
+                for activity in registry.active_for_runtime(self.name, composite_key)
+                if activity.id == task_id
+            ),
+            None,
+        )
+
         session_id = self._activity_session_id(context)
         description = str(self._task_field(message, "description", "") or "").strip() or None
         task_type = str(self._task_field(message, "task_type", "") or "").strip()
@@ -1258,7 +1268,20 @@ class ClaudeAgent(BaseAgent):
             }.items()
             if value not in (None, "")
         }
-        run_ids = self._activity_run_ids(composite_key, context)
+        if existing_activity is None:
+            run_ids = self._activity_run_ids(composite_key, context)
+            turn_id = self._current_turn_id(composite_key, context)
+        else:
+            run_ids = []
+            if existing_activity.run_id:
+                run_ids.append(existing_activity.run_id)
+            existing_run_ids = existing_activity.metadata.get("run_ids")
+            if isinstance(existing_run_ids, list):
+                for value in existing_run_ids:
+                    run_id = str(value or "").strip()
+                    if run_id and run_id not in run_ids:
+                        run_ids.append(run_id)
+            turn_id = existing_activity.turn_id
         if run_ids:
             metadata["run_ids"] = run_ids
         if event == "task_started":
@@ -1270,7 +1293,7 @@ class ClaudeAgent(BaseAgent):
                 kind=task_type or "background_task",
                 description=description,
                 parent_activity_id=tool_use_id or None,
-                turn_id=self._current_turn_id(composite_key, context),
+                turn_id=turn_id,
                 run_id=run_ids[0] if run_ids else None,
                 metadata=metadata,
             )
@@ -1298,7 +1321,7 @@ class ClaudeAgent(BaseAgent):
             logger.warning("Ignoring Claude %s with non-terminal status %r", event, status)
             return True
 
-        if not any(item.id == task_id for item in registry.active_for_runtime(self.name, composite_key)):
+        if existing_activity is None:
             registry.start(
                 backend=self.name,
                 runtime_key=composite_key,
@@ -1307,10 +1330,11 @@ class ClaudeAgent(BaseAgent):
                 kind=task_type or "background_task",
                 description=description,
                 parent_activity_id=tool_use_id or None,
+                turn_id=turn_id,
                 run_id=run_ids[0] if run_ids else None,
                 metadata=metadata,
             )
-        registry.complete(
+        completed = registry.complete(
             backend=self.name,
             runtime_key=composite_key,
             activity_id=task_id,
@@ -1318,6 +1342,10 @@ class ClaudeAgent(BaseAgent):
             metadata=metadata,
             expects_output=status == "completed",
         )
+        service = getattr(self.controller, "agent_service", None)
+        on_terminal = getattr(service, "on_activity_terminal", None)
+        if completed is not None and callable(on_terminal):
+            on_terminal(completed)
         if status != "completed":
             self._mark_session_idle_if_no_pending_requests(composite_key)
         return True
@@ -1346,6 +1374,77 @@ class ClaudeAgent(BaseAgent):
                 "backend": activity.backend,
             },
         )
+
+    async def _flush_completed_activity_outputs(
+        self,
+        composite_key: str,
+        context: MessageContext,
+    ) -> None:
+        """Deliver task notifications that ended the receiver without a Result."""
+
+        registry = self._activity_registry()
+        if registry is None:
+            return
+        while True:
+            activity = registry.claim_completed_output(self.name, composite_key)
+            if activity is None:
+                return
+            pending = self._pending_requests.get(composite_key) or []
+            pending_request = pending[0] if pending else None
+            pending_turn_id = str(
+                (
+                    getattr(
+                        getattr(pending_request, "context", None),
+                        "platform_specific",
+                        None,
+                    )
+                    or {}
+                ).get(AGENT_TURN_TOKEN)
+                or ""
+            ).strip()
+            same_turn = bool(
+                pending_request is not None
+                and activity.turn_id
+                and activity.turn_id == pending_turn_id
+            )
+            result_text = str(activity.metadata.get("summary") or "").strip()
+            if same_turn:
+                matched_request = self._pop_pending_request(composite_key)
+                self._adopt_pending_turn_token(context, matched_request)
+                try:
+                    await self.emit_result_message(
+                        context,
+                        result_text,
+                        parse_mode="markdown",
+                        request=matched_request,
+                        output=self._activity_message_output(
+                            activity,
+                            detached=False,
+                            completes_turn=True,
+                        ),
+                    )
+                finally:
+                    await self._remove_result_pending_reaction(
+                        composite_key,
+                        context,
+                        matched_request,
+                    )
+                    self._last_assistant_text.pop(composite_key, None)
+                    self._pending_assistant_message.pop(composite_key, None)
+                    self._mark_session_idle_if_no_pending_requests(composite_key)
+                continue
+
+            await self.emit_result_message(
+                context,
+                result_text,
+                parse_mode="markdown",
+                output=self._activity_message_output(
+                    activity,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+            self._mark_session_idle_if_no_pending_requests(composite_key)
 
     async def _maybe_begin_agent_initiated_turn(
         self,

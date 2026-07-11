@@ -254,6 +254,68 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
         controller.agent_service.release_runtime_turn.assert_called_once_with(context)
 
+    async def test_duplicate_terminal_output_still_settles_lifecycle(self):
+        controller = _StubController(platform="slack")
+        controller.agent_service = type(
+            "Service",
+            (),
+            {
+                "emit_matches_runtime_turn": lambda self, context: True,
+                "release_runtime_turn": mock.Mock(),
+            },
+        )()
+        controller.session_turns = type(
+            "Turns",
+            (),
+            {"on_terminal_result": mock.Mock()},
+        )()
+        controller.mark_turn_complete = mock.Mock()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        dispatcher._clear_consolidated_state = mock.AsyncMock()
+        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-1",
+            },
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            idempotency_key="terminal-output",
+        )
+
+        with mock.patch(
+            "core.message_dispatcher.agent_message_exists",
+            return_value=True,
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "already delivered",
+                output=output,
+            )
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent_messages, [])
+        controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
+        dispatcher._record_agent_run_terminal_result.assert_called_once_with(
+            context,
+            "already delivered",
+            None,
+            is_error=False,
+            output_semantics=output,
+        )
+        dispatcher._collapse_status_bubble.assert_awaited_once()
+        dispatcher._clear_consolidated_state.assert_awaited_once_with(context)
+        controller.mark_turn_complete.assert_called_once_with(context)
+        controller.agent_service.release_runtime_turn.assert_called_once_with(context)
+
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()
         controller = _StubController(platform="slack", im_client=im_client)
