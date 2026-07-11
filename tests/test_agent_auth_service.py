@@ -1457,6 +1457,45 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             request_timeout_seconds=60,
         )
 
+    async def test_opencode_agent_force_refresh_restarts_after_global_config_change(self):
+        from config.v2_compat import OpenCodeCompatConfig
+        from modules.agents.opencode.agent import OpenCodeAgent
+
+        old_config = OpenCodeCompatConfig(
+            enabled=True,
+            binary="/opencode",
+            port=4096,
+            request_timeout_seconds=60,
+        )
+        new_config = OpenCodeCompatConfig(
+            enabled=True,
+            binary="/opencode",
+            port=4096,
+            request_timeout_seconds=60,
+        )
+        previous_server = SimpleNamespace(
+            binary="/opencode",
+            port=4096,
+            request_timeout_seconds=60,
+            refresh_global_config=AsyncMock(return_value=True),
+            detach_after_deferred_refresh=AsyncMock(),
+            reload_runtime_config=AsyncMock(),
+        )
+        agent = OpenCodeAgent.__new__(OpenCodeAgent)
+        agent.opencode_config = old_config
+        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
+        agent._client_manager = SimpleNamespace(reset_config=AsyncMock(return_value=previous_server))
+
+        await agent.refresh_runtime_config(new_config, force=True)
+
+        previous_server.refresh_global_config.assert_not_awaited()
+        previous_server.detach_after_deferred_refresh.assert_awaited_once_with(force=True)
+        previous_server.reload_runtime_config.assert_awaited_once_with(
+            binary="/opencode",
+            port=4096,
+            request_timeout_seconds=60,
+        )
+
     async def test_opencode_agent_refresh_runtime_config_attaches_uncached_server(self):
         from config.v2_compat import OpenCodeCompatConfig
         from modules.agents.opencode.agent import OpenCodeAgent

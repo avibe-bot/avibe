@@ -105,7 +105,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 and previous_server.request_timeout_seconds == opencode_config.request_timeout_seconds
             )
             refresh_global_config = getattr(previous_server, "refresh_global_config", None)
-            if runtime_unchanged and callable(refresh_global_config):
+            if not force and runtime_unchanged and callable(refresh_global_config):
                 try:
                     refreshed = bool(await refresh_global_config())
                 except Exception:

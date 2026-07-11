@@ -179,6 +179,9 @@ class AgentService:
         gate.backend = agent.name
         gate.agent = agent
         gate.runtime_started = False
+        gate.task = asyncio.current_task()
+        gate.context = request.context
+        gate.cancel_tidy_task = None
         self._stamp_runtime_turn(request, runtime_key, gate.token)
         try:
             # Register the indicator handle for terminal/cancel cleanup BEFORE the
@@ -249,6 +252,7 @@ class AgentService:
                             self.release_runtime_turn(request.context)
 
                     tidy_task = asyncio.create_task(_tidy_on_cancel())
+                    gate.cancel_tidy_task = tidy_task
                     self._background_tasks.add(tidy_task)
                     tidy_task.add_done_callback(self._background_tasks.discard)
                     scheduled = True
@@ -468,8 +472,45 @@ class AgentService:
         gate.backend = ""
         gate.runtime_started = False
         gate.agent = None
+        gate.task = None
+        gate.context = None
         if gate.lock.locked():
             gate.lock.release()
+
+    async def force_cancel_backend_turns(self, backend: str) -> None:
+        """Cancel every foreground owner and emit a terminal outcome before cutover."""
+        owned = [
+            (runtime_key, gate, gate.token)
+            for runtime_key, gate in self._turn_gates.items()
+            if gate.backend == backend and gate.token
+        ]
+        tasks = {
+            gate.task
+            for _runtime_key, gate, _token in owned
+            if gate.task is not None and not gate.task.done()
+        }
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=2.0)
+        tidies = {
+            gate.cancel_tidy_task
+            for _runtime_key, gate, _token in owned
+            if gate.cancel_tidy_task is not None and not gate.cancel_tidy_task.done()
+        }
+        if tidies:
+            await asyncio.wait(tidies, timeout=2.0)
+        emit = getattr(self.controller, "emit_agent_message", None)
+        for runtime_key, gate, token in owned:
+            if gate.token != token:
+                continue
+            context = gate.context
+            if context is not None and callable(emit):
+                try:
+                    await emit(context, "result", "", is_error=True, level="silent")
+                except Exception:
+                    logger.debug("Failed to settle forced backend turn %s", runtime_key, exc_info=True)
+            self.release_runtime_turn_key(runtime_key, token)
 
     def emit_matches_runtime_turn(self, context: Any) -> bool:
         payload = getattr(context, "platform_specific", None) or {}
@@ -600,3 +641,6 @@ class _RuntimeTurnGate:
     backend: str = ""
     runtime_started: bool = False
     agent: BaseAgent | None = None
+    task: asyncio.Task | None = None
+    context: Any = None
+    cancel_tidy_task: asyncio.Task | None = None

@@ -36,6 +36,9 @@ class _AgentService:
         assert backend == "opencode"
         return []
 
+    async def force_cancel_backend_turns(self, backend: str) -> None:
+        assert backend == "opencode"
+
 
 def _controller(service: _AgentService):
     session_turns = SimpleNamespace(

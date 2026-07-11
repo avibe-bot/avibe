@@ -1029,6 +1029,27 @@ def test_backend_drain_queues_idle_session_without_dispatching():
     assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
 
 
+def test_backend_drain_resolves_inherited_default_agent_backend():
+    controller = _build_controller_double()
+    controller.resolve_agent_for_context = Mock(return_value="codex")
+    manager = session_turns.SessionTurnManager(controller)
+    enqueue = Mock()
+    context = MessageContext(user_id="U", channel_id="ses_default", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "ses_default",
+        "agent_session_target": {"agent_name": None, "agent_backend": None},
+    }
+
+    async def _go():
+        manager.begin_backend_drain("codex")
+        return await manager.submit("ses_default", context, "next", enqueue=enqueue)
+
+    assert asyncio.run(_go()) == "enqueued"
+    enqueue.assert_called_once_with()
+    controller.resolve_agent_for_context.assert_called_once_with(context)
+    assert manager._deferred_restart_sessions == {"codex": {"ses_default"}}
+
+
 def test_backend_drain_flushes_deferred_session_after_cutover():
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)

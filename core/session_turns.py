@@ -582,11 +582,25 @@ class SessionTurnManager:
         routing from the current session row."""
         self._build_context = build_context
 
-    @staticmethod
-    def _context_backend(context: "MessageContext") -> str:
+    def _context_backend(self, context: "MessageContext") -> str:
         spec = getattr(context, "platform_specific", None) or {}
         target = spec.get("agent_session_target")
-        return str(target.get("agent_backend") or "").strip() if isinstance(target, dict) else ""
+        backend = str(target.get("agent_backend") or "").strip() if isinstance(target, dict) else ""
+        if backend:
+            return backend
+        resolved = spec.get("resolved_vibe_agent")
+        if isinstance(resolved, dict):
+            backend = str(resolved.get("backend") or "").strip()
+            if backend:
+                return backend
+        resolver = getattr(self.controller, "resolve_agent_for_context", None)
+        if callable(resolver):
+            try:
+                return str(resolver(context) or "").strip()
+            except Exception:
+                logger.debug("Failed to resolve inherited backend for restart drain", exc_info=True)
+        service = getattr(self.controller, "agent_service", None)
+        return str(getattr(service, "default_agent", "") or "").strip()
 
     def begin_backend_drain(self, backend: str) -> None:
         self._draining_backends.add(backend)

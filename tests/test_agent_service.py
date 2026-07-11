@@ -343,6 +343,34 @@ def test_force_end_backend_activities_settles_pending_runs() -> None:
     ]
 
 
+def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:
+    async def _run():
+        controller = _Controller()
+        controller.emit_agent_message = AsyncMock()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent(asyncio.Event())
+        service.register(agent)
+        request = _request("first")
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.sleep(0)
+        assert service.runtime_turn_tokens_for_backend("claude")
+
+        await service.force_cancel_backend_turns("claude")
+
+        assert task.cancelled()
+        controller.emit_agent_message.assert_awaited_once_with(
+            request.context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+        )
+        assert service.runtime_turn_tokens_for_backend("claude") == {}
+
+    asyncio.run(_run())
+
+
 class _RecordingIndicator:
     """Records the queued/promote/finish reaction calls the gate drives."""
 

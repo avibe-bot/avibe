@@ -103,6 +103,7 @@ class BackendRestartCoordinator:
                         backend=backend,
                         base_session_ids=session_ids,
                     )
+                    await self.controller.agent_service.force_cancel_backend_turns(backend)
                     self.controller.agent_service.force_end_backend_activities(backend)
                     break
                 await asyncio.sleep(self._poll_interval)

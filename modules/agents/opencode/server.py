@@ -1254,10 +1254,17 @@ class OpenCodeServerManager:
         stopped = False
         if isinstance(pid, int) and self._pid_exists(pid):
             command = self._get_pid_command(pid)
-            if command and self._is_opencode_serve_cmd(command, self.port):
+            trusted_pid_file = bool(command and self._is_opencode_serve_cmd(command, self.port)) or (
+                isinstance(info, dict)
+                and info.get("port") == self.port
+                and self._pid_owns_listening_port(pid, self.port)
+            )
+            if trusted_pid_file:
                 stopped = self._terminate_pid_tree_sync(pid)
         if not stopped and isinstance(tracked_pid, int) and self._pid_exists(tracked_pid):
-            self._terminate_pid_tree_sync(tracked_pid)
+            tracked_command = self._get_pid_command(tracked_pid)
+            if tracked_command and self._is_opencode_serve_cmd(tracked_command, self.port):
+                self._terminate_pid_tree_sync(tracked_pid)
         self._clear_pid_file()
         self._base_url = None
         self._process = None
