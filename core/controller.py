@@ -1452,7 +1452,9 @@ class Controller:
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
-        self.show_git_checkpoint_service.stop()
+        show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
+        if show_git_checkpoint_service is not None:
+            show_git_checkpoint_service.stop()
 
         try:
             codex_agent = self.agent_service.agents.get("codex")
