@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from core.message_output import terminal_turn_output
 from modules.agents.service import AgentService
 
 
@@ -365,6 +366,7 @@ def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:
             "",
             is_error=True,
             level="silent",
+            output=terminal_turn_output(),
         )
         assert service.runtime_turn_tokens_for_backend("claude") == {}
 
