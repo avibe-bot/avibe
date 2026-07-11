@@ -87,6 +87,32 @@ def test_activity_updates_are_independent_and_runtime_disconnect_terminates_all(
     ]
 
 
+def test_runtime_disconnect_preserves_completed_output_until_delivery():
+    registry = SessionActivityRegistry()
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        metadata={"summary": "Background work finished"},
+        expects_output=True,
+    )
+
+    registry.end_runtime("claude", "runtime-1", status="disconnected")
+
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+    assert claimed.id == "task-1"
+    assert claimed.metadata["summary"] == "Background work finished"
+
+
 def test_turn_state_composes_foreground_inbox_activity_and_connection_axes():
     registry = SessionActivityRegistry()
     registry.set_connection(

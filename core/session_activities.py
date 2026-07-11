@@ -242,7 +242,7 @@ class SessionActivityRegistry:
         backend: str,
         runtime_key: str,
         *,
-        max_age_seconds: float = 300.0,
+        max_age_seconds: float = 0,
     ) -> SessionActivity | None:
         key = (str(backend), str(runtime_key))
         now = time.monotonic()
@@ -258,6 +258,23 @@ class SessionActivityRegistry:
                     return activity
             self._completed_outputs.pop(key, None)
         return None
+
+    def requeue_completed_output(
+        self,
+        activity: SessionActivity,
+        *,
+        front: bool = True,
+    ) -> None:
+        """Restore a claimed completion when its causal output cannot be consumed yet."""
+
+        key = (str(activity.backend), str(activity.runtime_key))
+        item = (time.monotonic(), activity)
+        with self._lock:
+            queue = self._completed_outputs[key]
+            if front:
+                queue.appendleft(item)
+            else:
+                queue.append(item)
 
     def has_completed_output(self, backend: str, runtime_key: str) -> bool:
         """Whether a completed Activity is waiting for user-visible output."""
@@ -288,7 +305,6 @@ class SessionActivityRegistry:
                 status if status in CONNECTION_STATES else "disconnected",
             )
             active_ids = [activity.id for activity in active]
-            self._completed_outputs.pop(key, None)
         completed: list[SessionActivity] = []
         for activity_id in active_ids:
             activity = self.complete(

@@ -278,6 +278,15 @@ class AgentService:
         gate = self._turn_gates.get(runtime_key)
         return bool(gate is not None and gate.token == runtime_token and gate.runtime_started)
 
+    def runtime_turn_active(self, runtime_key: str) -> bool:
+        """Whether a foreground turn holds or is queued on this backend runtime."""
+
+        gate = self._turn_gates.get(str(runtime_key or "").strip())
+        return bool(
+            gate is not None
+            and (gate.lock.locked() or self._lock_has_live_waiters(gate.lock))
+        )
+
     @staticmethod
     def _lock_has_live_waiters(lock: asyncio.Lock) -> bool:
         """True when ``lock`` has at least one not-yet-cancelled queued waiter.

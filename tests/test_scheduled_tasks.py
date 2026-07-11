@@ -2088,6 +2088,73 @@ def test_agent_run_forwards_multiple_outputs_and_completes_once(tmp_path: Path, 
     }
 
 
+@pytest.mark.parametrize(
+    ("terminal_status", "expected_message"),
+    [
+        ("failed", "Error: backend disconnected"),
+        ("canceled", "The run was canceled before producing a result."),
+    ],
+)
+def test_agent_run_forwards_terminal_status_after_partial_output(
+    tmp_path: Path,
+    monkeypatch,
+    terminal_status: str,
+    expected_message: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+    )
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    recorded = sqlite_store.record_run_output(
+        request.id,
+        output_id="output-1",
+        text="partial callback output",
+        sequence=1,
+        provenance={"run_id": request.id},
+    )
+    assert recorded["recorded"] is True
+    service.forward_run_outputs([request.id])
+    if terminal_status == "failed":
+        request_store.complete(request, ok=False, error="backend disconnected")
+    else:
+        assert request_store.mark_run_canceled(request.id) is True
+
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original is not None
+    assert original["status"] == terminal_status
+    assert original["callback_status"] == "sent"
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    assert [run["message"] for run in callback_runs] == [
+        "partial callback output",
+        expected_message,
+    ]
+    assert callback_runs[1]["source_actor"] == f"{request.id}:terminal:{terminal_status}"
+    assert original["callback_run_id"] == callback_runs[1]["id"]
+
+
 def test_duplicate_terminal_output_does_not_append_result_text_again(
     tmp_path: Path,
     monkeypatch,

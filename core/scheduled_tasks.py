@@ -1950,6 +1950,20 @@ class ScheduledTaskService:
             return None
         run_id = str(run.get("id") or "")
         output_callbacks = self.forward_run_outputs([run_id])
+        status = _normalize_requested_run_status(run.get("status")) or str(
+            run.get("status") or ""
+        )
+        if status in {"failed", "canceled"}:
+            terminal_message = self._fallback_callback_result(run, status=status)
+            terminal_callback = enqueue_session_callback(
+                self.request_store,
+                session_id=callback_session_id,
+                message=terminal_message,
+                source_actor=f"{run_id}:terminal:{status}",
+                parent_run_id=run_id or None,
+            )
+            if terminal_callback is not None:
+                return terminal_callback
         if output_callbacks:
             return output_callbacks[-1]
         return enqueue_session_callback(

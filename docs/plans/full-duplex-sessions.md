@@ -74,6 +74,11 @@ immediately. Callback turns are deduplicated by structured Run lineage. Parent
 `callback_status` stays pending while the parent Run is active and settles once
 after the parent reaches its one idempotent terminal transition.
 
+If a Run fails or is canceled after forwarding partial outputs, its callback
+Session receives one additional terminal failure/cancellation Message. A
+successful Run with streamed outputs does not repeat them in a synthetic final
+summary.
+
 A terminal Run intent is retained in `result_payload_json` while a non-detached
 owned Activity remains active. A later Activity output can complete that Run
 without acquiring lifecycle authority over whichever foreground Turn is current.
@@ -93,6 +98,15 @@ active background Activities. When a completed Activity produces a later
 assistant/result sequence while another user Turn owns the runtime gate, Claude
 delivers only the final user-facing result as a detached Message output. The
 newer user Turn remains untouched.
+
+The Claude stream does not expose a reliable query/result correlation id. Avibe
+therefore accepts the next Session input normally but serializes that native
+query while a background Activity or its undelivered completion can still
+produce output. This is backend execution admission, not Session message
+admission. A terminal-only task notification is delivered after a bounded grace
+period; a timed flush never consumes Activity provenance from underneath a
+newer pending native request. Queued completions also survive runtime disconnect
+inside the process so a late flush can still deliver and settle their origin Run.
 
 ## Compatibility and non-goals
 

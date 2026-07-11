@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 from typing import Callable, Optional
@@ -60,7 +61,10 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._detached_activity_outputs: dict[str, SessionActivity] = {}
         self._detached_assistant_text: dict[str, str] = {}
+        self._detached_unsolicited_outputs: set[str] = set()
+        self._detached_unsolicited_text: dict[str, str] = {}
         self._activity_flush_tasks: dict[str, asyncio.Task] = {}
+        self._activity_settle_events: dict[str, asyncio.Event] = {}
 
         # Question handler for AskUserQuestion support (disabled)
         # NOTE: Uncomment when SDK adds AskUserQuestion support
@@ -111,6 +115,13 @@ class ClaudeAgent(BaseAgent):
             mark_session_active = getattr(self.session_handler, "mark_session_active", None)
             if callable(mark_session_active):
                 mark_session_active(runtime_session_key)
+
+            # Claude does not expose a reliable query/result correlation id. If a
+            # native background Activity can still speak, serialize this accepted
+            # Inbox item until that output is delivered. The Session remains full
+            # duplex while this backend avoids attributing a background Result to
+            # the new user Turn.
+            await self._wait_for_activity_output(runtime_session_key)
 
             # Queue reaction BEFORE sending query to avoid race condition where
             # a fast result arrives before the reaction is queued
@@ -591,13 +602,15 @@ class ClaudeAgent(BaseAgent):
                     # active-turn guard. An actionable refusal-fallback frame is
                     # the one user-facing system exception: it belongs to the
                     # replacement run and must use that run's turn.
+                    output_mode = None
                     if message_type in ("assistant", "result") or model_refusal_fallback_notice is not None:
-                        await self._maybe_begin_agent_initiated_turn(
+                        output_mode = await self._maybe_begin_agent_initiated_turn(
                             context,
                             composite_key,
                             base_session_id,
                             working_path,
                             session_key,
+                            message_type=message_type,
                         )
 
                     if message_type == "assistant":
@@ -643,6 +656,10 @@ class ClaudeAgent(BaseAgent):
 
                         auth_failure_assistant = self._is_auth_failure_assistant_message(message)
                         assistant_text = self._extract_text_blocks(message, context)
+                        if output_mode == "detached":
+                            if assistant_text:
+                                self._detached_unsolicited_text[composite_key] = assistant_text
+                            continue
                         if composite_key in self._detached_activity_outputs:
                             if assistant_text:
                                 self._detached_assistant_text[composite_key] = assistant_text
@@ -775,22 +792,44 @@ class ClaudeAgent(BaseAgent):
                             if not result_text:
                                 result_text = self._detached_assistant_text.get(composite_key)
                             self._detached_assistant_text.pop(composite_key, None)
-                            await self.emit_result_message(
-                                context,
-                                result_text,
-                                subtype=getattr(message, "subtype", "") or "",
-                                duration_ms=getattr(message, "duration_ms", 0),
-                                parse_mode="markdown",
-                                output=self._activity_message_output(
-                                    detached_activity,
-                                    detached=True,
-                                    completes_turn=False,
-                                ),
-                            )
+                            try:
+                                await self.emit_result_message(
+                                    context,
+                                    result_text,
+                                    subtype=getattr(message, "subtype", "") or "",
+                                    duration_ms=getattr(message, "duration_ms", 0),
+                                    parse_mode="markdown",
+                                    output=self._activity_message_output(
+                                        detached_activity,
+                                        detached=True,
+                                        completes_turn=False,
+                                    ),
+                                )
+                            except Exception:
+                                registry = self._activity_registry()
+                                if registry is not None:
+                                    registry.requeue_completed_output(detached_activity)
+                                raise
                             # The detached Activity output has no authority over
                             # a newer pending request. Its Turn stays owned by its
                             # own backend query and liveness/timeout path.
-                            self._mark_session_idle_if_no_pending_requests(composite_key)
+                            self._mark_session_idle_if_runtime_free(composite_key)
+                            self._signal_activity_output_settled(composite_key)
+                            continue
+                        if output_mode == "detached":
+                            if not result_text:
+                                result_text = self._detached_unsolicited_text.get(composite_key)
+                            self._detached_unsolicited_text.pop(composite_key, None)
+                            self._detached_unsolicited_outputs.discard(composite_key)
+                            if result_text:
+                                await self.emit_result_message(
+                                    context,
+                                    result_text,
+                                    subtype=getattr(message, "subtype", "") or "",
+                                    duration_ms=getattr(message, "duration_ms", 0),
+                                    parse_mode="markdown",
+                                    output=self._unsolicited_message_output(message, result_text),
+                                )
                             continue
                         self._pending_assistant_message.pop(composite_key, None)
                         if self._consume_suppressed_synthetic_result(composite_key, message, result_text):
@@ -897,6 +936,8 @@ class ClaudeAgent(BaseAgent):
                     logger.error(f"Error processing message from Claude: {e}", exc_info=True)
                     continue
             await self._flush_completed_activity_outputs(composite_key, context)
+            await self._flush_detached_activity_output(composite_key, context)
+            await self._flush_detached_unsolicited_output(composite_key, context)
             await self._handle_receiver_eof(composite_key, context)
         except asyncio.CancelledError:
             # Receiver task was explicitly cancelled (e.g. /stop, /clear,
@@ -969,8 +1010,15 @@ class ClaudeAgent(BaseAgent):
         # inside the loop.
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
-            self._detached_activity_outputs.pop(composite_key, None)
+            detached_activity = self._detached_activity_outputs.pop(composite_key, None)
+            if detached_activity is not None:
+                registry = self._activity_registry()
+                if registry is not None:
+                    registry.requeue_completed_output(detached_activity)
+                    self._schedule_completed_activity_flush(composite_key, context)
             self._detached_assistant_text.pop(composite_key, None)
+            self._detached_unsolicited_outputs.discard(composite_key)
+            self._detached_unsolicited_text.pop(composite_key, None)
             self._end_activity_runtime(composite_key)
 
     async def _handle_receiver_eof(self, composite_key: str, context: MessageContext) -> None:
@@ -1164,6 +1212,36 @@ class ClaudeAgent(BaseAgent):
         service = getattr(self.controller, "agent_service", None)
         return getattr(service, "activities", None)
 
+    def _activity_output_pending(self, composite_key: str) -> bool:
+        registry = self._activity_registry()
+        return bool(
+            composite_key in self._detached_activity_outputs
+            or (
+                registry is not None
+                and (
+                    registry.has_active(self.name, composite_key)
+                    or registry.has_completed_output(self.name, composite_key)
+                )
+            )
+        )
+
+    async def _wait_for_activity_output(self, composite_key: str) -> None:
+        """Serialize Claude inference until native background output is consumed."""
+
+        while self._activity_output_pending(composite_key):
+            event = self._activity_settle_events.setdefault(composite_key, asyncio.Event())
+            if not self._activity_output_pending(composite_key):
+                self._signal_activity_output_settled(composite_key)
+                return
+            await event.wait()
+
+    def _signal_activity_output_settled(self, composite_key: str) -> None:
+        if self._activity_output_pending(composite_key):
+            return
+        event = self._activity_settle_events.pop(composite_key, None)
+        if event is not None:
+            event.set()
+
     @staticmethod
     def _activity_session_id(context: MessageContext) -> str | None:
         value = (getattr(context, "platform_specific", None) or {}).get("agent_session_id")
@@ -1190,6 +1268,7 @@ class ClaudeAgent(BaseAgent):
         end_runtime = getattr(service, "end_activity_runtime", None)
         if callable(end_runtime) and composite_key:
             end_runtime(self.name, composite_key)
+        self._signal_activity_output_settled(composite_key)
 
     @staticmethod
     def _task_field(message, name: str, default=None):
@@ -1361,7 +1440,8 @@ class ClaudeAgent(BaseAgent):
         if completed is not None and callable(on_terminal):
             on_terminal(completed)
         if status != "completed":
-            self._mark_session_idle_if_no_pending_requests(composite_key)
+            self._mark_session_idle_if_runtime_free(composite_key)
+            self._signal_activity_output_settled(composite_key)
         return True
 
     @staticmethod
@@ -1390,6 +1470,70 @@ class ClaudeAgent(BaseAgent):
                 "turn_id": activity.turn_id,
             },
         )
+
+    @staticmethod
+    def _unsolicited_message_output(message, text: str) -> MessageOutput:
+        native_id = str(getattr(message, "uuid", "") or "").strip()
+        if native_id:
+            identity = native_id
+        else:
+            identity = hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+        return MessageOutput(
+            completes_turn=False,
+            completes_run=False,
+            detached=True,
+            idempotency_key=f"claude-unsolicited:{identity}",
+            causation_id=native_id or None,
+            metadata={"backend": "claude", "source": "agent_initiated"},
+        )
+
+    async def _flush_detached_unsolicited_output(
+        self,
+        composite_key: str,
+        context: MessageContext,
+    ) -> None:
+        if composite_key not in self._detached_unsolicited_outputs:
+            return
+        text = self._detached_unsolicited_text.pop(composite_key, "").strip()
+        self._detached_unsolicited_outputs.discard(composite_key)
+        if not text:
+            return
+        await self.emit_result_message(
+            context,
+            text,
+            parse_mode="markdown",
+            output=self._unsolicited_message_output(None, text),
+        )
+
+    async def _flush_detached_activity_output(
+        self,
+        composite_key: str,
+        context: MessageContext,
+    ) -> None:
+        activity = self._detached_activity_outputs.pop(composite_key, None)
+        if activity is None:
+            return
+        text = self._detached_assistant_text.pop(composite_key, "").strip()
+        if not text:
+            text = str(activity.metadata.get("summary") or "").strip()
+        try:
+            await self.emit_result_message(
+                context,
+                text,
+                parse_mode="markdown",
+                output=self._activity_message_output(
+                    activity,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+        except Exception:
+            registry = self._activity_registry()
+            if registry is not None:
+                registry.requeue_completed_output(activity)
+            raise
+        self._mark_session_idle_if_runtime_free(composite_key)
+        self._signal_activity_output_settled(composite_key)
 
     async def _flush_completed_activity_outputs(
         self,
@@ -1423,6 +1567,13 @@ class ClaudeAgent(BaseAgent):
                 and activity.turn_id
                 and activity.turn_id == pending_turn_id
             )
+            if pending_request is not None and not same_turn:
+                # A timed summary flush cannot consume the only correlation for
+                # an Activity whose real assistant/result sequence may still be
+                # in flight. Leave it for the receiver so that later output is
+                # detached from, and cannot complete, this newer Turn.
+                registry.requeue_completed_output(activity)
+                return
             result_text = str(activity.metadata.get("summary") or "").strip()
             if same_turn:
                 matched_request = self._pop_pending_request(composite_key)
@@ -1439,6 +1590,9 @@ class ClaudeAgent(BaseAgent):
                             completes_turn=True,
                         ),
                     )
+                except Exception:
+                    registry.requeue_completed_output(activity)
+                    raise
                 finally:
                     await self._remove_result_pending_reaction(
                         composite_key,
@@ -1448,19 +1602,25 @@ class ClaudeAgent(BaseAgent):
                     self._last_assistant_text.pop(composite_key, None)
                     self._pending_assistant_message.pop(composite_key, None)
                     self._mark_session_idle_if_no_pending_requests(composite_key)
+                    self._signal_activity_output_settled(composite_key)
                 continue
 
-            await self.emit_result_message(
-                context,
-                result_text,
-                parse_mode="markdown",
-                output=self._activity_message_output(
-                    activity,
-                    detached=True,
-                    completes_turn=False,
-                ),
-            )
-            self._mark_session_idle_if_no_pending_requests(composite_key)
+            try:
+                await self.emit_result_message(
+                    context,
+                    result_text,
+                    parse_mode="markdown",
+                    output=self._activity_message_output(
+                        activity,
+                        detached=True,
+                        completes_turn=False,
+                    ),
+                )
+            except Exception:
+                registry.requeue_completed_output(activity)
+                raise
+            self._mark_session_idle_if_runtime_free(composite_key)
+            self._signal_activity_output_settled(composite_key)
 
     def _schedule_completed_activity_flush(
         self,
@@ -1497,7 +1657,9 @@ class ClaudeAgent(BaseAgent):
         base_session_id: str,
         working_path: str,
         session_key: str,
-    ) -> None:
+        *,
+        message_type: str | None = None,
+    ) -> str | None:
         """Open a turn for UNSOLICITED backend output (no Avibe query behind it).
 
         Claude Code re-invokes the agent loop inside this same SDK process when a
@@ -1516,7 +1678,9 @@ class ClaudeAgent(BaseAgent):
         existing result path retains its normal lifecycle behavior.
         """
         if composite_key in self._detached_activity_outputs:
-            return
+            return "activity"
+        if composite_key in self._detached_unsolicited_outputs:
+            return "detached"
         # A malformed-tool-use synthetic API error pops the turn's real pending
         # request and arms ``_suppressed_synthetic_results`` for the PAIRED
         # ResultMessage, which the result branch then skips (``continue``) with NO
@@ -1528,7 +1692,7 @@ class ClaudeAgent(BaseAgent):
         # ``_consume_suppressed_synthetic_result`` / cleanup, so real later turns
         # open normally.
         if composite_key in self._suppressed_synthetic_results:
-            return
+            return None
         registry = self._activity_registry()
         completed_activity = (
             registry.claim_completed_output(self.name, composite_key)
@@ -1554,46 +1718,41 @@ class ClaudeAgent(BaseAgent):
                     detached=False,
                     completes_turn=True,
                 )
-                return
+                return None
             self._detached_activity_outputs[composite_key] = completed_activity
             logger.info(
                 "Claude Activity %s output detached from the current user turn in %s",
                 completed_activity.id,
                 composite_key,
             )
-            return
+            return "activity"
         if self._has_pending_requests(composite_key):
-            return
+            return None
         service = getattr(self.controller, "agent_service", None)
         begin = getattr(service, "begin_agent_initiated_turn", None)
         if not callable(begin):
-            return
+            return None
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or composite_key
         token = await begin(self.name, context, runtime_key)
         if not token:
             # The gate is CONTENDED — a user turn holds it, or one is queued on it
             # and we must not block the receiver behind that waiter (deadlock; see
-            # begin_agent_initiated_turn). Deliver the completed Activity summary
-            # immediately as detached output. Keeping it in the result-sequence map
-            # would let a missing background Result poison the next user Result.
+            # begin_agent_initiated_turn). Keep Activity provenance until its real
+            # result branch consumes it. A generic ScheduleWakeup output has no
+            # Activity, so mark just this assistant/result sequence detached.
             logger.info(
                 "Agent-initiated output for %s not opened: runtime gate contended "
                 "(a user turn holds or is queued on it)",
                 composite_key,
             )
             if completed_activity is not None:
-                await self.emit_result_message(
-                    context,
-                    str(completed_activity.metadata.get("summary") or "").strip(),
-                    parse_mode="markdown",
-                    output=self._activity_message_output(
-                        completed_activity,
-                        detached=True,
-                        completes_turn=False,
-                    ),
-                )
-            return
+                self._detached_activity_outputs[composite_key] = completed_activity
+                return "activity"
+            if message_type in {"assistant", "result"}:
+                self._detached_unsolicited_outputs.add(composite_key)
+                return "detached"
+            return None
         # Mark the session ACTIVE so this in-flight agent-initiated turn gets the
         # SAME idle-eviction exemption a user turn gets in ``handle_message``.
         # Without it the turn is protected only by per-message activity touches and
@@ -1629,6 +1788,7 @@ class ClaudeAgent(BaseAgent):
             "Opened agent-initiated turn for session %s (unsolicited backend output)",
             composite_key,
         )
+        return None
 
     def _mark_session_idle_if_no_pending_requests(self, composite_key: str) -> bool:
         if self._has_pending_requests(composite_key):
@@ -1640,6 +1800,13 @@ class ClaudeAgent(BaseAgent):
         if callable(mark_session_idle):
             mark_session_idle(composite_key)
         return True
+
+    def _mark_session_idle_if_runtime_free(self, composite_key: str) -> bool:
+        service = getattr(self.controller, "agent_service", None)
+        runtime_turn_active = getattr(service, "runtime_turn_active", None)
+        if callable(runtime_turn_active) and runtime_turn_active(composite_key):
+            return False
+        return self._mark_session_idle_if_no_pending_requests(composite_key)
 
     def _remove_pending_request(self, composite_key: str, request: AgentRequest) -> None:
         requests = self._pending_requests.get(composite_key)
