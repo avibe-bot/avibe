@@ -277,6 +277,39 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_task_start_uses_current_request_run_not_stale_receiver_run(self):
+        agent, service = _build_agent()
+        composite_key = "session-lineage:/tmp/work"
+        pending_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-current",
+                "turn_token": "current-turn",
+            }
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=pending_context)]
+        receiver_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-stale",
+                "turn_token": "stale-turn",
+                "agent_session_id": "sess-lineage",
+            }
+        )
+
+        self.assertTrue(
+            agent._handle_activity_message(
+                TaskStartedMessage(),
+                composite_key,
+                receiver_context,
+            )
+        )
+
+        activity = service.activities.active_for_runtime("claude", composite_key)[0]
+        self.assertEqual(activity.run_id, "run-current")
+        self.assertEqual(activity.turn_id, "current-turn")
+        self.assertEqual(activity.metadata["run_ids"], ["run-current"])
+
     async def test_failed_task_does_not_claim_a_missing_followup_output(self):
         mark_idle_calls: list[str] = []
         agent, service = _build_agent(mark_idle_calls=mark_idle_calls)

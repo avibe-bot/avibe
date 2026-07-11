@@ -1194,9 +1194,14 @@ class ClaudeAgent(BaseAgent):
         value = (getattr(source, "platform_specific", None) or {}).get(AGENT_TURN_TOKEN)
         return str(value or "").strip() or None
 
-    @staticmethod
-    def _activity_run_ids(context: MessageContext) -> list[str]:
-        spec = getattr(context, "platform_specific", None) or {}
+    def _activity_run_ids(
+        self,
+        composite_key: str,
+        context: MessageContext,
+    ) -> list[str]:
+        pending = self._pending_requests.get(composite_key) or []
+        source = getattr(pending[0], "context", None) if pending else context
+        spec = getattr(source, "platform_specific", None) or {}
         if spec.get("task_trigger_kind") != "agent_run":
             return []
         run_ids: list[str] = []
@@ -1253,7 +1258,7 @@ class ClaudeAgent(BaseAgent):
             }.items()
             if value not in (None, "")
         }
-        run_ids = self._activity_run_ids(context)
+        run_ids = self._activity_run_ids(composite_key, context)
         if run_ids:
             metadata["run_ids"] = run_ids
         if event == "task_started":

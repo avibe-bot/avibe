@@ -1380,6 +1380,17 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
+                if canonical_type == "result" and output_semantics.settles_run:
+                    # Run completion is independent from visible Message and Turn
+                    # completion cardinality. A detached/empty final output may
+                    # settle its origin Run without touching the current Turn.
+                    self._record_agent_run_terminal_result(
+                        context,
+                        text,
+                        None,
+                        is_error=is_error,
+                        output_semantics=output_semantics,
+                    )
                 if mutates_turn_lifecycle:
                     # A terminal result — even silent/empty — still means the turn
                     # finished: release the streaming SSE waiter so it closes now
@@ -1388,13 +1399,6 @@ class ConsolidatedMessageDispatcher:
                     # doesn't stay stuck (missing agent / exception / user stop).
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._record_agent_run_terminal_result(
-                        context,
-                        text,
-                        None,
-                        is_error=is_error,
-                        output_semantics=output_semantics,
-                    )
                     self._signal_turn_complete(context)
                 return None
             finally:

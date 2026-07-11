@@ -81,6 +81,57 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_detached_result_can_complete_origin_run_without_current_turn(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda run_id: False),
+            emit_matches_runtime_turn=lambda context: False,
+            release_runtime_turn=lambda context: self.fail("detached output released current Turn"),
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-empty",
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "older-turn",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append((run_id, kwargs["text"], kwargs["terminal_status"]))
+
+            def close(self):
+                pass
+
+        with patch.object(
+            message_dispatcher_module,
+            "SQLiteBackgroundTaskStore",
+            return_value=_Store(),
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=True,
+                    detached=True,
+                    idempotency_key="empty-terminal",
+                ),
+            )
+
+        self.assertIsNone(message_id)
+        self.assertEqual(calls, [("run-empty", "", "succeeded")])
+
     async def test_owned_activity_defers_run_terminal_but_not_later_detached_output(self):
         controller = _StubController()
         blocking = [True]
