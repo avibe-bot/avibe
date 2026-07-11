@@ -1570,7 +1570,7 @@ class ClaudeAgent(BaseAgent):
                 "result",
                 "",
                 level="silent",
-                output=terminal_turn_output(),
+                output=MessageOutput(completes_turn=True, completes_run=False),
             )
         except Exception:
             logger.debug(

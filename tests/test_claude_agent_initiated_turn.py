@@ -818,6 +818,9 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             pending_request,
         )
         self.assertTrue(service.activities.has_completed_output("claude", composite_key))
+        tidy_output = agent.controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertTrue(tidy_output.completes_turn)
+        self.assertFalse(tidy_output.settles_run)
 
         await agent._flush_completed_activity_outputs(composite_key, context)
 

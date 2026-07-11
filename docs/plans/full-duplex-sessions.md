@@ -139,9 +139,11 @@ newer pending native request. Queued completions survive both runtime disconnect
 and controller restart so a late flush can still deliver and settle their origin
 Run. A same-Turn delivery attempt consumes that Turn exactly once; if IM
 delivery fails, the Activity remains in the Outbox and retries as detached
-Session output without reusing the settled Turn token. Output containing only
-`<silent>` directives uses the same silent Run-settlement path as an empty
-summary.
+Session output without reusing the settled Turn token; the failure tidy closes
+only that Turn, while the retry retains Run-completion authority. Recovered
+terminal Activities wait behind any output still owed by the same Run. Output
+containing only `<silent>` directives uses the same silent Run-settlement path
+as an empty summary.
 
 ## Other backend protocol disposition
 

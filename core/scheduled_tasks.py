@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
 from core.message_context import resolve_context_platform
+from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
@@ -1556,6 +1557,7 @@ class ScheduledTaskService:
         self._inflight_sessions: set[str] = set()
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
+        self._pending_recovered_activity_terminals: list[Any] = []
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
@@ -1585,14 +1587,20 @@ class ScheduledTaskService:
         registry = self._activity_registry()
         drain_terminals = getattr(registry, "drain_recovered_terminals", None)
         ack_terminal = getattr(registry, "ack_recovered_terminal", None)
+        has_pending_output = getattr(registry, "has_pending_run_output", None)
         if callable(drain_terminals):
             for activity in drain_terminals():
                 self.settle_activity_runs(activity)
+                if callable(has_pending_output) and any(
+                    has_pending_output(run_id)
+                    for run_id in self._activity_run_ids(activity)
+                ):
+                    self._pending_recovered_activity_terminals.append(activity)
+                    continue
                 if callable(ack_terminal):
                     ack_terminal(activity)
 
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
-        has_pending_output = getattr(registry, "has_pending_run_output", None)
         for run in self.request_store.list_deferred_runs():
             run_id = str(run.get("id") or "").strip()
             if not run_id:
@@ -1603,6 +1611,35 @@ class ScheduledTaskService:
                 continue
             if self.request_store.settle_deferred_run(run_id):
                 self._drain_dirty = True
+
+    def _settle_pending_recovered_activity_terminals(self) -> None:
+        """Acknowledge terminal snapshots only after owned output leaves the Outbox."""
+
+        if not self._pending_recovered_activity_terminals:
+            return
+        registry = self._activity_registry()
+        has_pending_output = getattr(registry, "has_pending_run_output", None)
+        ack_terminal = getattr(registry, "ack_recovered_terminal", None)
+        remaining: list[Any] = []
+        for activity in self._pending_recovered_activity_terminals:
+            if callable(has_pending_output) and any(
+                has_pending_output(run_id)
+                for run_id in self._activity_run_ids(activity)
+            ):
+                remaining.append(activity)
+                continue
+            try:
+                self.settle_activity_runs(activity)
+                if callable(ack_terminal):
+                    ack_terminal(activity)
+            except Exception:
+                remaining.append(activity)
+                logger.warning(
+                    "Failed to settle recovered terminal Activity %s",
+                    getattr(activity, "id", ""),
+                    exc_info=True,
+                )
+        self._pending_recovered_activity_terminals = remaining
 
     def _settle_activity_without_output(self, activity: Any) -> None:
         """Finish an Activity Run without manufacturing user-visible text."""
@@ -1619,7 +1656,7 @@ class ScheduledTaskService:
         registry = self._activity_registry()
         summary = str((getattr(activity, "metadata", None) or {}).get("summary") or "").strip()
         session_id = str(getattr(activity, "session_id", "") or "").strip()
-        if not summary or not session_id:
+        if not strip_silent_blocks(summary).strip() or not session_id:
             self._settle_activity_without_output(activity)
             registry.ack_completed_output(activity)
             return
@@ -1702,6 +1739,7 @@ class ScheduledTaskService:
                         exc_info=True,
                     )
                     break
+        self._settle_pending_recovered_activity_terminals()
 
     def validate_platform(self, platform: str) -> None:
         # The real IM platforms have a settings manager; ``avibe`` (the web
@@ -2017,6 +2055,7 @@ class ScheduledTaskService:
 
         registry = getattr(getattr(self.controller, "agent_service", None), "activities", None)
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        has_pending_output = getattr(registry, "has_pending_run_output", None)
         settled: list[str] = []
         for run_id in run_ids:
             self.request_store.defer_run_terminal(
@@ -2024,6 +2063,8 @@ class ScheduledTaskService:
                 terminal_status=terminal_status,
             )
             if callable(has_blocker) and has_blocker(run_id):
+                continue
+            if callable(has_pending_output) and has_pending_output(run_id):
                 continue
             error = f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
             if self.request_store.settle_deferred_run(

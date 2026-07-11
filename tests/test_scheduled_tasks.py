@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import select
@@ -2420,6 +2420,98 @@ def test_restart_delivers_persisted_activity_summary_and_settles_run_once(
     assert emitted == [("Recovered task result", True, False)]
 
 
+def test_recovered_terminal_waits_for_pending_activity_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    for activity_id in ("task-failed", "task-output"):
+        first_registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id=session_id,
+            activity_id=activity_id,
+            kind="background_task",
+            run_id=request.id,
+        )
+    failed = first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+    assert failed is not None
+    output = first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-output",
+        status="completed",
+        metadata={"summary": "Recovered output before failure callback"},
+        expects_output=True,
+    )
+    assert output is not None
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    statuses_during_delivery: list[str] = []
+
+    async def emit_agent_message(context, _message_type, text, *, output, **_kwargs):
+        current = request_store.get_run(request.id)
+        assert current is not None
+        statuses_during_delivery.append(current["status"])
+        result = sqlite_store.record_run_output(
+            request.id,
+            output_id=str(output.idempotency_key),
+            text=text,
+            terminal_status="succeeded" if output.settles_run else None,
+            provenance=output.provenance(context),
+        )
+        assert result["terminal_transition"] is True
+        return "recovered-message"
+
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    controller.agent_service = SimpleNamespace(activities=recovered_registry)
+    controller.emit_agent_message = emit_agent_message
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    before_output = request_store.get_run(request.id)
+    assert before_output is not None
+    assert before_output["status"] == "running"
+    assert before_output["result_payload"]["deferred_terminal_status"] == "failed"
+    assert len(activity_store.list_activities()) == 2
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert statuses_during_delivery == ["running"]
+    assert terminal["status"] == "failed"
+    assert terminal["result_text"] == "Recovered output before failure callback"
+    assert activity_store.list_activities() == []
+
+
 def test_restart_preserves_activity_delivery_override(
     tmp_path: Path,
     monkeypatch,
@@ -2525,6 +2617,27 @@ def test_restart_preserves_activity_delivery_override(
     assert context.platform_specific["delivery_override"]["thread_id"] is None
     assert request_store.get_run(request.id)["status"] == "succeeded"
     assert activity_store.list_activities() == []
+
+
+def test_recovered_silent_directive_activity_settles_without_emit() -> None:
+    activity = SimpleNamespace(
+        id="task-silent",
+        session_id="session-1",
+        metadata={"summary": "<silent>internal completion</silent>"},
+    )
+    registry = SimpleNamespace(ack_completed_output=Mock())
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=registry),
+        emit_agent_message=AsyncMock(),
+    )
+    service._settle_activity_without_output = Mock()
+
+    asyncio.run(service._deliver_recovered_activity_output(activity))
+
+    service._settle_activity_without_output.assert_called_once_with(activity)
+    registry.ack_completed_output.assert_called_once_with(activity)
+    service.controller.emit_agent_message.assert_not_awaited()
 
 
 def test_restart_no_delivery_activity_settles_real_run_without_emit(
