@@ -43,6 +43,12 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_scheduled_tasks.py::test_agent_run_forwards_multiple_outputs_and_completes_once
+  - id: MESSAGE-DELIVERY-006
+    name: Every turn entry point reaches Show checkpoint lifecycle
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_show_git_turn_entrypoints.py::test_all_turn_entrypoints_reach_checkpoint_subscriber
 next_priority:
   - MESSAGE-DELIVERY-101
   - MESSAGE-DELIVERY-102

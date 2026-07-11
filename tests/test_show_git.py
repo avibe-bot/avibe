@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -582,6 +583,53 @@ def test_duplicate_turn_events_do_not_create_duplicate_checkpoint_commits(resolv
         "edit page",
         "adopt existing workspace",
     ]
+
+
+def test_shared_turn_hooks_reuse_path_owned_bus_lifecycle(resolved_git, monkeypatch):
+    session_id = "ses_path_owned"
+    context = SimpleNamespace(platform="avibe", platform_specific={"agent_session_id": session_id})
+    controller = SimpleNamespace(
+        _session_id_from_context=lambda _context: session_id,
+        _get_session_key=lambda _context: "avibe::ses_path_owned",
+    )
+    calls = []
+
+    class FakeRepository:
+        def checkpoint(self, checkpoint, **kwargs):
+            calls.append((checkpoint, kwargs))
+            return True
+
+    monkeypatch.setattr(
+        show_git,
+        "load_turn_checkpoint_context",
+        lambda _session_id, **_kwargs: TurnCheckpointContext(message="edit page", message_id="message-1"),
+    )
+    service = ShowGitCheckpointService(resolved_git)
+    monkeypatch.setattr(service, "_repository", lambda _session_id: FakeRepository())
+    bus = InboxEventBus()
+    service.start(bus)
+    lifecycle = []
+    subscription_id = bus.subscribe_callback(
+        lambda event_type, data: lifecycle.append((event_type, data))
+        if event_type in {"turn.start", "turn.end"}
+        else None
+    )
+
+    try:
+        bus.publish("turn.start", {"session_id": session_id})
+        service.begin_turn(controller, context)
+        _workspace(session_id)
+        service.end_turn(context)
+        bus.publish("turn.end", {"session_id": session_id})
+    finally:
+        bus.unsubscribe(subscription_id)
+        service.stop()
+
+    assert lifecycle == [
+        ("turn.start", {"session_id": session_id}),
+        ("turn.end", {"session_id": session_id}),
+    ]
+    assert calls == [(POST_TURN, {"message": "edit page", "run_id": None})]
 
 
 def test_agent_contract_uses_startup_latched_checkpoint_service_state(resolved_git, monkeypatch):

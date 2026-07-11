@@ -189,11 +189,9 @@ def test_reconcile_adds_platform_with_callbacks_before_start(monkeypatch):
     assert controller.im_client.clients["discord"].settings_manager.platform == "discord"
 
 
-def test_im_message_callback_marks_checkpoint_turn_before_dispatch(monkeypatch):
+def test_im_message_callback_uses_shared_dispatch_without_transport_checkpoint_shim(monkeypatch):
     controller = _controller(_config(["slack"]))
-    marked = []
     dispatched = []
-    controller.show_git_checkpoint_service = SimpleNamespace(mark_im_turn=lambda context: marked.append(context))
 
     async def _dispatch(_controller, context, text):
         dispatched.append((context, text))
@@ -208,7 +206,6 @@ def test_im_message_callback_marks_checkpoint_turn_before_dispatch(monkeypatch):
 
     asyncio.run(_run_callback())
 
-    assert marked == [context]
     assert dispatched == [(context, "hello")]
 
 

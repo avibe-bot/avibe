@@ -16,7 +16,6 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
-from core.message_output import MessageOutput
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ _CHECKPOINT_KINDS = {PRE_TURN, POST_TURN, ADOPT}
 _MANAGED_POINTER_PARENT = "show-git"
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAIN_ANCHOR_REF = "refs/avibe/checkpoint-main"
-_IM_TURN_STATE_KEY = "_avibe_show_git_checkpoint"
+_TURN_STATE_KEY = "_avibe_show_git_checkpoint"
 _CHECKPOINT_STATUS_VERSION = 1
 _checkpoint_service_active: bool | None = None
 _SCRUBBED_GIT_ENV = {
@@ -598,6 +597,7 @@ class ShowGitCheckpointService:
         self._bus: Any = None
         self._subscription_id: int | None = None
         self._active_turns: dict[str, _ActiveTurnCheckpoint] = {}
+        self._open_bus_turns: set[str] = set()
 
     @property
     def enabled(self) -> bool:
@@ -624,23 +624,17 @@ class ShowGitCheckpointService:
         self._bus = None
         self._subscription_id = None
         self._active_turns.clear()
+        self._open_bus_turns.clear()
         _record_checkpoint_service_state(False)
         _checkpoint_service_active = None
 
     @staticmethod
-    def _im_turn_state(context: Any) -> dict[str, Any] | None:
-        state = (getattr(context, "platform_specific", None) or {}).get(_IM_TURN_STATE_KEY)
+    def _turn_state(context: Any) -> dict[str, Any] | None:
+        state = (getattr(context, "platform_specific", None) or {}).get(_TURN_STATE_KEY)
         return state if isinstance(state, dict) else None
 
-    def mark_im_turn(self, context: Any) -> None:
-        if not self.enabled:
-            return
-        payload = dict(getattr(context, "platform_specific", None) or {})
-        payload[_IM_TURN_STATE_KEY] = {"start_published": False, "ended": False}
-        context.platform_specific = payload
-
     @staticmethod
-    def _existing_im_session_id(controller: Any, context: Any) -> str | None:
+    def _existing_session_id(controller: Any, context: Any) -> str | None:
         session_id = controller._session_id_from_context(context)
         if session_id:
             return session_id
@@ -652,7 +646,7 @@ class ShowGitCheckpointService:
         try:
             row = finder(controller._get_session_key(context), base_session_id)
         except Exception:
-            logger.debug("IM Show checkpoint session lookup failed", exc_info=True)
+            logger.debug("Show checkpoint session lookup failed", exc_info=True)
             return None
         session_id = str(row.get("id") or "").strip() if row else ""
         if not session_id:
@@ -663,7 +657,7 @@ class ShowGitCheckpointService:
         return session_id
 
     @staticmethod
-    def _link_im_message(context: Any, session_id: str) -> bool:
+    def _link_message(context: Any, session_id: str) -> bool:
         platform = str(getattr(context, "platform", None) or "").strip()
         message_id = str(getattr(context, "message_id", None) or "").strip()
         if not platform or platform == "avibe" or not message_id:
@@ -678,63 +672,58 @@ class ShowGitCheckpointService:
             )
             return True
         except Exception:
-            logger.debug("IM Show checkpoint message link failed", exc_info=True)
+            logger.debug("Show checkpoint message link failed", exc_info=True)
             return False
 
-    def begin_im_turn(self, controller: Any, context: Any) -> None:
-        state = self._im_turn_state(context)
-        if self._bus is None or state is None or state.get("start_published"):
+    def begin_turn(self, controller: Any, context: Any) -> None:
+        """Publish checkpoint start from the shared backend execution boundary."""
+
+        if self._bus is None:
             return
-        session_id = self._existing_im_session_id(controller, context)
+        state = self._turn_state(context)
+        if state is None or state.get("ended"):
+            state = {"start_observed": False, "ended": False}
+        if state.get("start_observed"):
+            return
+        payload = dict(getattr(context, "platform_specific", None) or {})
+        payload[_TURN_STATE_KEY] = state
+        context.platform_specific = payload
+        session_id = self._existing_session_id(controller, context)
         if not session_id:
-            # A first-ever IM turn has no Show workspace yet. Its terminal event
-            # lazily adopts the workspace if the turn creates one.
+            # A first-ever turn can bind its session only after backend dispatch.
+            # Keep the state on the context so terminal delivery can lazily adopt
+            # a workspace created during that turn.
             return
+        owns_bus_lifecycle = session_id not in self._open_bus_turns
         state = {
             **state,
-            "start_published": True,
+            "start_observed": True,
             "start_session_id": session_id,
-            "message_linked": self._link_im_message(context, session_id),
+            "owns_bus_lifecycle": owns_bus_lifecycle,
+            "message_linked": self._link_message(context, session_id),
         }
         payload = dict(context.platform_specific or {})
-        payload[_IM_TURN_STATE_KEY] = state
+        payload[_TURN_STATE_KEY] = state
         context.platform_specific = payload
-        self._bus.publish("turn.start", {"session_id": session_id})
+        # Workbench and /internal/dispatch may already have published their UI
+        # lifecycle before backend execution reached this shared boundary.
+        if owns_bus_lifecycle:
+            self._bus.publish("turn.start", {"session_id": session_id})
 
-    def should_end_im_turn(
-        self,
-        controller: Any,
-        context: Any,
-        message_type: str,
-        *,
-        output: MessageOutput | None = None,
-    ) -> bool:
-        state = self._im_turn_state(context)
-        if self._bus is None or message_type != "result" or state is None or state.get("ended"):
-            return False
-        if output is not None and (not output.completes_turn or output.detached):
-            return False
-        matches = getattr(getattr(controller, "agent_service", None), "emit_matches_runtime_turn", None)
-        if not callable(matches):
-            return True
-        try:
-            return bool(matches(context))
-        except Exception:
-            logger.debug("IM Show checkpoint active-turn check failed", exc_info=True)
-            return True
+    def end_turn(self, context: Any) -> None:
+        """Publish checkpoint end from the shared terminal-result boundary."""
 
-    def end_im_turn(self, context: Any) -> None:
-        state = self._im_turn_state(context)
+        state = self._turn_state(context)
         if self._bus is None or state is None or state.get("ended"):
             return
         payload = dict(getattr(context, "platform_specific", None) or {})
         session_id = str(payload.get("agent_session_id") or state.get("start_session_id") or "").strip()
         message_linked = bool(state.get("message_linked"))
         if session_id and not message_linked:
-            message_linked = self._link_im_message(context, session_id)
-        payload[_IM_TURN_STATE_KEY] = {**state, "ended": True, "message_linked": message_linked}
+            message_linked = self._link_message(context, session_id)
+        payload[_TURN_STATE_KEY] = {**state, "ended": True, "message_linked": message_linked}
         context.platform_specific = payload
-        if session_id:
+        if session_id and (not state.get("start_observed") or state.get("owns_bus_lifecycle")):
             self._bus.publish("turn.end", {"session_id": session_id})
 
     def _handle_event(self, event_type: str, data: Any) -> None:
@@ -743,6 +732,10 @@ class ShowGitCheckpointService:
         session_id = str(data.get("session_id") or "").strip()
         if not _SESSION_ID_PATTERN.fullmatch(session_id):
             return
+        if event_type == "turn.start":
+            self._open_bus_turns.add(session_id)
+        else:
+            self._open_bus_turns.discard(session_id)
         if not paths.get_show_page_dir(session_id).is_dir():
             if event_type == "turn.end":
                 self._active_turns.pop(session_id, None)
