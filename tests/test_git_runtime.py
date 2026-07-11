@@ -94,6 +94,35 @@ def test_install_verifies_archive_and_uses_versioned_layout(
     assert manager.resolve_git_path() == installed
 
 
+@pytest.mark.parametrize("pointer_payload", [None, "not-json"])
+def test_reusing_install_repairs_current_pointer_before_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pointer_payload: str | None,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    archive = _write_git_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = GitRuntimeManager(manifest_path=manifest)
+    first = manager.ensure()
+    assert first["ok"] is True
+    pointer = home / "runtime" / "git" / "current.json"
+    if pointer_payload is None:
+        pointer.unlink()
+    else:
+        pointer.write_text(pointer_payload, encoding="utf-8")
+
+    reused = manager.ensure()
+    cleaned = manager.clean(keep_previous=0)
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert json.loads(pointer.read_text(encoding="utf-8"))["install_dir"] == first["install_dir"]
+    assert first["install_dir"] not in cleaned["removed"]
+    assert Path(first["path"]).is_file()
+
+
 def test_managers_for_same_runtime_share_install_lock(tmp_path: Path) -> None:
     first = GitRuntimeManager(runtime_dir=tmp_path / "first")
     second = GitRuntimeManager(runtime_dir=tmp_path / "second")
@@ -400,148 +429,3 @@ def test_macos_non_system_git_does_not_require_clt(monkeypatch: pytest.MonkeyPat
         "/opt/homebrew/bin/git"
     )
     assert calls == [["/opt/homebrew/bin/git", "--version"]]
-
-
-def test_agent_path_injection_uses_explicit_base_when_target_path_is_absent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    vendored = tmp_path / "runtime" / "bin" / "git"
-    vendored.parent.mkdir(parents=True)
-    vendored.touch()
-
-    class FakeManager:
-        def resolve_git_path(self) -> Path:
-            return vendored
-
-    seen_paths: list[str] = []
-
-    def missing_system_git(*, env):
-        seen_paths.append(env["PATH"])
-        return None
-
-    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
-    env: dict[str, str] = {}
-    base_path = os.pathsep.join(["/usr/local/bin", "/usr/bin"])
-
-    changed = git_runtime.prepend_vendored_git_to_path(
-        env,
-        base_env={"PATH": base_path},
-        manager=FakeManager(),  # type: ignore[arg-type]
-    )
-
-    assert changed is True
-    assert seen_paths == [base_path]
-    assert env["PATH"] == f"{vendored.parent}{os.pathsep}{base_path}"
-
-
-def test_agent_path_injection_preserves_explicit_empty_target_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    vendored = tmp_path / "runtime" / "bin" / "git"
-
-    class FakeManager:
-        def resolve_git_path(self) -> Path:
-            return vendored
-
-    seen_paths: list[str] = []
-
-    def missing_system_git(*, env):
-        seen_paths.append(env["PATH"])
-        return None
-
-    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
-    env = {"PATH": ""}
-
-    changed = git_runtime.prepend_vendored_git_to_path(
-        env,
-        base_env={"PATH": "/service/bin"},
-        manager=FakeManager(),  # type: ignore[arg-type]
-    )
-
-    assert changed is True
-    assert seen_paths == [""]
-    assert env["PATH"] == str(vendored.parent)
-
-
-def test_agent_path_injection_does_not_leak_parent_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    vendored = tmp_path / "runtime" / "bin" / "git"
-
-    class FakeManager:
-        def resolve_git_path(self) -> Path:
-            return vendored
-
-    seen_paths: list[str] = []
-
-    def missing_system_git(*, env):
-        seen_paths.append(env["PATH"])
-        return None
-
-    monkeypatch.setenv("PATH", "/parent/process/bin")
-    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
-    env: dict[str, str] = {}
-
-    changed = git_runtime.prepend_vendored_git_to_path(
-        env,
-        base_env={},
-        manager=FakeManager(),  # type: ignore[arg-type]
-    )
-
-    assert changed is True
-    assert seen_paths == [""]
-    assert env["PATH"] == str(vendored.parent)
-
-
-def test_agent_path_injection_preserves_target_environment_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    vendored = tmp_path / "runtime" / "bin" / "git"
-
-    class FakeManager:
-        def resolve_git_path(self) -> Path:
-            return vendored
-
-    seen_paths: list[str] = []
-
-    def missing_system_git(*, env):
-        seen_paths.append(env["PATH"])
-        return None
-
-    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
-    env = {"PATH": "/backend/tools:/backend/bin"}
-
-    changed = git_runtime.prepend_vendored_git_to_path(
-        env,
-        base_env={"PATH": "/service/bin"},
-        manager=FakeManager(),  # type: ignore[arg-type]
-    )
-
-    assert changed is True
-    assert seen_paths == ["/backend/tools:/backend/bin"]
-    assert env["PATH"] == f"{vendored.parent}:/backend/tools:/backend/bin"
-
-
-def test_agent_path_injection_never_shadows_system_git(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(git_runtime, "resolve_system_git_path", lambda **kwargs: Path("/usr/local/bin/git"))
-
-    class UnexpectedManager:
-        def resolve_git_path(self) -> Path:
-            pytest.fail("vendored Git should not be resolved when system Git is present")
-
-    env: dict[str, str] = {}
-    changed = git_runtime.prepend_vendored_git_to_path(
-        env,
-        base_env={"PATH": "/usr/local/bin:/usr/bin"},
-        manager=UnexpectedManager(),  # type: ignore[arg-type]
-    )
-
-    assert changed is False
-    assert "PATH" not in env

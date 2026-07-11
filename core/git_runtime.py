@@ -6,7 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -158,7 +158,7 @@ def git_runtime_status() -> dict[str, Any]:
         "resolution": resolution,
         "path": str(resolved_path) if resolved_path else None,
         "version": resolved_version,
-        # Agent shells preserve a developer's system Git and only fall back to vendored.
+        # Planned Agent order for post-merge wiring; this PR does not mutate child PATH.
         "agent": {
             "resolution": agent_resolution,
             "path": str(agent_path) if agent_path else None,
@@ -171,10 +171,9 @@ def git_runtime_status() -> dict[str, Any]:
 def resolve_system_git_path(*, env: Mapping[str, str] | None = None) -> Path | None:
     """Resolve the Git selected by PATH without triggering the macOS CLT shim.
 
-    The Git candidate intentionally follows the supplied PATH because it is the
-    binary an Agent would run. When ``env`` is provided, an absent or empty PATH
-    never falls back to the parent process. Supporting system probes never
-    follow the Agent PATH.
+    The Git candidate intentionally follows the supplied PATH for runtime status
+    reporting. When ``env`` is provided, an absent or empty PATH never falls
+    back to the parent process. Supporting system probes never follow that PATH.
     """
 
     source = env if env is not None else os.environ
@@ -200,31 +199,6 @@ def resolve_system_git_path(*, env: Mapping[str, str] | None = None) -> Path | N
         if proc.returncode != 0 or not (proc.stdout or "").strip():
             return None
     return candidate_path if _probe_git_version(candidate_path) is not None else None
-
-
-def prepend_vendored_git_to_path(
-    env: MutableMapping[str, str],
-    *,
-    base_env: Mapping[str, str],
-    manager: GitRuntimeManager | None = None,
-) -> bool:
-    """Prepend vendored Git when the composed Agent environment has no Git.
-
-    PATH composition is explicit: a PATH key in ``env`` wins even when its
-    value is empty; only an absent key falls back to the required ``base_env``.
-    This function never reads ``os.environ`` for PATH. When prepending, it
-    preserves a non-empty selected PATH verbatim after the vendored directory.
-    """
-
-    current_path = env["PATH"] if "PATH" in env else base_env.get("PATH", "")
-    if resolve_system_git_path(env={"PATH": current_path}) is not None:
-        return False
-    vendored = (manager or get_git_runtime_manager()).resolve_git_path()
-    if vendored is None:
-        return False
-    bin_dir = str(vendored.parent)
-    env["PATH"] = bin_dir if not current_path else f"{bin_dir}{os.pathsep}{current_path}"
-    return True
 
 
 def _probe_git_version(binary: Path | None) -> str | None:

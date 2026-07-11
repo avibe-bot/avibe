@@ -20,11 +20,10 @@ must not be executed before `xcode-select -p` confirms the tools are installed.
   Agent PATH resolution (system first), so the two contracts stay explicit.
 - Support `VIBE_GIT_MANIFEST_PATH`, `VIBE_GIT_MANIFEST_URL`, and
   `VIBE_GIT_OFFLINE` for development, out-of-band updates, and offline use.
-- Expose a helper that prepends the vendored `bin` directory to a concrete
-  target environment only when no safe system Git is present. The current
-  caller-context object is provenance, not the backend's final environment;
-  wiring is deferred to the post-#864 integration so backend PATH entries are
-  not overwritten.
+- Keep Agent PATH injection out of this PR. The current caller-context object
+  is provenance, not the backend's final environment, and probing an untrusted
+  target PATH would execute workspace-controlled tools. The orchestrator-owned
+  post-#864 integration will define and wire the backend environment contract.
 
 ## Build Boundary
 
@@ -55,3 +54,5 @@ digests ship in the final integration commit.
   change after this interface has production evidence.
 - Wire `core/git_binary.py` to `GitRuntimeManager` in the orchestrator-owned
   post-merge integration for #669.
+- Define and wire safe Agent PATH fallback after #864 at the concrete backend
+  child-environment seam.

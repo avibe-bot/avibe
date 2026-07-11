@@ -106,15 +106,18 @@ class ManagedRuntimeManager:
             install_dir = self._manifest_install_dir(manifest, archive)
             existing = self._verified_manifest_binary(install_dir, manifest, archive)
             if existing is not None and not force:
-                return self._success_payload(existing, install_dir, manifest, archive, changed=False)
+                return self._reuse_existing_install(existing, install_dir, manifest, archive)
 
             archive_path = self._resolve_manifest_archive(archive)
             if archive_path is None:
                 if existing is not None:
-                    return {
-                        **self._success_payload(existing, install_dir, manifest, archive, changed=False),
-                        "reason": self._install_reason,
-                    }
+                    return self._reuse_existing_install(
+                        existing,
+                        install_dir,
+                        manifest,
+                        archive,
+                        reason=self._install_reason,
+                    )
                 return self._failure(
                     self._install_reason or self._reason("archive_unavailable"),
                     manifest=manifest,
@@ -559,6 +562,30 @@ class ManagedRuntimeManager:
             "size": archive.size,
             "bin_path": archive.bin_path,
         }
+
+    def _reuse_existing_install(
+        self,
+        binary: Path,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            self._write_current_pointer(install_dir, manifest, archive)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to refresh managed %s runtime pointer", self.spec.runtime_id)
+            return self._failure(
+                self._reason("pointer_write_failed"),
+                manifest=manifest,
+                archive=archive,
+                message=str(exc),
+            )
+        payload = self._success_payload(binary, install_dir, manifest, archive, changed=False)
+        if reason:
+            payload["reason"] = reason
+        return payload
 
     def _success_payload(
         self,
