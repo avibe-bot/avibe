@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from core import git_runtime
 from modules.agents.opencode import caller_context as bridge
 
 
@@ -25,7 +26,7 @@ def test_ensure_plugin_installed_writes_global_opencode_plugin(tmp_path: Path, m
 def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     avibe_home = tmp_path / "avibe"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
-    monkeypatch.setattr(bridge, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
 
     ok = bridge.bind_session(
         "oc-session",
@@ -58,7 +59,7 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
-    monkeypatch.setattr(bridge, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
 
     assert bridge.bind_session(
         "oc-session",
@@ -82,7 +83,7 @@ def test_bind_session_writes_vendored_path_without_caller_context(
         env["PATH"] = "/managed/git/bin"
         return True
 
-    monkeypatch.setattr(bridge, "prepend_vendored_git_to_path", inject_git)
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", inject_git)
 
     assert bridge.bind_session(
         "oc-session",

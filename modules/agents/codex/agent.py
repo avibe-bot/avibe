@@ -17,7 +17,6 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
-from core.git_runtime import prepend_vendored_git_to_path
 from core.message_output import terminal_output_for
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
@@ -782,6 +781,8 @@ class CodexAgent(BaseAgent):
         return script_path
 
     def _inject_caller_env_config(self, params: Dict[str, Any], request: AgentRequest) -> None:
+        from core.git_runtime import prepend_vendored_git_to_path
+
         env = self._caller_env_for_request(request)
         config = dict(params.get("config") or {})
         shell_policy = dict(config.get("shell_environment_policy") or {})

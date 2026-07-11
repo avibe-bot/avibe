@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core.handlers.session_handler as session_handler_module
 from config.v2_compat import to_app_config
 from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
+from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
@@ -183,7 +184,7 @@ def test_session_handler_injects_vendored_git_into_gitless_child_env(
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
-    monkeypatch.setattr(session_handler_module, "prepend_vendored_git_to_path", inject_git)
+    monkeypatch.setattr(git_runtime_module, "prepend_vendored_git_to_path", inject_git)
 
     _run_session(
         SessionHandler(_Controller(tmp_path)),

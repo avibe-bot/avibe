@@ -1101,7 +1101,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             env["PATH"] = "/managed/git/bin"
             return True
 
-        with patch.object(_MODULE, "prepend_vendored_git_to_path", side_effect=inject_git):
+        with patch("core.git_runtime.prepend_vendored_git_to_path", side_effect=inject_git):
             agent._inject_caller_env_config(params, request)
 
         set_env = params["config"]["shell_environment_policy"]["set"]

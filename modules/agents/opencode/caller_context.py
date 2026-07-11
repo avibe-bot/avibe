@@ -17,7 +17,6 @@ from typing import Any, Mapping
 
 from config import paths
 from core.caller_context import caller_context_from_platform_payload
-from core.git_runtime import prepend_vendored_git_to_path
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
@@ -139,6 +138,8 @@ def bind_session(
     working_dir: Path | str | None,
     ttl_hours: int = BINDING_TTL_HOURS,
 ) -> bool:
+    from core.git_runtime import prepend_vendored_git_to_path
+
     session_id = str(opencode_session_id or "").strip()
     if not session_id:
         return False

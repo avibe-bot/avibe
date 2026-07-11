@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from core import git_binary
+from core import git_binary, git_runtime
 from core.git_binary import ResolvedGit
 
 
@@ -15,7 +15,7 @@ def test_resolve_vendored_uses_managed_git_runtime(monkeypatch):
         def resolve_git_path() -> Path:
             return vendored
 
-    monkeypatch.setattr(git_binary, "get_git_runtime_manager", lambda: FakeManager())
+    monkeypatch.setattr(git_runtime, "get_git_runtime_manager", lambda: FakeManager())
 
     assert git_binary._resolve_vendored() == ResolvedGit(path=vendored, source="vendored")
 
@@ -26,7 +26,7 @@ def test_resolve_vendored_degrades_when_runtime_is_not_installed(monkeypatch):
         def resolve_git_path() -> None:
             return None
 
-    monkeypatch.setattr(git_binary, "get_git_runtime_manager", lambda: FakeManager())
+    monkeypatch.setattr(git_runtime, "get_git_runtime_manager", lambda: FakeManager())
 
     assert git_binary._resolve_vendored() is None
 

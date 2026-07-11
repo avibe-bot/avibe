@@ -8,8 +8,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.git_runtime import get_git_runtime_manager
-
 
 @dataclass(frozen=True)
 class ResolvedGit:
@@ -18,6 +16,8 @@ class ResolvedGit:
 
 
 def _resolve_vendored() -> ResolvedGit | None:
+    from core.git_runtime import get_git_runtime_manager
+
     path = get_git_runtime_manager().resolve_git_path()
     return ResolvedGit(path=path, source="vendored") if path is not None else None
 
