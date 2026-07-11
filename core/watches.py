@@ -109,6 +109,20 @@ class ManagedWatch:
         )
 
 
+def _missing_watch_cwd_error(watch: ManagedWatch) -> Optional[str]:
+    if not watch.cwd or Path(watch.cwd).is_dir():
+        return None
+    return f"watch working directory no longer exists or is not a directory: {watch.cwd}"
+
+
+def _watch_spawn_cwd(watch: ManagedWatch) -> str:
+    if watch.cwd:
+        return watch.cwd
+    stable_cwd = paths.get_vibe_remote_dir()
+    stable_cwd.mkdir(parents=True, exist_ok=True)
+    return str(stable_cwd)
+
+
 class ManagedWatchStore:
     def __init__(self, path: Optional[Path] = None):
         self.path = path or paths.get_watches_path()
@@ -634,11 +648,19 @@ class ManagedWatchService:
 
             if not self._watch_store_call(watch.id, "mark_cycle_start", lambda: self.store.mark_cycle_start(watch.id)):
                 return
+            cwd_error = _missing_watch_cwd_error(watch)
+            if cwd_error:
+                self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
+                return
             try:
                 result = await self._run_cycle(watch, timeout_seconds=cycle_timeout)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                cwd_error = _missing_watch_cwd_error(watch)
+                if cwd_error:
+                    self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
+                    return
                 result = _CycleResult(
                     exit_code=1,
                     stdout="",
@@ -722,10 +744,11 @@ class ManagedWatchService:
             return
 
     async def _run_cycle(self, watch: ManagedWatch, *, timeout_seconds: float) -> _CycleResult:
+        spawn_cwd = _watch_spawn_cwd(watch)
         if watch.shell_command:
             process = await asyncio.create_subprocess_shell(
                 watch.shell_command,
-                cwd=watch.cwd or None,
+                cwd=spawn_cwd,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -734,7 +757,7 @@ class ManagedWatchService:
         else:
             process = await asyncio.create_subprocess_exec(
                 *watch.command,
-                cwd=watch.cwd or None,
+                cwd=spawn_cwd,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -807,6 +830,26 @@ class ManagedWatchService:
                 f"Error: {error_text}"
             )
         self._enqueue_hook(watch, prefix=watch.message or watch.prefix, body=body)
+
+    def _stop_watch_for_missing_cwd(self, watch: ManagedWatch, *, error_text: str) -> None:
+        if not self._watch_store_call(
+            watch.id,
+            "mark_cycle_result",
+            lambda: self.store.mark_cycle_result(
+                watch.id,
+                exit_code=1,
+                error=error_text,
+                disable=True,
+            ),
+        ):
+            return
+        watch_label = watch.name or watch.id
+        body = (
+            f"Watch '{watch_label}' stopped because its working directory is no longer available.\n"
+            f"Working directory: {watch.cwd}\n"
+            "Update or recreate the watch with a valid cwd before monitoring continues."
+        )
+        self._enqueue_hook(watch, body=body)
 
 
 def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:

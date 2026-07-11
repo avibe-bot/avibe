@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config import paths
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore, _CycleResult
 from storage.background import SQLiteBackgroundTaskStore
@@ -121,6 +122,7 @@ def test_managed_watch_exec_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
     assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
+    assert captured["kwargs"]["cwd"] == str(paths.get_vibe_remote_dir())
 
 
 def test_managed_watch_shell_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -> None:
@@ -162,6 +164,46 @@ def test_managed_watch_shell_detaches_waiter_stdin(tmp_path: Path, monkeypatch) 
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
     assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
+    assert captured["kwargs"]["cwd"] == str(paths.get_vibe_remote_dir())
+
+
+def test_managed_watch_legacy_none_cwd_survives_deleted_process_cwd(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    watch = store.add_watch(
+        name="Legacy watch",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "-c", "import os; print(os.getcwd())"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    deleted_cwd = tmp_path / "deleted-service-cwd"
+    deleted_cwd.mkdir()
+    original_cwd = Path.cwd()
+
+    os.chdir(deleted_cwd)
+    deleted_cwd.rmdir()
+    try:
+        result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
+    finally:
+        os.chdir(original_cwd)
+
+    assert result.exit_code == 0
+    assert result.stdout == str(paths.get_vibe_remote_dir())
 
 
 def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
@@ -631,6 +673,136 @@ def test_managed_watch_service_turns_spawn_error_into_failed_cycle(tmp_path: Pat
     assert len(pending) == 1
     assert "stopped because the waiter exited with code 1" in pending[0].prompt
     assert "fix the waiter or its dependencies" in pending[0].prompt
+
+
+@pytest.mark.parametrize("use_shell", [False, True], ids=["exec", "shell"])
+def test_managed_watch_service_stops_and_notifies_when_cwd_was_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_shell: bool,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    removed_cwd = tmp_path / "removed-worktree"
+    removed_cwd.mkdir()
+    removed_cwd.rmdir()
+    watch = store.add_watch(
+        name="PR review",
+        session_key="",
+        session_id="ses-linked",
+        command=[] if use_shell else [sys.executable, "-c", "raise AssertionError('must not run')"],
+        shell_command="exit 99" if use_shell else None,
+        prefix=None,
+        message="PR review activity detected.",
+        cwd=str(removed_cwd),
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    run_cycle_called = False
+
+    async def unexpected_run_cycle(*_args, **_kwargs):
+        nonlocal run_cycle_called
+        run_cycle_called = True
+        raise AssertionError("waiter must not spawn when its cwd is missing")
+
+    monkeypatch.setattr(service, "_run_cycle", unexpected_run_cycle)
+    service._running = True
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    pending = request_store.list_pending()
+    assert run_cycle_called is False
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.last_exit_code == 1
+    assert saved.last_error == (f"watch working directory no longer exists or is not a directory: {removed_cwd}")
+    assert len(pending) == 1
+    assert pending[0].session_id == "ses-linked"
+    assert pending[0].task_id == watch.id
+    assert pending[0].source_kind == "watch"
+    assert pending[0].prompt == (
+        "Watch 'PR review' stopped because its working directory is no longer available.\n"
+        f"Working directory: {removed_cwd}\n"
+        "Update or recreate the watch with a valid cwd before monitoring continues."
+    )
+
+
+def test_missing_watch_cwd_does_not_stop_other_watches(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    removed_cwd = tmp_path / "removed-worktree"
+    broken = store.add_watch(
+        name="Broken watch",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "-c", "raise AssertionError('must not run')"],
+        shell_command=None,
+        prefix=None,
+        cwd=str(removed_cwd),
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    healthy = store.add_watch(
+        name="Healthy watch",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "-c", "print('healthy completed')"],
+        shell_command=None,
+        prefix="Healthy watch event.",
+        cwd=str(tmp_path),
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        for _ in range(100):
+            broken_saved = store.get_watch(broken.id)
+            healthy_saved = store.get_watch(healthy.id)
+            if broken_saved and healthy_saved and not broken_saved.enabled and not healthy_saved.enabled:
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    broken_saved = store.get_watch(broken.id)
+    healthy_saved = store.get_watch(healthy.id)
+    prompts = [request.prompt for request in request_store.list_pending()]
+    assert broken_saved is not None
+    assert broken_saved.last_error and str(removed_cwd) in broken_saved.last_error
+    assert healthy_saved is not None
+    assert healthy_saved.last_error is None
+    assert healthy_saved.last_event_at is not None
+    assert any("working directory is no longer available" in (prompt or "") for prompt in prompts)
+    assert any("healthy completed" in (prompt or "") for prompt in prompts)
 
 
 def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: Path) -> None:
