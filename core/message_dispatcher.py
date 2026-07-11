@@ -1343,10 +1343,10 @@ class ConsolidatedMessageDispatcher:
 
         ``is_error`` marks a terminal ``result`` as a FAILED turn. It is the only
         signal the sidebar dot needs on the way out: a terminal result settles the
-        session to ``idle`` (or ``failed`` when ``is_error``). Callers that hit a
-        terminal failure emit it as ``result`` + ``is_error=True`` instead of a
-        bare ``notify`` — that routes the failure through this one outbound
-        chokepoint (dot + SSE stream release), so no caller pokes the dot directly.
+        session to ``idle`` (or ``failed`` when ``is_error``). Structured backend
+        failures use a visible ``notify`` for delivery followed by a silent
+        ``result`` with ``is_error=True`` for lifecycle settlement, keeping those
+        responsibilities independent while still passing through this chokepoint.
 
         ``level`` is the visibility grade — orthogonal to ``message_type``. The
         type says what role the message plays (and drives the dot + unread); the

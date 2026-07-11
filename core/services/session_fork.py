@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config import paths
+from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
 from vibe.i18n import t
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
@@ -79,10 +80,13 @@ class ForkSourceState:
     has_messages_after_anchor: bool = False
     has_terminal_agent_output_after_anchor: bool = False
     has_user_turn_after_anchor: bool = False
+    anchor_is_backend_failure: bool = False
 
     @property
     def anchor_is_terminal_agent_output(self) -> bool:
-        return self.anchor_author == "agent" and self.anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
+        return self.anchor_author == "agent" and (
+            self.anchor_type in TERMINAL_AGENT_OUTPUT_TYPES or self.anchor_is_backend_failure
+        )
 
 
 @dataclass(frozen=True)
@@ -388,7 +392,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     if not source_session_id or not source_message_id:
         return ForkSourceState()
 
-    from sqlalchemy import select
+    from sqlalchemy import and_, func, or_, select
 
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -399,7 +403,13 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     try:
         with engine.connect() as conn:
             anchor = conn.execute(
-                select(messages.c.created_at, messages.c.id, messages.c.author, messages.c.type)
+                select(
+                    messages.c.created_at,
+                    messages.c.id,
+                    messages.c.author,
+                    messages.c.type,
+                    messages.c.metadata_json,
+                )
                 .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
                 .limit(1)
             ).mappings().first()
@@ -412,10 +422,17 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 | ((messages.c.created_at == anchor_created_at) & (messages.c.id > anchor_id))
             )
             latest_after_anchor = conn.execute(
-                select(messages.c.author, messages.c.type)
+                select(messages.c.author, messages.c.type, messages.c.metadata_json)
                 .where(
                     messages.c.session_id == source_session_id,
-                    messages.c.type.in_(["user", *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]),
+                    or_(
+                        messages.c.type.in_(["user", *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]),
+                        and_(
+                            messages.c.type == "notify",
+                            func.json_extract(messages.c.metadata_json, "$.event")
+                            == BACKEND_FAILURE_EVENT,
+                        ),
+                    ),
                     after_anchor,
                 )
                 .order_by(messages.c.created_at.desc(), messages.c.id.desc())
@@ -427,9 +444,18 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             latest_after_anchor_type = (
                 str(latest_after_anchor["type"] or "").strip() if latest_after_anchor else ""
             )
+            latest_after_anchor_metadata = _load_metadata(
+                latest_after_anchor["metadata_json"] if latest_after_anchor else None
+            )
             has_terminal_agent_output_after_anchor = (
                 latest_after_anchor_author == "agent"
-                and latest_after_anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
+                and (
+                    latest_after_anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
+                    or is_backend_failure_notification(
+                        latest_after_anchor_type,
+                        latest_after_anchor_metadata,
+                    )
+                )
             )
             has_user_turn_after_anchor = (
                 conn.execute(
@@ -452,6 +478,10 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 has_messages_after_anchor=latest_after_anchor is not None,
                 has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
                 has_user_turn_after_anchor=has_user_turn_after_anchor,
+                anchor_is_backend_failure=is_backend_failure_notification(
+                    anchor["type"],
+                    _load_metadata(anchor["metadata_json"]),
+                ),
             )
     except Exception as exc:
         import logging

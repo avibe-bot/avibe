@@ -7,6 +7,18 @@ from typing import Any
 
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 
+BACKEND_FAILURE_EVENT = "backend_failure"
+
+
+def is_backend_failure_notification(message_type: str | None, metadata: Any) -> bool:
+    """Whether a persisted message is the visible half of a terminal failure."""
+
+    return (
+        str(message_type or "").strip() == "notify"
+        and isinstance(metadata, dict)
+        and metadata.get("event") == BACKEND_FAILURE_EVENT
+    )
+
 
 def _terminal_output(request: Any, output: MessageOutput | None) -> MessageOutput:
     if output is not None:
@@ -73,7 +85,7 @@ async def emit_backend_failure(
     notify_metadata.update(
         {
             "backend": backend_name,
-            "event": "backend_failure",
+            "event": BACKEND_FAILURE_EVENT,
             "failure_id": identity,
         }
     )

@@ -54,6 +54,35 @@ def test_maybe_notify_inbox_message_schedules_agent_result(monkeypatch):
     ]
 
 
+def test_maybe_notify_inbox_message_schedules_backend_failure_notify(monkeypatch):
+    calls = []
+
+    class _Thread:
+        def __init__(self, *, target, args, daemon):
+            assert daemon is True
+            self.args = args
+
+        def start(self):
+            calls.append(self.args[0])
+
+    monkeypatch.setattr(web_push_notifications.threading, "Thread", _Thread)
+
+    web_push_notifications.maybe_notify_inbox_message(
+        {
+            "id": "msg_failure",
+            "platform": "avibe",
+            "author": "agent",
+            "type": "notify",
+            "session_id": "ses_1",
+            "text": "Codex backend failed",
+            "metadata": {"event": "backend_failure", "failure_id": "failure_1"},
+        },
+        {"title": "Build fix"},
+    )
+
+    assert [call["message_id"] for call in calls] == ["msg_failure"]
+
+
 def test_maybe_notify_inbox_message_skips_non_notifiable(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -89,6 +118,70 @@ def test_maybe_notify_inbox_message_skips_non_notifiable(monkeypatch):
     )
 
     assert calls == []
+
+
+def test_backend_failure_notify_passes_durable_web_push_gates(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-07-11T00:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_failure", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_failure",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_failure",
+                native_session_id="",
+                title="Failure",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_failure",
+            platform="avibe",
+            author="user",
+            source="user",
+            metadata={"_web_push_user_key": "remote:user-a"},
+            message_type="user",
+            text="Please finish",
+        )
+        failure = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_failure",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            metadata={"event": "backend_failure", "failure_id": "failure_1"},
+            message_type="notify",
+            text="Codex backend failed",
+        )
+        ordinary_notify = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_failure",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="Still working",
+        )
+
+    with engine.connect() as conn:
+        assert web_push_notifications._message_still_unread(conn, failure["id"]) is True
+        assert web_push_notifications._web_push_user_keys_for_message(conn, failure["id"]) == ["remote:user-a"]
+        assert web_push_notifications._message_still_unread(conn, ordinary_notify["id"]) is False
+        assert web_push_notifications._web_push_user_keys_for_message(conn, ordinary_notify["id"]) == []
+    engine.dispose()
 
 
 def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeypatch, tmp_path):
