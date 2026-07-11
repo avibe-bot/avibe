@@ -263,7 +263,9 @@ def test_macos_system_git_checks_clt_before_executing_git(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         git_runtime.shutil,
         "which",
-        lambda name, path=None: f"/usr/bin/{name}" if name in {"git", "xcode-select"} else None,
+        lambda name, path=None: "/usr/bin/git"
+        if name == "git"
+        else pytest.fail("unexpected PATH lookup for a support tool"),
     )
 
     class MissingCLT:
@@ -281,13 +283,29 @@ def test_macos_system_git_checks_clt_before_executing_git(monkeypatch: pytest.Mo
     assert calls == [["/usr/bin/xcode-select", "-p"]]
 
 
+def test_system_git_explicit_env_never_falls_back_to_parent_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "/parent/process/bin")
+    monkeypatch.setattr(
+        git_runtime.shutil,
+        "which",
+        lambda *args, **kwargs: pytest.fail("explicit empty env must not search parent PATH"),
+    )
+
+    assert git_runtime.resolve_system_git_path(env={}) is None
+    assert git_runtime.resolve_system_git_path(env={"PATH": ""}) is None
+
+
 def test_macos_system_git_is_available_after_clt_check(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(git_runtime.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(
         git_runtime.shutil,
         "which",
-        lambda name, path=None: f"/usr/bin/{name}" if name in {"git", "xcode-select"} else None,
+        lambda name, path=None: "/usr/bin/git"
+        if name == "git"
+        else pytest.fail("unexpected PATH lookup for a support tool"),
     )
 
     def fake_run(argv, **kwargs):
@@ -308,6 +326,53 @@ def test_macos_system_git_is_available_after_clt_check(monkeypatch: pytest.Monke
 
     assert git_runtime.resolve_system_git_path(env={"PATH": "/usr/bin"}) == Path("/usr/bin/git")
     assert calls == [["/usr/bin/xcode-select", "-p"], ["/usr/bin/git", "--version"]]
+
+
+def test_macos_system_git_ignores_decoy_xcode_select(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decoy = tmp_path / "xcode-select"
+    marker = tmp_path / "decoy-ran"
+    decoy.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
+    target_path = os.pathsep.join([str(tmp_path), "/usr/bin"])
+    lookups: list[tuple[str, str | None]] = []
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(git_runtime.platform, "system", lambda: "Darwin")
+
+    def fake_which(name, path=None):
+        lookups.append((name, path))
+        if name == "git":
+            return "/usr/bin/git"
+        if name == "xcode-select":
+            return str(decoy)
+        return None
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == str(decoy):
+            marker.touch()
+
+        class Result:
+            returncode = 0
+            stdout = (
+                "/Library/Developer/CommandLineTools\n"
+                if argv[-1] == "-p"
+                else "git version 2.55.0\n"
+            )
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(git_runtime.shutil, "which", fake_which)
+    monkeypatch.setattr(git_runtime.subprocess, "run", fake_run)
+
+    assert git_runtime.resolve_system_git_path(env={"PATH": target_path}) == Path("/usr/bin/git")
+    assert lookups == [("git", target_path)]
+    assert calls == [["/usr/bin/xcode-select", "-p"], ["/usr/bin/git", "--version"]]
+    assert not marker.exists()
 
 
 def test_macos_non_system_git_does_not_require_clt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -337,7 +402,7 @@ def test_macos_non_system_git_does_not_require_clt(monkeypatch: pytest.MonkeyPat
     assert calls == [["/opt/homebrew/bin/git", "--version"]]
 
 
-def test_agent_path_injection_only_when_system_git_is_absent(
+def test_agent_path_injection_uses_explicit_base_when_target_path_is_absent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -349,17 +414,86 @@ def test_agent_path_injection_only_when_system_git_is_absent(
         def resolve_git_path(self) -> Path:
             return vendored
 
-    monkeypatch.setattr(git_runtime, "resolve_system_git_path", lambda **kwargs: None)
+    seen_paths: list[str] = []
+
+    def missing_system_git(*, env):
+        seen_paths.append(env["PATH"])
+        return None
+
+    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
     env: dict[str, str] = {}
+    base_path = os.pathsep.join(["/usr/local/bin", "/usr/bin"])
 
     changed = git_runtime.prepend_vendored_git_to_path(
         env,
-        base_env={"PATH": os.pathsep.join(["/usr/local/bin", "/usr/bin"])},
+        base_env={"PATH": base_path},
         manager=FakeManager(),  # type: ignore[arg-type]
     )
 
     assert changed is True
-    assert env["PATH"].split(os.pathsep)[0] == str(vendored.parent)
+    assert seen_paths == [base_path]
+    assert env["PATH"] == f"{vendored.parent}{os.pathsep}{base_path}"
+
+
+def test_agent_path_injection_preserves_explicit_empty_target_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        def resolve_git_path(self) -> Path:
+            return vendored
+
+    seen_paths: list[str] = []
+
+    def missing_system_git(*, env):
+        seen_paths.append(env["PATH"])
+        return None
+
+    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
+    env = {"PATH": ""}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={"PATH": "/service/bin"},
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert seen_paths == [""]
+    assert env["PATH"] == str(vendored.parent)
+
+
+def test_agent_path_injection_does_not_leak_parent_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        def resolve_git_path(self) -> Path:
+            return vendored
+
+    seen_paths: list[str] = []
+
+    def missing_system_git(*, env):
+        seen_paths.append(env["PATH"])
+        return None
+
+    monkeypatch.setenv("PATH", "/parent/process/bin")
+    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
+    env: dict[str, str] = {}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={},
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert seen_paths == [""]
+    assert env["PATH"] == str(vendored.parent)
 
 
 def test_agent_path_injection_preserves_target_environment_path(

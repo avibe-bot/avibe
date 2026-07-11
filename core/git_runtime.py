@@ -23,6 +23,9 @@ from core.process_isolation import isolated_subprocess_kwargs
 logger = logging.getLogger(__name__)
 
 _GIT_MANIFEST_RESOURCE = "git_runtime_manifest.json"
+_MACOS_CODESIGN = Path("/usr/bin/codesign")
+_MACOS_XATTR = Path("/usr/bin/xattr")
+_MACOS_XCODE_SELECT = Path("/usr/bin/xcode-select")
 _GIT_SPEC = ManagedRuntimeSpec(
     runtime_id="git",
     manifest_resource=_GIT_MANIFEST_RESOURCE,
@@ -79,12 +82,11 @@ class GitRuntimeManager(ManagedRuntimeManager):
         quarantine = _strip_quarantine(binary)
         if _codesign_valid(binary):
             return {"ok": True, "changed": False, "quarantine": quarantine}
-        codesign = shutil.which("codesign")
-        if not codesign:
+        if not _MACOS_CODESIGN.is_file():
             return {"ok": False, "reason": "git_codesign_missing", "quarantine": quarantine}
         try:
             proc = subprocess.run(
-                [codesign, "-f", "-s", "-", str(binary)],
+                [str(_MACOS_CODESIGN), "-f", "-s", "-", str(binary)],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -167,23 +169,26 @@ def git_runtime_status() -> dict[str, Any]:
 
 
 def resolve_system_git_path(*, env: Mapping[str, str] | None = None) -> Path | None:
-    """Resolve system Git without triggering the macOS Command Line Tools shim."""
+    """Resolve the Git selected by PATH without triggering the macOS CLT shim.
+
+    The Git candidate intentionally follows the supplied PATH because it is the
+    binary an Agent would run. When ``env`` is provided, an absent or empty PATH
+    never falls back to the parent process. Supporting system probes never
+    follow the Agent PATH.
+    """
 
     source = env if env is not None else os.environ
-    search_path = source.get("PATH")
+    search_path = source.get("PATH", "")
+    if not search_path:
+        return None
     candidate = shutil.which("git", path=search_path)
     if not candidate:
         return None
     candidate_path = Path(candidate)
     if platform.system() == "Darwin" and _is_macos_system_git(candidate_path):
-        xcode_select = shutil.which("xcode-select", path=search_path)
-        if not xcode_select and Path("/usr/bin/xcode-select").is_file():
-            xcode_select = "/usr/bin/xcode-select"
-        if not xcode_select:
-            return None
         try:
             proc = subprocess.run(
-                [xcode_select, "-p"],
+                [str(_MACOS_XCODE_SELECT), "-p"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -200,21 +205,25 @@ def resolve_system_git_path(*, env: Mapping[str, str] | None = None) -> Path | N
 def prepend_vendored_git_to_path(
     env: MutableMapping[str, str],
     *,
-    base_env: Mapping[str, str] | None = None,
+    base_env: Mapping[str, str],
     manager: GitRuntimeManager | None = None,
 ) -> bool:
-    """Prepend vendored Git only when the inherited environment has no safe Git."""
+    """Prepend vendored Git when the composed Agent environment has no Git.
 
-    inherited = base_env if base_env is not None else os.environ
-    current_path = env.get("PATH") or inherited.get("PATH", "")
+    PATH composition is explicit: a PATH key in ``env`` wins even when its
+    value is empty; only an absent key falls back to the required ``base_env``.
+    This function never reads ``os.environ`` for PATH. When prepending, it
+    preserves a non-empty selected PATH verbatim after the vendored directory.
+    """
+
+    current_path = env["PATH"] if "PATH" in env else base_env.get("PATH", "")
     if resolve_system_git_path(env={"PATH": current_path}) is not None:
         return False
     vendored = (manager or get_git_runtime_manager()).resolve_git_path()
     if vendored is None:
         return False
     bin_dir = str(vendored.parent)
-    entries = [entry for entry in current_path.split(os.pathsep) if entry and entry != bin_dir]
-    env["PATH"] = os.pathsep.join([bin_dir, *entries])
+    env["PATH"] = bin_dir if not current_path else f"{bin_dir}{os.pathsep}{current_path}"
     return True
 
 
@@ -258,12 +267,11 @@ def _is_macho(path: Path) -> bool:
 
 
 def _codesign_valid(binary: Path) -> bool:
-    codesign = shutil.which("codesign")
-    if not codesign:
+    if not _MACOS_CODESIGN.is_file():
         return False
     try:
         proc = subprocess.run(
-            [codesign, "-v", str(binary)],
+            [str(_MACOS_CODESIGN), "-v", str(binary)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -276,12 +284,11 @@ def _codesign_valid(binary: Path) -> bool:
 
 
 def _strip_quarantine(binary: Path) -> dict[str, Any]:
-    xattr = shutil.which("xattr")
-    if not xattr:
+    if not _MACOS_XATTR.is_file():
         return {"ok": True, "skipped": True, "reason": "xattr_missing"}
     try:
         proc = subprocess.run(
-            [xattr, "-d", "com.apple.quarantine", str(binary)],
+            [str(_MACOS_XATTR), "-d", "com.apple.quarantine", str(binary)],
             capture_output=True,
             text=True,
             timeout=10,
