@@ -396,7 +396,7 @@ const MobileSessionRow: React.FC<{
 export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { markRead, unreadBySession } = useWorkbenchInbox();
+  const { unreadBySession } = useWorkbenchInbox();
   const {
     projects,
     projectsError,
@@ -412,9 +412,6 @@ export const ProjectsPage: React.FC = () => {
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
 
   const openSession = (sessionId: string) => {
-    // Opening a chat marks it read everywhere (matches the desktop tree + Inbox),
-    // so unread badges/counts don't linger after a mobile drill-in.
-    void markRead(sessionId);
     navigate(`/chat/${sessionId}`);
   };
   const revealMoreSessions = (projectId: string, state: ProjectSessionsState, visibleCount: number, loadedCount: number) => {

@@ -22,6 +22,8 @@ router blocker. Preserve hard-unload protection and keep windowed-app close beha
   retain the existing `beforeunload` listener.
 - Remove manual AppShell confirmation wrappers. Links, imperative navigation, and POP transitions all
   pass through the central blocker; window close guards remain unchanged.
+- Keep unread clearing owned by the mounted `ChatPage`, not navigation click handlers, so a blocked
+  transition cannot mutate session state before the user confirms it.
 
 ## Verification
 
@@ -31,6 +33,7 @@ router blocker. Preserve hard-unload protection and keep windowed-app close beha
 - [x] Browser Back cancel, retry, and confirm
 - [x] Mobile bottom navigation and Back
 - [x] Imperative navigation, clean navigation, and hard-unload listener
+- [x] Canceled session navigation sends no mark-read request; confirmed navigation marks once
 - [x] Setup/auth/remote redirect, lazy Apps routes, and legacy redirects
 - [x] Local Incus worktree service and mobile blocker smoke
 

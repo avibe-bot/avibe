@@ -94,7 +94,6 @@ export const InboxPage: React.FC = () => {
   }, [filter, inboxSessions, unreadBySession]);
 
   const openSession = (s: InboxSession) => {
-    if (unreadOf(s) > 0) markRead(s.session_id);
     navigate(`/chat/${encodeURIComponent(s.session_id)}`);
   };
 

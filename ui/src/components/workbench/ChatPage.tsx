@@ -1257,7 +1257,8 @@ export const ChatPage: React.FC = () => {
   // not "new". Clear unread whenever it appears — on open, or when a realtime
   // inbox.session.updated lands after a reply — so the Inbox/sidebar never badge
   // the chat you're looking at. Reactive to the unread map, so it's race-free
-  // against the cross-process event ordering.
+  // against the cross-process event ordering. Owning this on the mounted route
+  // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
     if (historicalWindow) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {

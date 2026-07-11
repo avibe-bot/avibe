@@ -203,11 +203,10 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 const SessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
-  onSessionMarkRead: (sessionId: string) => void;
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, onSessionMarkRead, onForkSession, onRenameSession, onArchiveSession }) => {
+}> = ({ session, unread, onForkSession, onRenameSession, onArchiveSession }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
@@ -283,10 +282,7 @@ const SessionRow: React.FC<{
       <PopoverAnchor asChild>
         <button
           type="button"
-          onClick={() => {
-            navigate(`/chat/${encodeURIComponent(session.id)}`);
-            if (unread > 0) onSessionMarkRead(session.id);
-          }}
+          onClick={() => navigate(`/chat/${encodeURIComponent(session.id)}`)}
           onContextMenu={(e) => {
             e.preventDefault();
             setMenuOpen(true);
@@ -412,7 +408,6 @@ const ProjectRow: React.FC<{
   onCreateSession: () => void;
   creatingSession: boolean;
   unreadBySession: Record<string, number>;
-  onSessionMarkRead: (sessionId: string) => void;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
@@ -430,7 +425,6 @@ const ProjectRow: React.FC<{
   onCreateSession,
   creatingSession,
   unreadBySession,
-  onSessionMarkRead,
   onRename,
   onArchive,
   onForkSession,
@@ -629,7 +623,6 @@ const ProjectRow: React.FC<{
                 key={session.id}
                 session={session}
                 unread={unreadBySession[session.id] || 0}
-                onSessionMarkRead={onSessionMarkRead}
                 onForkSession={onForkSession}
                 onRenameSession={onRenameSession}
                 onArchiveSession={onArchiveSession}
@@ -737,7 +730,6 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const onItemClick = (session: InboxSession) => {
     setPopoverOpen(false);
     navigate(`/chat/${encodeURIComponent(session.session_id)}`);
-    if ((unreadBySession[session.session_id] ?? 0) > 0) markRead(session.session_id);
   };
 
   const onMarkAllRead = async () => {
@@ -918,7 +910,6 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   }}
                   creatingSession={creatingSession(project.id)}
                   unreadBySession={unreadBySession}
-                  onSessionMarkRead={markRead}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
                   onForkSession={(sessionId) => forkSession(project.id, sessionId)}
