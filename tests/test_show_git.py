@@ -237,6 +237,28 @@ def test_native_restore_is_recorded_as_a_forward_post_turn_commit(resolved_git):
     assert _platform_git(repo, "log", "-1", "--format=%s").stdout.strip() == "restore v1"
 
 
+def test_main_rewind_is_converted_to_a_forward_commit(resolved_git):
+    session_id = "ses_rewind"
+    workspace = _workspace(session_id)
+    target = workspace / "page.txt"
+    target.write_text("v1\n", encoding="utf-8")
+    repo = _repo(session_id, resolved_git)
+    repo.checkpoint(PRE_TURN)
+    target.write_text("v2\n", encoding="utf-8")
+    repo.checkpoint(POST_TURN, message="write v2")
+    v2_head = _platform_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _native_git(workspace, "reset", "--hard", "HEAD~1")
+    assert _native_git(workspace, "rev-parse", "HEAD").stdout.strip() != v2_head
+    assert repo.checkpoint(POST_TURN, message="recover after reset") is True
+
+    assert target.read_text(encoding="utf-8") == "v1\n"
+    assert _platform_git(repo, "rev-parse", "HEAD^").stdout.strip() == v2_head
+    assert _platform_git(repo, "rev-parse", "refs/avibe/checkpoint-main").stdout.strip() == _platform_git(
+        repo, "rev-parse", "HEAD"
+    ).stdout.strip()
+
+
 def test_detached_head_and_stale_index_lock_self_heal(resolved_git):
     session_id = "ses_heal"
     workspace = _workspace(session_id)

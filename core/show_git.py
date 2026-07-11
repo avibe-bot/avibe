@@ -32,6 +32,7 @@ _PLATFORM_EXCLUDES = ("node_modules/", "dist/", ".vite/")
 _CHECKPOINT_KINDS = {PRE_TURN, POST_TURN, ADOPT}
 _MANAGED_POINTER_PARENT = "show-git"
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_MAIN_ANCHOR_REF = "refs/avibe/checkpoint-main"
 _SCRUBBED_GIT_ENV = {
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -218,6 +219,7 @@ class ShowGitRepository:
         if managed:
             self._ensure_pointer(rewrite=rewrite_pointer)
         self._reattach_main()
+        self._restore_forward_main()
 
         if initialized or not self._has_commits():
             created = self._commit_all(
@@ -231,6 +233,7 @@ class ShowGitRepository:
             created = self._commit_if_dirty(subject, run_id=run_id, checkpoint=checkpoint)
 
         self._prune_if_needed()
+        self._record_main_anchor()
         return created
 
     def _workspace_ownership(self) -> tuple[bool, bool]:
@@ -338,6 +341,27 @@ class ShowGitRepository:
         if current.returncode == 0 and current.stdout.strip() == "refs/heads/main":
             return
         self._run_checked(["symbolic-ref", "HEAD", "refs/heads/main"])
+
+    def _restore_forward_main(self) -> None:
+        anchor = self._run(["rev-parse", "--verify", _MAIN_ANCHOR_REF], check=False)
+        if anchor.returncode != 0:
+            return
+        anchor_oid = anchor.stdout.strip()
+        current = self._run(["rev-parse", "--verify", "refs/heads/main"], check=False)
+        if current.returncode != 0:
+            self._run_checked(["update-ref", "refs/heads/main", anchor_oid])
+            return
+        current_oid = current.stdout.strip()
+        ancestry = self._run(["merge-base", "--is-ancestor", anchor_oid, current_oid], check=False)
+        if ancestry.returncode == 0:
+            return
+        if ancestry.returncode != 1:
+            raise ShowGitError(ancestry.stderr.strip() or "failed to verify Show Page checkpoint ancestry")
+        self._run_checked(["update-ref", "refs/heads/main", anchor_oid, current_oid])
+
+    def _record_main_anchor(self) -> None:
+        head = self._run_checked(["rev-parse", "refs/heads/main"]).stdout.strip()
+        self._run_checked(["update-ref", _MAIN_ANCHOR_REF, head])
 
     def _has_commits(self) -> bool:
         return self._run(["rev-parse", "--verify", "HEAD"], check=False).returncode == 0
