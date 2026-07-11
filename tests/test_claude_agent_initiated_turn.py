@@ -388,7 +388,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-eof",
             },
         )
-        agent.emit_result_message = AsyncMock()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
 
         await agent._receive_messages(
             _completed_task_notification_client(),
@@ -428,6 +428,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         async def _emit(*_args, **_kwargs):
             emitted.set()
+            return "message-id"
 
         agent.emit_result_message = AsyncMock(side_effect=_emit)
         release = asyncio.Event()
@@ -486,6 +487,41 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed.turn_id, "origin-turn")
 
+    async def test_detached_activity_output_requeues_when_delivery_returns_none(self):
+        agent, service = _build_agent()
+        composite_key = "session-delivery-failed:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-delivery-failed"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-delivery-failed",
+            activity_id="task-690",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-690",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        activity = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(activity)
+        agent._detached_activity_outputs[composite_key] = activity
+        agent._detached_assistant_text[composite_key] = "Full background result"
+        agent.emit_result_message = AsyncMock(return_value=None)
+
+        with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
+            await agent._flush_detached_activity_output(composite_key, context)
+
+        claimed = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed.id, "task-690")
+
     async def test_requeued_terminal_only_activity_flushes_after_pending_turn(self):
         agent, service = _build_agent()
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
@@ -521,7 +557,11 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         service.activities.requeue_completed_output = _requeue
         emitted = asyncio.Event()
-        agent.emit_result_message = AsyncMock(side_effect=lambda *_a, **_k: emitted.set())
+        async def _emit(*_args, **_kwargs):
+            emitted.set()
+            return "message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit)
 
         agent._schedule_completed_activity_flush(composite_key, context)
         await asyncio.wait_for(requeued.wait(), timeout=1)
@@ -688,7 +728,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-690",
             },
         )
-        agent.emit_result_message = AsyncMock()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
         service.activities.start(
             backend="claude",
             runtime_key=composite_key,
@@ -740,7 +780,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-contended",
             },
         )
-        agent.emit_result_message = AsyncMock()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
         service.activities.start(
             backend="claude",
             runtime_key=composite_key,
@@ -829,7 +869,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-wakeup",
             },
         )
-        agent.emit_result_message = AsyncMock()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
         try:
             await agent._receive_messages(
                 _one_result_client(),

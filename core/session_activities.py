@@ -265,7 +265,6 @@ class SessionActivityRegistry:
                 completed_at=now,
             )
             self._recovered_terminals.append(recovered)
-            self._delete_activity(activity)
 
     def set_connection(
         self,
@@ -545,6 +544,12 @@ class SessionActivityRegistry:
             values = list(self._recovered_terminals)
             self._recovered_terminals.clear()
         return values
+
+    def ack_recovered_terminal(self, activity: SessionActivity) -> None:
+        """Delete a recovered live snapshot only after its Run policy settles."""
+
+        with self._lock:
+            self._delete_activity(activity)
 
     def has_backend_work(self, backend: str) -> bool:
         """Whether a backend has live Activities or undelivered completions."""

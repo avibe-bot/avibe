@@ -810,7 +810,7 @@ class ClaudeAgent(BaseAgent):
                                 result_text = self._detached_assistant_text.get(composite_key)
                             self._detached_assistant_text.pop(composite_key, None)
                             try:
-                                await self.emit_result_message(
+                                message_id = await self.emit_result_message(
                                     context,
                                     result_text,
                                     subtype=getattr(message, "subtype", "") or "",
@@ -821,6 +821,10 @@ class ClaudeAgent(BaseAgent):
                                         detached=True,
                                         completes_turn=False,
                                     ),
+                                )
+                                self._require_activity_delivery(
+                                    detached_activity,
+                                    message_id,
                                 )
                             except Exception:
                                 registry = self._activity_registry()
@@ -903,7 +907,7 @@ class ClaudeAgent(BaseAgent):
                         # the next service restart). Run it in a ``finally``.
                         emit_failed = False
                         try:
-                            await self.emit_result_message(
+                            message_id = await self.emit_result_message(
                                 context,
                                 result_text,
                                 subtype=getattr(message, "subtype", "") or "",
@@ -912,6 +916,10 @@ class ClaudeAgent(BaseAgent):
                                 request=pending_request,
                             )
                             if output_activity is not None:
+                                self._require_activity_delivery(
+                                    output_activity,
+                                    message_id,
+                                )
                                 registry = self._activity_registry()
                                 if registry is not None:
                                     registry.ack_completed_output(output_activity)
@@ -1518,6 +1526,16 @@ class ClaudeAgent(BaseAgent):
         )
 
     @staticmethod
+    def _require_activity_delivery(
+        activity: SessionActivity,
+        message_id: str | None,
+    ) -> None:
+        if message_id is None:
+            raise RuntimeError(
+                f"Claude Activity output {activity.id} was not persisted or delivered"
+            )
+
+    @staticmethod
     def _unsolicited_message_output(message) -> MessageOutput:
         native_id = str(
             getattr(message, "uuid", "")
@@ -1582,7 +1600,7 @@ class ClaudeAgent(BaseAgent):
         if not text:
             text = str(activity.metadata.get("summary") or "").strip()
         try:
-            await self.emit_result_message(
+            message_id = await self.emit_result_message(
                 context,
                 text,
                 parse_mode="markdown",
@@ -1592,6 +1610,7 @@ class ClaudeAgent(BaseAgent):
                     completes_turn=False,
                 ),
             )
+            self._require_activity_delivery(activity, message_id)
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
@@ -1647,7 +1666,7 @@ class ClaudeAgent(BaseAgent):
                 matched_request = self._pop_pending_request(composite_key)
                 self._adopt_pending_turn_token(context, matched_request)
                 try:
-                    await self.emit_result_message(
+                    message_id = await self.emit_result_message(
                         context,
                         result_text,
                         parse_mode="markdown",
@@ -1658,6 +1677,7 @@ class ClaudeAgent(BaseAgent):
                             completes_turn=True,
                         ),
                     )
+                    self._require_activity_delivery(activity, message_id)
                 except Exception:
                     registry.requeue_completed_output(activity)
                     raise
@@ -1676,7 +1696,7 @@ class ClaudeAgent(BaseAgent):
                 continue
 
             try:
-                await self.emit_result_message(
+                message_id = await self.emit_result_message(
                     context,
                     result_text,
                     parse_mode="markdown",
@@ -1686,6 +1706,7 @@ class ClaudeAgent(BaseAgent):
                         completes_turn=False,
                     ),
                 )
+                self._require_activity_delivery(activity, message_id)
             except Exception:
                 registry.requeue_completed_output(activity)
                 raise

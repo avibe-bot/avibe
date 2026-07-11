@@ -1584,9 +1584,12 @@ class ScheduledTaskService:
 
         registry = self._activity_registry()
         drain_terminals = getattr(registry, "drain_recovered_terminals", None)
+        ack_terminal = getattr(registry, "ack_recovered_terminal", None)
         if callable(drain_terminals):
             for activity in drain_terminals():
                 self.settle_activity_runs(activity)
+                if callable(ack_terminal):
+                    ack_terminal(activity)
 
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
         has_pending_output = getattr(registry, "has_pending_run_output", None)

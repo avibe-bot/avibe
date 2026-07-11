@@ -55,7 +55,8 @@ output is removed only after its delivery policy is acknowledged.
 On controller restart:
 
 - active native work becomes `disconnected`; any owned Run reaches its existing
-  failure/cancellation policy exactly once;
+  failure/cancellation policy exactly once, and its snapshot remains durable
+  until that Run policy is acknowledged;
 - completed output remains pending with its stable producer identity;
 - a stored summary is delivered once as detached Session output, without
   lifecycle authority over any newer Turn;

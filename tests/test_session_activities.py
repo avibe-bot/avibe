@@ -184,6 +184,14 @@ def test_activity_restart_recovers_connection_and_interrupts_live_work(tmp_path:
     assert [(item.id, item.status, item.run_id) for item in terminals] == [
         ("task-live", "disconnected", "run-1"),
     ]
+    assert len(store.list_activities()) == 1
+
+    restarted_again = SessionActivityRegistry(store)
+    repeated = restarted_again.drain_recovered_terminals()
+    assert [(item.id, item.status, item.run_id) for item in repeated] == [
+        ("task-live", "disconnected", "run-1"),
+    ]
+    restarted_again.ack_recovered_terminal(repeated[0])
     assert store.list_activities() == []
     engine.dispose()
 

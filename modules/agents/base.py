@@ -470,7 +470,7 @@ class BaseAgent(ABC):
         suffix: Optional[str] = None,
         request: Optional[AgentRequest] = None,
         output: MessageOutput | None = None,
-    ) -> None:
+    ) -> Optional[str]:
         if output is None and request is not None:
             output = request.output
         if output is None:
@@ -491,9 +491,10 @@ class BaseAgent(ABC):
         visible_result = strip_silent_blocks(raw_result)
         visible_suffix = strip_silent_blocks(raw_suffix) if raw_suffix else None
         has_silent_directive = "<silent" in raw_result.lower() or "<silent" in raw_suffix.lower()
+        message_id: Optional[str] = None
 
         if has_silent_directive and not visible_result.strip() and not (visible_suffix or "").strip():
-            await self.controller.emit_agent_message(
+            message_id = await self.controller.emit_agent_message(
                 context,
                 "result",
                 "",
@@ -503,7 +504,7 @@ class BaseAgent(ABC):
             )
             if request and settles_request:
                 await self._remove_ack_reaction(request)
-            return
+            return message_id
 
         # When show_duration is disabled, skip the entire result line
         # unless there is actual result_text or suffix to deliver.
@@ -515,7 +516,7 @@ class BaseAgent(ABC):
                 parts.append(visible_suffix)
             if parts:
                 formatted = "\n".join(parts)
-                await self.controller.emit_agent_message(
+                message_id = await self.controller.emit_agent_message(
                     context,
                     "result",
                     formatted,
@@ -529,7 +530,7 @@ class BaseAgent(ABC):
                 # (empty result → dot idle / failed AND releases the web-Chat stream
                 # waiter), mirroring the silent-directive path above — otherwise the
                 # dot stays green and the stream hangs until the 600s timeout (Codex P2).
-                await self.controller.emit_agent_message(
+                message_id = await self.controller.emit_agent_message(
                     context,
                     "result",
                     "",
@@ -568,7 +569,7 @@ class BaseAgent(ABC):
             if not body.strip() and result_footer:
                 body = result_footer
                 result_footer = None
-            await self.controller.emit_agent_message(
+            message_id = await self.controller.emit_agent_message(
                 context,
                 "result",
                 body,
@@ -581,6 +582,7 @@ class BaseAgent(ABC):
         # Remove ack reaction after result is sent
         if request and settles_request:
             await self._remove_ack_reaction(request)
+        return message_id
 
     @abstractmethod
     async def handle_message(self, request: AgentRequest) -> None:

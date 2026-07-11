@@ -553,8 +553,8 @@ export const ChatPage: React.FC = () => {
     try {
       const res = await api.getTurnState(sessionId);
       if (sessionId !== sessionIdRef.current) return;
-      setRuntimeState(res);
       if (res.foreground === 'unknown') return;
+      setRuntimeState(res);
       if (res.foreground === 'running') {
         // markWorking (not setWorking): bump the epoch + timestamp so an OLDER
         // overlapping sync whose idle response lands AFTER this one can't clear
