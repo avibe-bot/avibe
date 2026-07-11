@@ -1,4 +1,13 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import {
+  createBrowserRouter,
+  createRoutesFromElements,
+  Navigate,
+  Outlet,
+  Route,
+  RouterProvider,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom';
 import { Wizard } from './components/Wizard';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ui/error-boundary';
@@ -35,7 +44,7 @@ import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanc
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
 import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
-import { NavGuardProvider } from './context/NavGuardContext';
+import { UnsavedChangesProvider } from './context/UnsavedChangesProvider';
 import { AgentationToggle } from './components/AgentationToggle';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -306,12 +315,19 @@ const DocumentTitle = () => {
   return null;
 };
 
-function AppRoutes() {
+function RouterRoot() {
   return (
-    <>
-    <DocumentTitle />
-    <WebPushNotificationNavigator />
-    <Routes>
+    <UnsavedChangesProvider>
+      <DocumentTitle />
+      <WebPushNotificationNavigator />
+      <Outlet />
+    </UnsavedChangesProvider>
+  );
+}
+
+const router = createBrowserRouter(
+  createRoutesFromElements(
+    <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>
         <Route path="/setup" element={<Wizard />} />
 
@@ -405,10 +421,9 @@ function AppRoutes() {
         <Route path="/doctor" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/doctor/logs" element={<Navigate to="/admin/logs" replace />} />
       </Route>
-    </Routes>
-    </>
-  );
-}
+    </Route>,
+  ),
+);
 
 function App() {
   return (
@@ -424,12 +439,8 @@ function App() {
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
-                  <NavGuardProvider>
-                    <BrowserRouter>
-                      <AppRoutes />
-                    </BrowserRouter>
-                    <AgentationToggle />
-                  </NavGuardProvider>
+                  <RouterProvider router={router} />
+                  <AgentationToggle />
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>

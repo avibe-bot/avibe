@@ -136,7 +136,7 @@ const WorkbenchProjectsContext = createContext<WorkbenchProjectsTree | null>(nul
 // for the same "sidebar + page both need live SSE data" situation. Owns: load +
 // paginate + dedupe sessions, reconnect reconcile (chunked, survives the 200-row
 // server clamp), live status/title via SSE, create/rename/archive. Navigation
-// stays in consumers — this is mounted outside <BrowserRouter>. Unread stays in
+// stays in consumers — this is mounted outside <RouterProvider>. Unread stays in
 // WorkbenchInboxContext (both consumers read it directly).
 export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const api = useApi();

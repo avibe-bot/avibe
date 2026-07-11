@@ -15,7 +15,6 @@ import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerContext';
-import { useNavGuard } from '../context/NavGuardContext';
 import { WindowLayer } from './apps/WindowLayer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
@@ -113,7 +112,6 @@ const ShellNavGroup: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
 const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
-  const { confirmLeave } = useNavGuard();
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
   const isWorkbench = item.variant === 'workbench';
@@ -149,12 +147,9 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   );
 
   if (item.onClick) {
-    const onClick = item.onClick;
-    return <button type="button" onClick={() => { if (confirmLeave()) onClick(); }} className={className}>{inner}</button>;
+    return <button type="button" onClick={item.onClick} className={className}>{inner}</button>;
   }
-  // Confirm before leaving a page that registered an unsaved-changes guard (e.g. the mobile editor);
-  // NavLink navigation bypasses `beforeunload`, so this is where in-app tab taps get intercepted.
-  return <NavLink to={item.to ?? '#'} onClick={(e) => { if (!confirmLeave()) e.preventDefault(); }} className={className}>{inner}</NavLink>;
+  return <NavLink to={item.to ?? '#'} className={className}>{inner}</NavLink>;
 };
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
@@ -164,7 +159,6 @@ type CenterButton = { label: string; icon: React.ComponentType<{ className?: str
 // Workbench (jump back) — the symmetric counterpart Alex asked for, so each
 // shell can reach the other from the tab bar.
 const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> = ({ items, center }) => {
-  const { confirmLeave } = useNavGuard();
   // No center FAB → a plain even row of tabs. The Control Panel uses this so
   // "Workbench" is just the first tab, which reads cleaner than an asymmetric
   // raised center button.
@@ -190,7 +184,7 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
             <Button
               type="button"
               variant="brand"
-              onClick={() => { if (confirmLeave()) center.onClick?.(); }}
+              onClick={center.onClick}
               aria-label={center.label}
               className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
             >
@@ -202,7 +196,7 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
               variant="brand"
               className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
             >
-              <Link to={center.to ?? '/'} onClick={(e) => { if (!confirmLeave()) e.preventDefault(); }} aria-label={center.label}>
+              <Link to={center.to ?? '/'} aria-label={center.label}>
                 <CenterIcon className="size-6" />
               </Link>
             </Button>

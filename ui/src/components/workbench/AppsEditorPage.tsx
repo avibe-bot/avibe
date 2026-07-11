@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { CodeXml, FolderOpen } from 'lucide-react';
 
 import { Button } from '../ui/button';
-import { useNavGuard } from '../../context/NavGuardContext';
+import { useUnsavedChanges } from '../../context/useUnsavedChanges';
 import { FileEditorPane } from './FileEditorPane';
 
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). On desktop it
@@ -41,8 +41,7 @@ function useDesktopAtMount(): boolean {
 }
 
 // Warn before a hard unload (refresh / tab close / leaving the SPA) while there are unsaved edits.
-// SPA in-app navigation does NOT fire this — that's handled separately (mobile: the NavGuard on the
-// tab bar; both surfaces: the editor's own guarded controls).
+// React Router's blocker handles in-app navigation separately.
 function useUnloadWarning(active: boolean): void {
   useEffect(() => {
     if (!active) return;
@@ -64,9 +63,12 @@ export const AppsEditorPage: React.FC = () => {
   const { t } = useTranslation();
   const location = useLocation();
   const desktop = useDesktopAtMount();
+  const [dirty, setDirty] = useState(false);
   // Re-read whenever the router state changes (each navigation carries a fresh state object) so
   // opening another file while already on this route swaps the launch target.
   const launch = useMemo(() => readLaunch(location.state), [location.state]);
+  useUnsavedChanges(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
+  useUnloadWarning(dirty);
 
   return (
     <div className="flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]">
@@ -74,7 +76,11 @@ export const AppsEditorPage: React.FC = () => {
         <h1 className="text-[18px] font-semibold text-foreground">{t('apps.editor.label')}</h1>
         <p className="text-[12px] text-muted">{t('apps.editor.tagline')}</p>
       </div>
-      {desktop ? <DesktopEditor launch={launch} /> : <MobileEditor launch={launch} />}
+      {desktop ? (
+        <DesktopEditor launch={launch} onDirtyChange={setDirty} />
+      ) : (
+        <MobileEditor launch={launch} onDirtyChange={setDirty} />
+      )}
     </div>
   );
 };
@@ -82,15 +88,16 @@ export const AppsEditorPage: React.FC = () => {
 // Desktop / tablet: the full Editor IDE, forced dark like its Dock window (data-theme re-cascades the
 // dark token set to this subtree). No windowId, so the window-only niceties (title, close guard,
 // ⌘O/⌘N) stay inert; open/edit/save all work full-page. `useWindowCloseGuard` is a no-op without a
-// window, so a page-level unload warning covers a dirty refresh/close here.
-const DesktopEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
-  const [dirty, setDirty] = useState(false);
-  useUnloadWarning(dirty);
+// window, so the route page owns its navigation and unload guards.
+const DesktopEditor: React.FC<{
+  launch: LaunchFile | null;
+  onDirtyChange: (dirty: boolean) => void;
+}> = ({ launch, onDirtyChange }) => {
   return (
     <div data-theme="dark" className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
       <Suspense fallback={<PaneLoading />}>
         <EditorApp
-          onDirtyChange={setDirty}
+          onDirtyChange={onDirtyChange}
           params={launch ? { path: launch.path, filename: launch.filename, mtime: launch.mtime } : undefined}
         />
       </Suspense>
@@ -102,37 +109,25 @@ const DesktopEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
 // renders the filename + dirty dot + Save header and the Monaco touch accessory bar; opening/switching
 // a file reuses the File Browser (the mobile file-picking surface, which owns the editable-vs-download
 // decision). The name-only launch has no live cursor/search — that richness stays on the desktop IDE.
-const MobileEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
+const MobileEditor: React.FC<{
+  launch: LaunchFile | null;
+  onDirtyChange: (dirty: boolean) => void;
+}> = ({ launch, onDirtyChange }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { setGuard } = useNavGuard();
   const [file, setFile] = useState<LaunchFile | null>(launch);
-  const [dirty, setDirty] = useState(false);
 
-  // A fresh navigation from Files swaps the open file. Edits to a previous file were already
-  // discarded when the user left this page to pick another (guarded in openAnother).
+  // A fresh navigation from Files swaps the open file. The router-wide blocker already confirmed
+  // before a dirty editor could leave this page to pick another.
   useEffect(() => {
     if (launch) {
       setFile(launch);
-      setDirty(false);
+      onDirtyChange(false);
     }
-  }, [launch]);
+  }, [launch, onDirtyChange]);
 
-  // Open / switch a file via the File Browser. Confirm first when the current buffer is dirty, since
-  // leaving unmounts this pane and drops the unsaved edits.
-  const openAnother = () => {
-    if (dirty && !window.confirm(t('apps.editor.confirmDiscardSwitch'))) return;
-    navigate('/apps/files');
-  };
-
-  // Guard leaving with unsaved edits: the NavGuard confirms in-app mobile tab-bar navigation (whose
-  // NavLinks bypass `beforeunload`); useUnloadWarning covers a hard unload. The header open button is
-  // separately guarded in openAnother.
-  useEffect(() => {
-    setGuard(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
-    return () => setGuard(null);
-  }, [dirty, setGuard, t]);
-  useUnloadWarning(dirty);
+  // This imperative navigation uses the same router-level blocker as links and browser Back.
+  const openAnother = () => navigate('/apps/files');
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface">
@@ -146,7 +141,7 @@ const MobileEditor: React.FC<{ launch: LaunchFile | null }> = ({ launch }) => {
           filename={file.filename}
           mtime={file.mtime}
           onOpenFile={openAnother}
-          onDirtyChange={setDirty}
+          onDirtyChange={onDirtyChange}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
