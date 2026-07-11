@@ -892,13 +892,9 @@ class ClaudeAgent(BaseAgent):
                         # stale straggler. No-op for fresh sessions / absent tokens.
                         self._adopt_pending_turn_token(context, pending_request)
 
-                        # A terminal result settles the turn. The pending request
-                        # was already popped above, so the idle transition must run
-                        # even if emitting the result raises — otherwise the inner
-                        # ``except … continue`` below
-                        # would swallow the error, skip the mark-idle, and leave the
-                        # session pinned ``active`` (exempt from idle eviction until
-                        # the next service restart). Run it in a ``finally``.
+                        # A terminal result consumes this Turn even when IM delivery
+                        # fails. A failed Activity delivery is requeued below, but its
+                        # retry is detached and cannot reuse this Turn's token.
                         emit_failed = False
                         try:
                             if output_activity is not None:
@@ -930,6 +926,9 @@ class ClaudeAgent(BaseAgent):
                                 registry = self._activity_registry()
                                 if registry is not None:
                                     registry.requeue_completed_output(output_activity)
+                                await self._settle_activity_turn_after_delivery_failure(
+                                    context
+                                )
                             raise
                         else:
                             native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
@@ -951,10 +950,6 @@ class ClaudeAgent(BaseAgent):
                                         exc_info=True,
                                     )
                         finally:
-                            # Settle the turn regardless of an emit/backfill
-                            # failure: clear the loading reaction and the stale
-                            # assistant-text fallback, then release the active
-                            # flag so the session can be idle-evicted.
                             await self._remove_result_pending_reaction(
                                 composite_key,
                                 context,
@@ -1529,6 +1524,7 @@ class ClaudeAgent(BaseAgent):
             status=status,
             metadata=metadata,
             expects_output=status == "completed",
+            retain_terminal_snapshot=status != "completed",
         )
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
@@ -1560,6 +1556,26 @@ class ClaudeAgent(BaseAgent):
         if message_id is None:
             raise RuntimeError(
                 f"Claude Activity output {activity.id} was not persisted or delivered"
+            )
+
+    async def _settle_activity_turn_after_delivery_failure(
+        self,
+        context: MessageContext,
+    ) -> None:
+        """Close the origin Turn if delivery failed before its terminal chokepoint."""
+
+        try:
+            await self.controller.emit_agent_message(
+                context,
+                "result",
+                "",
+                level="silent",
+                output=terminal_turn_output(),
+            )
+        except Exception:
+            logger.debug(
+                "Failed to settle Activity Turn after delivery failure",
+                exc_info=True,
             )
 
     async def _emit_activity_result(
@@ -1726,7 +1742,7 @@ class ClaudeAgent(BaseAgent):
                 return True
             result_text = str(activity.metadata.get("summary") or "").strip()
             if same_turn:
-                matched_request = pending_request
+                matched_request = self._pop_pending_request(composite_key)
                 self._adopt_pending_turn_token(context, matched_request)
                 try:
                     await self._emit_activity_result(
@@ -1739,18 +1755,20 @@ class ClaudeAgent(BaseAgent):
                     )
                 except Exception:
                     registry.requeue_completed_output(activity)
+                    await self._settle_activity_turn_after_delivery_failure(context)
                     raise
-                registry.ack_completed_output(activity)
-                self._pop_pending_request(composite_key)
-                await self._remove_result_pending_reaction(
-                    composite_key,
-                    context,
-                    matched_request,
-                )
-                self._last_assistant_text.pop(composite_key, None)
-                self._pending_assistant_message.pop(composite_key, None)
-                self._mark_session_idle_if_no_pending_requests(composite_key)
-                self._signal_activity_output_settled(composite_key)
+                else:
+                    registry.ack_completed_output(activity)
+                finally:
+                    await self._remove_result_pending_reaction(
+                        composite_key,
+                        context,
+                        matched_request,
+                    )
+                    self._last_assistant_text.pop(composite_key, None)
+                    self._pending_assistant_message.pop(composite_key, None)
+                    self._mark_session_idle_if_no_pending_requests(composite_key)
+                    self._signal_activity_output_settled(composite_key)
                 continue
 
             try:

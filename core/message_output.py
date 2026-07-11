@@ -59,11 +59,15 @@ class MessageOutput:
             return None
         spec = getattr(context, "platform_specific", None) or {}
         target = spec.get("agent_session_target")
-        backend = str(spec.get("vibe_agent_backend") or "").strip()
+        backend = str(
+            self.metadata.get("backend") or spec.get("vibe_agent_backend") or ""
+        ).strip()
         if not backend and isinstance(target, dict):
             backend = str(target.get("agent_backend") or "").strip()
+        activity_lineage = f"activity:{self.activity_id}" if self.activity_id else ""
         lineage = str(
             self.run_id
+            or activity_lineage
             or spec.get("task_execution_id")
             or spec.get("agent_session_id")
             or spec.get("agent_runtime_turn_key")

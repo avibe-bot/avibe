@@ -137,9 +137,11 @@ admission. A terminal-only task notification is delivered after a bounded grace
 period; a timed flush never consumes Activity provenance from underneath a
 newer pending native request. Queued completions survive both runtime disconnect
 and controller restart so a late flush can still deliver and settle their origin
-Run. A same-Turn summary retry retains the pending request and its lifecycle
-authority until delivery succeeds. Output containing only `<silent>` directives
-uses the same silent Run-settlement path as an empty summary.
+Run. A same-Turn delivery attempt consumes that Turn exactly once; if IM
+delivery fails, the Activity remains in the Outbox and retries as detached
+Session output without reusing the settled Turn token. Output containing only
+`<silent>` directives uses the same silent Run-settlement path as an empty
+summary.
 
 ## Other backend protocol disposition
 

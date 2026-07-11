@@ -5,7 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from core.session_activities import SessionActivityRegistry
+from core.session_activities import (
+    SessionActivity,
+    SessionActivityRegistry,
+    activity_completion_output,
+)
 from core.session_turns import SessionTurnManager
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -54,6 +58,42 @@ def test_activity_lifecycle_keeps_state_axes_orthogonal():
     assert registry.claim_completed_output("claude", "runtime-1") is None
     registry.ack_completed_output(claimed)
     assert registry.has_completed_output("claude", "runtime-1") is False
+
+
+def test_activity_output_native_id_is_stable_across_recovery_contexts():
+    activity = SessionActivity(
+        id="task-1",
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        kind="background_task",
+        status="completed",
+    )
+    output = activity_completion_output(
+        activity,
+        detached=True,
+        completes_turn=False,
+    )
+    live_context = SimpleNamespace(
+        platform_specific={
+            "vibe_agent_backend": "claude",
+            "agent_session_id": "ses-1",
+        }
+    )
+    recovered_context = SimpleNamespace(
+        platform_specific={
+            "vibe_agent_backend": "codex",
+            "task_execution_id": "activity:claude:task-1",
+            "agent_session_id": "ses-1",
+        }
+    )
+
+    live_id = output.native_message_id(live_context)
+    recovered_id = output.native_message_id(recovered_context)
+
+    assert live_id == recovered_id
+    assert live_id is not None
+    assert live_id.startswith("agent-output:claude:activity:task-1:")
 
 
 def test_activity_updates_are_independent_and_runtime_disconnect_terminates_all():

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
-from core.message_output import terminal_output_for
+from core.message_output import terminal_output_for, terminal_turn_output
 
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -85,8 +85,7 @@ class AgentService:
     def force_end_backend_activities(self, backend: str) -> list[Any]:
         completed = self.activities.end_backend(backend, status="killed")
         for activity in completed:
-            if self.on_activity_terminal(activity):
-                self.activities.ack_recovered_terminal(activity)
+            self.on_activity_terminal(activity)
         return completed
 
     def register(self, agent: BaseAgent):
@@ -108,6 +107,8 @@ class AgentService:
             return False
         try:
             settle(activity)
+            if str(getattr(activity, "status", "") or "") != "completed":
+                self.activities.ack_recovered_terminal(activity)
             return True
         except Exception:
             logger.warning(
@@ -126,8 +127,7 @@ class AgentService:
             retain_terminal_snapshots=True,
         )
         for activity in completed:
-            if self.on_activity_terminal(activity):
-                self.activities.ack_recovered_terminal(activity)
+            self.on_activity_terminal(activity)
         return completed
 
     def get(self, agent_name: Optional[str]) -> BaseAgent:
@@ -548,7 +548,14 @@ class AgentService:
             context = gate.context
             if context is not None and callable(emit):
                 try:
-                    await emit(context, "result", "", is_error=True, level="silent")
+                    await emit(
+                        context,
+                        "result",
+                        "",
+                        is_error=True,
+                        level="silent",
+                        output=terminal_turn_output(),
+                    )
                 except Exception:
                     logger.debug("Failed to settle forced backend turn %s", runtime_key, exc_info=True)
             self.release_runtime_turn_key(runtime_key, token)
