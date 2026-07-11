@@ -31,6 +31,7 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
+from core.git_runtime import prepend_vendored_git_to_path
 from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
@@ -854,6 +855,11 @@ class SessionHandler(BaseHandler):
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
         claude_env.update(caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
+        prepend_vendored_git_to_path(
+            claude_env,
+            base_env=os.environ,
+            working_dir=working_path,
+        )
         claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"

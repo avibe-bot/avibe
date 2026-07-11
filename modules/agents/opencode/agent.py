@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Dict, Optional
 
@@ -359,7 +360,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
             try:
-                bind_caller_context_session(session_id, request.context.platform_specific or {})
+                bind_caller_context_session(
+                    session_id,
+                    request.context.platform_specific or {},
+                    base_env=os.environ,
+                    working_dir=request.working_path,
+                )
             except Exception:
                 logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
 

@@ -17,6 +17,7 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
+from core.git_runtime import prepend_vendored_git_to_path
 from core.message_output import terminal_output_for
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
@@ -782,14 +783,19 @@ class CodexAgent(BaseAgent):
 
     def _inject_caller_env_config(self, params: Dict[str, Any], request: AgentRequest) -> None:
         env = self._caller_env_for_request(request)
-        if not env:
-            return
-        env_script_path = self._caller_env_script_path(request)
-        env = {**env, "BASH_ENV": str(env_script_path)}
         config = dict(params.get("config") or {})
         shell_policy = dict(config.get("shell_environment_policy") or {})
         set_env = dict(shell_policy.get("set") or {})
-        set_env.update(env)
+        if env:
+            env_script_path = self._caller_env_script_path(request)
+            set_env.update({**env, "BASH_ENV": str(env_script_path)})
+        git_path_changed = prepend_vendored_git_to_path(
+            set_env,
+            base_env=os.environ,
+            working_dir=getattr(request, "working_path", None),
+        )
+        if not env and not git_path_changed:
+            return
         shell_policy["set"] = set_env
         config["shell_environment_policy"] = shell_policy
         params["config"] = config

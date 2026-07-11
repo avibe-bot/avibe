@@ -25,6 +25,7 @@ def test_ensure_plugin_installed_writes_global_opencode_plugin(tmp_path: Path, m
 def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     avibe_home = tmp_path / "avibe"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    monkeypatch.setattr(bridge, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
 
     ok = bridge.bind_session(
         "oc-session",
@@ -37,6 +38,8 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
                 "native_session_id": "oc-session",
             },
         },
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path / "workspace",
     )
 
     assert ok is True
@@ -55,6 +58,39 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(bridge, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
 
-    assert bridge.bind_session("oc-session", {"platform": "slack"}) is False
+    assert bridge.bind_session(
+        "oc-session",
+        {"platform": "slack"},
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path / "workspace",
+    ) is False
     assert not bridge.binding_path().exists()
+
+
+def test_bind_session_writes_vendored_path_without_caller_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+
+    def inject_git(env, *, base_env, working_dir):
+        assert env == {}
+        assert base_env == {"PATH": ""}
+        assert working_dir == tmp_path / "workspace"
+        env["PATH"] = "/managed/git/bin"
+        return True
+
+    monkeypatch.setattr(bridge, "prepend_vendored_git_to_path", inject_git)
+
+    assert bridge.bind_session(
+        "oc-session",
+        {"platform": "slack"},
+        base_env={"PATH": ""},
+        working_dir=tmp_path / "workspace",
+    ) is True
+    data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
+    entry = data["sessions"]["oc-session"]
+    assert entry["env"] == {"PATH": "/managed/git/bin"}
+    assert "caller_context" not in entry

@@ -1086,6 +1086,27 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
+    def test_inject_caller_env_config_adds_vendored_git_for_gitless_session(self):
+        agent = object.__new__(CodexAgent)
+        params = {"config": {"shell_environment_policy": {"set": {"PATH": ""}}}}
+        request = SimpleNamespace(
+            working_path="/tmp/workspace",
+            context=SimpleNamespace(platform_specific={}),
+        )
+
+        def inject_git(env, *, base_env, working_dir):
+            self.assertEqual(env["PATH"], "")
+            self.assertIs(base_env, os.environ)
+            self.assertEqual(working_dir, "/tmp/workspace")
+            env["PATH"] = "/managed/git/bin"
+            return True
+
+        with patch.object(_MODULE, "prepend_vendored_git_to_path", side_effect=inject_git):
+            agent._inject_caller_env_config(params, request)
+
+        set_env = params["config"]["shell_environment_policy"]["set"]
+        self.assertEqual(set_env, {"PATH": "/managed/git/bin"})
+
     def test_inject_caller_env_config_merges_shell_environment_policy(self):
         agent = object.__new__(CodexAgent)
         params = {"config": {"shell_environment_policy": {"set": {"KEEP": "1"}}}}

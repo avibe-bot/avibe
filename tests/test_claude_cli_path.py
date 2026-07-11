@@ -161,6 +161,38 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
 
 
+def test_session_handler_injects_vendored_git_into_gitless_child_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    def inject_git(env, *, base_env, working_dir):
+        assert "PATH" not in env
+        assert base_env is session_handler_module.os.environ
+        assert working_dir == str(tmp_path)
+        env["PATH"] = "/managed/git/bin"
+        return True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "prepend_vendored_git_to_path", inject_git)
+
+    _run_session(
+        SessionHandler(_Controller(tmp_path)),
+        MessageContext(user_id="U123", channel_id="C123"),
+    )
+
+    assert captured["options"].env["PATH"] == "/managed/git/bin"
+
+
 def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp_path: Path) -> None:
     calls: list[tuple[int, str]] = []
 

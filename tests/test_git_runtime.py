@@ -82,6 +82,32 @@ def test_manifest_parses_and_exposes_archive(tmp_path: Path, monkeypatch: pytest
     ][managed_runtime.runtime_platform_tag()]["binary_sha256"]
 
 
+def test_packaged_manifest_matches_published_four_platform_release(tmp_path: Path) -> None:
+    manager = GitRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    manifest = manager._load_manifest(allow_network=False)
+
+    assert manifest is not None
+    assert manifest.runtime_version == "2.55.0"
+    assert manifest.payload["release_state"] == "published"
+    assert manifest.payload["release_tag"] == "git-runtime-v2.55.0-1"
+    assert manifest.payload["local_ops_only"] is True
+    assert set(manifest.archives) == {
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64",
+        "linux-x64",
+    }
+    for platform_tag, archive in manifest.archives.items():
+        assert archive.size is not None and archive.size > 0
+        assert archive.sha256 != "0" * 64
+        assert archive.binary_sha256 != "0" * 64
+        assert archive.url == (
+            "https://github.com/avibe-bot/avibe/releases/download/"
+            f"git-runtime-v2.55.0-1/git-2.55.0-{platform_tag}.tar.gz"
+        )
+
+
 def test_manifest_requires_pinned_binary_sha256(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     archive = _write_git_archive(tmp_path)
@@ -522,3 +548,196 @@ def test_macos_non_system_git_is_classified_without_execution(monkeypatch: pytes
         "/opt/homebrew/bin/git"
     )
     assert calls == []
+
+
+def test_agent_path_injection_uses_explicit_fallback_when_path_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            return vendored
+
+    seen_paths: list[str] = []
+
+    def missing_system_git(*, env):
+        seen_paths.append(env["PATH"])
+        return None
+
+    monkeypatch.setattr(git_runtime, "resolve_system_git_path", missing_system_git)
+    env: dict[str, str] = {}
+    base_path = os.pathsep.join(["/usr/local/bin", "/usr/bin"])
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={"PATH": base_path},
+        working_dir=tmp_path / "workspace",
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert seen_paths == ["/usr/local/bin", "/usr/bin"]
+    assert env["PATH"] == f"{vendored.parent}{os.pathsep}{base_path}"
+
+
+def test_agent_path_injection_preserves_empty_path_and_never_leaks_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            return vendored
+
+    monkeypatch.setenv("PATH", "/parent/process/bin")
+    monkeypatch.setattr(
+        git_runtime,
+        "resolve_system_git_path",
+        lambda **kwargs: pytest.fail("empty target PATH must not probe parent PATH"),
+    )
+    env = {"PATH": ""}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={"PATH": "/explicit/base/bin"},
+        working_dir=tmp_path / "workspace",
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert env["PATH"] == str(vendored.parent)
+
+
+def test_agent_path_injection_absent_path_does_not_leak_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            return vendored
+
+    monkeypatch.setenv("PATH", "/parent/process/bin")
+    monkeypatch.setattr(
+        git_runtime,
+        "resolve_system_git_path",
+        lambda **kwargs: pytest.fail("explicit empty fallback must not probe parent PATH"),
+    )
+    env: dict[str, str] = {}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={},
+        working_dir=tmp_path / "workspace",
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert env["PATH"] == str(vendored.parent)
+
+
+def test_agent_path_injection_never_shadows_safe_system_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        git_runtime,
+        "resolve_system_git_path",
+        lambda *, env: Path("/usr/local/bin/git") if env["PATH"] == "/usr/local/bin" else None,
+    )
+
+    class UnexpectedManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            pytest.fail("vendored Git must not resolve when safe system Git is first")
+
+    env: dict[str, str] = {}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={"PATH": "/usr/local/bin:/usr/bin"},
+        working_dir=tmp_path / "workspace",
+        manager=UnexpectedManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is False
+    assert "PATH" not in env
+
+
+def test_agent_path_injection_shadows_workspace_prefix_before_system_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace_bin = workspace / "bin"
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            return vendored
+
+    monkeypatch.setattr(
+        git_runtime,
+        "resolve_system_git_path",
+        lambda **kwargs: pytest.fail("workspace prefix must fail closed before probing later PATH entries"),
+    )
+    original_path = f"{workspace_bin}{os.pathsep}/usr/bin"
+    env = {"PATH": original_path}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={},
+        working_dir=workspace,
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert env["PATH"] == f"{vendored.parent}{os.pathsep}{original_path}"
+
+
+def test_agent_path_injection_treats_macos_shim_as_gitless_without_clt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vendored = tmp_path / "runtime" / "bin" / "git"
+    calls: list[list[str]] = []
+
+    class FakeManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            return vendored
+
+    monkeypatch.setattr(git_runtime.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(git_runtime.shutil, "which", lambda name, path=None: "/usr/bin/git")
+
+    def missing_clt(argv, **kwargs):
+        calls.append(argv)
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "missing"
+
+        return Result()
+
+    monkeypatch.setattr(git_runtime.subprocess, "run", missing_clt)
+    env = {"PATH": "/usr/bin"}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={},
+        working_dir=tmp_path / "workspace",
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert calls == [["/usr/bin/xcode-select", "-p"]]
+    assert env["PATH"] == f"{vendored.parent}{os.pathsep}/usr/bin"

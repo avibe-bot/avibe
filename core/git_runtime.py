@@ -6,7 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +199,72 @@ def resolve_system_git_path(*, env: Mapping[str, str] | None = None) -> Path | N
         if proc.returncode != 0 or not (proc.stdout or "").strip():
             return None
     return candidate_path
+
+
+def prepend_vendored_git_to_path(
+    env: MutableMapping[str, str],
+    *,
+    base_env: Mapping[str, str],
+    working_dir: Path | str | None,
+    manager: GitRuntimeManager | None = None,
+) -> bool:
+    """Prepend verified Git when the effective Agent PATH has no safe Git.
+
+    PATH composition is explicit: a ``PATH`` key in ``env`` wins even when its
+    value is empty. Only an absent key falls back to the required ``base_env``;
+    this helper never reads ``os.environ`` implicitly. A relative, empty, or
+    workspace-owned PATH entry before system Git is not trusted as system Git,
+    so the hardened vendored binary takes precedence over that mutable prefix.
+    """
+
+    current_path = env["PATH"] if "PATH" in env else base_env.get("PATH", "")
+    if _agent_path_has_system_git(current_path, working_dir=working_dir):
+        return False
+    vendored = (manager or get_git_runtime_manager()).resolve_git_path()
+    if vendored is None:
+        return False
+    bin_dir = str(vendored.parent)
+    env["PATH"] = bin_dir if not current_path else f"{bin_dir}{os.pathsep}{current_path}"
+    return True
+
+
+def _agent_path_has_system_git(
+    search_path: str,
+    *,
+    working_dir: Path | str | None,
+) -> bool:
+    workspace = _resolved_path(Path(working_dir)) if working_dir is not None else None
+    if workspace is not None and workspace.parent == workspace:
+        workspace = None
+    for raw_entry in search_path.split(os.pathsep):
+        entry = Path(raw_entry)
+        if not raw_entry or not entry.is_absolute():
+            return False
+        resolved_entry = _resolved_path(entry)
+        if workspace is not None and _path_is_within(resolved_entry, workspace):
+            return False
+        candidate = resolve_system_git_path(env={"PATH": raw_entry})
+        if candidate is None:
+            continue
+        if workspace is not None and _path_is_within(_resolved_path(candidate), workspace):
+            return False
+        return True
+    return False
+
+
+def _resolved_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
+
+
+def _path_is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
 
 
 def _probe_git_version(binary: Path | None) -> str | None:

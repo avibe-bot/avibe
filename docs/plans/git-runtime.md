@@ -19,13 +19,16 @@ must not be executed before `xcode-select -p` confirms the tools are installed.
 - Resolve an installed binary against the immutable binary hash in the active
   manifest without network access or execution. Status classifies system Git
   paths without executing PATH-selected binaries and reports both the platform
-  resolution (vendored first) and planned Agent resolution (system first).
+  resolution (vendored first) and Agent resolution (system first).
 - Support `VIBE_GIT_MANIFEST_PATH`, `VIBE_GIT_MANIFEST_URL`, and
   `VIBE_GIT_OFFLINE` for development, out-of-band updates, and offline use.
-- Keep Agent PATH injection out of this PR. The current caller-context object
-  is provenance, not the backend's final environment, and probing an untrusted
-  target PATH would execute workspace-controlled tools. The orchestrator-owned
-  post-#864 integration will define and wire the backend environment contract.
+- Agent child environments preserve an effective system Git and prepend the
+  verified runtime only when none is available. PATH composition respects an
+  explicit key, including an empty value, and uses the service environment only
+  where each backend passes it as an explicit fallback. Relative, empty, and
+  workspace-owned prefixes are not trusted ahead of system Git. Claude injects
+  at SDK client creation, Codex at its per-thread shell policy, and OpenCode at
+  its per-session `shell.env` binding.
 
 ## Build Boundary
 
@@ -42,13 +45,12 @@ stay deterministic. The workflow exercises `init`, `add`, `commit`, `status`,
 `log`, `diff`, `restore`, and `gc`; proves hostile helper markers do not run;
 and proves that `push` is rejected.
 
-## Publication Gate
+## Publication
 
-The packaged manifest remains `release_state: pending` with zero placeholders
-until the orchestrator runs the workflow with tag `git-runtime-v2.55.0-1`.
-Pending manifests never download or install. The published workflow artifact
-must replace `vibe/git_runtime_manifest.json` so real archive sizes plus archive
-and binary SHA-256 digests ship in the final integration commit.
+The four-platform workflow completed in run `29165285903`. Release
+`git-runtime-v2.55.0-1` contains the four archives and checksum files, and the
+packaged manifest carries the published release URLs, sizes, archive hashes,
+and final-binary hashes.
 
 Offline resolution deliberately fails closed across manifest version changes:
 an install is reusable only when it matches the active trusted manifest. Avibe
@@ -59,7 +61,5 @@ multi-version manifest schema can be added later if real usage justifies it.
 
 - Migrate tmux and Show Runtime to the common managed-runtime core in a separate
   change after this interface has production evidence.
-- Wire `core/git_binary.py` to `GitRuntimeManager` in the orchestrator-owned
-  post-merge integration for #669.
-- Define and wire safe Agent PATH fallback after #864 at the concrete backend
-  child-environment seam.
+- Verify vendored resolution and Show Page checkpointing end to end on a
+  gitless Incus machine as part of #669's integration pass.
