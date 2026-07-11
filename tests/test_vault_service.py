@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
 
 from storage import vault_service as vs, vault_webauthn
@@ -381,6 +381,75 @@ def test_save_vault_settings_first_write_is_atomic_under_concurrency(vault):
 
     assert len(rows) == 1
     assert {result["last_grant_ttl"] for result in results}.issubset({300, 900})
+
+
+def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkeypatch):
+    init_lock_key = vs.PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY
+    monkeypatch.setattr(vs, "register_webauthn_factor", lambda *_args, **_kwargs: None)
+
+    lock_barrier = threading.Barrier(2)
+    pre_guard_barrier = threading.Barrier(2)
+    post_guard_barrier = threading.Barrier(2)
+    lock_seen = threading.Event()
+
+    def is_init_lock(statement: str, parameters) -> bool:
+        return statement.lstrip().upper().startswith("INSERT INTO STATE_META") and init_lock_key in parameters
+
+    def is_protected_guard(statement: str) -> bool:
+        normalized = " ".join(statement.upper().split())
+        return "FROM VAULT_SECRETS" in normalized and "WHERE VAULT_SECRETS.PROTECTION =" in normalized
+
+    def synchronize_before_guard(_conn, _cursor, statement, parameters, _context, _executemany):
+        if is_init_lock(statement, parameters):
+            lock_seen.set()
+            lock_barrier.wait(timeout=5)
+        elif not lock_seen.is_set() and is_protected_guard(statement):
+            # On the unfixed implementation, force both deferred transactions
+            # through the empty-vault read before either reaches its first write.
+            pre_guard_barrier.wait(timeout=5)
+
+    def synchronize_after_guard(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if not lock_seen.is_set() and is_protected_guard(statement):
+            post_guard_barrier.wait(timeout=5)
+
+    event.listen(vault, "before_cursor_execute", synchronize_before_guard)
+    event.listen(vault, "after_cursor_execute", synchronize_after_guard)
+
+    def establish(index: int):
+        try:
+            with vault.begin() as conn:
+                return vs.create_secret(
+                    conn,
+                    name=f"CONCURRENT_PROTECTED_{index}",
+                    sealed=_sealed(f"concurrent-{index}"),
+                    protection="protected",
+                    establishing_vmk=True,
+                    authz_factor_registration={},
+                )
+        except vs.VaultServiceError as exc:
+            return exc
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(establish, range(2)))
+    finally:
+        event.remove(vault, "before_cursor_execute", synchronize_before_guard)
+        event.remove(vault, "after_cursor_execute", synchronize_after_guard)
+
+    successes = [result for result in results if isinstance(result, dict)]
+    failures = [result for result in results if isinstance(result, vs.VaultServiceError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], vs.VaultAlreadyInitializedError)
+
+    with vault.connect() as conn:
+        protected_names = list(
+            conn.execute(select(vault_secrets.c.name).where(vault_secrets.c.protection == "protected")).scalars()
+        )
+        lock_row = conn.execute(select(state_meta).where(state_meta.c.key == init_lock_key)).mappings().one()
+
+    assert protected_names == [successes[0]["name"]]
+    assert lock_row["value_json"] == "{}"
 
 
 def test_sibling_approval_requires_matching_purpose(vault):

@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 SKILL_TAG_PREFIX = "skill:"
 VAULT_SETTINGS_META_KEY = "vault_settings"
+PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY = "vault_protected_establishment_lock"
 DEFAULT_UNLOCK_WINDOW_SECONDS = 600
 UNLOCK_WINDOW_OPTIONS_SECONDS = (300, 600, 1800)
 GRANT_DURATION_ONE_TIME = "one-time"
@@ -2042,10 +2043,25 @@ def create_secret(
     )
 
     if establishing_vmk and protection == "protected":
-        # Atomic single-init guard: this runs inside the write transaction (SQLite
-        # serialises writers), so two concurrent first-time setups cannot both pass —
-        # the loser is rejected instead of splitting the vault key history with a
-        # second VMK. The browser then reloads and unlocks the established vault.
+        # A deferred SQLite transaction does not take the writer lock for the
+        # existence check below. This metadata upsert is establishment's first
+        # write, so concurrent initializers serialize before checking. The row is
+        # only a mutex; protected-secret existence remains the source of truth.
+        lock_updated_at = _now()
+        lock_stmt = sqlite_insert(state_meta).values(
+            key=PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY,
+            value_json="{}",
+            updated_at=lock_updated_at,
+        )
+        conn.execute(
+            lock_stmt.on_conflict_do_update(
+                index_elements=[state_meta.c.key],
+                set_={
+                    "value_json": lock_stmt.excluded.value_json,
+                    "updated_at": lock_stmt.excluded.updated_at,
+                },
+            )
+        )
         if (
             conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)).first()
             is not None
