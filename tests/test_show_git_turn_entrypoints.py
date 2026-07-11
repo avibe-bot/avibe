@@ -163,12 +163,15 @@ class _Controller:
         self.message_dispatcher.update_thread_message_id(context)
 
     async def emit_agent_message(self, context, message_type, text, **kwargs):
-        return await self.message_dispatcher.emit_agent_message(
-            context=context,
-            message_type=message_type,
-            text=text,
-            **kwargs,
-        )
+        try:
+            return await self.message_dispatcher.emit_agent_message(
+                context=context,
+                message_type=message_type,
+                text=text,
+                **kwargs,
+            )
+        finally:
+            self.session_turns.on_terminal_delivery_complete(context)
 
     @staticmethod
     def _t(key: str, **_kwargs) -> str:

@@ -1269,17 +1269,23 @@ class Controller:
         output: MessageOutput | None = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
-        return await self.message_dispatcher.emit_agent_message(
-            context=context,
-            message_type=message_type,
-            text=text,
-            parse_mode=parse_mode,
-            is_error=is_error,
-            level=level,
-            status_label=status_label,
-            result_footer=result_footer,
-            output=output,
-        )
+        try:
+            return await self.message_dispatcher.emit_agent_message(
+                context=context,
+                message_type=message_type,
+                text=text,
+                parse_mode=parse_mode,
+                is_error=is_error,
+                level=level,
+                status_label=status_label,
+                result_footer=result_footer,
+                output=output,
+            )
+        finally:
+            manager = getattr(self, "session_turns", None)
+            complete = getattr(manager, "on_terminal_delivery_complete", None)
+            if callable(complete):
+                complete(context)
 
     def note_session_tokens(self, context: MessageContext, *, total: int) -> None:
         """Report the session's current context-window occupancy for the status

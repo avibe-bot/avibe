@@ -49,6 +49,8 @@ SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
 SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
+_SHOW_CHECKPOINT_DEFERRED_START_KEY = "_avibe_show_git_deferred_start"
+_SHOW_CHECKPOINT_TERMINAL_PENDING_KEY = "_avibe_show_git_terminal_pending"
 
 # The platform_specific keys the FLUSH rebuilds fresh from the session row (avibe
 # routing). Everything ELSE the scheduled context carries is delivery / attribution
@@ -1239,11 +1241,45 @@ class SessionTurnManager:
         except Exception:
             logger.exception("Show checkpoint end hook failed")
 
+    @staticmethod
+    def _set_context_flag(context: "MessageContext", key: str, value: bool) -> None:
+        payload = dict(getattr(context, "platform_specific", None) or {})
+        if value:
+            payload[key] = True
+        else:
+            payload.pop(key, None)
+        context.platform_specific = payload
+
+    @staticmethod
+    def _pop_context_flag(context: "MessageContext", key: str) -> bool:
+        payload = dict(getattr(context, "platform_specific", None) or {})
+        value = bool(payload.pop(key, False))
+        context.platform_specific = payload
+        return value
+
+    def _agent_initiated_turn_will_register(self, context: "MessageContext") -> bool:
+        service = getattr(self.controller, "agent_service", None)
+        runtime_started = getattr(service, "runtime_turn_started", None)
+        if not callable(runtime_started) or runtime_started(context) is not True:
+            return False
+        session_id = self.controller._session_id_from_context(context)
+        get_key = getattr(self.controller, "_get_session_key", None)
+        if not session_id or not callable(get_key):
+            return False
+        session_key = get_key(context)
+        return session_id not in self.in_flight and self.get_turn_sink(session_key) is None
+
     def on_running(self, context: "MessageContext") -> None:
         """INBOUND turn chokepoint shared by every source and backend."""
         if self.controller is None:
             return
-        self._begin_show_checkpoint(context)
+        if self._agent_initiated_turn_will_register(context):
+            # Agent-initiated turns register their FSM bus lifecycle immediately
+            # after on_running. Let that start publish first so checkpointing
+            # observes path ownership and never emits a duplicate pair.
+            self._set_context_flag(context, _SHOW_CHECKPOINT_DEFERRED_START_KEY, True)
+        else:
+            self._begin_show_checkpoint(context)
         session_id = self.controller._session_id_from_context(context)
         if session_id:
             self.controller.set_agent_status(session_id, "running")
@@ -1254,11 +1290,20 @@ class SessionTurnManager:
             return
         if not self.is_active_emit(context):
             return
-        self._end_show_checkpoint(context)
+        # The dispatcher calls this before delivery. Record authority now, then
+        # checkpoint from Controller.emit_agent_message's post-delivery finally.
+        self._set_context_flag(context, _SHOW_CHECKPOINT_TERMINAL_PENDING_KEY, True)
         session_id = self.controller._session_id_from_context(context)
         if not session_id:
             return
         self.controller.set_agent_status(session_id, "failed" if is_error else "idle")
+
+    def on_terminal_delivery_complete(self, context: "MessageContext") -> None:
+        """Checkpoint an accepted terminal result after delivery and persistence."""
+
+        if not self._pop_context_flag(context, _SHOW_CHECKPOINT_TERMINAL_PENDING_KEY):
+            return
+        self._end_show_checkpoint(context)
 
     def register_agent_initiated_turn(self, context: "MessageContext") -> bool:
         """Register a turn the BACKEND started on its own (agent-initiated:
@@ -1338,6 +1383,8 @@ class SessionTurnManager:
             return False
         self.in_flight[session_id] = Turn(task=task, context=context)
         bus.publish("turn.start", {"session_id": session_id})
+        if self._pop_context_flag(context, _SHOW_CHECKPOINT_DEFERRED_START_KEY):
+            self._begin_show_checkpoint(context)
         return True
 
     def is_active_emit(self, context: "MessageContext") -> bool:

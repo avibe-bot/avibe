@@ -19,7 +19,9 @@ branch to the existing worktree at each session turn boundary.
   lifecycle from the shared inbound/terminal turn chokepoints every backend and
   source traverses. Existing Workbench and streaming dispatch events remain for
   their UI/cancellation lifecycle, while context-local state makes overlap
-  idempotent. Checkpoint paths never create Show Page workspaces.
+  idempotent. Terminal authority is recorded before delivery, then the checkpoint
+  runs after delivery/persistence and before the event loop can start the next
+  gated turn. Checkpoint paths never create Show Page workspaces.
 - Isolate every platform Git invocation from ambient Git environment, global
   configuration, signing, hooks, and automatic GC.
 - Self-heal only provably Avibe-owned or dangling state, bound retained history,
@@ -41,5 +43,6 @@ The first implementation attached lifecycle publication to the known transport
 paths, so background Agent Runs, scheduled tasks, and watch callbacks could reach
 the backend without checkpoint events. The follow-up closes that architectural
 gap at `SessionTurnManager.on_running` / `on_terminal_result`, after the runtime
-gate and before/at the terminal output respectively. `MESSAGE-DELIVERY-006`
-enumerates every current turn entry point against this shared contract.
+gate and at the authorized terminal output respectively; controller delivery
+completion executes the post-turn checkpoint. `MESSAGE-DELIVERY-006` enumerates
+every current turn entry point against this shared contract.

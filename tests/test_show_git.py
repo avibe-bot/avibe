@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -12,8 +13,10 @@ import pytest
 
 from config import paths
 from core import show_git
+from core import inbox_events
 from core.git_binary import ResolvedGit
 from core.inbox_events import InboxEventBus
+from core.session_turns import SessionTurnManager
 from core.show_git import (
     POST_TURN,
     PRE_TURN,
@@ -630,6 +633,79 @@ def test_shared_turn_hooks_reuse_path_owned_bus_lifecycle(resolved_git, monkeypa
         ("turn.end", {"session_id": session_id}),
     ]
     assert calls == [(POST_TURN, {"message": "edit page", "run_id": None})]
+
+
+def test_agent_initiated_turn_reuses_fsm_bus_lifecycle(resolved_git, monkeypatch):
+    session_id = "ses_agent_initiated"
+    _workspace(session_id)
+    calls = []
+
+    class FakeRepository:
+        def checkpoint(self, checkpoint, **kwargs):
+            calls.append((checkpoint, kwargs))
+            return True
+
+    monkeypatch.setattr(
+        show_git,
+        "load_turn_checkpoint_context",
+        lambda _session_id, **_kwargs: TurnCheckpointContext(message="background result", message_id="message-1"),
+    )
+    service = ShowGitCheckpointService(resolved_git)
+    monkeypatch.setattr(service, "_repository", lambda _session_id: FakeRepository())
+    bus = InboxEventBus()
+    monkeypatch.setattr(inbox_events, "bus", bus)
+    service.start(bus)
+    lifecycle = []
+    subscription_id = bus.subscribe_callback(
+        lambda event_type, data: lifecycle.append((event_type, data))
+        if event_type in {"turn.start", "turn.end"}
+        else None
+    )
+    context = SimpleNamespace(
+        platform="avibe",
+        channel_id=session_id,
+        platform_specific={"agent_session_id": session_id, "turn_token": "turn-agent"},
+    )
+    controller = SimpleNamespace(
+        _session_id_from_context=lambda _context: session_id,
+        _get_session_key=lambda _context: f"avibe::{session_id}",
+        set_agent_status=lambda _session_id, _status: None,
+        show_git_checkpoint_service=service,
+        agent_service=SimpleNamespace(runtime_turn_started=lambda _context: True),
+    )
+    manager = SessionTurnManager(controller)
+    controller.get_turn_sink = manager.get_turn_sink
+
+    async def _flush_queue(_session_id: str) -> bool:
+        return False
+
+    manager.flush_queue = _flush_queue
+
+    async def _exercise() -> None:
+        manager.on_running(context)
+        assert lifecycle == []
+        assert manager.register_agent_initiated_turn(context) is True
+        manager.on_terminal_result(context, is_error=False)
+        manager.on_terminal_delivery_complete(context)
+        sink = manager.get_turn_sink(f"avibe::{session_id}")
+        assert sink is not None
+        sink["done_event"].set()
+        await manager.in_flight[session_id].task
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        bus.unsubscribe(subscription_id)
+        service.stop()
+
+    assert lifecycle == [
+        ("turn.start", {"session_id": session_id}),
+        ("turn.end", {"session_id": session_id}),
+    ]
+    assert calls == [
+        (PRE_TURN, {"run_id": None}),
+        (POST_TURN, {"message": "background result", "run_id": None}),
+    ]
 
 
 def test_agent_contract_uses_startup_latched_checkpoint_service_state(resolved_git, monkeypatch):
