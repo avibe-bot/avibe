@@ -100,25 +100,7 @@ async def emit_backend_failure(
         metadata=notify_metadata,
     )
 
-    auth_service = getattr(controller, "agent_auth_service", None)
-    maybe_recover = getattr(auth_service, "maybe_emit_auth_recovery_message", None)
-    if callable(maybe_recover) and await maybe_recover(
-        context,
-        backend_name,
-        visible,
-        output=terminal,
-        terminal_error=error,
-    ):
-        return True
-
-    try:
-        await controller.emit_agent_message(
-            context,
-            "notify",
-            visible,
-            output=notification,
-        )
-    finally:
+    async def settle_terminal_failure() -> None:
         await controller.emit_agent_message(
             context,
             "result",
@@ -128,4 +110,31 @@ async def emit_backend_failure(
             output=terminal,
             terminal_error=error,
         )
+
+    auth_service = getattr(controller, "agent_auth_service", None)
+    maybe_recover = getattr(auth_service, "maybe_emit_auth_recovery_message", None)
+    if callable(maybe_recover):
+        try:
+            handled_auth = await maybe_recover(
+                context,
+                backend_name,
+                visible,
+                output=terminal,
+                terminal_error=error,
+            )
+        except Exception:
+            await settle_terminal_failure()
+            raise
+        if handled_auth:
+            return True
+
+    try:
+        await controller.emit_agent_message(
+            context,
+            "notify",
+            visible,
+            output=notification,
+        )
+    finally:
+        await settle_terminal_failure()
     return False

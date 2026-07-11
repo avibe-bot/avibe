@@ -11,7 +11,7 @@ import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../cont
 import type { SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
-import { isNotifyMessageType } from '../../lib/chatMessageTypes';
+import { isNotifyMessageType, isTerminalAgentMessage } from '../../lib/chatMessageTypes';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -2032,12 +2032,13 @@ const Transcript: React.FC<TranscriptProps> = ({
   // The reply arrives atomically as a persisted ``result`` row (no streaming
   // card), so the thinking bubble shows for the whole gap between send and
   // reply. Hide it the moment the last row is a fresh agent terminal — a
-  // successful ``result`` OR a failed ``error`` both end the turn.
-  const lastIsAgentResult =
-    messages.length > 0 &&
-    messages[messages.length - 1].author === 'agent' &&
-    (messages[messages.length - 1].type === 'result' || messages[messages.length - 1].type === 'error');
-  const showThinking = working && !lastIsAgentResult;
+  // successful ``result``, a legacy ``error``, or a structured backend-failure
+  // ``notify`` all end the visible response. ``working`` itself still settles
+  // only from turn.end or the authoritative turn-state poll, so a late row from
+  // an older Turn cannot clear Stop for a newer one.
+  const lastIsAgentTerminal =
+    messages.length > 0 && isTerminalAgentMessage(messages[messages.length - 1]);
+  const showThinking = working && !lastIsAgentTerminal;
   const empty = messages.length === 0 && !working;
 
   // Capture the topmost (partly) visible row as the restore anchor. Viewport-

@@ -47,6 +47,36 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled_auth)
         controller.emit_agent_message.assert_not_awaited()
 
+    async def test_settles_lifecycle_when_auth_recovery_delivery_raises(self) -> None:
+        request = _request()
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(
+                maybe_emit_auth_recovery_message=AsyncMock(
+                    side_effect=RuntimeError("button delivery unavailable")
+                )
+            ),
+            emit_agent_message=AsyncMock(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "button delivery unavailable"):
+            await emit_backend_failure(
+                controller,
+                request.context,
+                "codex",
+                "401 Unauthorized",
+                request=request,
+            )
+
+        controller.emit_agent_message.assert_awaited_once_with(
+            request.context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=request.output,
+            terminal_error="401 Unauthorized",
+        )
+
     async def test_separates_notify_from_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(
