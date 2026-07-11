@@ -2420,6 +2420,113 @@ def test_restart_delivers_persisted_activity_summary_and_settles_run_once(
     assert emitted == [("Recovered task result", True, False)]
 
 
+def test_restart_preserves_activity_delivery_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+    from storage.sessions_service import SQLiteSessionsService
+
+    ensure_sqlite_state()
+    session_target = parse_session_key(
+        "slack::channel::C-SOURCE::thread::171717.123"
+    )
+    sessions = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        session_id = sessions.reserve_agent_session(
+            scope_key=session_target.session_scope,
+            agent_backend="claude",
+            session_anchor=session_anchor_for_target(session_target),
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        session_key=session_target.to_key(),
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id=session_id,
+        activity_id="task-routed",
+        kind="background_task",
+        run_id=request.id,
+        metadata={"delivery_key_external": "slack::channel::C-DESTINATION"},
+    )
+    first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-routed",
+        status="completed",
+        metadata={"summary": "Recovered routed result"},
+        expects_output=True,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    emitted_contexts: list[MessageContext] = []
+
+    async def emit_agent_message(context, _message_type, text, *, output, **_kwargs):
+        emitted_contexts.append(context)
+        result = sqlite_store.record_run_output(
+            request.id,
+            output_id=str(output.idempotency_key),
+            text=text,
+            terminal_status="succeeded" if output.settles_run else None,
+            provenance=output.provenance(context),
+        )
+        assert result["terminal_transition"] is True
+        return "recovered-routed-message"
+
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None)
+    )
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        im_clients={},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        agent_service=SimpleNamespace(activities=recovered_registry),
+        emit_agent_message=emit_agent_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    assert len(emitted_contexts) == 1
+    context = emitted_contexts[0]
+    assert context.thread_id == "171717.123"
+    assert context.platform_specific["delivery_key_external"] == (
+        "slack::channel::C-DESTINATION"
+    )
+    assert context.platform_specific["delivery_override"]["channel_id"] == (
+        "C-DESTINATION"
+    )
+    assert context.platform_specific["delivery_override"]["thread_id"] is None
+    assert request_store.get_run(request.id)["status"] == "succeeded"
+    assert activity_store.list_activities() == []
+
+
 def test_restart_no_delivery_activity_settles_real_run_without_emit(
     tmp_path: Path,
     monkeypatch,

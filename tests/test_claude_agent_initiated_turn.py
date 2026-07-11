@@ -348,8 +348,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         claimed = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(claimed)
-        service.activities.ack_completed_output(claimed)
-        agent._signal_activity_output_settled(composite_key)
+        self.assertTrue(service.activities.ack_completed_output(claimed))
         await asyncio.wait_for(waiter, timeout=1)
 
     async def test_terminal_only_task_event_keeps_current_turn_origin(self):
@@ -374,6 +373,53 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         activity = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(activity)
         self.assertEqual(activity.turn_id, "current-turn")
+
+    async def test_activity_keeps_origin_delivery_target_when_a_newer_turn_arrives(self):
+        agent, service = _build_agent()
+        composite_key = "session-delivery-origin:/tmp/work"
+        origin_context = SimpleNamespace(
+            platform_specific={
+                "turn_token": "origin-turn",
+                "delivery_key_external": "slack::channel::C-ORIGIN",
+            },
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=origin_context)]
+        receiver_context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-delivery-origin"},
+        )
+
+        self.assertTrue(
+            agent._handle_activity_message(
+                TaskStartedMessage(),
+                composite_key,
+                receiver_context,
+            )
+        )
+        agent._pending_requests[composite_key] = [
+            SimpleNamespace(
+                context=SimpleNamespace(
+                    platform_specific={
+                        "turn_token": "newer-turn",
+                        "delivery_key_external": "slack::channel::C-NEWER",
+                    },
+                )
+            )
+        ]
+
+        self.assertTrue(
+            agent._handle_activity_message(
+                TaskNotificationMessage(),
+                composite_key,
+                receiver_context,
+            )
+        )
+
+        activity = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(activity)
+        self.assertEqual(
+            activity.metadata["delivery_key_external"],
+            "slack::channel::C-ORIGIN",
+        )
 
     async def test_completed_task_notification_at_eof_delivers_summary(self):
         agent, service = _build_agent()

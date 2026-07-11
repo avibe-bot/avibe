@@ -34,6 +34,13 @@ class AgentService:
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
+        set_output_settled_callback = getattr(
+            self.activities,
+            "set_output_settled_callback",
+            None,
+        )
+        if callable(set_output_settled_callback):
+            set_output_settled_callback(self._on_activity_output_settled)
         # Strong refs to fire-and-forget tasks (e.g. the cancellation tidy) so the
         # event loop doesn't GC them before they run (asyncio only weak-refs tasks).
         self._background_tasks: set[asyncio.Task] = set()
@@ -85,6 +92,12 @@ class AgentService:
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
+
+    def _on_activity_output_settled(self, activity: Any) -> None:
+        agent = self.agents.get(str(getattr(activity, "backend", "") or ""))
+        notify = getattr(agent, "on_activity_output_settled", None)
+        if callable(notify):
+            notify(str(getattr(activity, "runtime_key", "") or ""))
 
     def on_activity_terminal(self, activity: Any) -> bool:
         """Let the Run owner acknowledge one terminal Activity."""

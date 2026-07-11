@@ -384,3 +384,44 @@ def test_force_end_backend_retains_terminal_snapshot_until_ack(tmp_path: Path):
         recovered.ack_recovered_terminal(activity)
     assert store.list_activities() == []
     engine.dispose()
+
+
+def test_force_end_backend_claimed_output_wins_late_delivery_race(tmp_path: Path):
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-claimed",
+        kind="background_task",
+        run_id="run-1",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-claimed",
+        status="completed",
+        metadata={"summary": "Delivery is in flight"},
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+    assert registry.has_backend_work("claude") is True
+
+    completed = registry.end_backend("claude", status="killed")
+
+    assert [(item.id, item.status) for item in completed] == [
+        ("task-claimed", "killed"),
+    ]
+    assert registry.has_backend_work("claude") is False
+    assert registry.requeue_completed_output(claimed) is False
+    assert registry.ack_completed_output(claimed) is False
+    records = store.list_activities()
+    assert len(records) == 1
+    assert records[0]["phase"] == "terminal"
+    assert records[0]["activity"]["status"] == "killed"
+    engine.dispose()

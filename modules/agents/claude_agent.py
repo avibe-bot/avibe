@@ -1320,6 +1320,9 @@ class ClaudeAgent(BaseAgent):
         if event is not None:
             event.set()
 
+    def on_activity_output_settled(self, runtime_key: str) -> None:
+        self._signal_activity_output_settled(runtime_key)
+
     @staticmethod
     def _activity_session_id(context: MessageContext) -> str | None:
         value = (getattr(context, "platform_specific", None) or {}).get("agent_session_id")
@@ -1443,6 +1446,16 @@ class ClaudeAgent(BaseAgent):
             if value not in (None, "")
         }
         if existing_activity is None:
+            pending = self._pending_requests.get(composite_key) or []
+            source = getattr(pending[0], "context", None) if pending else context
+            delivery_key = str(
+                (getattr(source, "platform_specific", None) or {}).get(
+                    "delivery_key_external"
+                )
+                or ""
+            ).strip()
+            if delivery_key:
+                metadata["delivery_key_external"] = delivery_key
             run_ids = self._activity_run_ids(composite_key, context)
             turn_id = self._current_turn_id(composite_key, context)
         else:

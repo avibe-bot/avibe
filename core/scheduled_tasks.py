@@ -1644,8 +1644,19 @@ class ScheduledTaskService:
             registry.ack_completed_output(activity)
             return
 
+        delivery_target = target.session_key
+        delivery_key = str(
+            (getattr(activity, "metadata", None) or {}).get("delivery_key_external")
+            or ""
+        ).strip()
+        if delivery_key and delivery_key != target.session_key.to_key():
+            delivery_target = parse_session_key(delivery_key)
+            if delivery_target.platform != target.session_key.platform:
+                raise ValueError("recovered Activity delivery target changed platform")
+
         context = await self._build_context(
             target.session_key,
+            delivery_target=delivery_target,
             execution_id=f"activity:{getattr(activity, 'backend', '')}:{getattr(activity, 'id', '')}",
             trigger_kind="activity_recovery",
             session_id=session_id,

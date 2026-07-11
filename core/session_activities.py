@@ -14,7 +14,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from core.message_output import MessageOutput
 
@@ -131,6 +131,7 @@ class SessionActivityRegistry:
     def __init__(self, store: Any = None) -> None:
         self._lock = threading.RLock()
         self._store = store
+        self._output_settled_callback: Callable[[SessionActivity], None] | None = None
         self._active: dict[tuple[str, str, str], SessionActivity] = {}
         self._connections: dict[tuple[str, str], tuple[str | None, str]] = {}
         self._completed_outputs: dict[
@@ -142,6 +143,15 @@ class SessionActivityRegistry:
         self._recovered_output_ids: set[tuple[str, str, str]] = set()
         self._recovered_terminals: deque[SessionActivity] = deque()
         self._restore()
+
+    def set_output_settled_callback(
+        self,
+        callback: Callable[[SessionActivity], None] | None,
+    ) -> None:
+        """Register the runtime wakeup invoked after a completion is acknowledged."""
+
+        with self._lock:
+            self._output_settled_callback = callback
 
     @staticmethod
     def _key(backend: str, runtime_key: str, activity_id: str) -> tuple[str, str, str]:
@@ -485,7 +495,7 @@ class SessionActivityRegistry:
         *,
         front: bool = True,
         recovered: bool | None = None,
-    ) -> None:
+    ) -> bool:
         """Restore a claimed completion when its causal output cannot be consumed yet."""
 
         key = (str(activity.backend), str(activity.runtime_key))
@@ -493,8 +503,10 @@ class SessionActivityRegistry:
         item = (time.monotonic(), activity)
         with self._lock:
             claimed = self._claimed_completed_outputs.pop(activity_key, None)
+            if claimed is None:
+                return False
             if recovered is None:
-                recovered = claimed[1] if claimed is not None else False
+                recovered = claimed[1]
             queue = self._completed_outputs[key]
             if front:
                 queue.appendleft(item)
@@ -503,15 +515,29 @@ class SessionActivityRegistry:
             if recovered:
                 self._recovered_output_ids.add(activity_key)
             self._persist_activity(activity, phase="awaiting_output")
+        return True
 
-    def ack_completed_output(self, activity: SessionActivity) -> None:
+    def ack_completed_output(self, activity: SessionActivity) -> bool:
         """Forget a durable completion only after its output policy succeeds."""
 
         activity_key = self._activity_key(activity)
         with self._lock:
-            self._claimed_completed_outputs.pop(activity_key, None)
+            claimed = self._claimed_completed_outputs.pop(activity_key, None)
+            if claimed is None:
+                return False
             self._recovered_output_ids.discard(activity_key)
             self._delete_activity(activity)
+            callback = self._output_settled_callback
+        if callback is not None:
+            try:
+                callback(activity)
+            except Exception:
+                logger.warning(
+                    "Failed to signal settled Activity output %s",
+                    activity.id,
+                    exc_info=True,
+                )
+        return True
 
     def has_completed_output(self, backend: str, runtime_key: str) -> bool:
         """Whether a completed Activity is waiting for user-visible output."""
@@ -565,9 +591,13 @@ class SessionActivityRegistry:
 
         identity = str(backend)
         with self._lock:
-            return any(key[0] == identity for key in self._active) or any(
-                key[0] == identity and bool(queue)
-                for key, queue in self._completed_outputs.items()
+            return (
+                any(key[0] == identity for key in self._active)
+                or any(
+                    key[0] == identity and bool(queue)
+                    for key, queue in self._completed_outputs.items()
+                )
+                or any(key[0] == identity for key in self._claimed_completed_outputs)
             )
 
     def end_backend(self, backend: str, *, status: str = "killed") -> list[SessionActivity]:
@@ -590,6 +620,11 @@ class SessionActivityRegistry:
                 for item_backend, runtime_key in self._completed_outputs
                 if item_backend == identity
             )
+            runtime_keys.update(
+                runtime_key
+                for item_backend, runtime_key, _activity_id in self._claimed_completed_outputs
+                if item_backend == identity
+            )
         completed: list[SessionActivity] = []
         for runtime_key in runtime_keys:
             completed.extend(
@@ -601,14 +636,24 @@ class SessionActivityRegistry:
                 )
             )
         with self._lock:
-            pending = [
-                activity
+            pending_by_key = {
+                self._activity_key(activity): activity
                 for key, queue in self._completed_outputs.items()
                 if key[0] == identity
                 for _completed_at, activity in queue
-            ]
+            }
+            pending_by_key.update(
+                {
+                    key: activity
+                    for key, (activity, _recovered) in self._claimed_completed_outputs.items()
+                    if key[0] == identity
+                }
+            )
             for key in [key for key in self._completed_outputs if key[0] == identity]:
                 self._completed_outputs.pop(key, None)
+            for key in [key for key in self._claimed_completed_outputs if key[0] == identity]:
+                self._claimed_completed_outputs.pop(key, None)
+            pending = list(pending_by_key.values())
         now = _now_iso()
         terminated_pending = [
             replace(

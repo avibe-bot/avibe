@@ -120,6 +120,11 @@ class BaseAgent(ABC):
         """Return runtime identities scoped to a persisted Avibe settings key."""
         return set()
 
+    def on_activity_output_settled(self, runtime_key: str) -> None:
+        """Wake backend-local admission blocked on acknowledged Activity output."""
+
+        return None
+
     def backend_alive(self, context: Any) -> Optional[bool]:
         """Best-effort liveness of this backend for the given turn context.
 

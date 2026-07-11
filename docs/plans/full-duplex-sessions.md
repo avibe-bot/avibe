@@ -50,7 +50,10 @@ without a cross-product enum:
 Restart snapshots use the existing `runtime_records` aggregate rather than a new
 Activity table. An active Activity snapshot, a completed Activity waiting for
 output, and backend connection state are persisted independently. Completed
-output is removed only after its delivery policy is acknowledged.
+output remains backend work while queued or claimed for delivery and is removed
+only after its delivery policy is acknowledged. A claimed output cannot be
+requeued or acknowledged after a forced backend terminal transition supersedes
+that delivery attempt.
 
 On controller restart:
 
@@ -60,6 +63,8 @@ On controller restart:
 - completed output remains pending with its stable producer identity;
 - a stored summary is delivered once as detached Session output, without
   lifecycle authority over any newer Turn;
+- the originating context's already-resolved delivery key is retained as
+  Activity metadata, so recovery preserves `post_to` / `deliver_key` routing;
 - if no summary or valid Session route exists, or the Session is explicitly
   no-delivery, the Run settles silently and no user-visible text is invented;
 - a forced backend restart converts live and pending-output Activities into
