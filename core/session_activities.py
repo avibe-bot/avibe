@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_ACTIVITY_STATUSES = frozenset({"completed", "failed", "stopped", "killed", "disconnected"})
 CONNECTION_STATES = frozenset({"connected", "reconnecting", "disconnected", "unknown"})
+TERMINAL_SNAPSHOT_PHASE = "terminal"
 
 
 def _now_iso() -> str:
@@ -253,16 +254,21 @@ class SessionActivityRegistry:
                 session_id=activity.session_id,
                 state="disconnected",
             )
-            if record.get("phase") == "awaiting_output":
+            phase = record.get("phase")
+            if phase == "awaiting_output":
                 self._completed_outputs[connection_key].append((time.monotonic(), activity))
                 self._recovered_output_ids.add(key)
                 continue
 
-            recovered = replace(
-                activity,
-                status="disconnected",
-                updated_at=now,
-                completed_at=now,
+            recovered = (
+                activity
+                if phase == TERMINAL_SNAPSHOT_PHASE
+                else replace(
+                    activity,
+                    status="disconnected",
+                    updated_at=now,
+                    completed_at=now,
+                )
             )
             self._recovered_terminals.append(recovered)
 
@@ -380,6 +386,7 @@ class SessionActivityRegistry:
         status: str,
         metadata: dict[str, Any] | None = None,
         expects_output: bool = False,
+        retain_terminal_snapshot: bool = False,
     ) -> SessionActivity | None:
         key = self._key(backend, runtime_key, activity_id)
         normalized = status if status in TERMINAL_ACTIVITY_STATUSES else "completed"
@@ -402,6 +409,8 @@ class SessionActivityRegistry:
                     (time.monotonic(), completed)
                 )
                 self._persist_activity(completed, phase="awaiting_output")
+            elif retain_terminal_snapshot:
+                self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
             else:
                 self._delete_activity(completed)
             return completed
@@ -583,7 +592,14 @@ class SessionActivityRegistry:
             )
         completed: list[SessionActivity] = []
         for runtime_key in runtime_keys:
-            completed.extend(self.end_runtime(identity, runtime_key, status=status))
+            completed.extend(
+                self.end_runtime(
+                    identity,
+                    runtime_key,
+                    status=status,
+                    retain_terminal_snapshots=True,
+                )
+            )
         with self._lock:
             pending = [
                 activity
@@ -594,7 +610,7 @@ class SessionActivityRegistry:
             for key in [key for key in self._completed_outputs if key[0] == identity]:
                 self._completed_outputs.pop(key, None)
         now = _now_iso()
-        completed.extend(
+        terminated_pending = [
             replace(
                 activity,
                 status=status if status in TERMINAL_ACTIVITY_STATUSES else "killed",
@@ -602,7 +618,12 @@ class SessionActivityRegistry:
                 completed_at=now,
             )
             for activity in pending
-        )
+        ]
+        with self._lock:
+            for activity in terminated_pending:
+                self._recovered_output_ids.discard(self._activity_key(activity))
+                self._persist_activity(activity, phase=TERMINAL_SNAPSHOT_PHASE)
+        completed.extend(terminated_pending)
         return completed
 
     def end_runtime(
@@ -611,6 +632,7 @@ class SessionActivityRegistry:
         runtime_key: str,
         *,
         status: str = "disconnected",
+        retain_terminal_snapshots: bool = False,
     ) -> list[SessionActivity]:
         key = (str(backend), str(runtime_key))
         with self._lock:
@@ -641,6 +663,7 @@ class SessionActivityRegistry:
                 runtime_key=runtime_key,
                 activity_id=activity_id,
                 status=status if status in TERMINAL_ACTIVITY_STATUSES else "disconnected",
+                retain_terminal_snapshot=retain_terminal_snapshots,
             )
             if activity is not None:
                 completed.append(activity)

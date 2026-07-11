@@ -330,3 +330,57 @@ def test_force_end_backend_settles_active_and_discards_pending_output():
     ]
     assert registry.has_backend_work("claude") is False
     assert registry.claim_completed_output("claude", "runtime-2") is None
+
+
+def test_force_end_backend_retains_terminal_snapshot_until_ack(tmp_path: Path):
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-active",
+        kind="background_task",
+    )
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-complete",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-complete",
+        status="completed",
+        metadata={"summary": "Do not deliver after forced restart"},
+        expects_output=True,
+    )
+    assert len(store.list_activities()) == 2
+
+    completed = registry.end_backend("claude", status="killed")
+
+    assert sorted((item.id, item.status) for item in completed) == [
+        ("task-active", "killed"),
+        ("task-complete", "killed"),
+    ]
+    records = store.list_activities()
+    assert len(records) == 2
+    assert {record["phase"] for record in records} == {"terminal"}
+    assert {record["activity"]["status"] for record in records} == {"killed"}
+    recovered = SessionActivityRegistry(store)
+    assert recovered.recovered_output_runtimes() == []
+    assert recovered.claim_completed_output("claude", "runtime-1") is None
+    terminals = recovered.drain_recovered_terminals()
+    assert sorted((item.id, item.status) for item in terminals) == [
+        ("task-active", "killed"),
+        ("task-complete", "killed"),
+    ]
+    for activity in terminals:
+        recovered.ack_recovered_terminal(activity)
+    assert store.list_activities() == []
+    engine.dispose()

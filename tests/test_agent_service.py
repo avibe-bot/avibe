@@ -335,6 +335,8 @@ def test_force_end_backend_activities_settles_pending_runs() -> None:
         status="completed",
         expects_output=True,
     )
+    original_ack = service.activities.ack_recovered_terminal
+    service.activities.ack_recovered_terminal = Mock(wraps=original_ack)
 
     service.force_end_backend_activities("claude")
 
@@ -342,6 +344,33 @@ def test_force_end_backend_activities_settles_pending_runs() -> None:
         ("task-active", "killed"),
         ("task-pending", "killed"),
     ]
+    assert service.activities.ack_recovered_terminal.call_count == 2
+
+
+def test_force_end_backend_activities_waits_for_run_settlement_before_ack() -> None:
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(
+            settle_activity_runs=Mock(side_effect=RuntimeError("store unavailable")),
+        ),
+    )
+    service = AgentService(controller=controller)
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-active",
+        kind="background_task",
+        run_id="run-active",
+    )
+    original_ack = service.activities.ack_recovered_terminal
+    service.activities.ack_recovered_terminal = Mock(wraps=original_ack)
+
+    completed = service.force_end_backend_activities("claude")
+
+    assert [(item.id, item.status) for item in completed] == [
+        ("task-active", "killed"),
+    ]
+    service.activities.ack_recovered_terminal.assert_not_called()
 
 
 def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:

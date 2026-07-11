@@ -78,28 +78,31 @@ class AgentService:
     def force_end_backend_activities(self, backend: str) -> list[Any]:
         completed = self.activities.end_backend(backend, status="killed")
         for activity in completed:
-            self.on_activity_terminal(activity)
+            if self.on_activity_terminal(activity):
+                self.activities.ack_recovered_terminal(activity)
         return completed
 
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
-    def on_activity_terminal(self, activity: Any) -> None:
-        """Let the Run owner react after the registry removed one Activity."""
+    def on_activity_terminal(self, activity: Any) -> bool:
+        """Let the Run owner acknowledge one terminal Activity."""
 
         service = getattr(self.controller, "scheduled_task_service", None)
         settle = getattr(service, "settle_activity_runs", None)
         if not callable(settle):
-            return
+            return False
         try:
             settle(activity)
+            return True
         except Exception:
             logger.warning(
                 "Failed to settle Runs for terminal Activity %s",
                 getattr(activity, "id", ""),
                 exc_info=True,
             )
+            return False
 
     def end_activity_runtime(self, backend: str, runtime_key: str) -> list[Any]:
         """Terminate one backend connection's Activities and notify Run owners."""

@@ -62,6 +62,8 @@ On controller restart:
   lifecycle authority over any newer Turn;
 - if no summary or valid Session route exists, or the Session is explicitly
   no-delivery, the Run settles silently and no user-visible text is invented;
+- a forced backend restart converts live and pending-output Activities into
+  terminal snapshots that remain durable until their Run policy is acknowledged;
 - every recovered native connection projects as `disconnected` until the backend
   reconnects.
 
