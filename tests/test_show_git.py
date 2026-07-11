@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -222,6 +223,32 @@ def test_user_git_pointer_is_never_overwritten(resolved_git, tmp_path):
 
     assert _repo(session_id, resolved_git).checkpoint(PRE_TURN) is True
     assert pointer.read_bytes() == before
+
+
+def test_existing_user_git_pointer_with_managed_path_shape_is_never_overwritten(resolved_git, tmp_path):
+    session_id = "ses_user_shaped_pointer"
+    workspace = _workspace(session_id)
+    (workspace / "app.txt").write_text("content\n", encoding="utf-8")
+    user_gitdir = tmp_path / "show-git" / f"{session_id}.git"
+    user_gitdir.parent.mkdir()
+    subprocess.run(
+        [str(resolved_git.path), "init", "--bare", str(user_gitdir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    pointer = workspace / ".git"
+    pointer.write_text(f"gitdir: {user_gitdir}\n", encoding="utf-8")
+    before = pointer.read_bytes()
+
+    repo = _repo(session_id, resolved_git)
+    assert repo.checkpoint(PRE_TURN) is True
+
+    assert pointer.read_bytes() == before
+    assert repo.gitdir != user_gitdir
+    assert _commit_count(repo) == 1
+    contract = format_agent_contract(checkpointing_available=True, session_id=session_id)
+    assert "addresses the **user's repo**, not Avibe history" in contract
 
 
 def test_pre_and_post_turn_commit_only_when_dirty_with_frozen_messages(resolved_git):
@@ -555,6 +582,52 @@ def test_duplicate_turn_events_do_not_create_duplicate_checkpoint_commits(resolv
         "edit page",
         "adopt existing workspace",
     ]
+
+
+def test_agent_contract_uses_startup_latched_checkpoint_service_state(resolved_git, monkeypatch):
+    bus = InboxEventBus()
+    unavailable_service = ShowGitCheckpointService(None)
+    unavailable_service.start(bus)
+    monkeypatch.setattr(show_git, "resolve_git", lambda: resolved_git)
+
+    unavailable = format_agent_contract(session_id="ses_latched_unavailable")
+    unavailable_status = json.loads(paths.get_show_git_runtime_status_path().read_text(encoding="utf-8"))
+    unavailable_service.stop()
+
+    active_service = ShowGitCheckpointService(resolved_git)
+    active_service.start(bus)
+    monkeypatch.setattr(show_git, "resolve_git", lambda: None)
+    available = format_agent_contract(session_id="ses_latched_available")
+    active_status = json.loads(paths.get_show_git_runtime_status_path().read_text(encoding="utf-8"))
+    active_service.stop()
+
+    assert "Automatic Show Page history is unavailable" in unavailable
+    assert unavailable_status["active"] is False
+    assert "History is saved automatically around each turn" in available
+    assert active_status["active"] is True
+    assert active_status["service_pid"] == os.getpid()
+
+
+def test_cross_process_checkpoint_status_requires_current_service_owner(monkeypatch):
+    status_path = paths.get_show_git_runtime_status_path()
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "version": show_git._CHECKPOINT_STATUS_VERSION,
+                "active": True,
+                "service_pid": 1234,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(show_git, "_checkpoint_service_active", None)
+    monkeypatch.setattr("vibe.runtime.resolve_service_owner_pid", lambda **_kwargs: 5678)
+
+    assert show_git.show_git_checkpointing_active() is False
+
+    monkeypatch.setattr("vibe.runtime.resolve_service_owner_pid", lambda **_kwargs: 1234)
+    assert show_git.show_git_checkpointing_active() is True
 
 
 def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():

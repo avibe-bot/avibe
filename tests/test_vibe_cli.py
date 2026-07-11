@@ -212,7 +212,7 @@ def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch
 
     payload = json.loads(runtime.render_status(detect_extra_processes=False))
 
-    assert payload["show_git_checkpoints"] == "degraded: Git executable unavailable"
+    assert payload["show_git_checkpoints"] == "degraded: Git checkpoint service unavailable"
 
 
 def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
@@ -225,6 +225,17 @@ def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
             "code": "runtime.show_git_unavailable",
         }
     ]
+
+
+def test_status_and_doctor_use_running_checkpoint_service_state(monkeypatch):
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: False)
+    monkeypatch.setattr("core.git_binary.resolve_git", lambda: object())
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["show_git_checkpoints"] == "degraded: Git checkpoint service unavailable"
+    assert cli._show_git_checkpoint_items()[0]["code"] == "runtime.show_git_unavailable"
 
 
 def test_stop_process_handles_missing_pid(tmp_path, monkeypatch):

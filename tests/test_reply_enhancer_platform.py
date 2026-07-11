@@ -357,7 +357,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.show_git.show_git_checkpointing_active", return_value=True),
+        ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,
                 context=context,
@@ -483,7 +486,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.show_git.resolve_git", return_value=None),
+            patch("core.show_git.show_git_checkpointing_active", return_value=False),
         ):
             prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
 
@@ -504,7 +507,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.show_git.resolve_git", return_value=object()),
+            patch("core.show_git.show_git_checkpointing_active", return_value=True),
         ):
             managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
             (workspace / ".git").mkdir()

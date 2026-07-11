@@ -21,9 +21,10 @@ branch to the existing worktree at each session turn boundary.
   checkpoint paths.
 - Isolate every platform Git invocation from ambient Git environment, global
   configuration, signing, hooks, and automatic GC.
-- Self-heal Avibe-owned state, bound retained history, deny dot-leading asset
-  segments before runtime proxying and static fallback, and publish the
-  native-Git contract only when checkpoint Git is available.
+- Self-heal only provably Avibe-owned or dangling state, bound retained history,
+  keep static dot-path denial strict while preserving Vite dependency assets on
+  the hardened runtime proxy, and publish ownership-gated Git guidance from the
+  running checkpoint service's startup-latched capability state.
 
 ## Validation
 

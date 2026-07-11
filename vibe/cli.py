@@ -793,10 +793,15 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
 
 
 def _show_git_checkpoint_items() -> list[dict]:
-    from core.git_binary import resolve_git
-
     try:
-        available = resolve_git() is not None
+        if runtime.resolve_service_owner_pid(include_starting=False):
+            from core.show_git import show_git_checkpointing_active
+
+            available = show_git_checkpointing_active()
+        else:
+            from core.git_binary import resolve_git
+
+            available = resolve_git() is not None
     except Exception:
         available = False
     if available:

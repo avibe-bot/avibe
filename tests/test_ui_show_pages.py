@@ -551,6 +551,7 @@ def test_public_show_page_does_not_inject_write_runtime_config(monkeypatch, tmp_
 
 def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: True)
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
@@ -570,7 +571,7 @@ def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeyp
 
 def test_private_show_page_recovery_reports_history_unavailable_without_git(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.show_git.resolve_git", lambda: None)
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: False)
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
@@ -587,7 +588,7 @@ def test_private_show_page_recovery_reports_history_unavailable_without_git(monk
 
 def test_private_show_page_recovery_uses_self_managed_history_contract(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.show_git.resolve_git", lambda: object())
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: True)
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     (paths.get_show_pages_dir() / "ses123" / ".git").mkdir()

@@ -1098,14 +1098,20 @@ def render_status(*, detect_extra_processes: bool = True):
     if restart_status:
         status["restart"] = restart_status
     try:
-        from core.git_binary import resolve_git
+        if owner_pid:
+            from core.show_git import show_git_checkpointing_active
 
-        if resolve_git() is None:
-            status["show_git_checkpoints"] = "degraded: Git executable unavailable"
+            checkpointing_available = show_git_checkpointing_active()
         else:
+            from core.git_binary import resolve_git
+
+            checkpointing_available = resolve_git() is not None
+        if checkpointing_available:
             status.pop("show_git_checkpoints", None)
+        else:
+            status["show_git_checkpoints"] = "degraded: Git checkpoint service unavailable"
     except Exception:
-        status["show_git_checkpoints"] = "degraded: Git resolution failed"
+        status["show_git_checkpoints"] = "degraded: Git checkpoint status failed"
     return json.dumps(status, indent=2)
 
 

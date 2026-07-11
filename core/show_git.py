@@ -34,6 +34,8 @@ _MANAGED_POINTER_PARENT = "show-git"
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAIN_ANCHOR_REF = "refs/avibe/checkpoint-main"
 _IM_TURN_STATE_KEY = "_avibe_show_git_checkpoint"
+_CHECKPOINT_STATUS_VERSION = 1
+_checkpoint_service_active: bool | None = None
 _SCRUBBED_GIT_ENV = {
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -85,6 +87,48 @@ class _ActiveTurnCheckpoint:
     started_at: str
 
 
+def _record_checkpoint_service_state(active: bool) -> None:
+    global _checkpoint_service_active
+
+    _checkpoint_service_active = active
+    status_path = paths.get_show_git_runtime_status_path()
+    temporary = status_path.with_name(f".{status_path.name}.{os.getpid()}.tmp")
+    payload = {
+        "version": _CHECKPOINT_STATUS_VERSION,
+        "active": active,
+        "service_pid": os.getpid(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, status_path)
+    except OSError:
+        logger.warning("failed to persist Show Page checkpoint service state", exc_info=True)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def show_git_checkpointing_active() -> bool:
+    """Return the running service's startup-latched checkpoint capability."""
+
+    if _checkpoint_service_active is not None:
+        return _checkpoint_service_active
+    try:
+        payload = json.loads(paths.get_show_git_runtime_status_path().read_text(encoding="utf-8"))
+        if payload.get("version") != _CHECKPOINT_STATUS_VERSION or payload.get("active") is not True:
+            return False
+        service_pid = int(payload.get("service_pid") or 0)
+        from vibe.runtime import resolve_service_owner_pid
+
+        return service_pid > 0 and resolve_service_owner_pid(include_starting=False) == service_pid
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _read_git_pointer(pointer: Path) -> Path | None:
     if pointer.is_symlink() or not pointer.is_file():
         return None
@@ -113,7 +157,7 @@ def _workspace_ownership(workspace: Path, gitdir: Path) -> tuple[bool, bool]:
     expected = gitdir.resolve(strict=False)
     if target == expected:
         return True, False
-    if target.name == gitdir.name and target.parent.name == _MANAGED_POINTER_PARENT:
+    if not target.exists() and target.name == gitdir.name and target.parent.name == _MANAGED_POINTER_PARENT:
         return True, True
     return False, False
 
@@ -135,7 +179,7 @@ def format_agent_contract(
     session_id: str | None = None,
 ) -> str:
     if checkpointing_available is None:
-        checkpointing_available = resolve_git() is not None
+        checkpointing_available = show_git_checkpointing_active()
     if not checkpointing_available:
         lines = SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT
     elif session_id is not None and _workspace_is_self_managed(session_id):
@@ -559,20 +603,28 @@ class ShowGitCheckpointService:
         return isinstance(self.git, ResolvedGit)
 
     def start(self, event_bus: Any = None) -> None:
-        if not self.enabled or self._subscription_id is not None:
+        if self._subscription_id is not None:
+            return
+        _record_checkpoint_service_state(False)
+        if not self.enabled:
             return
         if event_bus is None:
             from core.inbox_events import bus as event_bus
 
         self._bus = event_bus
         self._subscription_id = event_bus.subscribe_callback(self._handle_event)
+        _record_checkpoint_service_state(True)
 
     def stop(self) -> None:
+        global _checkpoint_service_active
+
         if self._bus is not None and self._subscription_id is not None:
             self._bus.unsubscribe(self._subscription_id)
         self._bus = None
         self._subscription_id = None
         self._active_turns.clear()
+        _record_checkpoint_service_state(False)
+        _checkpoint_service_active = None
 
     @staticmethod
     def _im_turn_state(context: Any) -> dict[str, Any] | None:
