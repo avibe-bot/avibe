@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.controller import Controller
 from core.git_binary import ResolvedGit
 from core.inbox_events import InboxEventBus
+from core.message_output import MessageOutput
 from core.show_git import ShowGitCheckpointService
 from modules.im import MessageContext
 
@@ -281,16 +282,27 @@ def test_im_show_checkpoint_lifecycle_spans_real_start_to_terminal_result(monkey
     )
     try:
         controller.update_thread_message_id(context)
+        detached_result = asyncio.run(
+            controller.emit_agent_message(
+                context,
+                "result",
+                "activity finished",
+                output=MessageOutput(completes_turn=False, detached=True),
+            )
+        )
+        assert lifecycle == [("turn.start", {"session_id": "ses_im"})]
         first_result = asyncio.run(controller.emit_agent_message(context, "result", "done"))
         second_result = asyncio.run(controller.emit_agent_message(context, "result", "duplicate"))
     finally:
         checkpoint_bus.unsubscribe(subscription_id)
         checkpoint_service.stop()
 
+    assert detached_result == "result-1"
     assert first_result == "result-1"
     assert second_result == "result-1"
     assert updated_threads == [context]
-    assert len(emitted_messages) == 2
+    assert len(emitted_messages) == 3
+    assert emitted_messages[0]["output"] == MessageOutput(completes_turn=False, detached=True)
     assert context.platform_specific["agent_session_id"] == "ses_im"
     assert linked_messages == [
         {

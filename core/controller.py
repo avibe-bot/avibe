@@ -1280,7 +1280,9 @@ class Controller:
         checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         should_end_im_turn = getattr(checkpoint_service, "should_end_im_turn", None)
         publish_checkpoint_end = bool(
-            should_end_im_turn(self, context, message_type) if callable(should_end_im_turn) else False
+            should_end_im_turn(self, context, message_type, output=output)
+            if callable(should_end_im_turn)
+            else False
         )
         try:
             return await self.message_dispatcher.emit_agent_message(

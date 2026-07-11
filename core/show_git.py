@@ -16,6 +16,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
+from core.message_output import MessageOutput
 
 logger = logging.getLogger(__name__)
 
@@ -700,9 +701,18 @@ class ShowGitCheckpointService:
         context.platform_specific = payload
         self._bus.publish("turn.start", {"session_id": session_id})
 
-    def should_end_im_turn(self, controller: Any, context: Any, message_type: str) -> bool:
+    def should_end_im_turn(
+        self,
+        controller: Any,
+        context: Any,
+        message_type: str,
+        *,
+        output: MessageOutput | None = None,
+    ) -> bool:
         state = self._im_turn_state(context)
         if self._bus is None or message_type != "result" or state is None or state.get("ended"):
+            return False
+        if output is not None and (not output.completes_turn or output.detached):
             return False
         matches = getattr(getattr(controller, "agent_service", None), "emit_matches_runtime_turn", None)
         if not callable(matches):

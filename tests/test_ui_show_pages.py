@@ -674,6 +674,46 @@ def test_private_show_page_proxies_vite_dependency_dot_path(monkeypatch, tmp_pat
     assert manager.calls[0][1] == "/sessions/ses123/app/node_modules/.vite/deps/react.js"
 
 
+def test_private_show_page_proxies_root_vite_dependency_dot_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        body=b"export const react = true",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/.vite/deps/react.js",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export const react = true"
+    assert manager.calls[0][1] == "/sessions/ses123/app/.vite/deps/react.js"
+
+
+def test_private_show_page_denies_sensitive_file_before_runtime_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(body=b"private key")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/config/server.key",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
 def test_private_show_page_proxies_workspace_at_fs_path_below_dot_home(monkeypatch, tmp_path):
     avibe_home = tmp_path / ".avibe"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))

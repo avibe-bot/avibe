@@ -7781,9 +7781,11 @@ def _is_show_runtime_sensitive_file_segment(segment: str) -> bool:
     )
 
 
-def _is_show_page_runtime_denied_dot_path(asset_path: str, *, session_id: str) -> bool:
+def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bool:
     decoded = _decode_show_page_asset_path(asset_path)
     segments = [segment for segment in decoded.split("/") if segment]
+    if any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments):
+        return True
     dot_segments = [index for index, segment in enumerate(segments) if segment.startswith(".")]
     if not dot_segments:
         return False
@@ -7791,17 +7793,13 @@ def _is_show_page_runtime_denied_dot_path(asset_path: str, *, session_id: str) -
         return True
 
     vite_dependency = (
-        len(segments) >= 4
-        and segments[:3] == ["node_modules", ".vite", "deps"]
-        and dot_segments == [1]
+        (len(segments) >= 4 and segments[:3] == ["node_modules", ".vite", "deps"] and dot_segments == [1])
+        or (len(segments) >= 3 and segments[:2] == [".vite", "deps"] and dot_segments == [0])
     )
     if vite_dependency:
-        return any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments[3:])
+        return False
 
     if not decoded.startswith("@fs/"):
-        return True
-    fs_segments = segments[1:]
-    if any(_is_show_runtime_sensitive_file_segment(segment) for segment in fs_segments):
         return True
 
     raw_fs_path = decoded.removeprefix("@fs/")
@@ -7834,7 +7832,10 @@ def _show_page_file_response(root: Path, asset_path: str):
     if not relative:
         relative = "index.html"
     decoded = _decode_show_page_asset_path(relative)
-    if _is_show_page_dot_path(decoded):
+    segments = [segment for segment in decoded.split("/") if segment]
+    if _is_show_page_dot_path(decoded) or any(
+        _is_show_runtime_sensitive_file_segment(segment) for segment in segments
+    ):
         return _show_page_file_not_found_response()
     candidate = (root / decoded).resolve()
     root_resolved = root.resolve()
@@ -8787,7 +8788,7 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "private":
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_dot_path(asset_path, session_id=page.session_id):
+        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
@@ -8858,7 +8859,7 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_dot_path(asset_path, session_id=page.session_id):
+        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method != "GET":
