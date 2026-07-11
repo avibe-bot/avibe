@@ -1124,7 +1124,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        agent._inject_caller_env_config(params, request)
+        with patch("core.git_runtime.prepend_vendored_git_to_path", return_value=False):
+            agent._inject_caller_env_config(params, request)
 
         set_env = params["config"]["shell_environment_policy"]["set"]
         self.assertEqual(set_env["KEEP"], "1")
@@ -1134,6 +1135,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set_env["AVIBE_CALLER_BACKEND"], "codex")
         self.assertEqual(set_env["AVIBE_NATIVE_SESSION_ID"], "thread-parent")
         self.assertTrue(set_env["BASH_ENV"].endswith("/codex-caller-env/ses-parent.sh"))
+        self.assertNotIn("PATH", set_env)
 
     def test_write_caller_env_script_refreshes_reused_thread_run_id(self):
         agent = object.__new__(CodexAgent)
@@ -2612,7 +2614,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         }
         agent._thread_caller_env_configs = {}
         agent._thread_git_path_configs = {
-            "session-1": ("thread-existing", "/gitless/bin")
+            "session-1": ("thread-existing", "/gitless/bin", False)
         }
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -2651,7 +2653,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             agent._thread_git_path_configs["session-1"],
-            ("thread-existing", "/managed/git/bin:/gitless/bin"),
+            ("thread-existing", "/managed/git/bin:/gitless/bin", True),
         )
 
     async def test_refresh_thread_developer_instructions_clears_stale_vendored_path(self):
@@ -2664,7 +2666,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         }
         agent._thread_caller_env_configs = {}
         agent._thread_git_path_configs = {
-            "session-1": ("thread-existing", "/managed/git/bin:/usr/bin")
+            "session-1": ("thread-existing", "/managed/git/bin:/usr/bin", True)
         }
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -2691,7 +2693,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             agent._thread_git_path_configs["session-1"],
-            ("thread-existing", "/usr/bin"),
+            ("thread-existing", "/usr/bin", True),
         )
 
     async def test_refresh_thread_developer_instructions_preserves_resume_model_provider_override(self):

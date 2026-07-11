@@ -91,8 +91,8 @@ class CodexAgent(BaseAgent):
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, AVIBE_* caller env)
         self._thread_caller_env_configs: Dict[str, tuple[str, dict[str, str]]] = {}
-        # base_session_id → (thread_id, effective Git PATH)
-        self._thread_git_path_configs: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
+        self._thread_git_path_configs: Dict[str, tuple[str, str, bool]] = {}
         self._fork_correction_pending_base_sessions: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -782,27 +782,38 @@ class CodexAgent(BaseAgent):
         tmp_path.replace(script_path)
         return script_path
 
-    def _inject_caller_env_config(self, params: Dict[str, Any], request: AgentRequest) -> str:
+    def _inject_caller_env_config(
+        self,
+        params: Dict[str, Any],
+        request: AgentRequest,
+        *,
+        force_path: bool = False,
+    ) -> tuple[str, bool]:
         from core.git_runtime import prepend_vendored_git_to_path
 
         env = self._caller_env_for_request(request)
         config = dict(params.get("config") or {})
         shell_policy = dict(config.get("shell_environment_policy") or {})
         set_env = dict(shell_policy.get("set") or {})
+        had_path = "PATH" in set_env
         if env:
             env_script_path = self._caller_env_script_path(request)
             set_env.update({**env, "BASH_ENV": str(env_script_path)})
-        prepend_vendored_git_to_path(
+        git_path_changed = prepend_vendored_git_to_path(
             set_env,
             base_env=os.environ,
             working_dir=getattr(request, "working_path", None),
         )
         git_path_state = set_env["PATH"] if "PATH" in set_env else os.environ.get("PATH", "")
-        set_env["PATH"] = git_path_state
+        path_managed = had_path or git_path_changed or force_path
+        if force_path:
+            set_env["PATH"] = git_path_state
+        if not env and not path_managed:
+            return git_path_state, False
         shell_policy["set"] = set_env
         config["shell_environment_policy"] = shell_policy
         params["config"] = config
-        return git_path_state
+        return git_path_state, path_managed
 
     def _git_path_state_for_request(self, request: AgentRequest) -> str:
         from core.git_runtime import prepend_vendored_git_to_path
@@ -830,7 +841,7 @@ class CodexAgent(BaseAgent):
         developer_instructions = self._build_thread_developer_instructions(request)
         if developer_instructions:
             params["developerInstructions"] = developer_instructions
-        git_path_state = self._inject_caller_env_config(params, request)
+        git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
 
         resp = await transport.send_request("thread/start", params)
         # thread/start returns Thread directly OR may nest under "thread"
@@ -851,7 +862,12 @@ class CodexAgent(BaseAgent):
             thread_id,
             self._caller_env_for_request(request),
         )
-        self._remember_thread_git_path_config(request.base_session_id, thread_id, git_path_state)
+        self._remember_thread_git_path_config(
+            request.base_session_id,
+            thread_id,
+            git_path_state,
+            git_path_managed,
+        )
         return thread_id
 
     async def _fork_thread(
@@ -875,7 +891,7 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = developer_instructions
         if effective_model:
             params["model"] = effective_model
-        git_path_state = self._inject_caller_env_config(params, request)
+        git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
@@ -902,7 +918,12 @@ class CodexAgent(BaseAgent):
             thread_id,
             self._caller_env_for_request(request),
         )
-        self._remember_thread_git_path_config(request.base_session_id, thread_id, git_path_state)
+        self._remember_thread_git_path_config(
+            request.base_session_id,
+            thread_id,
+            git_path_state,
+            git_path_managed,
+        )
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
 
@@ -1036,7 +1057,10 @@ class CodexAgent(BaseAgent):
                     "threadId": persisted,
                     "developerInstructions": self._build_thread_developer_instructions(request),
                 }
-                git_path_state = self._inject_caller_env_config(resume_params, request)
+                git_path_state, git_path_managed = self._inject_caller_env_config(
+                    resume_params,
+                    request,
+                )
                 model_provider = await self._resolve_resume_model_provider_override(transport, request, persisted)
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
@@ -1086,6 +1110,7 @@ class CodexAgent(BaseAgent):
                 request.base_session_id,
                 thread_id,
                 git_path_state,
+                git_path_managed,
             )
             logger.info("Resumed Codex thread %s for session %s", thread_id, request.base_session_id)
             return thread_id
@@ -1257,7 +1282,15 @@ class CodexAgent(BaseAgent):
         cached = self._thread_developer_instructions.get(request.base_session_id)
         cached_caller_env = self._thread_caller_env_configs.get(request.base_session_id)
         cached_git_path = self._thread_git_path_configs.get(request.base_session_id)
-        git_path_changed = cached_git_path != (thread_id, git_path_state)
+        git_path_changed = cached_git_path is None or cached_git_path[:2] != (
+            thread_id,
+            git_path_state,
+        )
+        git_path_managed = bool(
+            cached_git_path
+            and cached_git_path[0] == thread_id
+            and cached_git_path[2]
+        )
         if not developer_instructions and not caller_env and not git_path_changed:
             return
         if cached == (thread_id, developer_instructions) and (
@@ -1271,7 +1304,11 @@ class CodexAgent(BaseAgent):
         if cached != (thread_id, developer_instructions):
             resume_params["developerInstructions"] = developer_instructions
         if caller_env or git_path_changed:
-            git_path_state = self._inject_caller_env_config(resume_params, request)
+            git_path_state, git_path_managed = self._inject_caller_env_config(
+                resume_params,
+                request,
+                force_path=git_path_managed,
+            )
         model_provider = await self._resolve_resume_model_provider_override(transport, request, thread_id)
         if model_provider:
             resume_params["modelProvider"] = model_provider
@@ -1286,7 +1323,12 @@ class CodexAgent(BaseAgent):
             developer_instructions,
         )
         self._remember_thread_caller_env_config(request.base_session_id, thread_id, caller_env)
-        self._remember_thread_git_path_config(request.base_session_id, thread_id, git_path_state)
+        self._remember_thread_git_path_config(
+            request.base_session_id,
+            thread_id,
+            git_path_state,
+            git_path_managed,
+        )
 
     def _remember_thread_developer_instructions(
         self,
@@ -1317,10 +1359,15 @@ class CodexAgent(BaseAgent):
         base_session_id: str,
         thread_id: str,
         git_path_state: str,
+        path_managed: bool,
     ) -> None:
         if not hasattr(self, "_thread_git_path_configs"):
             self._thread_git_path_configs = {}
-        self._thread_git_path_configs[base_session_id] = (thread_id, git_path_state)
+        self._thread_git_path_configs[base_session_id] = (
+            thread_id,
+            git_path_state,
+            path_managed,
+        )
 
     def _clear_thread_developer_instructions(self, base_session_id: str) -> None:
         if hasattr(self, "_thread_developer_instructions"):
