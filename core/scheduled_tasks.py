@@ -1635,6 +1635,15 @@ class ScheduledTaskService:
             registry.ack_completed_output(activity)
             return
 
+        if target.suppress_delivery:
+            logger.info(
+                "Recovered Activity %s targets a no-delivery Session; settling without output",
+                getattr(activity, "id", ""),
+            )
+            self._settle_activity_without_output(activity)
+            registry.ack_completed_output(activity)
+            return
+
         context = await self._build_context(
             target.session_key,
             execution_id=f"activity:{getattr(activity, 'backend', '')}:{getattr(activity, 'id', '')}",

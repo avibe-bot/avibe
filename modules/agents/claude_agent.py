@@ -810,21 +810,14 @@ class ClaudeAgent(BaseAgent):
                                 result_text = self._detached_assistant_text.get(composite_key)
                             self._detached_assistant_text.pop(composite_key, None)
                             try:
-                                message_id = await self.emit_result_message(
+                                await self._emit_activity_result(
                                     context,
+                                    detached_activity,
                                     result_text,
+                                    detached=True,
+                                    completes_turn=False,
                                     subtype=getattr(message, "subtype", "") or "",
                                     duration_ms=getattr(message, "duration_ms", 0),
-                                    parse_mode="markdown",
-                                    output=self._activity_message_output(
-                                        detached_activity,
-                                        detached=True,
-                                        completes_turn=False,
-                                    ),
-                                )
-                                self._require_activity_delivery(
-                                    detached_activity,
-                                    message_id,
                                 )
                             except Exception:
                                 registry = self._activity_registry()
@@ -900,29 +893,44 @@ class ClaudeAgent(BaseAgent):
 
                         # A terminal result settles the turn. The pending request
                         # was already popped above, so the idle transition must run
-                        # even if emitting the result or backfilling the title
-                        # raises — otherwise the inner ``except … continue`` below
+                        # even if emitting the result raises — otherwise the inner
+                        # ``except … continue`` below
                         # would swallow the error, skip the mark-idle, and leave the
                         # session pinned ``active`` (exempt from idle eviction until
                         # the next service restart). Run it in a ``finally``.
                         emit_failed = False
                         try:
-                            message_id = await self.emit_result_message(
-                                context,
-                                result_text,
-                                subtype=getattr(message, "subtype", "") or "",
-                                duration_ms=getattr(message, "duration_ms", 0),
-                                parse_mode="markdown",
-                                request=pending_request,
-                            )
                             if output_activity is not None:
-                                self._require_activity_delivery(
+                                await self._emit_activity_result(
+                                    context,
                                     output_activity,
-                                    message_id,
+                                    result_text,
+                                    detached=False,
+                                    completes_turn=True,
+                                    subtype=getattr(message, "subtype", "") or "",
+                                    duration_ms=getattr(message, "duration_ms", 0),
+                                    request=pending_request,
                                 )
                                 registry = self._activity_registry()
                                 if registry is not None:
                                     registry.ack_completed_output(output_activity)
+                            else:
+                                await self.emit_result_message(
+                                    context,
+                                    result_text,
+                                    subtype=getattr(message, "subtype", "") or "",
+                                    duration_ms=getattr(message, "duration_ms", 0),
+                                    parse_mode="markdown",
+                                    request=pending_request,
+                                )
+                        except Exception:
+                            emit_failed = True
+                            if output_activity is not None:
+                                registry = self._activity_registry()
+                                if registry is not None:
+                                    registry.requeue_completed_output(output_activity)
+                            raise
+                        else:
                             native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
                                 context,
                                 self.name,
@@ -931,14 +939,16 @@ class ClaudeAgent(BaseAgent):
                                 self.name,
                             )
                             if pending_request is not None and native_session_id:
-                                self._maybe_backfill_session_title(pending_request, native_session_id)
-                        except Exception:
-                            emit_failed = True
-                            if output_activity is not None:
-                                registry = self._activity_registry()
-                                if registry is not None:
-                                    registry.requeue_completed_output(output_activity)
-                            raise
+                                try:
+                                    self._maybe_backfill_session_title(
+                                        pending_request,
+                                        native_session_id,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Claude result delivered but session title backfill failed",
+                                        exc_info=True,
+                                    )
                         finally:
                             # Settle the turn regardless of an emit/backfill
                             # failure: clear the loading reaction and the stale
@@ -1272,10 +1282,13 @@ class ClaudeAgent(BaseAgent):
 
     def _requeue_request_activity(self, request: AgentRequest | None) -> None:
         activity = getattr(request, "output_activity", None)
+        if activity is None or request is None:
+            return
         registry = self._activity_registry()
-        if activity is not None and registry is not None:
+        if registry is not None:
             registry.requeue_completed_output(activity)
-            request.output_activity = None
+        request.output_activity = None
+        request.output = terminal_turn_output()
 
     def _activity_output_pending(self, composite_key: str) -> bool:
         registry = self._activity_registry()
@@ -1535,6 +1548,46 @@ class ClaudeAgent(BaseAgent):
                 f"Claude Activity output {activity.id} was not persisted or delivered"
             )
 
+    async def _emit_activity_result(
+        self,
+        context: MessageContext,
+        activity: SessionActivity,
+        text: str | None,
+        *,
+        detached: bool,
+        completes_turn: bool,
+        subtype: str = "success",
+        duration_ms: int = 0,
+        request: AgentRequest | None = None,
+    ) -> None:
+        """Apply the Activity's explicit visible-or-silent output policy."""
+
+        output = self._activity_message_output(
+            activity,
+            detached=detached,
+            completes_turn=completes_turn,
+        )
+        visible_text = str(text or "")
+        if not visible_text.strip():
+            await self.controller.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=(subtype or "").startswith("error"),
+                output=output,
+            )
+            return
+        message_id = await self.emit_result_message(
+            context,
+            visible_text,
+            subtype=subtype,
+            duration_ms=duration_ms,
+            parse_mode="markdown",
+            request=request,
+            output=output,
+        )
+        self._require_activity_delivery(activity, message_id)
+
     @staticmethod
     def _unsolicited_message_output(message) -> MessageOutput:
         native_id = str(
@@ -1600,17 +1653,13 @@ class ClaudeAgent(BaseAgent):
         if not text:
             text = str(activity.metadata.get("summary") or "").strip()
         try:
-            message_id = await self.emit_result_message(
+            await self._emit_activity_result(
                 context,
+                activity,
                 text,
-                parse_mode="markdown",
-                output=self._activity_message_output(
-                    activity,
-                    detached=True,
-                    completes_turn=False,
-                ),
+                detached=True,
+                completes_turn=False,
             )
-            self._require_activity_delivery(activity, message_id)
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
@@ -1666,18 +1715,14 @@ class ClaudeAgent(BaseAgent):
                 matched_request = self._pop_pending_request(composite_key)
                 self._adopt_pending_turn_token(context, matched_request)
                 try:
-                    message_id = await self.emit_result_message(
+                    await self._emit_activity_result(
                         context,
+                        activity,
                         result_text,
-                        parse_mode="markdown",
+                        detached=False,
+                        completes_turn=True,
                         request=matched_request,
-                        output=self._activity_message_output(
-                            activity,
-                            detached=False,
-                            completes_turn=True,
-                        ),
                     )
-                    self._require_activity_delivery(activity, message_id)
                 except Exception:
                     registry.requeue_completed_output(activity)
                     raise
@@ -1696,17 +1741,13 @@ class ClaudeAgent(BaseAgent):
                 continue
 
             try:
-                message_id = await self.emit_result_message(
+                await self._emit_activity_result(
                     context,
+                    activity,
                     result_text,
-                    parse_mode="markdown",
-                    output=self._activity_message_output(
-                        activity,
-                        detached=True,
-                        completes_turn=False,
-                    ),
+                    detached=True,
+                    completes_turn=False,
                 )
-                self._require_activity_delivery(activity, message_id)
             except Exception:
                 registry.requeue_completed_output(activity)
                 raise

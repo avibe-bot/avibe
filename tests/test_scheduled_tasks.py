@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -2419,6 +2420,71 @@ def test_restart_delivers_persisted_activity_summary_and_settles_run_once(
     assert emitted == [("Recovered task result", True, False)]
 
 
+def test_restart_no_delivery_activity_settles_real_run_without_emit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        metadata={"no_delivery": True},
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    first_registry = SessionActivityRegistry(activity_store)
+    first_registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id=session_id,
+        activity_id="task-private",
+        kind="background_task",
+        run_id=request.id,
+    )
+    first_registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-private",
+        status="completed",
+        metadata={"summary": "Private task result"},
+        expects_output=True,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+    ) is True
+
+    recovered_registry = SessionActivityRegistry(activity_store)
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    controller.agent_service = SimpleNamespace(activities=recovered_registry)
+    controller.emit_agent_message = AsyncMock()
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert terminal["status"] == "succeeded"
+    assert terminal["result_text"] in {None, ""}
+    assert not terminal["result_payload"].get("outputs")
+    controller.emit_agent_message.assert_not_awaited()
+    assert activity_store.list_activities() == []
+
+
 def test_restart_settles_terminal_activity_without_inventing_visible_text(
     tmp_path: Path,
     monkeypatch,
@@ -3661,7 +3727,12 @@ def _avibe_controller_double(*, gate, handle_scheduled_message):
     )
 
 
-def _make_avibe_session(monkeypatch, tmp_path) -> str:
+def _make_avibe_session(
+    monkeypatch,
+    tmp_path,
+    *,
+    metadata: dict | None = None,
+) -> str:
     """Create a real avibe workbench session so ``resolve_session_id_target``
     resolves it to ``platform='avibe'`` (the gate trigger)."""
     from core.services import sessions as sessions_service
@@ -3696,7 +3767,11 @@ def _make_avibe_session(monkeypatch, tmp_path) -> str:
             )
         )
         session = sessions_service.create_session(
-            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+            metadata=metadata,
         )
     return session["id"]
 

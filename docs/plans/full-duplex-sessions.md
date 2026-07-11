@@ -60,8 +60,8 @@ On controller restart:
 - completed output remains pending with its stable producer identity;
 - a stored summary is delivered once as detached Session output, without
   lifecycle authority over any newer Turn;
-- if no summary or valid Session route exists, the Run settles silently and no
-  user-visible text is invented;
+- if no summary or valid Session route exists, or the Session is explicitly
+  no-delivery, the Run settles silently and no user-visible text is invented;
 - every recovered native connection projects as `disconnected` until the backend
   reconnects.
 

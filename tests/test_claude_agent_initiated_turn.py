@@ -22,12 +22,13 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
+from core.message_output import terminal_output_for
 
 
 # Class names mirror the Claude SDK frames so ``_detect_message_type`` (which maps
@@ -455,6 +456,46 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await receiver
 
+    async def test_summaryless_completed_activity_settles_silently(self):
+        agent, service = _build_agent()
+        composite_key = "session-silent-activity:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-silent-activity"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-silent-activity",
+            activity_id="task-silent",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-silent",
+            status="completed",
+            expects_output=True,
+        )
+        agent.emit_result_message = AsyncMock()
+        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
+
+        self.assertFalse(should_retry)
+        agent.emit_result_message.assert_not_awaited()
+        agent.controller.emit_agent_message.assert_awaited_once()
+        silent_call = agent.controller.emit_agent_message.await_args
+        self.assertEqual(silent_call.args[:3], (context, "result", ""))
+        output = silent_call.kwargs["output"]
+        self.assertTrue(output.detached)
+        self.assertFalse(output.completes_turn)
+        self.assertTrue(output.completes_run)
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+
     async def test_timed_flush_keeps_activity_for_a_newer_pending_turn(self):
         agent, service = _build_agent()
         composite_key = "session-deferred-flush:/tmp/work"
@@ -521,6 +562,46 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         claimed = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed.id, "task-690")
+
+    async def test_requeued_request_activity_restores_terminal_turn_policy(self):
+        agent, service = _build_agent()
+        composite_key = "session-requeued-policy:/tmp/work"
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-requeued-policy",
+            activity_id="task-690",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-690",
+            status="completed",
+            expects_output=True,
+        )
+        activity = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(activity)
+        request = SimpleNamespace(
+            output_activity=activity,
+            output=agent._activity_message_output(
+                activity,
+                detached=False,
+                completes_turn=True,
+            ),
+        )
+
+        agent._requeue_request_activity(request)
+
+        self.assertIsNone(request.output_activity)
+        restored = terminal_output_for(request)
+        self.assertTrue(restored.completes_turn)
+        self.assertTrue(restored.settles_run)
+        self.assertIsNone(restored.activity_id)
+        self.assertIsNotNone(
+            service.activities.claim_completed_output("claude", composite_key)
+        )
 
     async def test_requeued_terminal_only_activity_flushes_after_pending_turn(self):
         agent, service = _build_agent()
@@ -761,6 +842,63 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate.token, "USER-TURN")
         self.assertTrue(gate.lock.locked())
         agent.controller.emit_agent_message.assert_not_awaited()
+
+    async def test_title_backfill_failure_does_not_requeue_delivered_activity(self):
+        agent, service = _build_agent()
+        composite_key = "session-title-backfill:/tmp/work"
+        pending_context = SimpleNamespace(
+            platform_specific={"turn_token": "origin-turn"},
+        )
+        pending_request = SimpleNamespace(context=pending_context)
+        agent._pending_requests[composite_key] = [pending_request]
+        receiver_context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "sess-title-backfill",
+                "turn_token": "origin-turn",
+            },
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-title-backfill",
+            activity_id="task-690",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-690",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent._native_session_ids[composite_key] = "claude-native-session"
+        agent._maybe_backfill_session_title = Mock(
+            side_effect=RuntimeError("title store unavailable")
+        )
+
+        await agent._receive_messages(
+            _one_result_client(),
+            "session-title-backfill",
+            "/tmp/work",
+            receiver_context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        agent._maybe_backfill_session_title.assert_called_once_with(
+            pending_request,
+            "claude-native-session",
+        )
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertIsNone(
+            service.activities.claim_completed_output("claude", composite_key)
+        )
 
     async def test_contended_activity_result_does_not_poison_next_user_result(self):
         agent, service = _build_agent()
