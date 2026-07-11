@@ -861,9 +861,10 @@ def _default_app_tsx() -> str:
     # everything under src/pages/ + src/router.tsx are a starting point: the agent
     # can restyle the nav, add pages, or replace the whole thing. The runtime-owned
     # app shell (index.html + src/main.tsx) is never edited to add a page.
-    return """import { ThemeProvider } from "@avibe/show-ui/theme"
+    return """import { useEffect } from "react"
+import { ThemeProvider } from "@avibe/show-ui/theme"
 import { cn } from "@/lib/utils"
-import { Link, RouterView, navItems, useRoutePath } from "./router"
+import { activeLocale, Link, RouterView, navItems, useRoutePath } from "./router"
 
 function Nav() {
   const path = useRoutePath()
@@ -891,6 +892,9 @@ function Nav() {
 }
 
 export default function App() {
+  useEffect(() => {
+    document.documentElement.lang = activeLocale()
+  }, [])
   return (
     <ThemeProvider preset="zinc">
       <div className="min-h-screen bg-background text-foreground">
@@ -929,6 +933,18 @@ def _default_router_tsx() -> str:
     # the app shell needs editing to add a page.
     return """import type { ComponentType, ReactNode } from "react"
 import { useSyncExternalStore } from "react"
+
+// Locale-aware demo copy. The generated demo keeps a zh/en first-run experience
+// (the previous scaffold did too) without pulling in an i18n framework. Language
+// is read once from the browser. Replace or extend this however you localize.
+export function activeLocale(): "en" | "zh" {
+  const lang = (typeof navigator !== "undefined" && navigator.language) || "en"
+  return lang.toLowerCase().startsWith("zh") ? "zh" : "en"
+}
+
+export function t(en: string, zh: string): string {
+  return activeLocale() === "zh" ? zh : en
+}
 
 export type PageMeta = {
   // Label shown in the nav. Falls back to a title-cased path when omitted.
@@ -1080,13 +1096,14 @@ export function RouterView() {
   if (!route) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-card-foreground">
-        <h1 className="text-lg font-semibold">Page not found</h1>
+        <h1 className="text-lg font-semibold">{t("Page not found", "页面不存在")}</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          No route matches <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
+          {t("No route matches", "没有匹配的路由")}{" "}
+          <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
         </p>
         <p className="mt-4 text-sm">
           <a className="font-medium underline underline-offset-4" href="#/">
-            Back to Home
+            {t("Back to Home", "返回首页")}
           </a>
         </p>
       </div>
@@ -1101,12 +1118,12 @@ export function RouterView() {
 def _default_page_home_tsx() -> str:
     # Demo landing page. Generic on purpose: it teaches the "add a file = add a
     # page" pattern without implying a page must map to a topic, feature, or
-    # history. The agent is free to replace or remove it.
+    # history. The agent is free to replace or remove it. Copy is locale-aware.
     return """import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Link } from "../router"
+import { Link, t } from "../router"
 
-export const meta = { title: "Home", order: 0 }
+export const meta = { title: t("Home", "首页"), order: 0 }
 
 const codeClass = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
 
@@ -1114,24 +1131,26 @@ export default function Home() {
   return (
     <div className="space-y-6">
       <div className="space-y-2">
-        <Badge>Starter</Badge>
-        <h1 className="text-2xl font-semibold tracking-tight">A multi-page Show Page</h1>
+        <Badge>{t("Starter", "起始模板")}</Badge>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("A multi-page Show Page", "多页 Show Page")}</h1>
         <p className="text-muted-foreground">
-          This workspace starts as a small multi-page app so routing is ready to use. It is only
-          a starting point — restyle it, extend it, or replace it with whatever structure fits
-          your app: flat pages, sections, or nested routes.
+          {t(
+            "This workspace starts as a small multi-page app so routing is ready to use. It is only a starting point — restyle it, extend it, or replace it with whatever structure fits your app: flat pages, sections, or nested routes.",
+            "这个工作区默认就是一个小型多页应用，路由开箱即用。它只是一个起点——随意改样式、扩展，或换成任何适合你的结构：扁平页面、分区，或嵌套路由。",
+          )}
         </p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Add a page</CardTitle>
-          <CardDescription>Routing is file-based — no config and no app-shell edits.</CardDescription>
+          <CardTitle>{t("Add a page", "添加页面")}</CardTitle>
+          <CardDescription>{t("Routing is file-based — no config and no app-shell edits.", "文件即路由——无需配置，也不用改应用外壳。")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
           <p>
-            Create a file under <code className={codeClass}>src/pages/</code>. Its location becomes
-            the route:
+            {t("Create a file under ", "在 ")}
+            <code className={codeClass}>src/pages/</code>
+            {t(" and its location becomes the route:", " 下新建文件，它的位置就是路由：")}
           </p>
           <ul className="space-y-1">
             <li>
@@ -1142,24 +1161,25 @@ export default function Home() {
             </li>
             <li>
               <code className={codeClass}>src/pages/items/[id].tsx</code> → <code className={codeClass}>#/items/:id</code>
-              {" "}(nested + dynamic)
+              {" "}({t("nested + dynamic", "嵌套 + 动态")})
             </li>
           </ul>
           <p>
-            Export a default component. Add an optional <code className={codeClass}>meta</code> to set
-            its nav label and order.
+            {t("Export a default component. Add an optional ", "默认导出一个组件。可选导出 ")}
+            <code className={codeClass}>meta</code>
+            {t(" to set its nav label and order.", " 来设置导航标题和排序。")}
           </p>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Nested routing</CardTitle>
-          <CardDescription>Folders become nested paths; [param] files capture values.</CardDescription>
+          <CardTitle>{t("Nested routing", "嵌套路由")}</CardTitle>
+          <CardDescription>{t("Folders become nested paths; [param] files capture values.", "文件夹变成嵌套路径；[param] 文件捕获动态值。")}</CardDescription>
         </CardHeader>
         <CardContent>
           <Link to="/items" className="font-medium text-foreground underline underline-offset-4">
-            Open the Items demo →
+            {t("Open the Items demo →", "打开 Items 示例 →")}
           </Link>
         </CardContent>
       </Card>
@@ -1173,24 +1193,25 @@ def _default_page_items_index_tsx() -> str:
     # Demo list page under a folder, so the route is nested (#/items) and links
     # into a dynamic child route (#/items/:id).
     return """import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Link } from "../../router"
+import { Link, t } from "../../router"
 
-export const meta = { title: "Items", order: 1 }
+export const meta = { title: t("Items", "条目"), order: 1 }
 
 const items = [
-  { id: "1", name: "First item", hint: "A demo record" },
-  { id: "2", name: "Second item", hint: "Another demo record" },
-  { id: "3", name: "Third item", hint: "One more demo record" },
+  { id: "1", name: t("First item", "第一个条目"), hint: t("A demo record", "示例数据") },
+  { id: "2", name: t("Second item", "第二个条目"), hint: t("Another demo record", "另一条示例数据") },
+  { id: "3", name: t("Third item", "第三个条目"), hint: t("One more demo record", "再来一条示例数据") },
 ]
 
 export default function Items() {
   return (
     <div className="space-y-6">
       <div className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Items</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("Items", "条目")}</h1>
         <p className="text-muted-foreground">
-          Each item links to a nested route such as <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">#/items/1</code>.
-          Open one, then reload — the deep link loads directly.
+          {t("Each item links to a nested route such as ", "每个条目都链接到一个嵌套路由，比如 ")}
+          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">#/items/1</code>
+          {t(". Open one, then reload — the deep link loads directly.", "。打开其中一个再刷新——深链接会直接加载。")}
         </p>
       </div>
 
@@ -1217,7 +1238,7 @@ def _default_page_item_detail_tsx() -> str:
     # param and is directly deep-linkable / refreshable.
     return """import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Link, type PageProps } from "../../router"
+import { Link, t, type PageProps } from "../../router"
 
 const codeClass = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
 
@@ -1225,21 +1246,24 @@ export default function ItemDetail({ params }: PageProps) {
   return (
     <div className="space-y-6">
       <Link to="/items" className="text-sm text-muted-foreground underline underline-offset-4">
-        ← Back to Items
+        {t("← Back to Items", "← 返回 Items")}
       </Link>
 
       <Card>
         <CardHeader>
-          <Badge>Nested route</Badge>
-          <CardTitle>Item {params.id}</CardTitle>
+          <Badge>{t("Nested route", "嵌套路由")}</Badge>
+          <CardTitle>{t("Item", "条目")} {params.id}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
           <p>
-            This page is <code className={codeClass}>src/pages/items/[id].tsx</code>, matched from the
-            URL. The <code className={codeClass}>id</code> parameter is{" "}
+            {t("This page is ", "这个页面是 ")}
+            <code className={codeClass}>src/pages/items/[id].tsx</code>
+            {t(", matched from the URL. The ", "，根据 URL 匹配。参数 ")}
+            <code className={codeClass}>id</code>
+            {t(" parameter is ", " 的值是 ")}
             <code className={codeClass}>{params.id}</code>.
           </p>
-          <p>Reload the page — this deep link resolves on the client, in private and public modes.</p>
+          <p>{t("Reload the page — this deep link resolves on the client, in private and public modes.", "刷新页面——这个深链接会在客户端解析，私有和公开模式都一样。")}</p>
         </CardContent>
       </Card>
     </div>
