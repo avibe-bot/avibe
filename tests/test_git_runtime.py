@@ -703,6 +703,40 @@ def test_agent_path_injection_shadows_workspace_prefix_before_system_git(
     assert env["PATH"] == f"{vendored.parent}{os.pathsep}{original_path}"
 
 
+def test_agent_path_injection_rejects_workspace_symlink_to_system_bin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_bin = workspace / "bin"
+    workspace_bin.symlink_to("/usr/bin", target_is_directory=True)
+    vendored = tmp_path / "runtime" / "bin" / "git"
+
+    class FakeManager:
+        @staticmethod
+        def resolve_git_path() -> Path:
+            return vendored
+
+    monkeypatch.setattr(
+        git_runtime,
+        "resolve_system_git_path",
+        lambda **kwargs: pytest.fail("workspace symlink must be rejected before Git lookup"),
+    )
+    original_path = f"{workspace_bin}{os.pathsep}/usr/bin"
+    env = {"PATH": original_path}
+
+    changed = git_runtime.prepend_vendored_git_to_path(
+        env,
+        base_env={},
+        working_dir=workspace,
+        manager=FakeManager(),  # type: ignore[arg-type]
+    )
+
+    assert changed is True
+    assert env["PATH"] == f"{vendored.parent}{os.pathsep}{original_path}"
+
+
 def test_agent_path_injection_treats_macos_shim_as_gitless_without_clt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

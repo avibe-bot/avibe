@@ -233,23 +233,36 @@ def _agent_path_has_system_git(
     *,
     working_dir: Path | str | None,
 ) -> bool:
-    workspace = _resolved_path(Path(working_dir)) if working_dir is not None else None
-    if workspace is not None and workspace.parent == workspace:
-        workspace = None
+    lexical_workspace = _absolute_path(Path(working_dir)) if working_dir is not None else None
+    resolved_workspace = _resolved_path(lexical_workspace) if lexical_workspace is not None else None
+    if lexical_workspace is not None and lexical_workspace.parent == lexical_workspace:
+        lexical_workspace = None
+    if resolved_workspace is not None and resolved_workspace.parent == resolved_workspace:
+        resolved_workspace = None
     for raw_entry in search_path.split(os.pathsep):
         entry = Path(raw_entry)
         if not raw_entry or not entry.is_absolute():
             return False
+        lexical_entry = _absolute_path(entry)
+        if lexical_workspace is not None and _path_is_within(lexical_entry, lexical_workspace):
+            return False
         resolved_entry = _resolved_path(entry)
-        if workspace is not None and _path_is_within(resolved_entry, workspace):
+        if resolved_workspace is not None and _path_is_within(resolved_entry, resolved_workspace):
             return False
         candidate = resolve_system_git_path(env={"PATH": raw_entry})
         if candidate is None:
             continue
-        if workspace is not None and _path_is_within(_resolved_path(candidate), workspace):
+        if resolved_workspace is not None and _path_is_within(
+            _resolved_path(candidate),
+            resolved_workspace,
+        ):
             return False
         return True
     return False
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(path))
 
 
 def _resolved_path(path: Path) -> Path:
