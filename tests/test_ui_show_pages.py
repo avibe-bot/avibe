@@ -761,24 +761,20 @@ def test_private_show_page_denies_workspace_dot_path_through_at_fs(monkeypatch, 
 
 def test_private_show_page_proxies_single_slash_at_fs_external_dep(monkeypatch, tmp_path):
     # Real Vite emits `/@fs/<abs>` with a SINGLE slash (e.g. the HMR client's
-    # env.mjs under the shared runtime node_modules). The gate must treat it as an
-    # absolute path; being outside the workspace it defers to the runtime's own
-    # allowlist instead of denying it. Previously `removeprefix("@fs/")` dropped
-    # the leading slash, mis-read it as relative, and denied it — which blanked the
-    # private /show/ surface (react-refresh preamble could not load env.mjs).
+    # env.mjs under the runtime's node_modules). The gate must treat it as an
+    # absolute path and, being outside the workspace, defer to the runtime's own
+    # allowlist. Use a dep under a custom hidden runtime root (an nvm/global-bin
+    # provider), NOT the default `~/.avibe/runtime`, so the gate cannot rely on a
+    # hardcoded root. Previously `removeprefix("@fs/")` dropped the leading slash,
+    # mis-read it as relative, and denied it — which blanked the private /show/
+    # surface (react-refresh preamble could not load env.mjs).
     avibe_home = tmp_path / ".avibe"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
     _save_config(avibe_home)
     _create_show_page("ses123", "private")
     dep_path = (
-        paths.get_runtime_dir()
-        / "show-runtime"
-        / "source"
-        / "node_modules"
-        / "vite"
-        / "dist"
-        / "client"
-        / "env.mjs"
+        tmp_path / ".nvm" / "versions" / "node" / "v20" / "lib" / "node_modules"
+        / "vite" / "dist" / "client" / "env.mjs"
     )
     manager = _FakeShowRuntimeManager(
         body=b"export const context = {}",
@@ -822,27 +818,32 @@ def test_private_show_page_denies_single_slash_at_fs_workspace_dot_path(monkeypa
     assert manager.calls == []
 
 
-def test_private_show_page_denies_at_fs_dot_path_outside_runtime_root(monkeypatch, tmp_path):
-    # An absolute @fs dot path that is neither in the workspace nor under the
-    # shared runtime dependency root (e.g. `~/.ssh`) is denied here, before
-    # proxying — avibe does not defer such paths to the runtime's allowlist.
+def test_private_show_page_proxies_relative_relocated_vite_cache_at_fs(monkeypatch, tmp_path):
+    # The synthetic relative relocated-cache form `@fs/.vite-cache/deps/...` must
+    # stay allowed (proxied). The normalization must NOT force it to an absolute
+    # path (`/.vite-cache/...`) that then looks like an out-of-tree request; it is
+    # recognized as a relocated Vite dep and passed through to the runtime.
     avibe_home = tmp_path / ".avibe"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
     _save_config(avibe_home)
     _create_show_page("ses123", "private")
-    outside_path = tmp_path / ".ssh" / "known_hosts"
-    manager = _FakeShowRuntimeManager(body=b"secret")
+    manager = _FakeShowRuntimeManager(
+        body=b"export const react = true",
+        extra_headers={"content-type": "text/javascript"},
+    )
     set_show_runtime_manager_for_tests(manager)
     try:
         response = app.test_client().get(
-            f"/show/ses123/@fs{outside_path.as_posix()}",
+            "/show/ses123/@fs/.vite-cache/deps/react.js",
             base_url="http://127.0.0.1:5123",
         )
     finally:
         set_show_runtime_manager_for_tests(None)
 
-    assert response.status_code == 404
-    assert manager.calls == []
+    assert response.status_code == 200
+    assert response.content == b"export const react = true"
+    assert manager.calls
+    assert manager.calls[0][1].endswith("/@fs/.vite-cache/deps/react.js")
 
 
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):

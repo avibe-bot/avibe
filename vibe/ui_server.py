@@ -7875,16 +7875,23 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bo
         return True
 
     # Recover the absolute filesystem path from Vite's `/@fs/<abs>` convention,
-    # mirroring Vite's own fsPathFromId. This route strips the URL's single
+    # mirroring Vite's own fsPathFromId. This route stripped the URL's single
     # leading slash, so a POSIX request arrives as `@fs/home/...` (restore the
-    # slash); a double-slash spelling `@fs//home/...` and a Windows drive letter
-    # `@fs/C:/...` already carry an absolute path, so leave those intact —
-    # prepending a slash to `C:/...` would corrupt the Windows path. Parsing with
-    # `removeprefix("@fs/")` alone dropped the single POSIX slash and mis-read a
-    # real request as relative, denying legitimate external deps (notably the Vite
-    # HMR client's `env.mjs`) so nothing mounted on the private `/show/` surface.
+    # slash); `@fs//home/...` (double slash) and `@fs/C:/...` (Windows drive)
+    # already carry an absolute path, so leave those intact — prepending a slash
+    # to `C:/...` would corrupt the Windows path. Leave the synthetic relative
+    # relocated-cache form (e.g. `@fs/.vite-cache/deps/...`) relative so the
+    # allowance below handles it. Parsing with `removeprefix("@fs/")` alone
+    # dropped the single POSIX slash and mis-read a real request as relative,
+    # denying legitimate external deps (notably the Vite HMR client's `env.mjs`)
+    # so nothing mounted on the private `/show/` surface.
     fs_remainder = decoded.removeprefix("@fs/")
-    if fs_remainder and not fs_remainder.startswith("/") and not re.match(r"^[A-Za-z]:", fs_remainder):
+    if (
+        fs_remainder
+        and not fs_remainder.startswith("/")
+        and not re.match(r"^[A-Za-z]:", fs_remainder)
+        and not _is_relocated_vite_dep_path(decoded)
+    ):
         fs_remainder = "/" + fs_remainder
     fs_path = Path(fs_remainder)
     if not fs_path.is_absolute():
@@ -7897,16 +7904,14 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bo
     try:
         workspace_relative = target.relative_to(workspace)
     except ValueError:
-        # Outside the workspace: allow ONLY the shared runtime dependency root.
-        # The Vite HMR client `env.mjs`, the vendor bundle, and optimized deps all
-        # live below `~/.avibe/runtime`; the Show Runtime enforces its own
-        # allowlist and sensitive-file denial there. Anything else outside the
-        # workspace (a stray dot path, `/etc`, ...) is denied here before proxying.
-        runtime_root = paths.get_runtime_dir().resolve(strict=False)
-        try:
-            target.relative_to(runtime_root)
-        except ValueError:
-            return True
+        # Outside the workspace: defer to the Show Runtime, which owns the
+        # authoritative fs allowlist for its dependency/cache roots — the default
+        # `~/.avibe/runtime`, a custom `VIBE_SHOW_RUNTIME_BIN` provider (e.g. an
+        # nvm/global install), per-session extras — and still denies sensitive
+        # filenames and non-allowlisted paths there. avibe cannot enumerate those
+        # roots without breaking supported providers, so here it enforces only what
+        # it can decide authoritatively: the sensitive-filename check above and the
+        # workspace-internal dot-path check below.
         return False
     return any(part.startswith(".") for part in workspace_relative.parts)
 
