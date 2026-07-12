@@ -1272,7 +1272,9 @@ export default function ItemDetail({ params }: PageProps) {
 
       <Card>
         <CardHeader>
-          <Badge>{t("Nested route", "嵌套路由")}</Badge>
+          {/* w-fit: CardHeader is a flex column (align-items: stretch), which
+              blockifies an inline-flex Badge and stretches it to full width. */}
+          <Badge className="w-fit">{t("Nested route", "嵌套路由")}</Badge>
           <CardTitle>{t("Item", "条目")} {params.id}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">

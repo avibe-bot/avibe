@@ -767,8 +767,12 @@ def test_fresh_workspace_scaffolds_multipage_demo(monkeypatch, tmp_path):
     assert (page_dir / "src" / "pages" / "items" / "index.tsx").exists()
     detail = page_dir / "src" / "pages" / "items" / "[id].tsx"
     assert detail.exists()
+    detail_src = detail.read_text(encoding="utf-8")
     # The dynamic route reads its captured param.
-    assert "params.id" in detail.read_text(encoding="utf-8")
+    assert "params.id" in detail_src
+    # The Badge sits in a flex-column CardHeader; w-fit keeps it from stretching
+    # to full width (see the demo detail page).
+    assert '<Badge className="w-fit">' in detail_src
 
     # App composes the router and its nav; it does not hardcode a route table.
     app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
