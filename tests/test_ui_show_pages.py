@@ -822,6 +822,29 @@ def test_private_show_page_denies_single_slash_at_fs_workspace_dot_path(monkeypa
     assert manager.calls == []
 
 
+def test_private_show_page_denies_at_fs_dot_path_outside_runtime_root(monkeypatch, tmp_path):
+    # An absolute @fs dot path that is neither in the workspace nor under the
+    # shared runtime dependency root (e.g. `~/.ssh`) is denied here, before
+    # proxying — avibe does not defer such paths to the runtime's allowlist.
+    avibe_home = tmp_path / ".avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    _save_config(avibe_home)
+    _create_show_page("ses123", "private")
+    outside_path = tmp_path / ".ssh" / "known_hosts"
+    manager = _FakeShowRuntimeManager(body=b"secret")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/@fs{outside_path.as_posix()}",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

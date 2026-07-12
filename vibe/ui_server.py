@@ -7874,23 +7874,39 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bo
     if not decoded.startswith("@fs/"):
         return True
 
-    # Vite's `/@fs/<abs>` convention: everything after `@fs` is the absolute
-    # filesystem path. This route strips the URL's leading slash, so a real Vite
-    # request arrives as `@fs/home/...` (one slash) while some callers/tests spell
-    # it `@fs//home/...` (two). Parsing with `removeprefix("@fs/")` dropped the
-    # single leading slash and mis-read a real request as a relative path, which
-    # denied legitimate external deps — notably the Vite HMR client's `env.mjs`
-    # under the shared runtime `node_modules`, so nothing mounted on the private
-    # `/show/` surface. Normalize both spellings to the absolute path.
-    raw_fs_path = "/" + decoded[len("@fs"):].lstrip("/")
-    target = Path(raw_fs_path).resolve(strict=False)
+    # Recover the absolute filesystem path from Vite's `/@fs/<abs>` convention,
+    # mirroring Vite's own fsPathFromId. This route strips the URL's single
+    # leading slash, so a POSIX request arrives as `@fs/home/...` (restore the
+    # slash); a double-slash spelling `@fs//home/...` and a Windows drive letter
+    # `@fs/C:/...` already carry an absolute path, so leave those intact —
+    # prepending a slash to `C:/...` would corrupt the Windows path. Parsing with
+    # `removeprefix("@fs/")` alone dropped the single POSIX slash and mis-read a
+    # real request as relative, denying legitimate external deps (notably the Vite
+    # HMR client's `env.mjs`) so nothing mounted on the private `/show/` surface.
+    fs_remainder = decoded.removeprefix("@fs/")
+    if fs_remainder and not fs_remainder.startswith("/") and not re.match(r"^[A-Za-z]:", fs_remainder):
+        fs_remainder = "/" + fs_remainder
+    fs_path = Path(fs_remainder)
+    if not fs_path.is_absolute():
+        # A synthetic/relative @fs form (prewarming/tests). Allow only relocated
+        # Vite cache deps; otherwise deny so a hidden path can't be proxied here.
+        return not _is_relocated_vite_dep_path(decoded)
+
+    target = fs_path.resolve(strict=False)
     workspace = paths.get_show_page_dir(session_id).resolve(strict=False)
     try:
         workspace_relative = target.relative_to(workspace)
     except ValueError:
-        # Outside the workspace (e.g. the shared runtime install below ~/.avibe).
-        # The Show Runtime owns its own allowlist and still denies sensitive
-        # filenames; only workspace-relative dot paths are private here.
+        # Outside the workspace: allow ONLY the shared runtime dependency root.
+        # The Vite HMR client `env.mjs`, the vendor bundle, and optimized deps all
+        # live below `~/.avibe/runtime`; the Show Runtime enforces its own
+        # allowlist and sensitive-file denial there. Anything else outside the
+        # workspace (a stray dot path, `/etc`, ...) is denied here before proxying.
+        runtime_root = paths.get_runtime_dir().resolve(strict=False)
+        try:
+            target.relative_to(runtime_root)
+        except ValueError:
+            return True
         return False
     return any(part.startswith(".") for part in workspace_relative.parts)
 
