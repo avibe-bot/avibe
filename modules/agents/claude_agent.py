@@ -5,6 +5,7 @@ import uuid
 from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
+from core.backend_failure import backend_failure_notification_output, emit_backend_failure
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import SessionActivity, activity_completion_output
@@ -54,6 +55,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message: dict[str, str] = {}
         self._native_session_ids: dict[str, str] = {}
         self._suppressed_synthetic_results: set[str] = set()
+        self._suppressed_synthetic_error_text: dict[str, str] = {}
         self._suppress_receiver_runtime_release: set[str] = set()
         # Store reaction info per runtime session for cleanup after terminal
         # result. Under the runtime turn gate there is normally one active entry;
@@ -172,38 +174,48 @@ class ClaudeAgent(BaseAgent):
             self._mark_session_idle_if_no_pending_requests(runtime_session_key)
             await self._remove_ack_reaction(request)
             error_notify = self._format_error_notify(e)
-            handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
-                context,
-                "claude",
-                error_notify,
-            )
-            if not handled:
-                await self.session_handler.handle_session_error(runtime_session_key, context, e)
-                # ``handle_session_error`` sends through the IM client, which doesn't
-                # write to ``messages``, and the web Chat renders only durable
-                # ``message.new`` rows — so persist a terminal notify or the avibe
-                # user's prompt stops with no explanation (Codex P2). The HANDLED
-                # (auth) branch instead persists the full recovery text centrally in
-                # ``maybe_emit_auth_recovery_message``.
-                try:
-                    from core.message_mirror import persist_agent_message
-
-                    persist_agent_message(context, "notify", error_notify)
-                except Exception:
-                    logger.debug("claude: failed to persist terminal error row", exc_info=True)
-            # Synchronous failure (query/setup raised), no async receiver result
-            # coming: settle the turn through the OUTBOUND status chokepoint. An
-            # empty terminal error result turns the dot red AND releases the
-            # web-Chat stream waiter (the visible error was sent + persisted
-            # above), instead of waiting out the safety timeout. No-op off-workbench.
             try:
-                await self.controller.emit_agent_message(
+                handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                     context,
-                    "result",
-                    "",
-                    is_error=True,
+                    "claude",
+                    error_notify,
                     output=terminal_output_for(request),
+                    terminal_error=str(e),
                 )
+                if not handled:
+                    await self.session_handler.handle_session_error(runtime_session_key, context, e)
+                    # ``handle_session_error`` sends through the IM client, which doesn't
+                    # write to ``messages``, and the web Chat renders only durable
+                    # ``message.new`` rows. The auth branch persists its recovery text.
+                    try:
+                        from core.message_mirror import persist_agent_message
+
+                        notification = backend_failure_notification_output(
+                            context,
+                            "claude",
+                            request=request,
+                            output=terminal_output_for(request),
+                        )
+                        persist_agent_message(
+                            context,
+                            "notify",
+                            error_notify,
+                            metadata=notification.metadata,
+                            native_message_id=notification.idempotency_key,
+                        )
+                    except Exception:
+                        logger.debug("claude: failed to persist terminal error row", exc_info=True)
+                    # No async receiver result is coming. Auth recovery settles its
+                    # own failure; otherwise do that here without another bubble.
+                    await self.controller.emit_agent_message(
+                        context,
+                        "result",
+                        "",
+                        is_error=True,
+                        level="silent",
+                        output=terminal_output_for(request),
+                        terminal_error=str(e),
+                    )
             finally:
                 self._release_service_runtime_turn(context)
         finally:
@@ -397,6 +409,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message.pop(composite_key, None)
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
+        self._suppressed_synthetic_error_text.pop(composite_key, None)
         if not preserve_pending_request_state:
             self._pending_reactions.pop(composite_key, None)
             pending_requests = self._pending_requests.pop(composite_key, None) or []
@@ -672,7 +685,6 @@ class ClaudeAgent(BaseAgent):
                         if context_tokens:
                             self.controller.note_session_tokens(context, total=context_tokens)
 
-                        auth_failure_assistant = self._is_auth_failure_assistant_message(message)
                         assistant_text = self._extract_text_blocks(message, context)
                         if output_mode == "detached":
                             if assistant_text:
@@ -682,26 +694,15 @@ class ClaudeAgent(BaseAgent):
                             if assistant_text:
                                 self._detached_assistant_text[composite_key] = assistant_text
                             continue
-                        auth_failure_text = assistant_text or "OAuth authentication failed."
-                        if await self._handle_auth_failure_result(
-                            context,
-                            composite_key,
-                            "error" if auth_failure_assistant else "",
-                            auth_failure_text if auth_failure_assistant else assistant_text,
-                        ):
-                            mark_session_idle = getattr(self.session_handler, "mark_session_idle", None)
-                            if callable(mark_session_idle):
-                                mark_session_idle(composite_key)
-                            await self._clear_pending_reactions(composite_key, context)
-                            self._last_assistant_text.pop(composite_key, None)
-                            self._pending_assistant_message.pop(composite_key, None)
-                            return
-                        if await self._handle_synthetic_api_error_message(
+                        failure_disposition = await self._handle_assistant_terminal_failure(
                             context,
                             composite_key,
                             message,
                             assistant_text,
-                        ):
+                        )
+                        if failure_disposition == "auth":
+                            return
+                        if failure_disposition:
                             continue
                         if assistant_text:
                             self._last_assistant_text[composite_key] = assistant_text
@@ -860,20 +861,16 @@ class ClaudeAgent(BaseAgent):
                             if fallback:
                                 result_text = fallback
 
-                        if await self._handle_auth_failure_result(
+                        failure_disposition = await self._handle_terminal_failure_result(
                             context,
                             composite_key,
-                            getattr(message, "subtype", "") or "",
+                            message,
                             result_text,
-                        ):
-                            self._retire_failed_auth_turn(composite_key, context)
-                            mark_session_idle = getattr(self.session_handler, "mark_session_idle", None)
-                            if callable(mark_session_idle):
-                                mark_session_idle(composite_key)
-                            await self._clear_pending_reactions(composite_key, context)
-                            self._last_assistant_text.pop(composite_key, None)
-                            self._pending_assistant_message.pop(composite_key, None)
+                        )
+                        if failure_disposition == "auth":
                             return
+                        if failure_disposition:
+                            continue
 
                         # NOTE: The pending assistant message is intentionally
                         # NOT emitted here.  ResultMessage.result already
@@ -1012,7 +1009,8 @@ class ClaudeAgent(BaseAgent):
             # context BEFORE clearing the FIFO (and before either the auth-recovery or
             # the non-auth emit below), mirroring the in-loop auth-failure paths (Codex P2).
             _pending = self._pending_requests.get(composite_key) or []
-            self._adopt_pending_turn_token(context, _pending[0] if _pending else None)
+            pending_request = _pending[0] if _pending else None
+            self._adopt_pending_turn_token(context, pending_request)
             # Clean up all pending reactions for this session on error —
             # the receiver is dead and won't process any more results.
             await self._clear_pending_reactions(composite_key, context)
@@ -1021,6 +1019,8 @@ class ClaudeAgent(BaseAgent):
                 context,
                 "claude",
                 error_notify,
+                output=terminal_output_for(pending_request),
+                terminal_error=str(e),
             )
             if not handled:
                 await self.session_handler.handle_session_error(composite_key, context, e)
@@ -1031,7 +1031,19 @@ class ClaudeAgent(BaseAgent):
                 try:
                     from core.message_mirror import persist_agent_message
 
-                    persist_agent_message(context, "notify", error_notify)
+                    notification = backend_failure_notification_output(
+                        context,
+                        "claude",
+                        request=pending_request,
+                        output=terminal_output_for(pending_request),
+                    )
+                    persist_agent_message(
+                        context,
+                        "notify",
+                        error_notify,
+                        metadata=notification.metadata,
+                        native_message_id=notification.idempotency_key,
+                    )
                 except Exception:
                     logger.debug("claude: failed to persist terminal receiver-error row", exc_info=True)
                 # A dead receiver is terminal. The HANDLED (auth) branch already
@@ -1046,7 +1058,9 @@ class ClaudeAgent(BaseAgent):
                     "result",
                     "",
                     is_error=True,
-                    output=terminal_turn_output(),
+                    level="silent",
+                    output=terminal_output_for(pending_request),
+                    terminal_error=str(e),
                 )
             self._release_service_runtime_turn(context)
         # NOTE: no `finally` cleanup of pending reactions here.
@@ -1059,6 +1073,7 @@ class ClaudeAgent(BaseAgent):
         # inside the loop.
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
+            self._suppressed_synthetic_error_text.pop(composite_key, None)
             detached_activity = self._detached_activity_outputs.pop(composite_key, None)
             if detached_activity is not None:
                 registry = self._activity_registry()
@@ -1105,58 +1120,126 @@ class ClaudeAgent(BaseAgent):
                 "result",
                 "",
                 is_error=True,
+                level="silent",
                 output=terminal_output_for(pending_request),
+                terminal_error="Claude receiver ended without a terminal result",
             )
         finally:
             self._release_service_runtime_turn(context)
 
-    async def _handle_synthetic_api_error_message(
+    async def _handle_assistant_terminal_failure(
         self,
         context: MessageContext,
         composite_key: str,
         message,
         text: str,
+    ) -> str | None:
+        """Handle a structured AssistantMessage failure and its paired result."""
+
+        diagnostic = self._terminal_backend_failure(message, text)
+        if diagnostic is None:
+            return None
+
+        handled_auth = await self._settle_terminal_backend_failure(
+            context,
+            composite_key,
+            diagnostic,
+        )
+        if handled_auth:
+            return "auth"
+        self._suppressed_synthetic_results.add(composite_key)
+        self._suppressed_synthetic_error_text[composite_key] = diagnostic
+        return "failure"
+
+    async def _handle_terminal_failure_result(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        message,
+        text: str | None,
+    ) -> str | None:
+        diagnostic = self._terminal_backend_failure(message, text)
+        if diagnostic is None:
+            return None
+        handled_auth = await self._settle_terminal_backend_failure(
+            context,
+            composite_key,
+            diagnostic,
+        )
+        return "auth" if handled_auth else "failure"
+
+    async def _settle_terminal_backend_failure(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        diagnostic: str,
     ) -> bool:
-        """Settle Claude Code synthetic API errors without publishing them as chat."""
-
-        if not self._is_synthetic_api_error_message(message, text):
-            return False
-
-        pending_request = self._pop_pending_request(composite_key)
-        self._requeue_request_activity(pending_request)
+        pending_requests = self._pending_requests.get(composite_key) or []
+        pending_request = pending_requests[0] if pending_requests else None
         self._adopt_pending_turn_token(context, pending_request)
         logger.warning(
-            "Claude malformed tool-use synthetic API error for session %s suppressed from user-visible transcript: %s",
+            "Claude terminal backend failure for session %s: %s",
             composite_key,
-            text or "<empty>",
+            diagnostic,
         )
-        await self.controller.emit_agent_message(
+        handled_auth = await emit_backend_failure(
+            self.controller,
             context,
-            "result",
-            "",
-            is_error=True,
-            output=terminal_output_for(pending_request),
+            self.name,
+            diagnostic,
+            display_text=f"❌ Claude error: {diagnostic}",
+            request=pending_request,
         )
-        if pending_request is not None:
-            await self._remove_ack_reaction(pending_request)
+        if handled_auth:
+            self._retire_failed_auth_turn(composite_key, context)
+            await self._cleanup_runtime_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                preserve_pending_request_state=True,
+            )
+            if pending_request is not None:
+                await self._remove_ack_reaction(pending_request)
+            self._discard_pending_reaction(composite_key)
+            await self._clear_pending_reactions(composite_key, context)
+            self._mark_session_idle_if_no_pending_requests(composite_key)
+            return True
+
+        popped_request = self._pop_pending_request(composite_key)
+        self._requeue_request_activity(popped_request)
+        if popped_request is not None:
+            await self._remove_ack_reaction(popped_request)
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
-        self._suppressed_synthetic_results.add(composite_key)
         self._discard_pending_reaction(composite_key)
         self._mark_session_idle_if_no_pending_requests(composite_key)
-        return True
+        return False
 
     def _consume_suppressed_synthetic_result(self, composite_key: str, message, text: Optional[str]) -> bool:
         if composite_key not in self._suppressed_synthetic_results:
             return False
 
-        if not self._is_malformed_tool_call_retry_failure_result(message, text):
+        expected = " ".join(
+            self._suppressed_synthetic_error_text.get(composite_key, "").lower().split()
+        )
+        actual = " ".join((text or "").lower().split())
+        same_failure_text = bool(
+            expected
+            and actual
+            and (expected in actual or actual in expected)
+        )
+        if (
+            self._terminal_backend_failure(message, text) is None
+            and not same_failure_text
+            and not self._is_malformed_tool_call_retry_failure_result(message, text)
+        ):
             self._suppressed_synthetic_results.discard(composite_key)
+            self._suppressed_synthetic_error_text.pop(composite_key, None)
             return False
 
         self._suppressed_synthetic_results.discard(composite_key)
+        self._suppressed_synthetic_error_text.pop(composite_key, None)
         logger.warning(
-            "Claude paired malformed tool-use synthetic ResultMessage for session %s suppressed: %s",
+            "Claude paired terminal ResultMessage for session %s suppressed: %s",
             composite_key,
             text or "<empty>",
         )
@@ -1848,16 +1931,11 @@ class ClaudeAgent(BaseAgent):
             return "activity"
         if composite_key in self._detached_unsolicited_outputs:
             return "detached"
-        # A malformed-tool-use synthetic API error pops the turn's real pending
-        # request and arms ``_suppressed_synthetic_results`` for the PAIRED
-        # ResultMessage, which the result branch then skips (``continue``) with NO
-        # terminal emit. That paired result reaches this hook with an empty FIFO +
-        # free gate, so opening an agent-initiated turn for it would leak the gate /
-        # pending request / active flag until EOF — and the NEXT user message for
-        # this Claude session would block behind the leaked gate (Codex P1). Skip
-        # while a suppressed synthetic result is pending; the set is cleared by
-        # ``_consume_suppressed_synthetic_result`` / cleanup, so real later turns
-        # open normally.
+        # A structured AssistantMessage failure pops the turn's real pending
+        # request and arms ``_suppressed_synthetic_results`` for its paired
+        # ResultMessage. Opening an agent-initiated turn for that duplicate frame
+        # would leak the gate and block the next user message. The marker is cleared
+        # when the paired result is consumed or the receiver exits.
         if composite_key in self._suppressed_synthetic_results:
             return None
         registry = self._activity_registry()
@@ -2205,12 +2283,15 @@ class ClaudeAgent(BaseAgent):
         # active-turn guard would otherwise treat the stale token as a superseded
         # turn and skip the failed-status write for 2nd-or-later Claude auth failures.
         pending = self._pending_requests.get(composite_key) or []
-        self._adopt_pending_turn_token(context, pending[0] if pending else None)
+        pending_request = pending[0] if pending else None
+        self._adopt_pending_turn_token(context, pending_request)
 
         handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
             context,
             "claude",
             f"❌ Claude error: {text}",
+            output=terminal_output_for(pending_request),
+            terminal_error=text,
         )
         if handled:
             await self._cleanup_runtime_session(
@@ -2220,9 +2301,55 @@ class ClaudeAgent(BaseAgent):
             )
         return handled
 
-    def _is_auth_failure_assistant_message(self, message) -> bool:
-        error_kind = (getattr(message, "error", "") or "").strip().lower()
-        return error_kind == "authentication_failed"
+    @staticmethod
+    def _error_value_text(value) -> str:
+        if isinstance(value, dict):
+            for key in ("message", "error", "type", "name"):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    return text
+            return str(value).strip()
+        return str(value or "").strip()
+
+    @classmethod
+    def _terminal_backend_failure(cls, message, text: Optional[str]) -> str | None:
+        """Extract only structured terminal failure evidence from Claude frames."""
+
+        subtype = str(getattr(message, "subtype", "") or "").strip().lower()
+        error_value = getattr(message, "error", None)
+        errors = getattr(message, "errors", None)
+        api_status = getattr(message, "api_error_status", None)
+        structured_failure = bool(
+            getattr(message, "is_error", False)
+            or error_value
+            or bool(errors)
+            or api_status
+            or subtype == "failed"
+            or subtype.startswith("error")
+            or cls._is_synthetic_api_error_message(message, text)
+        )
+        if not structured_failure:
+            return None
+
+        candidates = [
+            str(text or "").strip(),
+            str(getattr(message, "result", "") or "").strip(),
+            cls._error_value_text(error_value),
+        ]
+        error_token = cls._error_value_text(error_value).lower()
+        if not candidates[0] and error_token in {
+            "authentication_error",
+            "authentication_failed",
+        }:
+            candidates.insert(0, "OAuth authentication failed.")
+        if isinstance(errors, (list, tuple)):
+            candidates.extend(cls._error_value_text(item) for item in errors)
+        elif errors:
+            candidates.append(cls._error_value_text(errors))
+        if api_status:
+            candidates.append(f"API error status {api_status}")
+        candidates.append(subtype)
+        return next((candidate for candidate in candidates if candidate), "Claude backend failed")
 
     @staticmethod
     def _is_synthetic_api_error_message(message, text: Optional[str] = None) -> bool:

@@ -312,6 +312,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             "already delivered",
             None,
             is_error=False,
+            terminal_error=None,
             output_semantics=output,
         )
         dispatcher._collapse_status_bubble.assert_awaited_once()
@@ -770,6 +771,26 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
         self.assertEqual(controller.status_calls, [("ses-1", "failed")])
+
+    async def test_silent_backend_failure_collapses_status_as_failed(self):
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                terminal_error="provider unavailable",
+            )
+        dispatcher._collapse_status_bubble.assert_awaited_once_with(
+            context,
+            controller.im_client,
+            reason="failed",
+        )
 
     async def test_notify_does_not_settle_dot(self):
         controller = _AvibeStatusController()

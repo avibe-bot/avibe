@@ -209,7 +209,7 @@ def _build_agent(*, running_calls=None, mark_idle_calls=None, active_calls=None)
     agent._maybe_capture_session_id = lambda *a, **k: None
     agent._consume_suppressed_synthetic_result = lambda *a, **k: False
     agent._handle_auth_failure_result = AsyncMock(return_value=False)
-    agent._handle_synthetic_api_error_message = AsyncMock(return_value=False)
+    agent._handle_assistant_terminal_failure = AsyncMock(return_value=False)
     agent._reserved_native_session_id = lambda *a, **k: None
     agent._adopt_pending_turn_token = lambda *a, **k: None
     agent._get_formatter = lambda context: None

@@ -1312,17 +1312,19 @@ def test_opencode_poll_aborts_disabled_question_toolcall():
     assert emitted[0][1] == "translated:error.opencodeQuestionToolDisabled"
 
 
-def test_opencode_poll_emits_error_result_on_retry_exhaustion():
+def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     # A completed assistant message carrying an error, with retries exhausted
     # (error_retry_limit=0) and the auth-recovery path declining (non-auth error),
-    # is a terminal FAILURE. It must (a) emit an ERROR result so the dot turns red
-    # and (b) return should_emit=False so the caller does NOT then emit the idle
-    # "(No response from OpenCode)" warning that would reset the dot to idle (Codex P2).
+    # is a terminal FAILURE. It emits one visible notification plus one silent
+    # failed settlement, then suppresses the idle "(No response from OpenCode)"
+    # result that would overwrite the terminal state.
     emitted = []
 
     class _AuthSvc:
-        async def maybe_emit_auth_recovery_message(self, context, backend, message):
-            return False  # non-auth error → caller emits the terminal result itself
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
 
     class _Formatter:
         def format_toolcall(self, *args, **kwargs):
@@ -1344,8 +1346,9 @@ def test_opencode_poll_emits_error_result_on_retry_exhaustion():
             is_error=False,
             level="normal",
             output=None,
+            terminal_error=None,
         ):
-            emitted.append((message_type, is_error))
+            emitted.append((message_type, text, is_error, level, terminal_error))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
@@ -1401,11 +1404,12 @@ def test_opencode_poll_emits_error_result_on_retry_exhaustion():
     # should_emit False → caller skips the idle "(No response)" warning that would
     # otherwise reset the dot we just turned red.
     assert should_emit is False
-    assert ("result", True) in emitted
-    assert not any(mtype == "notify" for mtype, _ in emitted)
+    assert [item[0] for item in emitted] == ["notify", "result"]
+    assert emitted[0][1] == "OpenCode error: ProviderError - rate limited"
+    assert emitted[1][1:] == ("", True, "silent", "ProviderError - rate limited")
 
 
-def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_message():
+def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
     emitted = []
 
     class _AuthSvc:
@@ -1515,27 +1519,15 @@ def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_me
     )
 
     assert final_text is None
-    assert should_emit is False
-    assert emitted == [
-        (
-            "notify",
-            "provider:glm/glm-5.2/(Default):AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
-            False,
-            "normal",
-        ),
-        (
-            "result",
-            "provider:glm/glm-5.2/(Default):AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
-            True,
-            "silent",
-        ),
-    ]
+    assert should_emit is True
+    assert emitted == []
 
 
-def test_opencode_restored_poll_preserves_model_details_for_empty_terminal_probe():
+def test_opencode_restored_poll_keeps_empty_completion_successful():
     emitted = []
     removed = []
     diagnostics = []
+    results = []
 
     class _AuthSvc:
         async def maybe_emit_auth_recovery_message(self, context, backend, message):
@@ -1632,8 +1624,8 @@ def test_opencode_restored_poll_preserves_model_details_for_empty_terminal_probe
         def _extract_response_text(self, message):
             return ""
 
-        async def emit_result_message(self, *args, **kwargs):
-            raise AssertionError("empty terminal path should emit failure directly")
+        async def emit_result_message(self, context, text, **kwargs):
+            results.append((text, kwargs))
 
         async def _remove_ack_reaction(self, request):
             return None
@@ -1655,7 +1647,7 @@ def test_opencode_restored_poll_preserves_model_details_for_empty_terminal_probe
     loop = OpenCodePollLoop(_Agent())
     asyncio.run(loop.run_restored_poll_loop(poll))
 
-    assert diagnostics == [("glm", "glm-5.2")]
+    assert diagnostics == []
     assert removed == ["oc-session"]
     assert emitted == [
         (
@@ -1664,19 +1656,11 @@ def test_opencode_restored_poll_preserves_model_details_for_empty_terminal_probe
             False,
             "normal",
         ),
-        (
-            "notify",
-            "provider:glm/glm-5.2/high:Provider API returned HTTP 503: No available accounts",
-            False,
-            "normal",
-        ),
-        (
-            "result",
-            "provider:glm/glm-5.2/high:Provider API returned HTTP 503: No available accounts",
-            True,
-            "silent",
-        ),
     ]
+    assert len(results) == 1
+    assert results[0][0] == "(No response from OpenCode)"
+    assert results[0][1]["subtype"] == "warning"
+    assert isinstance(results[0][1]["started_at"], float)
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

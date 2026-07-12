@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, Optional
 
 from config.v2_config import DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
+from core.backend_failure import emit_backend_failure
 from core.message_context import build_context_session_key
 from core.message_output import terminal_output_for, terminal_turn_output
 from modules.agents.base import AgentRequest
@@ -85,86 +86,6 @@ class OpenCodePollLoop:
 
     def _build_restored_context(self, poll_info):
         return self._build_restored_handle(poll_info).context
-
-    def _empty_terminal_message_text(
-        self,
-        *,
-        model_dict: Optional[Dict[str, str]],
-        reasoning_effort: Optional[str],
-        detail: Optional[str] = None,
-    ) -> str:
-        provider_id = (model_dict or {}).get("providerID") or self._t("common.default")
-        model_id = (model_dict or {}).get("modelID") or self._t("common.default")
-        variant = reasoning_effort or self._t("common.default")
-        if detail:
-            return self._t(
-                "error.opencodeProviderRuntimeError",
-                provider=provider_id,
-                model=model_id,
-                variant=variant,
-                detail=detail,
-            )
-        return self._t(
-            "error.opencodeEmptyResponse",
-            provider=provider_id,
-            model=model_id,
-            variant=variant,
-        )
-
-    async def _empty_terminal_message_detail(
-        self,
-        server: OpenCodeServerManager,
-        session_id: str,
-        model_dict: Optional[Dict[str, str]] = None,
-        *,
-        since: Optional[float] = None,
-    ) -> Optional[str]:
-        try:
-            detail = await server.get_recent_session_error(session_id, since=since)
-            if detail:
-                return detail
-            provider_id = (model_dict or {}).get("providerID")
-            model_id = (model_dict or {}).get("modelID")
-            if provider_id and model_id:
-                return await server.get_provider_api_diagnostic(provider_id, model_id)
-        except Exception as err:
-            logger.debug("Failed to inspect OpenCode logs for %s: %s", session_id, err)
-        return None
-
-    async def _emit_empty_terminal_failure(
-        self,
-        *,
-        context,
-        server: OpenCodeServerManager,
-        session_id: str,
-        model_dict: Optional[Dict[str, str]],
-        reasoning_effort: Optional[str],
-        prompt_started_at: Optional[float] = None,
-    ) -> None:
-        detail = await self._empty_terminal_message_detail(
-            server,
-            session_id,
-            model_dict=model_dict,
-            since=prompt_started_at,
-        )
-        message = self._empty_terminal_message_text(
-            model_dict=model_dict,
-            reasoning_effort=reasoning_effort,
-            detail=detail,
-        )
-        await self._agent.controller.emit_agent_message(
-            context,
-            "notify",
-            message,
-        )
-        await self._agent.controller.emit_agent_message(
-            context,
-            "result",
-            message,
-            is_error=True,
-            level="silent",
-            output=terminal_turn_output(),
-        )
 
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
         handle = self._build_restored_handle(poll_info)
@@ -251,8 +172,6 @@ class OpenCodePollLoop:
         emitted_assistant_messages: set[str] = set()
         poll_interval_seconds = 2.0
         final_text: Optional[str] = None
-        get_started_at = getattr(server, "get_last_prompt_started_at", None)
-        prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -409,23 +328,17 @@ class OpenCodePollLoop:
                                     retry_err,
                                 )
 
-                        message = f"OpenCode error: {error_name} - {error_msg[:500]}"
-                        handled = await self._agent.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                        diagnostic = f"{error_name} - {error_msg[:500]}".strip(" -")
+                        message = f"OpenCode error: {diagnostic}"
+                        await emit_backend_failure(
+                            self._agent.controller,
                             request.context,
                             "opencode",
-                            message,
+                            diagnostic,
+                            display_text=message,
+                            request=request,
+                            failure_id=str(last_id or ""),
                         )
-                        if not handled:
-                            # Retry exhausted on a message error → terminal FAILURE.
-                            # Emit an ERROR result so the outbound chokepoint turns the
-                            # dot red (a bare notify never settles agent_status) (Codex P2).
-                            await self._agent.controller.emit_agent_message(
-                                request.context,
-                                "result",
-                                message,
-                                is_error=True,
-                                output=terminal_output_for(request),
-                            )
                         # Terminal: stop polling AND signal the caller NOT to emit the
                         # "(No response from OpenCode)" warning result — that warning is
                         # idle and would reset the dot we (or the auth-recovery path)
@@ -459,15 +372,7 @@ class OpenCodePollLoop:
                                 (model_dict or {}).get("modelID"),
                                 reasoning_effort,
                             )
-                            await self._emit_empty_terminal_failure(
-                                context=request.context,
-                                server=server,
-                                session_id=session_id,
-                                model_dict=model_dict,
-                                reasoning_effort=reasoning_effort,
-                                prompt_started_at=prompt_started_at,
-                            )
-                            return None, False
+                            break
                         break
 
             await asyncio.sleep(poll_interval_seconds)
@@ -478,7 +383,8 @@ class OpenCodePollLoop:
         """Continue a poll loop that was interrupted by restart."""
 
         session_id = poll_info.opencode_session_id
-        context = self._build_restored_context(poll_info)
+        restored_request = self._build_restored_ack_request(poll_info)
+        context = restored_request.context
 
         await self._agent.controller.emit_agent_message(
             context,
@@ -492,10 +398,6 @@ class OpenCodePollLoop:
         emitted_assistant_messages = set(poll_info.emitted_assistant_messages)
         poll_interval_seconds = 2.0
         final_text: Optional[str] = None
-        get_started_at = getattr(server, "get_last_prompt_started_at", None)
-        prompt_started_at = getattr(poll_info, "prompt_started_at", None) or (
-            get_started_at(session_id) if callable(get_started_at) else None
-        )
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -619,23 +521,15 @@ class OpenCodePollLoop:
                                 error_retry_count += 1
                                 if error_retry_count > error_retry_limit:
                                     message = f"OpenCode error: {error_text}"
-                                    handled = await self._agent.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                                    await emit_backend_failure(
+                                        self._agent.controller,
                                         context,
                                         "opencode",
-                                        message,
+                                        error_text,
+                                        display_text=message,
+                                        request=restored_request,
+                                        failure_id=str(last_info.get("id") or ""),
                                     )
-                                    if not handled:
-                                        # Terminal failure (retry exhausted) on the
-                                        # restored poll path → ERROR result so the dot
-                                        # turns red, not a notify that leaves it
-                                        # running until the safety timeout (Codex P2).
-                                        await self._agent.controller.emit_agent_message(
-                                            context,
-                                            "result",
-                                            message,
-                                            is_error=True,
-                                            output=terminal_turn_output(),
-                                        )
                                     self._agent.sessions.remove_active_poll(session_id)
                                     await self.remove_restored_ack(poll_info)
                                     return
@@ -662,17 +556,7 @@ class OpenCodePollLoop:
                                         "Restored OpenCode session %s completed without text/error",
                                         session_id,
                                     )
-                                    await self._emit_empty_terminal_failure(
-                                        context=context,
-                                        server=server,
-                                        session_id=session_id,
-                                        model_dict=getattr(poll_info, "model_dict", None),
-                                        reasoning_effort=getattr(poll_info, "reasoning_effort", None),
-                                        prompt_started_at=prompt_started_at,
-                                    )
-                                    self._agent.sessions.remove_active_poll(session_id)
-                                    await self.remove_restored_ack(poll_info)
-                                    return
+                                    break
                                 break
 
                 await asyncio.sleep(poll_interval_seconds)
@@ -717,18 +601,12 @@ class OpenCodePollLoop:
             await self.remove_restored_ack(poll_info)
 
             message = f"Restored OpenCode session failed: {error_text}"
-            handled = await self._agent.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+            await emit_backend_failure(
+                self._agent.controller,
                 context,
                 "opencode",
-                message,
+                error_text,
+                display_text=message,
+                request=restored_request,
+                failure_id=session_id,
             )
-            if not handled:
-                # Terminal failure → error RESULT so the outbound chokepoint turns
-                # the dot red (auth-classified errors settle via the recovery path).
-                await self._agent.controller.emit_agent_message(
-                    context,
-                    "result",
-                    message,
-                    is_error=True,
-                    output=terminal_turn_output(),
-                )

@@ -15,6 +15,7 @@ import time
 from typing import Dict, Optional
 
 from core.avibe_cloud import avibe_cloud_url_available
+from core.backend_failure import emit_backend_failure
 from core.message_output import terminal_output_for
 from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
@@ -198,14 +199,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await server.ensure_running()
         except Exception as e:
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
-            # Terminal failure → emit as a RESULT (error): the outbound chokepoint
-            # turns the dot red and releases the SSE waiter. No separate latch.
-            await self.controller.emit_agent_message(
+            await emit_backend_failure(
+                self.controller,
                 request.context,
-                "result",
-                f"Failed to start OpenCode server: {e}",
-                is_error=True,
-                output=terminal_output_for(request),
+                self.name,
+                str(e),
+                display_text=f"Failed to start OpenCode server: {e}",
+                request=request,
             )
             await self._remove_ack_reaction(request)
             return
@@ -219,12 +219,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
             # fork a fresh session and lose context.
-            await self.controller.emit_agent_message(
+            await emit_backend_failure(
+                self.controller,
                 request.context,
-                "result",
-                f"❌ {e}",
-                is_error=True,
-                output=terminal_output_for(request),
+                self.name,
+                str(e),
+                display_text=f"❌ {e}",
+                request=request,
             )
             await self._remove_ack_reaction(request)
             return
@@ -236,26 +237,24 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # (which settles the dot itself); otherwise emit the error result here.
             logger.error(f"OpenCode session acquisition failed: {e}", exc_info=True)
             message = f"OpenCode error: {type(e).__name__}: {e}".strip()
-            handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
-                request.context, "opencode", message
+            await emit_backend_failure(
+                self.controller,
+                request.context,
+                self.name,
+                str(e),
+                display_text=message,
+                request=request,
             )
-            if not handled:
-                await self.controller.emit_agent_message(
-                    request.context,
-                    "result",
-                    message,
-                    is_error=True,
-                    output=terminal_output_for(request),
-                )
             await self._remove_ack_reaction(request)
             return
         if not session_id:
-            await self.controller.emit_agent_message(
+            await emit_backend_failure(
+                self.controller,
                 request.context,
-                "result",
+                self.name,
                 "Failed to obtain OpenCode session ID",
-                is_error=True,
-                output=terminal_output_for(request),
+                display_text="Failed to obtain OpenCode session ID",
+                request=request,
             )
             await self._remove_ack_reaction(request)
             return
@@ -476,25 +475,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 self.sessions.remove_active_poll(session_id)
 
             message = f"OpenCode request failed: {error_text}"
-            handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+            await emit_backend_failure(
+                self.controller,
                 request.context,
-                "opencode",
-                message,
+                self.name,
+                error_text,
+                display_text=message,
+                request=request,
             )
-            if not handled:
-                # Terminal failure → error RESULT so the outbound chokepoint turns
-                # the dot red (auth-classified errors settle via the recovery path).
-                await self.controller.emit_agent_message(
-                    request.context,
-                    "result",
-                    message,
-                    is_error=True,
-                    output=terminal_output_for(request),
-                )
-            # handled == True persists the durable recovery notify centrally in
-            # ``maybe_emit_auth_recovery_message`` (which also latches the turn
-            # failure for the workbench dot — auth AND non-auth); the not-handled
-            # branch persists via ``emit_agent_message`` above.
         finally:
             if run_registered:
                 await server.mark_run_inactive(session_id)

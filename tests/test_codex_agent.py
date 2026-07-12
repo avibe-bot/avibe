@@ -904,15 +904,20 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
         agent._event_handler.clear_pending.assert_not_called()
         agent._remove_ack_reaction.assert_awaited_once_with(request)
-        # The failed interrupt is a terminal failure → emitted as an ERROR result
-        # (the outbound status chokepoint turns the dot red), not a bare notify.
-        agent.controller.emit_agent_message.assert_awaited_once_with(
-            request.context,
-            "result",
-            "❌ Failed to interrupt previous Codex turn: interrupt failed",
-            is_error=True,
-            output=ANY,
+        self.assertEqual(agent.controller.emit_agent_message.await_count, 2)
+        notify_call, terminal_call = agent.controller.emit_agent_message.await_args_list
+        self.assertEqual(
+            notify_call.args[:3],
+            (
+                request.context,
+                "notify",
+                "❌ Failed to interrupt previous Codex turn: interrupt failed",
+            ),
         )
+        self.assertEqual(terminal_call.args[:3], (request.context, "result", ""))
+        self.assertTrue(terminal_call.kwargs["is_error"])
+        self.assertEqual(terminal_call.kwargs["level"], "silent")
+        self.assertEqual(terminal_call.kwargs["terminal_error"], "interrupt failed")
 
     async def test_handle_message_recovers_from_broken_transport_once(self):
         agent = object.__new__(CodexAgent)

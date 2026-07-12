@@ -179,14 +179,19 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             request.context,
             "codex",
             "❌ Codex turn failed: unexpected status 401 Unauthorized:",
-        )
-        agent.controller.emit_agent_message.assert_awaited_once_with(
-            request.context,
-            "result",
-            "❌ Codex turn failed: unexpected status 401 Unauthorized:",
-            is_error=True,
             output=ANY,
+            terminal_error="unexpected status 401 Unauthorized:",
         )
+        self.assertEqual(agent.controller.emit_agent_message.await_count, 2)
+        notify_call, terminal_call = agent.controller.emit_agent_message.await_args_list
+        self.assertEqual(
+            notify_call.args[:3],
+            (request.context, "notify", "❌ Codex turn failed: unexpected status 401 Unauthorized:"),
+        )
+        self.assertEqual(terminal_call.args[:3], (request.context, "result", ""))
+        self.assertTrue(terminal_call.kwargs["is_error"])
+        self.assertEqual(terminal_call.kwargs["level"], "silent")
+        self.assertEqual(terminal_call.kwargs["terminal_error"], "unexpected status 401 Unauthorized:")
 
         await handler._on_turn_completed(
             {
@@ -199,7 +204,7 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             request,
         )
 
-        assert agent.controller.emit_agent_message.await_count == 1
+        assert agent.controller.emit_agent_message.await_count == 2
         agent._remove_ack_reaction.assert_awaited_once_with(request)
 
     async def test_turn_failure_falls_back_to_completion_error_when_no_error_notification_arrives(self):
@@ -223,16 +228,17 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             request.context,
             "codex",
             "❌ Codex turn failed: fallback message",
-        )
-        # Terminal failure → error RESULT (the outbound status chokepoint turns
-        # the dot red), not a bare notify.
-        agent.controller.emit_agent_message.assert_awaited_once_with(
-            request.context,
-            "result",
-            "❌ Codex turn failed: fallback message",
-            is_error=True,
             output=ANY,
+            terminal_error="fallback message",
         )
+        self.assertEqual(agent.controller.emit_agent_message.await_count, 2)
+        notify_call, terminal_call = agent.controller.emit_agent_message.await_args_list
+        self.assertEqual(
+            notify_call.args[:3],
+            (request.context, "notify", "❌ Codex turn failed: fallback message"),
+        )
+        self.assertEqual(terminal_call.args[:3], (request.context, "result", ""))
+        self.assertEqual(terminal_call.kwargs["terminal_error"], "fallback message")
         agent._remove_ack_reaction.assert_awaited_once_with(request)
 
     async def test_unknown_turn_error_is_logged_without_emitting(self):

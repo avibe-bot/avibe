@@ -2200,6 +2200,105 @@ def test_duplicate_terminal_output_does_not_append_result_text_again(
     assert "deferred_terminal_status" not in terminal["result_payload"]
 
 
+def test_failed_run_records_error_and_enqueues_one_terminal_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+    )
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+
+    first = sqlite_store.record_run_output(
+        request.id,
+        output_id="terminal",
+        text="",
+        terminal_status="failed",
+        error="provider unavailable",
+    )
+    duplicate = sqlite_store.record_run_output(
+        request.id,
+        output_id="terminal",
+        text="",
+        terminal_status="failed",
+        error="provider unavailable",
+    )
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original is not None
+    assert first["terminal_transition"] is True
+    assert duplicate["terminal_transition"] is False
+    assert original["status"] == "failed"
+    assert original["error"] == "provider unavailable"
+    assert not original["result_text"]
+    assert original["callback_status"] == "sent"
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    assert [run["message"] for run in callback_runs] == ["Error: provider unavailable"]
+    assert callback_runs[0]["source_actor"] == f"{request.id}:terminal:failed"
+
+
+def test_deferred_failure_preserves_error_through_later_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+
+    assert sqlite_store.defer_run_terminal(
+        request.id,
+        terminal_status="failed",
+        error="provider unavailable",
+    ) is True
+    running = request_store.get_run(request.id)
+    assert running is not None
+    assert running["result_payload"]["deferred_terminal_error"] == "provider unavailable"
+
+    terminal = sqlite_store.record_run_output(
+        request.id,
+        output_id="activity-output",
+        text="background output",
+        terminal_status="succeeded",
+    )
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert terminal["terminal_transition"] is True
+    assert settled["status"] == "failed"
+    assert settled["error"] == "provider unavailable"
+    assert "deferred_terminal_status" not in settled["result_payload"]
+    assert "deferred_terminal_error" not in settled["result_payload"]
+
+
 @pytest.mark.parametrize(
     ("activity_status", "expected_run_status"),
     [

@@ -1128,6 +1128,85 @@ def test_fork_source_state_ignores_notify_as_terminal_output(
         engine.dispose()
 
 
+def test_fork_source_state_treats_backend_failure_notify_anchor_as_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            notify = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="notify",
+                text="Codex backend failed",
+                metadata={"event": "backend_failure", "failure_id": "failure_1"},
+            )
+
+        fork = {"source_session_id": source_id, "source_message_id": notify["id"]}
+        state = fork_source_state(fork)
+
+        assert state.anchor_is_terminal_agent_output is True
+        assert state.has_messages_after_anchor is False
+        assert fork_anchor_is_terminal_agent_output(fork) is True
+    finally:
+        engine.dispose()
+
+
+def test_fork_source_state_treats_backend_failure_notify_after_anchor_as_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            user = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="Do the task",
+            )
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="notify",
+                text="Codex backend failed",
+                metadata={"event": "backend_failure", "failure_id": "failure_1"},
+            )
+
+        state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})
+
+        assert state.latest_after_anchor_author == "agent"
+        assert state.latest_after_anchor_type == "notify"
+        assert state.has_messages_after_anchor is True
+        assert state.has_terminal_agent_output_after_anchor is True
+    finally:
+        engine.dispose()
+
+
 def test_fork_source_state_ignores_operational_rows_after_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

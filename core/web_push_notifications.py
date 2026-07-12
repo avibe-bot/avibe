@@ -10,16 +10,35 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
+from core.backend_failure import is_backend_failure_notification
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
 
 logger = logging.getLogger(__name__)
 
-_NOTIFIABLE_TYPES = {"result", "error"}
+_NOTIFIABLE_TYPES = {"result", "error", "notify"}
 _UNREAD_GATED_TYPES = {"result"}
 WEB_PUSH_NOTIFICATION_DELAY_SECONDS = 3.0
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
+
+
+def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
+    normalized_type = str(message_type or "").strip()
+    return normalized_type in {"result", "error"} or is_backend_failure_notification(
+        normalized_type,
+        metadata,
+    )
+
+
+def _parse_metadata(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[str, Any] | None) -> None:
@@ -36,7 +55,7 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
         return
     if message.get("author") != "agent":
         return
-    if message.get("type") not in _NOTIFIABLE_TYPES:
+    if not _is_notifiable_message(message.get("type"), message.get("metadata")):
         return
     if not message.get("session_id"):
         return
@@ -61,13 +80,17 @@ def _message_still_unread(conn: Any, message_id: str | None) -> bool:
     if not message_id:
         return False
     row = conn.execute(
-        select(messages.c.type, messages.c.read_at)
+        select(messages.c.type, messages.c.read_at, messages.c.metadata_json)
         .where(messages.c.id == message_id)
         .where(messages.c.platform == "avibe")
         .where(messages.c.author == "agent")
         .where(messages.c.type.in_(_NOTIFIABLE_TYPES))
     ).first()
-    return bool(row is not None and (row[0] not in _UNREAD_GATED_TYPES or row[1] is None))
+    return bool(
+        row is not None
+        and _is_notifiable_message(row[0], _parse_metadata(row[2]))
+        and (row[0] not in _UNREAD_GATED_TYPES or row[1] is None)
+    )
 
 
 def _metadata_user_keys(metadata: dict[str, Any]) -> list[str]:
@@ -96,15 +119,24 @@ def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[s
     if not message_id:
         return []
     agent_row = conn.execute(
-        select(messages.c.session_id, messages.c.created_at, messages.c.id)
+        select(
+            messages.c.session_id,
+            messages.c.created_at,
+            messages.c.id,
+            messages.c.type,
+            messages.c.metadata_json,
+        )
         .where(messages.c.id == message_id)
         .where(messages.c.platform == "avibe")
         .where(messages.c.author == "agent")
         .where(messages.c.type.in_(_NOTIFIABLE_TYPES))
     ).first()
-    if not agent_row or not agent_row[0]:
+    if not agent_row or not agent_row[0] or not _is_notifiable_message(
+        agent_row[3],
+        _parse_metadata(agent_row[4]),
+    ):
         return []
-    session_id, created_at, row_id = agent_row
+    session_id, created_at, row_id = agent_row[0], agent_row[1], agent_row[2]
 
     user_rows = conn.execute(
         select(messages.c.metadata_json)

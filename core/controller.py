@@ -1280,6 +1280,7 @@ class Controller:
         status_label: Optional[str] = None,
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
+        terminal_error: Optional[str] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         try:
@@ -1293,6 +1294,7 @@ class Controller:
                 status_label=status_label,
                 result_footer=result_footer,
                 output=output,
+                terminal_error=terminal_error,
             )
         finally:
             manager = getattr(self, "session_turns", None)

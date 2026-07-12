@@ -219,7 +219,9 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             "result",
             "",
             is_error=True,
+            level="silent",
             output=ANY,
+            terminal_error="❌ Codex error: 401 Unauthorized",
         )
 
     async def test_maybe_emit_auth_recovery_message_defers_non_auth_error_to_caller(self):

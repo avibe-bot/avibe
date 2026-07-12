@@ -11,6 +11,7 @@ import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../cont
 import type { SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
+import { isNotifyMessageType, isTerminalAgentMessage } from '../../lib/chatMessageTypes';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -2031,12 +2032,13 @@ const Transcript: React.FC<TranscriptProps> = ({
   // The reply arrives atomically as a persisted ``result`` row (no streaming
   // card), so the thinking bubble shows for the whole gap between send and
   // reply. Hide it the moment the last row is a fresh agent terminal — a
-  // successful ``result`` OR a failed ``error`` both end the turn.
-  const lastIsAgentResult =
-    messages.length > 0 &&
-    messages[messages.length - 1].author === 'agent' &&
-    (messages[messages.length - 1].type === 'result' || messages[messages.length - 1].type === 'error');
-  const showThinking = working && !lastIsAgentResult;
+  // successful ``result``, a legacy ``error``, or a structured backend-failure
+  // ``notify`` all end the visible response. ``working`` itself still settles
+  // only from turn.end or the authoritative turn-state poll, so a late row from
+  // an older Turn cannot clear Stop for a newer one.
+  const lastIsAgentTerminal =
+    messages.length > 0 && isTerminalAgentMessage(messages[messages.length - 1]);
+  const showThinking = working && !lastIsAgentTerminal;
   const empty = messages.length === 0 && !working;
 
   // Capture the topmost (partly) visible row as the restore anchor. Viewport-
@@ -2432,9 +2434,9 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   // Each branch composes this onto its own ``justify-*`` so alignment is kept.
   const rowClass = (extra: string) => clsx('flex w-full', extra, highlighted && 'msg-highlight');
 
-  // A notify row is a turn-terminal marker (agent run that failed/stopped
-  // without a result) — a compact status pill, not an answer.
-  const isNotify = message.type === 'notify';
+  // Runtime notifications and legacy error rows are compact status pills,
+  // not Agent-authored answers.
+  const isNotify = isNotifyMessageType(message.type);
   const isAgent = !isNotify && message.author === 'agent';
   const isSystem = !isNotify && message.author === 'system';
   // A harness-origin row is a user-role prompt the human didn't type (scheduled

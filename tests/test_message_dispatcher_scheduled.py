@@ -194,6 +194,160 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(message_id)
         self.assertEqual(calls, [("run-empty", "", "succeeded")])
 
+    async def test_terminal_failure_records_explicit_run_error_without_result_text(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: False),
+            emit_matches_runtime_turn=lambda _context: True,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-failed",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append((run_id, kwargs))
+
+            def close(self):
+                pass
+
+        with patch.object(
+            message_dispatcher_module,
+            "SQLiteBackgroundTaskStore",
+            return_value=_Store(),
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                output=MessageOutput(completes_turn=True, completes_run=True),
+                terminal_error="provider unavailable",
+            )
+
+        self.assertEqual(len(calls), 1)
+        run_id, payload = calls[0]
+        self.assertEqual(run_id, "run-failed")
+        self.assertEqual(payload["text"], "")
+        self.assertEqual(payload["terminal_status"], "failed")
+        self.assertEqual(payload["error"], "provider unavailable")
+
+    async def test_blocking_activity_defers_terminal_error_with_status(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: True),
+            emit_matches_runtime_turn=lambda _context: True,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-failed",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def defer_run_terminal(self, run_id, **kwargs):
+                calls.append(("defer", run_id, kwargs))
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append(("output", run_id, kwargs))
+
+            def close(self):
+                pass
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                output=MessageOutput(completes_turn=True, completes_run=True),
+                terminal_error="provider unavailable",
+            )
+
+        self.assertEqual(
+            calls[0],
+            (
+                "defer",
+                "run-failed",
+                {"terminal_status": "failed", "error": "provider unavailable"},
+            ),
+        )
+        self.assertEqual(calls[1][0:2], ("output", "run-failed"))
+        self.assertIsNone(calls[1][2]["terminal_status"])
+        self.assertEqual(calls[1][2]["error"], "provider unavailable")
+
+    async def test_notify_output_uses_stable_persistence_identity(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+        persisted_ids = set()
+        persisted = []
+
+        def exists(_context, native_message_id):
+            return native_message_id in persisted_ids
+
+        def persist(_context, message_type, text, **kwargs):
+            native_message_id = kwargs["native_message_id"]
+            persisted_ids.add(native_message_id)
+            persisted.append((message_type, text, kwargs))
+            return {"id": "row-1"}
+
+        output = MessageOutput(
+            idempotency_key="backend-failure:turn-1",
+            metadata={"backend": "codex", "event": "backend_failure"},
+        )
+        with (
+            patch.object(message_dispatcher_module, "agent_message_exists", side_effect=exists),
+            patch.object(message_dispatcher_module, "persist_agent_message", side_effect=persist),
+        ):
+            first = await dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "Codex failed",
+                output=output,
+            )
+            second = await dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "Codex failed",
+                output=output,
+            )
+
+        self.assertEqual(first, "bot-msg-1")
+        self.assertTrue(str(second).startswith("agent-output:codex:"))
+        self.assertEqual(controller.im_client.sent, [("C123", None, "Codex failed")])
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0][0:2], ("notify", "Codex failed"))
+        self.assertEqual(persisted[0][2]["metadata"]["event"], "backend_failure")
+
     async def test_activity_run_settlement_waits_for_successful_delivery(self):
         controller = _StubController()
         controller.im_client = _FailingIMClient()
@@ -552,6 +706,46 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 ("close",),
             ],
         )
+
+    async def test_suppressed_agent_run_failure_records_diagnostic(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-agent",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append((run_id, kwargs))
+
+            def close(self):
+                pass
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private failure",
+                is_error=True,
+                terminal_error="provider unavailable",
+            )
+
+        self.assertEqual(message_id, "suppressed:run-agent")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "run-agent")
+        self.assertEqual(calls[0][1]["terminal_status"], "failed")
+        self.assertEqual(calls[0][1]["error"], "provider unavailable")
 
     async def test_suppressed_coalesced_agent_run_result_marks_each_run_terminal(self):
         controller = _StubController()

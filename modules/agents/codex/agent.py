@@ -16,6 +16,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import terminal_output_for
 from core.services.session_fork import fork_source_state, pending_native_fork
@@ -132,26 +133,26 @@ class CodexAgent(BaseAgent):
         try:
             transport = await self._get_or_create_transport(request.working_path)
         except FileNotFoundError:
-            # Terminal failure → emit as a RESULT (error): the outbound chokepoint
-            # turns the dot red and releases the SSE waiter (no separate latch).
-            await self.controller.emit_agent_message(
+            await emit_backend_failure(
+                self.controller,
                 request.context,
-                "result",
-                "❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
-                is_error=True,
-                output=terminal_output_for(request),
+                self.name,
+                "Codex CLI not found",
+                display_text="❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
+                request=request,
             )
             await self._remove_ack_reaction(request)
             self._event_handler._release_stream_turn(request.context)
             return
         except Exception as e:
             logger.error("Failed to start Codex transport: %s", e, exc_info=True)
-            await self.controller.emit_agent_message(
+            await emit_backend_failure(
+                self.controller,
                 request.context,
-                "result",
-                f"❌ Failed to start Codex CLI: {e}",
-                is_error=True,
-                output=terminal_output_for(request),
+                self.name,
+                str(e),
+                display_text=f"❌ Failed to start Codex CLI: {e}",
+                request=request,
             )
             await self._remove_ack_reaction(request)
             self._event_handler._release_stream_turn(request.context)
@@ -189,12 +190,13 @@ class CodexAgent(BaseAgent):
                         if self._is_recoverable_transport_error(e):
                             raise
                         logger.warning("Failed to interrupt turn %s: %s", active_turn, e)
-                        await self.controller.emit_agent_message(
+                        await emit_backend_failure(
+                            self.controller,
                             request.context,
-                            "result",
-                            f"❌ Failed to interrupt previous Codex turn: {e}",
-                            is_error=True,
-                            output=terminal_output_for(request),
+                            self.name,
+                            str(e),
+                            display_text=f"❌ Failed to interrupt previous Codex turn: {e}",
+                            request=request,
                         )
                         await self._remove_ack_reaction(request)
                         self._event_handler._release_stream_turn(request.context)
@@ -235,24 +237,14 @@ class CodexAgent(BaseAgent):
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 error_text = f"❌ Codex error: {e}"
-                handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                await emit_backend_failure(
+                    self.controller,
                     request.context,
-                    "codex",
-                    error_text,
+                    self.name,
+                    str(e),
+                    display_text=error_text,
+                    request=request,
                 )
-                if not handled:
-                    # Terminal failure → RESULT (error): the outbound chokepoint
-                    # turns the dot red. The auth-recovery branch (handled) emits
-                    # its own terminal error result inside
-                    # ``maybe_emit_auth_recovery_message``, so both paths settle
-                    # the dot via the same outbound — no separate latch.
-                    await self.controller.emit_agent_message(
-                        request.context,
-                        "result",
-                        error_text,
-                        is_error=True,
-                        output=terminal_output_for(request),
-                    )
                 await self._remove_ack_reaction(request)
                 # The turn never started (all retries failed) — release the
                 # web-Chat working/Stop state instead of leaving it until the

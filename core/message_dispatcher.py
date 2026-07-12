@@ -983,6 +983,7 @@ class ConsolidatedMessageDispatcher:
         text: str,
         message_id: str | None,
         terminal_status: str | None,
+        terminal_error: str | None,
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
     ) -> None:
@@ -994,7 +995,10 @@ class ConsolidatedMessageDispatcher:
             if run_terminal_status and self._run_has_blocking_activity(run_id):
                 defer_terminal = getattr(store, "defer_run_terminal", None)
                 if callable(defer_terminal):
-                    defer_terminal(run_id, terminal_status=run_terminal_status)
+                    defer_kwargs = {"terminal_status": run_terminal_status}
+                    if terminal_error is not None:
+                        defer_kwargs["error"] = terminal_error
+                    defer_terminal(run_id, **defer_kwargs)
                 run_terminal_status = None
             record_output = getattr(store, "record_run_output", None)
             if callable(record_output):
@@ -1006,23 +1010,33 @@ class ConsolidatedMessageDispatcher:
                 if not output_id:
                     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
                     output_id = f"content:{digest}"
+                record_kwargs = {
+                    "output_id": output_id,
+                    "text": text,
+                    "message_id": message_id,
+                    "sequence": output_semantics.sequence,
+                    "provenance": provenance,
+                    "terminal_status": run_terminal_status,
+                }
+                if terminal_error is not None:
+                    record_kwargs["error"] = terminal_error
                 record_output(
                     run_id,
-                    output_id=output_id,
-                    text=text,
-                    message_id=message_id,
-                    sequence=output_semantics.sequence,
-                    provenance=provenance,
-                    terminal_status=run_terminal_status,
+                    **record_kwargs,
                 )
             else:
                 # Compatibility for isolated stores and older persisted-state
                 # adapters while the shared SQLite path owns the output ledger.
+                record_kwargs = {
+                    "text": text,
+                    "message_id": message_id,
+                    "terminal_status": run_terminal_status,
+                }
+                if terminal_error is not None:
+                    record_kwargs["error"] = terminal_error
                 store.record_run_message(
                     run_id,
-                    text=text,
-                    message_id=message_id,
-                    terminal_status=run_terminal_status,
+                    **record_kwargs,
                 )
 
     def _run_has_blocking_activity(self, run_id: str) -> bool:
@@ -1061,6 +1075,7 @@ class ConsolidatedMessageDispatcher:
         message_id: str | None,
         *,
         is_error: bool,
+        terminal_error: str | None = None,
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
     ) -> None:
@@ -1093,6 +1108,7 @@ class ConsolidatedMessageDispatcher:
                 text=text,
                 message_id=message_id,
                 terminal_status=terminal_status,
+                terminal_error=terminal_error,
                 output_semantics=semantics,
                 provenance=semantics.provenance(context),
             )
@@ -1115,6 +1131,7 @@ class ConsolidatedMessageDispatcher:
         message_id: str | None,
         *,
         is_error: bool,
+        terminal_error: str | None = None,
         output_semantics: MessageOutput | None = None,
     ) -> None:
         self._record_agent_run_terminal_result(
@@ -1122,6 +1139,7 @@ class ConsolidatedMessageDispatcher:
             text,
             message_id,
             is_error=is_error,
+            terminal_error=terminal_error,
             output_semantics=output_semantics,
             log_label="suppressed agent run terminal result",
         )
@@ -1313,6 +1331,7 @@ class ConsolidatedMessageDispatcher:
         status_label: Optional[str] = None,
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
+        terminal_error: Optional[str] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -1324,10 +1343,10 @@ class ConsolidatedMessageDispatcher:
 
         ``is_error`` marks a terminal ``result`` as a FAILED turn. It is the only
         signal the sidebar dot needs on the way out: a terminal result settles the
-        session to ``idle`` (or ``failed`` when ``is_error``). Callers that hit a
-        terminal failure emit it as ``result`` + ``is_error=True`` instead of a
-        bare ``notify`` — that routes the failure through this one outbound
-        chokepoint (dot + SSE stream release), so no caller pokes the dot directly.
+        session to ``idle`` (or ``failed`` when ``is_error``). Structured backend
+        failures use a visible ``notify`` for delivery followed by a silent
+        ``result`` with ``is_error=True`` for lifecycle settlement, keeping those
+        responsibilities independent while still passing through this chokepoint.
 
         ``level`` is the visibility grade — orthogonal to ``message_type``. The
         type says what role the message plays (and drives the dot + unread); the
@@ -1335,9 +1354,8 @@ class ConsolidatedMessageDispatcher:
         - ``"normal"`` (default): delivered / persisted / streamed as usual.
         - ``"silent"``: settles the dot + releases the SSE waiter for a terminal
           ``result``, then returns WITHOUT delivering, persisting, or streaming.
-          Used for intentional, non-noteworthy lifecycle events (e.g. a user-
-          initiated stop) so the turn ends cleanly with no user-facing bubble —
-          replacing the old "fake it with empty text" trick with an explicit flag.
+          Used when lifecycle settlement must not add another visible bubble,
+          including intentional stops and failures already shown as notifications.
 
         ``status_label`` is an optional backend-computed clean tool-call label
         (claude-pipe style) used ONLY as the concise status-bubble body for the
@@ -1371,10 +1389,14 @@ class ConsolidatedMessageDispatcher:
 
         # Terminal status-bubble reason word for the done/orphan footer:
         # a clean turn is "done" (✅); a failure is "stopped" (⏹) when it was an
-        # intentional silent stop (e.g. user stop), else "failed" (⏹). Computed
-        # here where both is_error + level are known, then threaded into the
-        # compose/tidy helpers so the footer marker stays consistent.
-        terminal_reason = "done" if not is_error else ("stopped" if level == "silent" else "failed")
+        # intentional silent stop (e.g. user stop), else "failed" (⏹). An explicit
+        # diagnostic distinguishes a silent backend failure from a silent stop.
+        if not is_error:
+            terminal_reason = "done"
+        elif level == "silent" and terminal_error is None:
+            terminal_reason = "stopped"
+        else:
+            terminal_reason = "failed"
 
         # OUTBOUND status chokepoint (one of exactly two — the other is the
         # inbound AgentService.handle_message). A terminal ``result`` ends the
@@ -1411,6 +1433,7 @@ class ConsolidatedMessageDispatcher:
                         text,
                         None,
                         is_error=is_error,
+                        terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
                 if mutates_turn_lifecycle:
@@ -1462,6 +1485,7 @@ class ConsolidatedMessageDispatcher:
                         duplicate_result_text,
                         None,
                         is_error=is_error,
+                        terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
                 if mutates_turn_lifecycle:
@@ -1507,6 +1531,7 @@ class ConsolidatedMessageDispatcher:
                         recorded_text,
                         message_id,
                         is_error=is_error,
+                        terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
                 elif canonical_type == "result" or (context.platform_specific or {}).get("task_trigger_kind") != "agent_run":
@@ -1534,7 +1559,13 @@ class ConsolidatedMessageDispatcher:
                 # Record only once delivered (avibe always, via SSE) so a failed
                 # IM send isn't stored as if the user received it.
                 if persists_without_delivery or message_id is not None:
-                    persist_agent_message(target_context, "notify", text)
+                    persist_agent_message(
+                        target_context,
+                        "notify",
+                        text,
+                        metadata=output_metadata,
+                        native_message_id=native_output_id,
+                    )
                 # Live SSE turn stream for the web Chat page (no-op for IM/CLI).
                 await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
                 return message_id
@@ -1781,6 +1812,7 @@ class ConsolidatedMessageDispatcher:
                         persisted_result_text,
                         primary_message_id,
                         is_error=is_error,
+                        terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
 
@@ -1836,6 +1868,7 @@ class ConsolidatedMessageDispatcher:
                         persisted_result_text,
                         primary_message_id,
                         is_error=is_error,
+                        terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
 

@@ -101,6 +101,16 @@ class _StubController:
 
 
 class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
+    def assert_backend_failure_emitted(self, emitter, context, display_text, diagnostic):
+        self.assertEqual(emitter.await_count, 2)
+        notify_call, terminal_call = emitter.await_args_list
+        self.assertEqual(notify_call.args[:3], (context, "notify", display_text))
+        self.assertFalse(notify_call.kwargs["output"].settles_run)
+        self.assertEqual(terminal_call.args[:3], (context, "result", ""))
+        self.assertTrue(terminal_call.kwargs["is_error"])
+        self.assertEqual(terminal_call.kwargs["level"], "silent")
+        self.assertEqual(terminal_call.kwargs["terminal_error"], diagnostic)
+
     async def test_handle_message_serializes_queries_for_same_runtime_session(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"
@@ -348,7 +358,15 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queries, [("first", runtime_key)])
         self.assertEqual(mark_active_calls, [runtime_key])
         self.assertIn(runtime_key, mark_idle_calls)
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=ANY,
+            terminal_error="Claude receiver ended without a terminal result",
+        )
         agent._remove_ack_reaction.assert_awaited_once_with(request)
         self.assertNotIn(runtime_key, agent._pending_requests)
         self.assertNotIn(runtime_key, controller.claude_sessions)
@@ -818,12 +836,21 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[runtime_key] = [queued_request]
         agent._pending_reactions[runtime_key] = [("m2", ":eyes:")]
 
-        await agent.handle_message(request)
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            await agent.handle_message(request)
 
         self.assertEqual(mark_idle_calls, [])
         self.assertEqual(agent._pending_requests[runtime_key], [queued_request])
         self.assertEqual(agent._pending_reactions[runtime_key], [("m2", ":eyes:")])
         agent._remove_ack_reaction.assert_awaited_once_with(request)
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.args[1:], ("notify", "❌ Claude error: boom"))
+        self.assertEqual(persist.call_args.kwargs["metadata"]["backend"], "claude")
+        self.assertEqual(persist.call_args.kwargs["metadata"]["event"], "backend_failure")
+        self.assertTrue(persist.call_args.kwargs["metadata"]["failure_id"])
+        self.assertTrue(
+            persist.call_args.kwargs["native_message_id"].startswith("backend-failure:")
+        )
 
     async def test_clear_sessions_cancels_receiver_tasks_for_cleared_session(self):
         controller = _StubController()
@@ -1219,10 +1246,24 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=ANY,
+            terminal_error="Connection lost",
+        )
         persist.assert_called_once()
         self.assertEqual(persist.call_args.args[1], "notify")
         self.assertEqual(persist.call_args.args[2], "❌ Claude error: Connection lost")
+        self.assertEqual(persist.call_args.kwargs["metadata"]["backend"], "claude")
+        self.assertEqual(persist.call_args.kwargs["metadata"]["event"], "backend_failure")
+        self.assertTrue(persist.call_args.kwargs["metadata"]["failure_id"])
+        self.assertTrue(
+            persist.call_args.kwargs["native_message_id"].startswith("backend-failure:")
+        )
 
     async def test_receiver_buffer_error_persists_connection_lost_notify(self):
         controller = _StubController()
@@ -1253,16 +1294,37 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        terminal_error = "Failed to decode JSON: JSON message exceeded maximum buffer size of 1048576 bytes"
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=ANY,
+            terminal_error=terminal_error,
+        )
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
             context,
             "claude",
             "❌ Connection to Claude was lost. Please try your message again.",
+            output=ANY,
+            terminal_error=terminal_error,
         )
-        persist.assert_called_once_with(
-            context,
-            "notify",
-            "❌ Connection to Claude was lost. Please try your message again.",
+        persist.assert_called_once()
+        self.assertEqual(
+            persist.call_args.args,
+            (
+                context,
+                "notify",
+                "❌ Connection to Claude was lost. Please try your message again.",
+            ),
+        )
+        self.assertEqual(persist.call_args.kwargs["metadata"]["backend"], "claude")
+        self.assertEqual(persist.call_args.kwargs["metadata"]["event"], "backend_failure")
+        self.assertTrue(persist.call_args.kwargs["metadata"]["failure_id"])
+        self.assertTrue(
+            persist.call_args.kwargs["native_message_id"].startswith("backend-failure:")
         )
 
     async def test_result_auth_error_prefers_oauth_recovery_message(self):
@@ -1678,7 +1740,15 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.wait_for(receiver_task, timeout=1)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=ANY,
+            terminal_error="Claude receiver ended without a terminal result",
+        )
         self.assertFalse(service._turn_gates[composite_key].lock.locked())
         self.assertNotIn(composite_key, controller.claude_sessions)
         self.assertNotIn(composite_key, agent._pending_requests)
@@ -1852,7 +1922,15 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.wait_for(receiver_task, timeout=1)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=ANY,
+            terminal_error="Claude receiver ended without a terminal result",
+        )
         self.assertEqual(context.platform_specific["turn_token"], "current-turn")
         self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "current-runtime")
         self.assertFalse(service._turn_gates[composite_key].lock.locked())
@@ -1946,7 +2024,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context)
 
-        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
+        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
+            context,
+            "claude",
+            "❌ Claude error: OAuth authentication failed.",
+            output=ANY,
+            terminal_error="OAuth authentication failed.",
+        )
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
@@ -1993,7 +2077,12 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        self.assert_backend_failure_emitted(
+            controller.emit_agent_message,
+            context,
+            f"❌ Claude error: {error_text}",
+            error_text,
+        )
         agent.emit_result_message.assert_not_awaited()
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         self.assertEqual(context.platform_specific["turn_token"], "T1")
@@ -2048,7 +2137,12 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        self.assert_backend_failure_emitted(
+            controller.emit_agent_message,
+            context,
+            f"❌ Claude error: {error_text}",
+            error_text,
+        )
         agent.emit_result_message.assert_not_awaited()
         self.assertEqual(agent._pending_requests[composite_key], [next_request])
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
@@ -2106,7 +2200,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        diagnostic = "The model's tool call could not be parsed (retry also failed)."
+        self.assert_backend_failure_emitted(
+            controller.emit_agent_message,
+            context,
+            f"❌ Claude error: {diagnostic}",
+            diagnostic,
+        )
         agent.emit_result_message.assert_not_awaited()
         self.assertEqual(agent._pending_requests[composite_key], [next_request])
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
@@ -2178,7 +2278,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         client.ready.set()
         await receiver_task
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        diagnostic = "The model's tool call could not be parsed (retry also failed)."
+        self.assert_backend_failure_emitted(
+            controller.emit_agent_message,
+            context,
+            f"❌ Claude error: {diagnostic}",
+            diagnostic,
+        )
         agent.emit_result_message.assert_not_awaited()
         self.assertEqual(agent._pending_requests[composite_key], [followup_request])
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
@@ -2251,7 +2357,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         client.ready.set()
         await receiver_task
 
-        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True, output=ANY)
+        diagnostic = "The model's tool call could not be parsed (retry also failed)."
+        self.assert_backend_failure_emitted(
+            controller.emit_agent_message,
+            context,
+            f"❌ Claude error: {diagnostic}",
+            diagnostic,
+        )
         agent.emit_result_message.assert_awaited_once_with(
             context,
             "next turn result",
@@ -2339,13 +2451,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(composite_key, agent._pending_requests)
 
-    async def test_non_malformed_synthetic_api_error_remains_visible(self):
+    async def test_synthetic_server_error_notifies_and_suppresses_paired_result(self):
         controller = _StubController()
         controller._get_session_key = lambda context: "avibe::project::p1"
         controller.emit_agent_message = AsyncMock()
         agent = ClaudeAgent(controller)
         agent.emit_result_message = AsyncMock()
-        error_text = "Claude API rate_limit: retry later."
+        error_text = "API Error: 503 provider unavailable"
         agent._extract_text_blocks = lambda message, context: error_text
         context = SimpleNamespace(
             user_id="U1",
@@ -2364,7 +2476,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 "content": [],
                 "isApiErrorMessage": True,
                 "model": "<synthetic>",
-                "error": "rate_limit",
+                "error": "server_error",
+                "api_error_status": 503,
             },
         )()
         result_message = type(
@@ -2383,16 +2496,97 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_not_awaited()
+        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
+            context,
+            "claude",
+            f"❌ Claude error: {error_text}",
+            output=ANY,
+            terminal_error=error_text,
+        )
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, terminal_call = controller.emit_agent_message.await_args_list
+        self.assertEqual(notify_call.args[:3], (context, "notify", f"❌ Claude error: {error_text}"))
+        self.assertFalse(notify_call.kwargs["output"].settles_run)
+        self.assertEqual(terminal_call.args[:3], (context, "result", ""))
+        self.assertTrue(terminal_call.kwargs["is_error"])
+        self.assertEqual(terminal_call.kwargs["level"], "silent")
+        self.assertEqual(terminal_call.kwargs["terminal_error"], error_text)
+        agent.emit_result_message.assert_not_awaited()
+        self.assertNotIn(composite_key, agent._pending_requests)
+
+    async def test_result_is_error_fails_without_error_subtype(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "avibe::project::p1"
+        controller.emit_agent_message = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-1:/tmp/work"
+        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "T1"}))
+        agent._pending_requests[composite_key] = [pending_request]
+        result_message = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "is_error": True,
+                "result": "provider rejected the request",
+                "duration_ms": 1,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield result_message
+
+                return _iterate()
+
+        await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
+
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        agent.emit_result_message.assert_not_awaited()
+        terminal_call = controller.emit_agent_message.await_args_list[1]
+        self.assertEqual(terminal_call.kwargs["terminal_error"], "provider rejected the request")
+
+    async def test_success_result_with_error_words_remains_agent_output(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "avibe::project::p1"
+        controller.emit_agent_message = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-1:/tmp/work"
+        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "T1"}))
+        agent._pending_requests[composite_key] = [pending_request]
+        result_message = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "is_error": False,
+                "result": "The test failed with an error; I fixed it.",
+                "duration_ms": 1,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield result_message
+
+                return _iterate()
+
+        await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
+
         agent.emit_result_message.assert_awaited_once_with(
             context,
-            error_text,
-            subtype="error",
+            "The test failed with an error; I fixed it.",
+            subtype="success",
             duration_ms=1,
             parse_mode="markdown",
             request=pending_request,
         )
-        self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_assistant_auth_error_without_is_api_error_flag_still_triggers_recovery(self):
         """Scenario: AUTH-SETUP-902"""

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibe.i18n import t as i18n_t
-from core.message_output import terminal_output_for
+from core.backend_failure import emit_backend_failure
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
@@ -160,26 +160,15 @@ class CodexEventHandler:
 
             if should_emit_terminal_error and not already_notified:
                 message = f"❌ Codex turn failed: {error_msg}"
-                handled = await self._agent.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                await emit_backend_failure(
+                    self._agent.controller,
                     tracked_request.context,
                     "codex",
-                    message,
+                    error_msg or "Unknown error",
+                    display_text=message,
+                    request=tracked_request,
+                    failure_id=turn_id,
                 )
-                if not handled:
-                    # Terminal failure → RESULT (error): the outbound status
-                    # chokepoint turns the dot red. The auth-recovery branch
-                    # settles it via its own terminal error result.
-                    await self._agent.controller.emit_agent_message(
-                        tracked_request.context,
-                        "result",
-                        message,
-                        is_error=True,
-                        output=terminal_output_for(tracked_request),
-                    )
-                # handled == True persists the durable recovery notify centrally in
-                # ``maybe_emit_auth_recovery_message`` (the auth service is the single
-                # home for the reset-prompt text); the not-handled branch persists via
-                # ``emit_agent_message`` above.
                 error_was_user_visible = True
             else:
                 logger.info("Suppressing inactive Codex turn failure for %s: %s", turn_id, error_msg)
@@ -344,42 +333,29 @@ class CodexEventHandler:
                 and not turn_state.terminal_error_notified
             ):
                 text = f"❌ Codex turn failed: {message}"
-                handled = await self._agent.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                await emit_backend_failure(
+                    self._agent.controller,
                     request.context,
                     "codex",
-                    text,
+                    message,
+                    display_text=text,
+                    request=request,
+                    failure_id=turn_id,
                 )
-                if not handled:
-                    # Terminal failure → error RESULT so the outbound chokepoint
-                    # turns the dot red (the later completed handler suppresses a
-                    # second message once terminal_error_notified is set).
-                    await self._agent.controller.emit_agent_message(
-                        request.context,
-                        "result",
-                        text,
-                        is_error=True,
-                        output=terminal_output_for(request),
-                    )
                 turn_state.terminal_error_notified = True
             else:
                 logger.info("Logging inactive Codex turn error for %s: %s", turn_id, message)
             return
 
         text = f"❌ Codex error: {message}"
-        handled = await self._agent.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+        await emit_backend_failure(
+            self._agent.controller,
             request.context,
             "codex",
-            text,
+            message,
+            display_text=text,
+            request=request,
         )
-        if not handled:
-            # No-turnId terminal error → error RESULT so the dot turns red.
-            await self._agent.controller.emit_agent_message(
-                request.context,
-                "result",
-                text,
-                is_error=True,
-                output=terminal_output_for(request),
-            )
 
     def _extract_error_message(self, error: Any) -> str:
         if isinstance(error, dict):

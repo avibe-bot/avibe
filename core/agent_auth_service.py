@@ -34,7 +34,7 @@ from modules.agents.opencode.message_processor import (
 from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from core.resource_governance import governor_from_controller
-from core.message_output import terminal_turn_output
+from core.message_output import MessageOutput, terminal_turn_output
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
@@ -874,15 +874,22 @@ class AgentAuthService:
 
         return False
 
-    async def maybe_emit_auth_recovery_message(self, context: MessageContext, backend: str, error_text: str) -> bool:
+    async def maybe_emit_auth_recovery_message(
+        self,
+        context: MessageContext,
+        backend: str,
+        error_text: str,
+        *,
+        output: MessageOutput | None = None,
+        terminal_error: str | None = None,
+    ) -> bool:
         """Emit a reset-oauth button when the backend error is auth-related.
 
-        Each backend error-emit site calls this FIRST and emits its own terminal
-        error result only when this returns ``False``. When this DOES handle the
-        error (auth-related), the recovery message is a button row (not a result),
-        so settle the turn through the outbound chokepoint here by emitting a
-        terminal ``error`` result — that turns the workbench dot red and releases
-        the SSE waiter. No-op off-workbench (the outbound resolves no session id).
+        Each backend error-emit site calls this FIRST and emits its own failure
+        path only when this returns ``False``. When this DOES handle the error,
+        the recovery message is a button row, so settle the turn separately
+        through the outbound chokepoint with a silent terminal failure. No-op
+        off-workbench (the outbound resolves no session id).
         """
         if not classify_auth_error(backend, error_text):
             return False
@@ -913,8 +920,8 @@ class AgentAuthService:
             persist_agent_message(context, "notify", durable_text)
         except Exception:
             logger.debug("auth recovery: failed to persist durable notify", exc_info=True)
-        # Settle the failed turn through the outbound status chokepoint: an empty
-        # terminal ``error`` result turns the dot red and releases the SSE waiter
+        # Settle the failed turn through the outbound status chokepoint: a silent
+        # terminal failure turns the dot red and releases the SSE waiter
         # without adding a second visible message (the recovery button above is the
         # visible one). No-op off-workbench.
         try:
@@ -923,7 +930,9 @@ class AgentAuthService:
                 "result",
                 "",
                 is_error=True,
-                output=terminal_turn_output(),
+                level="silent",
+                output=output or terminal_turn_output(),
+                terminal_error=terminal_error or error_text,
             )
         except Exception:
             logger.debug("auth recovery: failed to settle turn status", exc_info=True)

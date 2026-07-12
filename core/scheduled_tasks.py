@@ -1122,12 +1122,19 @@ class TaskExecutionStore:
             error=error,
         )
 
-    def defer_run_terminal(self, run_id: str, *, terminal_status: str) -> bool:
+    def defer_run_terminal(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        error: Optional[str] = None,
+    ) -> bool:
         if self._sqlite is None:
             return False
         return self._sqlite.defer_run_terminal(
             run_id,
             terminal_status=terminal_status,
+            error=error,
         )
 
     def update_callback_status(
