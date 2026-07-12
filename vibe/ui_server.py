@@ -7874,23 +7874,25 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bo
     if not decoded.startswith("@fs/"):
         return True
 
-    raw_fs_path = decoded.removeprefix("@fs/")
-    fs_path = Path(raw_fs_path)
-    if fs_path.is_absolute():
-        target = fs_path.resolve(strict=False)
-        workspace = paths.get_show_page_dir(session_id).resolve(strict=False)
-        try:
-            workspace_relative = target.relative_to(workspace)
-        except ValueError:
-            # Runtime dependency roots can legitimately live below dot directories
-            # such as ~/.avibe. The Show Runtime owns their allowlist and still denies
-            # sensitive filenames; only workspace-relative dot paths are all private.
-            return False
-        return any(part.startswith(".") for part in workspace_relative.parts)
-
-    # A Vite @fs path is normally absolute. Retain the synthetic relative cache
-    # form used by prewarming/tests, but do not generally relax relative dot paths.
-    return not _is_relocated_vite_dep_path(decoded)
+    # Vite's `/@fs/<abs>` convention: everything after `@fs` is the absolute
+    # filesystem path. This route strips the URL's leading slash, so a real Vite
+    # request arrives as `@fs/home/...` (one slash) while some callers/tests spell
+    # it `@fs//home/...` (two). Parsing with `removeprefix("@fs/")` dropped the
+    # single leading slash and mis-read a real request as a relative path, which
+    # denied legitimate external deps — notably the Vite HMR client's `env.mjs`
+    # under the shared runtime `node_modules`, so nothing mounted on the private
+    # `/show/` surface. Normalize both spellings to the absolute path.
+    raw_fs_path = "/" + decoded[len("@fs"):].lstrip("/")
+    target = Path(raw_fs_path).resolve(strict=False)
+    workspace = paths.get_show_page_dir(session_id).resolve(strict=False)
+    try:
+        workspace_relative = target.relative_to(workspace)
+    except ValueError:
+        # Outside the workspace (e.g. the shared runtime install below ~/.avibe).
+        # The Show Runtime owns its own allowlist and still denies sensitive
+        # filenames; only workspace-relative dot paths are private here.
+        return False
+    return any(part.startswith(".") for part in workspace_relative.parts)
 
 
 def _show_page_recovery_response(session_id: str):

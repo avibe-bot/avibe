@@ -759,6 +759,69 @@ def test_private_show_page_denies_workspace_dot_path_through_at_fs(monkeypatch, 
     assert manager.calls == []
 
 
+def test_private_show_page_proxies_single_slash_at_fs_external_dep(monkeypatch, tmp_path):
+    # Real Vite emits `/@fs/<abs>` with a SINGLE slash (e.g. the HMR client's
+    # env.mjs under the shared runtime node_modules). The gate must treat it as an
+    # absolute path; being outside the workspace it defers to the runtime's own
+    # allowlist instead of denying it. Previously `removeprefix("@fs/")` dropped
+    # the leading slash, mis-read it as relative, and denied it — which blanked the
+    # private /show/ surface (react-refresh preamble could not load env.mjs).
+    avibe_home = tmp_path / ".avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    _save_config(avibe_home)
+    _create_show_page("ses123", "private")
+    dep_path = (
+        paths.get_runtime_dir()
+        / "show-runtime"
+        / "source"
+        / "node_modules"
+        / "vite"
+        / "dist"
+        / "client"
+        / "env.mjs"
+    )
+    manager = _FakeShowRuntimeManager(
+        body=b"export const context = {}",
+        extra_headers={"content-type": "text/javascript"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        # Single slash: "@fs" + an absolute posix path -> ".../@fs/private/...".
+        response = app.test_client().get(
+            f"/show/ses123/@fs{dep_path.as_posix()}",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"export const context = {}"
+    assert manager.calls
+    assert manager.calls[0][1].endswith(f"/@fs{dep_path.as_posix()}")
+
+
+def test_private_show_page_denies_single_slash_at_fs_workspace_dot_path(monkeypatch, tmp_path):
+    # The single-slash normalization must still deny a workspace-relative dot path
+    # reached through @fs (a hidden draft), not only the double-slash spelling.
+    avibe_home = tmp_path / ".avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    _save_config(avibe_home)
+    _create_show_page("ses123", "private")
+    hidden_path = paths.get_show_page_dir("ses123") / ".draft" / "secret.ts"
+    manager = _FakeShowRuntimeManager(body=b"export const secret = true")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/@fs{hidden_path.as_posix()}",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
