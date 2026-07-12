@@ -720,9 +720,90 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert 'eventsPath: injected.eventsPath ?? "__show/events"' in main_tsx
     assert 'streamPath: injected.streamPath ?? "__show/events?stream=1"' in main_tsx
     assert 'writeToken: injected.writeToken ?? readCookie("vibe_show_event_token")' in main_tsx
+    # The runtime-owned shell just renders <App/>; routing is NOT moved into
+    # main.tsx/index.html, so adding a page never requires touching the shell.
+    assert 'import App from "./App"' in main_tsx
+    assert "router" not in main_tsx.lower()
     app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert "Building your Show Page" in app_tsx
-    assert "Please visualize this session as a Show Page." in app_tsx
+    # The default App is now a multi-page router host, not the old single-page
+    # placeholder.
+    assert "Building your Show Page" not in app_tsx
+    assert 'from "./router"' in app_tsx
+    assert "<RouterView" in app_tsx
+    assert (page_dir / "api" / "health.ts").exists()
+
+
+def test_fresh_workspace_scaffolds_multipage_demo(monkeypatch, tmp_path):
+    # A brand-new Show Page workspace starts as a working multi-page app: a router,
+    # a nav derived from the pages, and at least two routes including a nested
+    # dynamic one. Adding a page is just dropping a file under src/pages/ (found via
+    # import.meta.glob), so the shell (index.html/main.tsx) is never edited.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    page_dir = ensure_show_page_dir("sesmulti")
+
+    router = (page_dir / "src" / "router.tsx").read_text(encoding="utf-8")
+    # File-based discovery of pages.
+    assert "import.meta.glob" in router
+    assert '"./pages/**/*.tsx"' in router
+    assert "eager: true" in router
+    # Hash-based client routing: nested deep-link + refresh work in both private
+    # /show/ and public /p/ serving modes with no server cooperation.
+    assert "hashchange" in router
+    assert "useSyncExternalStore" in router
+    # A concrete path wins over a matching [param] route of the same length.
+    assert "routeSpecificity" in router
+    assert "navItems" in router
+    assert "export function RouterView" in router
+    # A malformed hash param must degrade gracefully, not throw and blank the app.
+    assert "safeDecode" in router
+    # Pages exported as React exotic components (memo/forwardRef) are accepted.
+    assert "isRenderablePage" in router
+    assert "$$typeof" in router
+
+    # Demo pages: a home, a nested list, and a nested dynamic detail route.
+    home = (page_dir / "src" / "pages" / "index.tsx").read_text(encoding="utf-8")
+    assert "export const meta" in home
+    assert "export default function" in home
+    assert (page_dir / "src" / "pages" / "items" / "index.tsx").exists()
+    detail = page_dir / "src" / "pages" / "items" / "[id].tsx"
+    assert detail.exists()
+    # The dynamic route reads its captured param.
+    assert "params.id" in detail.read_text(encoding="utf-8")
+
+    # App composes the router and its nav; it does not hardcode a route table.
+    app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "navItems" in app_tsx
+    assert "<RouterView" in app_tsx
+
+    # styles.css keeps the two imports the runtime's Tailwind pipeline requires,
+    # with the tailwindcss import first.
+    styles = (page_dir / "src" / "styles.css").read_text(encoding="utf-8")
+    assert styles.splitlines()[0].strip() == '@import "tailwindcss";'
+    assert '@import "@avibe/show-ui/theme.css";' in styles
+
+
+def test_existing_single_page_workspace_is_preserved(monkeypatch, tmp_path):
+    # An existing single-page workspace (its own src/App.tsx) must not be migrated:
+    # ensure() leaves App.tsx byte-for-byte and does NOT drop router/pages files
+    # next to it. Only genuinely-missing shell files are (re)materialized so the
+    # workspace stays runnable.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    page_dir = paths.get_show_page_dir("seslegacy")
+    (page_dir / "src").mkdir(parents=True, exist_ok=True)
+    legacy_app = "export default function App() {\n  return <h1>Legacy single page</h1>\n}\n"
+    (page_dir / "src" / "App.tsx").write_text(legacy_app, encoding="utf-8")
+
+    ensure_show_page_dir("seslegacy")
+
+    # The agent's page is untouched.
+    assert (page_dir / "src" / "App.tsx").read_text(encoding="utf-8") == legacy_app
+    # No multi-page demo is sprinkled next to a customized single-page app.
+    assert not (page_dir / "src" / "router.tsx").exists()
+    assert not (page_dir / "src" / "pages").exists()
+    # Missing shell/workspace files are still materialized.
+    assert (page_dir / "index.html").exists()
+    assert (page_dir / "src" / "main.tsx").exists()
+    assert (page_dir / "src" / "styles.css").exists()
     assert (page_dir / "api" / "health.ts").exists()
 
 
