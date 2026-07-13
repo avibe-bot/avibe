@@ -794,7 +794,8 @@
       "newTab": "New tab",
       "reconnect": "Reconnect",
       "exitCode": "exit {{code}}",
-      "disabled": "Terminal unavailable: it may be turned off on the server (VIBE_UI_ENABLE_TERMINAL=0) or this session isn't authorized.",
+      "disabled": "The terminal is turned off for this service, or this session isn't authorized to use it. Whoever runs the service can turn it on in the service configuration.",
+      "pasteBlocked": "Couldn't read the clipboard — check your browser's clipboard permission and try again.",
       "status": {
         "connecting": "Connecting…",
         "ready": "Connected",
@@ -803,6 +804,7 @@
         "error": "Disconnected"
       },
       "keys": {
+        "paste": "Paste",
         "esc": "Esc",
         "tab": "Tab",
         "ctrl": "Ctrl",

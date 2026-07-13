@@ -5,10 +5,16 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import { ChevronDown, ChevronUp, RotateCw, Search, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, ClipboardPaste, RotateCw, Search, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import {
+  adjustTerminalFontSize,
+  getTerminalFontSize,
+  resetTerminalFontSize,
+  subscribeTerminalFontSize,
+} from '../../lib/terminalFontSize';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
 // backend): client sends raw stdin as BINARY frames and JSON control as TEXT
@@ -90,6 +96,36 @@ const isFindHotkey = (e: {
   (e.key === 'f' || e.key === 'F') &&
   (IS_APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey && !e.metaKey);
 
+// The font-zoom chord: ⌘ +/-/0 on Apple, Ctrl +/-/0 elsewhere — exactly what native terminal emulators
+// (Terminal.app, iTerm, GNOME Terminal) and browsers bind for zoom. We claim it only while the terminal
+// has focus (see the custom key handler), so it resizes the terminal font instead of the page; anywhere
+// else in the app the browser's own zoom stays untouched. '+' and '=' are the same physical key (Shift
+// decides which), so both mean zoom-in. Mirrors isFindHotkey: the modifier is ⌘ on Apple / Ctrl elsewhere
+// and never both. All of -, =, +, 0 are non-control keys, so swallowing them steals nothing from the PTY;
+// notably we do NOT match '_' (Ctrl+_ is 0x1f, readline's undo), leaving that control key for the shell.
+type FontZoom = 'in' | 'out' | 'reset';
+const fontZoomIntent = (e: {
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  key: string;
+}): FontZoom | null => {
+  if (e.altKey) return null;
+  const modifier = IS_APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (!modifier) return null;
+  switch (e.key) {
+    case '+':
+    case '=':
+      return 'in';
+    case '-':
+      return 'out';
+    case '0':
+      return 'reset';
+    default:
+      return null;
+  }
+};
+
 export const TerminalView: React.FC<{
   sessionId: string;
   /** Start directory for a newly created session (from "Open Terminal Here"). Stable per tab. */
@@ -107,6 +143,8 @@ export const TerminalView: React.FC<{
   const ctrlStickyRef = useRef(false);
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
+  // Auto-dismiss timer for the mobile Paste key's "clipboard blocked" hint.
+  const pasteHintTimerRef = useRef<number | null>(null);
   // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
   // badge reflects reality — tmux-backed = persistent, plain-shell fallback = not. Held in a ref so
   // the WS effect (which doesn't depend on the prop) always calls the latest callback.
@@ -120,6 +158,9 @@ export const TerminalView: React.FC<{
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<{ index: number; count: number }>({ index: -1, count: 0 });
+  // Brief inline hint when the mobile Paste key can't read the clipboard (permission denied or an
+  // insecure context) — a graceful notice instead of a silent failure or a crash.
+  const [pasteBlocked, setPasteBlocked] = useState(false);
 
   // Surface connection status to the parent (tab bar). The standalone status row inside the
   // body was removed — only the terminating states render an in-body overlay (below).
@@ -131,7 +172,7 @@ export const TerminalView: React.FC<{
 
   useEffect(() => {
     const term = new Terminal({
-      fontSize: 13,
+      fontSize: getTerminalFontSize(), // shared, persisted preference — see terminalFontSize.ts
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       cursorBlink: true,
       theme: TERMINAL_THEME,
@@ -161,7 +202,8 @@ export const TerminalView: React.FC<{
     // terminal key events), so the browser's own find stays available everywhere else in the app.
     // Returning false stops xterm forwarding the key to the PTY; preventDefault stops the browser find.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && isFindHotkey(e)) {
+      if (e.type !== 'keydown') return true;
+      if (isFindHotkey(e)) {
         e.preventDefault();
         setSearchOpen(true);
         // Focus once the bar has mounted (first open) or refocus it (already open); rAF waits for commit.
@@ -169,6 +211,16 @@ export const TerminalView: React.FC<{
           searchInputRef.current?.focus();
           searchInputRef.current?.select();
         });
+        return false;
+      }
+      const zoom = fontZoomIntent(e);
+      if (zoom) {
+        // Adjust the shared font size and swallow the key: preventDefault stops the browser zooming the
+        // whole page, `return false` stops xterm forwarding ⌘=/⌘- to the PTY. Every mounted terminal
+        // re-fits through the subscription below (so all tabs track one size) — this one included.
+        e.preventDefault();
+        if (zoom === 'reset') resetTerminalFontSize();
+        else adjustTerminalFontSize(zoom === 'in' ? 1 : -1);
         return false;
       }
       return true;
@@ -227,6 +279,14 @@ export const TerminalView: React.FC<{
       term.open(containerRef.current);
       settle();
     }
+
+    // Apply later font-size changes — this terminal's own zoom hotkey, or another terminal's — to this
+    // instance: set the size, then reuse the existing refit path so the new cols/rows reach the PTY. The
+    // starting size is read once in the constructor above; subscribe fires only on subsequent changes.
+    const unsubscribeFontSize = subscribeTerminalFontSize((size) => {
+      term.options.fontSize = size;
+      refit();
+    });
 
     const onData = term.onData((data: string) => {
       const ws = wsRef.current;
@@ -301,6 +361,7 @@ export const TerminalView: React.FC<{
       ro.disconnect();
       onData.dispose();
       searchResults.dispose();
+      unsubscribeFontSize();
       // Detach handlers before closing. A closing socket's onclose can fire asynchronously
       // *after* its replacement has already reported 'ready' (reconnect / effect remount);
       // left attached, the stale onclose would mark the live terminal 'closed' or schedule a
@@ -321,6 +382,14 @@ export const TerminalView: React.FC<{
     };
   }, [sessionId, cwd, reconnectKey]);
 
+  // Clear the paste-hint auto-dismiss timer if the view unmounts before it fires.
+  useEffect(
+    () => () => {
+      if (pasteHintTimerRef.current != null) window.clearTimeout(pasteHintTimerRef.current);
+    },
+    [],
+  );
+
   const sendKey = (k: { seq?: string; ctrl?: boolean }) => {
     if (k.ctrl) {
       ctrlStickyRef.current = !ctrlStickyRef.current;
@@ -329,6 +398,26 @@ export const TerminalView: React.FC<{
     const ws = wsRef.current;
     if (k.seq && ws && ws.readyState === WebSocket.OPEN) ws.send(ENC.encode(k.seq));
     termRef.current?.focus();
+  };
+
+  // Mobile Paste key: read the clipboard and feed it to the PTY through xterm's paste(), which applies
+  // bracketed-paste framing when the running program asked for it (so a multi-line paste isn't executed
+  // line by line in shells/editors that opted in). Exists because the touch key bar has no paste; desktop
+  // users paste with the hardware keyboard. The read is intentionally un-guarded (no `?.`) so a blocked
+  // clipboard — permission denied, or a non-secure context where the API is absent — throws into the
+  // catch and surfaces a brief hint, rather than failing silently.
+  const pasteFromClipboard = async () => {
+    const term = termRef.current;
+    try {
+      const text = await navigator.clipboard.readText();
+      const ws = wsRef.current;
+      if (text && term && ws && ws.readyState === WebSocket.OPEN) term.paste(text);
+      term?.focus();
+    } catch {
+      setPasteBlocked(true);
+      if (pasteHintTimerRef.current != null) window.clearTimeout(pasteHintTimerRef.current);
+      pasteHintTimerRef.current = window.setTimeout(() => setPasteBlocked(false), 3200);
+    }
   };
 
   const reconnect = () => {
@@ -470,6 +559,16 @@ export const TerminalView: React.FC<{
               </div>
             </div>
           )}
+          {pasteBlocked && (
+            // The mobile Paste key couldn't read the clipboard — float a brief, non-blocking notice above
+            // the key bar. Fixed-dark like the find widget (the terminal body is theme-locked dark);
+            // pointer-events-none so it never intercepts a tap. Only the touch-only Paste key sets this.
+            <div className="pointer-events-none absolute inset-x-0 bottom-2 z-10 flex justify-center px-3">
+              <span className="rounded-md bg-zinc-900/95 px-3 py-1.5 text-center text-[11px] text-zinc-200 shadow-lg ring-1 ring-zinc-700/70">
+                {t('apps.terminal.pasteBlocked')}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -479,6 +578,15 @@ export const TerminalView: React.FC<{
         // hardware keyboard already has these keys and the bar just costs a row. Keyed off
         // pointer type rather than the md: viewport breakpoint so tablets keep it.
         <div className="hidden gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 pointer-coarse:flex">
+          <button
+            type="button"
+            onClick={pasteFromClipboard}
+            aria-label={t('apps.terminal.keys.paste')}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2.5 py-1.5 text-[12px] text-foreground active:bg-foreground/[0.08]"
+          >
+            <ClipboardPaste className="size-3.5" aria-hidden />
+            {t('apps.terminal.keys.paste')}
+          </button>
           {KEYS.map((k) => (
             <button
               key={k.labelKey}
