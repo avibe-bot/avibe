@@ -736,6 +736,9 @@
       "unpin": "从 Dock 取消固定",
       "emptyHint": "Dock 为空 · 打开应用库"
     },
+    "launcher": {
+      "openLibrary": "打开应用库"
+    },
     "window": {
       "minimize": "最小化",
       "maximize": "最大化",

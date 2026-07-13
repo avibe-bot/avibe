@@ -736,6 +736,9 @@
       "unpin": "Unpin from Dock",
       "emptyHint": "Dock is empty · Open App Library"
     },
+    "launcher": {
+      "openLibrary": "Open App Library"
+    },
     "window": {
       "minimize": "Minimize",
       "maximize": "Maximize",
