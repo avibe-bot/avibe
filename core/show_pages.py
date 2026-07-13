@@ -1058,27 +1058,81 @@ export function RouterView() {
 
 
 def _default_page_home_tsx() -> str:
-    # Default landing page: a placeholder shown while the agent builds the real
-    # page (this is what the user sees right after clicking "Visualize"). It also
-    # hints the built-in UI — it renders one component (Card) and leaves a couple
-    # of others as commented imports so the agent sees what is available. The agent
-    # replaces this file with the real content.
-    return """import { Card, CardContent } from "@/components/ui/card"
-// More built-in UI is available, e.g.:
-// import { Button } from "@/components/ui/button"
+    # Default landing page: a live "building" placeholder the user sees right after
+    # clicking "Visualize". A pulsing dot signals work in progress; after a delay
+    # (only if it is genuinely taking a while) it reveals a copy-able nudge prompt.
+    # It also hints the built-in UI — it renders Card + Button and leaves Badge as a
+    # commented import. The agent replaces this file with the real content.
+    return """import { useEffect, useRef, useState } from "react"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+// More built-in UI is available too, e.g.:
 // import { Badge } from "@/components/ui/badge"
 
+const NUDGE_PROMPT = "Please visualize this session as a Show Page."
+// Only offer the nudge if it is genuinely taking a while — don't nag on arrival.
+const NUDGE_AFTER_MS = 90_000
+
 export default function Home() {
+  const [showNudge, setShowNudge] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const codeRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowNudge(true), NUDGE_AFTER_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  async function copyPrompt() {
+    try {
+      await navigator.clipboard.writeText(NUDGE_PROMPT)
+    } catch {
+      // Clipboard may be unavailable (e.g. insecure context) — select the text
+      // so the viewer can copy it manually.
+      const node = codeRef.current
+      if (node) {
+        const range = document.createRange()
+        range.selectNodeContents(node)
+        const selection = window.getSelection()
+        selection?.removeAllRanges()
+        selection?.addRange(range)
+      }
+      return
+    }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 2000)
+  }
+
   return (
-    <Card className="mx-auto mt-24 max-w-md text-center">
-      <CardContent className="space-y-3 py-10">
-        <p className="text-lg font-medium">Your page is being generated…</p>
-        <p className="text-sm text-muted-foreground">
-          The agent is turning this session into a page. It will appear here as soon as it is ready.
-        </p>
-        {/* Drop a component in, e.g. <Button>Action</Button> or <Badge>New</Badge> */}
-      </CardContent>
-    </Card>
+    <div className="flex min-h-[70vh] items-center justify-center">
+      <Card className="w-full max-w-md">
+        <CardContent className="flex flex-col items-center gap-4 px-8 py-12 text-center">
+          <span className="relative flex h-3.5 w-3.5" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-emerald-500" />
+          </span>
+          <div className="space-y-1.5">
+            <h1 className="text-lg font-semibold tracking-tight">Building your Show Page</h1>
+            <p className="text-sm text-muted-foreground">
+              Your agent is turning this session into a visual page. It will appear here automatically once it is ready.
+            </p>
+          </div>
+          {showNudge && (
+            <div className="w-full space-y-2 border-t border-border pt-4 text-left duration-500 animate-in fade-in slide-in-from-bottom-1">
+              <p className="text-xs text-muted-foreground">Taking a while? Send this to your agent:</p>
+              <div className="flex items-center gap-2">
+                <code ref={codeRef} className="flex-1 truncate rounded bg-muted px-2 py-1.5 font-mono text-xs">
+                  {NUDGE_PROMPT}
+                </code>
+                <Button size="sm" variant="secondary" onClick={copyPrompt}>
+                  {copied ? "Copied" : "Copy"}
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 """
@@ -1086,19 +1140,34 @@ export default function Home() {
 
 def _default_page_second_tsx() -> str:
     # A second page, only to show that adding a file under src/pages/ adds a route
-    # (a folder becomes a nested path; a [param] file a dynamic one). Delete or
-    # replace it.
-    return """import { Link } from "../router"
+    # (a folder becomes a nested path; a [param] file a dynamic one) and to model a
+    # tidy page using the built-in UI. Delete or replace it.
+    return """import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Link } from "../router"
+
+const code = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
 
 export default function SecondPage() {
   return (
-    <div className="space-y-3">
-      <h1 className="text-xl font-semibold">Second page</h1>
-      <p className="text-sm text-muted-foreground">
-        Add a file under <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">src/pages/</code> and it
-        becomes a route. Delete or replace these starter pages.
-      </p>
-      <Link to="/" className="text-sm underline underline-offset-4">← Home</Link>
+    <div className="mx-auto max-w-2xl space-y-6 py-10">
+      <div className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">A second page</h1>
+        <p className="text-muted-foreground">
+          This is <code className={code}>src/pages/second.tsx</code>. Any file under{" "}
+          <code className={code}>src/pages/</code> becomes a route — a folder nests it, a{" "}
+          <code className={code}>[id]</code> file makes it dynamic. Delete or replace it.
+        </p>
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Use the built-in UI</CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          Import from <code className={code}>@/components/ui/*</code> — Card, Button, Badge, and more — and Tailwind
+          classes work anywhere.
+        </CardContent>
+      </Card>
+      <Link to="/" className="text-sm underline underline-offset-4">← Back</Link>
     </div>
   )
 }

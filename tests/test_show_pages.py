@@ -762,19 +762,22 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     assert "activeLocale" not in router
     assert "navItems" not in router
 
-    # The home page is the user-facing placeholder, and it hints the built-in UI by
-    # rendering one component (Card) with a couple more as commented imports.
+    # The home page is the user-facing "building" placeholder: a pulsing dot, and a
+    # nudge prompt revealed only after a delay. It hints the built-in UI by rendering
+    # Card + Button, leaving Badge as a commented import.
     home = (page_dir / "src" / "pages" / "index.tsx").read_text(encoding="utf-8")
     assert "export default function" in home
-    assert "being generated" in home
+    assert "Building your Show Page" in home
+    assert "animate-ping" in home  # the pulsing "working" dot
+    assert "NUDGE_AFTER_MS = 90_000" in home  # nudge only after ~90s, no nagging on arrival
     assert "@/components/ui/card" in home
-    assert "// import { Button }" in home
-    assert "// import { Badge }" in home
+    assert "@/components/ui/button" in home  # Button is a live import now
+    assert "// import { Badge }" in home  # Badge stays a commented hint
 
     # One extra page demonstrates "add a file = add a route"; the old items demo is gone.
     second = page_dir / "src" / "pages" / "second.tsx"
     assert second.exists()
-    assert "Second page" in second.read_text(encoding="utf-8")
+    assert "A second page" in second.read_text(encoding="utf-8")
     assert not (page_dir / "src" / "pages" / "items").exists()
 
     # App is a minimal shell that renders the router — no hardcoded nav/route table.

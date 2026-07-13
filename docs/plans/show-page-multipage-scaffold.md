@@ -30,6 +30,12 @@ fake demo instead of a progress state. The scaffold was slimmed back to the affo
 - The file-based hash router (discovery, nesting, `[param]`, deep-link/refresh) is
   unchanged; the starter is English-only and minimal.
 
+A follow-up polish (owner feedback, same day) restored the "live" feel the flat
+card had lost: the placeholder now shows a pulsing emerald dot (`animate-ping`),
+and — only after ~90s (so it never nags on arrival) — reveals a copy-able nudge
+prompt (`Button`, with a manual-select fallback when the clipboard is blocked). The
+example `second.tsx` became a tidy Card-based page. Both stay English-only.
+
 ## Serving model (verified against current code)
 
 - avibe proxies **both** private `/show/<id>/` and public `/p/<share>/` to the **same**
