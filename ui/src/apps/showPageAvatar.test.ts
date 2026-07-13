@@ -85,4 +85,12 @@ describe('sessionChatPath', () => {
     expect(sessionChatPath('ses_1')).toBe('/chat/ses_1');
     expect(sessionChatPath('a/b')).toBe('/chat/a%2Fb');
   });
+
+  it('appends the ?view=chat show-me-the-chat signal only when requested', () => {
+    expect(sessionChatPath('ses_1', { showChat: true })).toBe('/chat/ses_1?view=chat');
+    expect(sessionChatPath('a/b', { showChat: true })).toBe('/chat/a%2Fb?view=chat');
+    // Omitted / falsy keeps the plain canonical route (no stray query).
+    expect(sessionChatPath('ses_1', {})).toBe('/chat/ses_1');
+    expect(sessionChatPath('ses_1', { showChat: false })).toBe('/chat/ses_1');
+  });
 });

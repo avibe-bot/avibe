@@ -109,6 +109,9 @@ export const ChatPage: React.FC = () => {
   // re-render / visibility gap-recovery can't re-trigger the jump.
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkMessageId = searchParams.get('msg');
+  // A "show me the chat" navigation carries ?view=chat (see sessionChatPath({ showChat:
+  // true })) — a general signal that this navigation must leave Show Page mode.
+  const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
@@ -151,6 +154,18 @@ export const ChatPage: React.FC = () => {
     setShowPageUrl(null);
     setShowPageBusy(false);
   }, [sessionId]);
+
+  // Honor the ?view=chat "show me the chat" signal ONCE: leave Show Page mode and strip
+  // the param. This makes the intent work even for a same-session jump (where the
+  // :sessionId path doesn't change, so the reset-on-sessionId effect above never fires);
+  // stripping it (like the ?msg jump below) keeps it a no-op on every render afterwards.
+  useEffect(() => {
+    if (!showChatSignal) return;
+    setShowPageMode(false);
+    const next = new URLSearchParams(window.location.search);
+    next.delete('view');
+    setSearchParams(next, { replace: true });
+  }, [showChatSignal, setSearchParams]);
 
   // Publish this chat's composer to the ComposerBridge so the sidebar's
   // "reference this session" action can insert a #<session> mention into the

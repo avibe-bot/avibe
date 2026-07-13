@@ -144,7 +144,9 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     },
     chatHref: (params) => {
       const sessionId = params?.sessionId;
-      return typeof sessionId === 'string' && sessionId ? sessionChatPath(sessionId) : undefined;
+      // showChat appends ?view=chat so ChatPage leaves Show Page mode even when the
+      // target is the session already open in Show Page mode (a same-path no-op nav).
+      return typeof sessionId === 'string' && sessionId ? sessionChatPath(sessionId, { showChat: true }) : undefined;
     },
   },
   // The App Library — the app manager, itself a built-in app (§7.1). Two views

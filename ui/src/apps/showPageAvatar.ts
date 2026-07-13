@@ -46,9 +46,14 @@ export function showPagePrivatePath(sessionId: string): string {
   return `/show/${encodeURIComponent(sessionId)}/`;
 }
 
-/** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The
- *  Show Page window's chat-bubble button navigates here (SPA nav, not a new tab)
- *  and minimizes the window. Pure. */
-export function sessionChatPath(sessionId: string): string {
-  return `/chat/${encodeURIComponent(sessionId)}`;
+/** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The Show
+ *  Page window's chat-bubble navigates here (SPA nav, not a new tab) and minimizes the
+ *  window. Pass `{ showChat: true }` to append the `?view=chat` signal that tells
+ *  ChatPage to leave Show Page mode — required when the target is the SAME session
+ *  already open in Show Page mode (the `:sessionId` path alone wouldn't change, so the
+ *  navigation would otherwise be a no-op). Reusable by any "show me the chat" entry
+ *  point (inbox, deep links). Pure. */
+export function sessionChatPath(sessionId: string, opts?: { showChat?: boolean }): string {
+  const path = `/chat/${encodeURIComponent(sessionId)}`;
+  return opts?.showChat ? `${path}?view=chat` : path;
 }
