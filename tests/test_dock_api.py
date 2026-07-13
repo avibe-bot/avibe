@@ -133,6 +133,22 @@ def test_pin_multiple_sessions_all_survive(monkeypatch, tmp_path):
     assert [pin["session_id"] for pin in dock["pins"]] == ["ses_a", "ses_b", "ses_c"]
 
 
+def test_pin_rejects_when_dock_is_full(monkeypatch, tmp_path):
+    # The cap that set_dock_order enforces must also gate new pins, else the order
+    # can grow past it and every later reorder is rejected.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 4)  # 3 built-ins + room for one pin
+    for sid in ("ses_full1", "ses_full2"):
+        _seed_session(sid)
+        _make_show_page(sid)
+
+    api.pin_dock_show_page("ses_full1")  # fills the Dock (3 built-ins + 1 pin = 4)
+    with pytest.raises(DockError) as excinfo:
+        api.pin_dock_show_page("ses_full2")
+    assert excinfo.value.code == "dock_full"
+
+
 def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

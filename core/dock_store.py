@@ -174,6 +174,11 @@ def pin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, 
         if any(pin["session_id"] == session_id for pin in doc["pins"]):
             return doc  # already pinned → idempotent no-op (keeps its place + snapshot)
 
+        # Enforce the same cap ``set_dock_order`` does, so a new pin can't push the
+        # order past MAX_DOCK_ITEMS (which would then make every reorder rejected).
+        if len(doc["order"]) >= MAX_DOCK_ITEMS:
+            raise DockError("The Dock is full — unpin an app before pinning another.", code="dock_full")
+
         meta = read_session_display_meta([session_id], db_path=db_path)
         title = (meta.get(session_id) or {}).get("title") or ""
         doc["pins"].append(
