@@ -26,6 +26,7 @@ export interface ShowPage {
 }
 
 type ShowPagePatch = Pick<ShowPage, 'session_id'> & Partial<ShowPage>;
+const INVENTORY_REFRESH_EVENTS = new Set(['created', 'user_message', 'show_event']);
 
 // Read-side Show Page inventory shared by the Library, Dock, and global search.
 // Session-title edits already publish `session.activity`; subscribe here so each
@@ -44,6 +45,11 @@ export function useShowPageInventory(enabled = true) {
     setPages((prev) =>
       prev.map((page) => (page.session_id === next.session_id ? { ...page, ...next } : page)),
     );
+  }, []);
+
+  const removePage = useCallback((sessionId: string) => {
+    revisionRef.current += 1;
+    setPages((prev) => prev.filter((page) => page.session_id !== sessionId));
   }, []);
 
   const load = useCallback(async () => {
@@ -69,13 +75,21 @@ export function useShowPageInventory(enabled = true) {
     return api.connectWorkbenchEvents({
       onConnected: () => void load(),
       onSessionActivity: (data) => {
+        if (data.event === 'archived') {
+          removePage(data.session_id);
+          return;
+        }
         if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) {
           mergePage({ session_id: data.session_id, title: data.title ?? null });
           void load();
+          return;
         }
+        // A newly ensured Show Page is followed by the prompt's user_message;
+        // show_event covers pages first materialized by runtime activity.
+        if (INVENTORY_REFRESH_EVENTS.has(data.event)) void load();
       },
     });
-  }, [api, enabled, load, mergePage]);
+  }, [api, enabled, load, mergePage, removePage]);
 
   const reload = useCallback(() => void load(), [load]);
 
