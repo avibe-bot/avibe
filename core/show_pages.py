@@ -532,11 +532,13 @@ def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
         "src/styles.css": _default_styles_css(),
         "api/health.ts": _default_api_health_ts(),
     }
-    # Multi-page demo. Only seed it into a FRESH workspace — one that does not yet
-    # have its own ``src/App.tsx``. This keeps existing single-page workspaces
-    # byte-for-byte unchanged (we never drop router/pages files next to a page the
-    # agent already authored) while a brand-new Show Page starts as a working
-    # multi-page app the agent can inspect, run, extend, or replace. Adding a page
+    # Fresh-workspace starter. Only seed it into a FRESH workspace — one that does
+    # not yet have its own ``src/App.tsx``. This keeps existing single-page
+    # workspaces byte-for-byte unchanged (we never drop router/pages files next to
+    # a page the agent already authored). A brand-new Show Page starts as a clean
+    # "being generated" placeholder for the user, plus a minimal file-based router
+    # and one extra page so the agent can see the multi-page affordance — it is a
+    # starting point to extend or replace, not a required structure. Adding a page
     # later is just a new file under ``src/pages/`` — the router discovers it and
     # the runtime-owned shell (``index.html`` / ``src/main.tsx``) is never touched.
     if not (page_dir / "src" / "App.tsx").exists():
@@ -545,8 +547,7 @@ def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
                 "src/App.tsx": _default_app_tsx(),
                 "src/router.tsx": _default_router_tsx(),
                 "src/pages/index.tsx": _default_page_home_tsx(),
-                "src/pages/items/index.tsx": _default_page_items_index_tsx(),
-                "src/pages/items/[id].tsx": _default_page_item_detail_tsx(),
+                "src/pages/second.tsx": _default_page_second_tsx(),
             }
         )
     for relative_path, contents in files.items():
@@ -856,60 +857,20 @@ createRoot(document.getElementById("root")!).render(
 
 
 def _default_app_tsx() -> str:
-    # The default multi-page demo (agent-editable). It composes the shared layout
-    # (nav derived from the discovered pages) with the routed page. This file and
-    # everything under src/pages/ + src/router.tsx are a starting point: the agent
-    # can restyle the nav, add pages, or replace the whole thing. The runtime-owned
-    # app shell (index.html + src/main.tsx) is never edited to add a page.
-    return """import { useEffect } from "react"
-import { ThemeProvider } from "@avibe/show-ui/theme"
-import { cn } from "@/lib/utils"
-import { activeLocale, Link, RouterView, navItems, useRoutePath } from "./router"
-
-function Nav() {
-  const path = useRoutePath()
-  return (
-    <nav className="flex flex-wrap items-center gap-1">
-      {navItems.map((item) => {
-        const active = path === item.to || (item.to !== "/" && path.startsWith(item.to + "/"))
-        return (
-          <Link
-            key={item.to}
-            to={item.to}
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              active
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-          >
-            {item.label}
-          </Link>
-        )
-      })}
-    </nav>
-  )
-}
+    # Default app shell for a fresh Show Page (agent-editable). It wraps the routed
+    # page in the theme provider and a simple centered container. This file, the
+    # pages under src/pages/, and src/router.tsx are a starting point — restyle,
+    # add pages, or replace them. The runtime-owned app shell (index.html +
+    # src/main.tsx) is never edited to add a page.
+    return """import { ThemeProvider } from "@avibe/show-ui/theme"
+import { RouterView } from "./router"
 
 export default function App() {
-  useEffect(() => {
-    document.documentElement.lang = activeLocale()
-  }, [])
   return (
     <ThemeProvider preset="zinc">
-      <div className="min-h-screen bg-background text-foreground">
-        <header className="sticky top-0 z-10 border-b border-border bg-background/85 backdrop-blur">
-          <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <Link to="/" className="text-sm font-semibold tracking-tight">
-              Show Page
-            </Link>
-            <Nav />
-          </div>
-        </header>
-        <main className="mx-auto max-w-3xl px-4 py-8">
-          <RouterView />
-        </main>
-      </div>
+      <main className="mx-auto min-h-screen max-w-3xl px-4 py-8">
+        <RouterView />
+      </main>
     </ThemeProvider>
   )
 }
@@ -934,43 +895,18 @@ def _default_router_tsx() -> str:
     return """import type { ComponentType, ReactNode } from "react"
 import { useSyncExternalStore } from "react"
 
-// Locale-aware demo copy. The generated demo keeps a zh/en first-run experience
-// (the previous scaffold did too) without pulling in an i18n framework. Language
-// is read once from the browser. Replace or extend this however you localize.
-export function activeLocale(): "en" | "zh" {
-  const lang = (typeof navigator !== "undefined" && navigator.language) || "en"
-  return lang.toLowerCase().startsWith("zh") ? "zh" : "en"
-}
-
-export function t(en: string, zh: string): string {
-  return activeLocale() === "zh" ? zh : en
-}
-
-export type PageMeta = {
-  // Label shown in the nav. Falls back to a title-cased path when omitted.
-  title?: string
-  // Sort order within the nav (lower first).
-  order?: number
-  // Set false to keep a static page out of the nav (it stays directly linkable).
-  nav?: boolean
-}
-
 export type PageProps = {
   // Values captured from [param] segments, e.g. { id: "42" } for /items/42.
   params: Record<string, string>
 }
 
-type PageModule = {
-  default: ComponentType<PageProps>
-  meta?: PageMeta
-}
+type PageModule = { default: ComponentType<PageProps> }
 
 type Segment = { name: string; dynamic: boolean }
 type Route = {
   path: string
   segments: Segment[]
   Component: ComponentType<PageProps>
-  meta: PageMeta
   dynamic: boolean
 }
 
@@ -1003,10 +939,6 @@ function toSegments(path: string): Segment[] {
     .map((part) => (part.startsWith(":") ? { name: part.slice(1), dynamic: true } : { name: part, dynamic: false }))
 }
 
-function titleCase(value: string): string {
-  return value.replace(/[-_]/g, " ").replace(/\\b\\w/g, (c) => c.toUpperCase())
-}
-
 // Per-segment specificity mask: "0" for a static segment, "1" for a dynamic one.
 // Routes are sorted ascending by this mask (compared left to right), so among
 // routes of the same length a static segment always beats a [param] at the same
@@ -1031,7 +963,7 @@ export const routes: Route[] = Object.entries(modules)
     const path = filePathToRoute(file)
     if (!path || !isRenderablePage(mod.default)) return null
     const segments = toSegments(path)
-    return { path, segments, Component: mod.default, meta: mod.meta ?? {}, dynamic: segments.some((s) => s.dynamic) }
+    return { path, segments, Component: mod.default, dynamic: segments.some((s) => s.dynamic) }
   })
   .filter((route): route is Route => route !== null)
   .sort((a, b) => {
@@ -1040,14 +972,6 @@ export const routes: Route[] = Object.entries(modules)
     if (specA !== specB) return specA < specB ? -1 : 1
     return a.path.localeCompare(b.path)
   })
-
-export const navItems: { to: string; label: string }[] = routes
-  .filter((route) => !route.dynamic && route.meta.nav !== false)
-  .sort((a, b) => (a.meta.order ?? 0) - (b.meta.order ?? 0) || a.path.localeCompare(b.path))
-  .map((route) => ({
-    to: route.path,
-    label: route.meta.title ?? (route.path === "/" ? "Home" : titleCase(route.path.slice(1).split("/").pop() || "")),
-  }))
 
 // decodeURIComponent throws on a malformed escape (e.g. a link built with a raw
 // "%", like #/items/50%); fall back to the raw segment so a bad param degrades to
@@ -1117,15 +1041,12 @@ export function RouterView() {
   if (!route) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-card-foreground">
-        <h1 className="text-lg font-semibold">{t("Page not found", "页面不存在")}</h1>
+        <h1 className="text-lg font-semibold">Page not found</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          {t("No route matches", "没有匹配的路由")}{" "}
-          <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
+          No route matches <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
         </p>
         <p className="mt-4 text-sm">
-          <a className="font-medium underline underline-offset-4" href="#/">
-            {t("Back to Home", "返回首页")}
-          </a>
+          <a className="font-medium underline underline-offset-4" href="#/">Back to Home</a>
         </p>
       </div>
     )
@@ -1137,158 +1058,47 @@ export function RouterView() {
 
 
 def _default_page_home_tsx() -> str:
-    # Demo landing page. Generic on purpose: it teaches the "add a file = add a
-    # page" pattern without implying a page must map to a topic, feature, or
-    # history. The agent is free to replace or remove it. Copy is locale-aware.
-    return """import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Link, t } from "../router"
-
-export const meta = { title: t("Home", "首页"), order: 0 }
-
-const codeClass = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+    # Default landing page: a placeholder shown while the agent builds the real
+    # page (this is what the user sees right after clicking "Visualize"). It also
+    # hints the built-in UI — it renders one component (Card) and leaves a couple
+    # of others as commented imports so the agent sees what is available. The agent
+    # replaces this file with the real content.
+    return """import { Card, CardContent } from "@/components/ui/card"
+// More built-in UI is available, e.g.:
+// import { Button } from "@/components/ui/button"
+// import { Badge } from "@/components/ui/badge"
 
 export default function Home() {
   return (
-    <div className="space-y-6">
-      <div className="space-y-2">
-        <Badge>{t("Starter", "起始模板")}</Badge>
-        <h1 className="text-2xl font-semibold tracking-tight">{t("A multi-page Show Page", "多页 Show Page")}</h1>
-        <p className="text-muted-foreground">
-          {t(
-            "This workspace starts as a small multi-page app so routing is ready to use. It is only a starting point — restyle it, extend it, or replace it with whatever structure fits your app: flat pages, sections, or nested routes.",
-            "这个工作区默认就是一个小型多页应用，路由开箱即用。它只是一个起点——随意改样式、扩展，或换成任何适合你的结构：扁平页面、分区，或嵌套路由。",
-          )}
+    <Card className="mx-auto mt-24 max-w-md text-center">
+      <CardContent className="space-y-3 py-10">
+        <p className="text-lg font-medium">Your page is being generated…</p>
+        <p className="text-sm text-muted-foreground">
+          The agent is turning this session into a page. It will appear here as soon as it is ready.
         </p>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("Add a page", "添加页面")}</CardTitle>
-          <CardDescription>{t("Routing is file-based — no config and no app-shell edits.", "文件即路由——无需配置，也不用改应用外壳。")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm text-muted-foreground">
-          <p>
-            {t("Create a file under ", "在 ")}
-            <code className={codeClass}>src/pages/</code>
-            {t(" and its location becomes the route:", " 下新建文件，它的位置就是路由：")}
-          </p>
-          <ul className="space-y-1">
-            <li>
-              <code className={codeClass}>src/pages/about.tsx</code> → <code className={codeClass}>#/about</code>
-            </li>
-            <li>
-              <code className={codeClass}>src/pages/items/index.tsx</code> → <code className={codeClass}>#/items</code>
-            </li>
-            <li>
-              <code className={codeClass}>src/pages/items/[id].tsx</code> → <code className={codeClass}>#/items/:id</code>
-              {" "}({t("nested + dynamic", "嵌套 + 动态")})
-            </li>
-          </ul>
-          <p>
-            {t("Export a default component. Add an optional ", "默认导出一个组件。可选导出 ")}
-            <code className={codeClass}>meta</code>
-            {t(" to set its nav label and order.", " 来设置导航标题和排序。")}
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("Nested routing", "嵌套路由")}</CardTitle>
-          <CardDescription>{t("Folders become nested paths; [param] files capture values.", "文件夹变成嵌套路径；[param] 文件捕获动态值。")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Link to="/items" className="font-medium text-foreground underline underline-offset-4">
-            {t("Open the Items demo →", "打开 Items 示例 →")}
-          </Link>
-        </CardContent>
-      </Card>
-    </div>
+        {/* Drop a component in, e.g. <Button>Action</Button> or <Badge>New</Badge> */}
+      </CardContent>
+    </Card>
   )
 }
 """
 
 
-def _default_page_items_index_tsx() -> str:
-    # Demo list page under a folder, so the route is nested (#/items) and links
-    # into a dynamic child route (#/items/:id).
-    return """import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Link, t } from "../../router"
+def _default_page_second_tsx() -> str:
+    # A second page, only to show that adding a file under src/pages/ adds a route
+    # (a folder becomes a nested path; a [param] file a dynamic one). Delete or
+    # replace it.
+    return """import { Link } from "../router"
 
-export const meta = { title: t("Items", "条目"), order: 1 }
-
-const items = [
-  { id: "1", name: t("First item", "第一个条目"), hint: t("A demo record", "示例数据") },
-  { id: "2", name: t("Second item", "第二个条目"), hint: t("Another demo record", "另一条示例数据") },
-  { id: "3", name: t("Third item", "第三个条目"), hint: t("One more demo record", "再来一条示例数据") },
-]
-
-export default function Items() {
+export default function SecondPage() {
   return (
-    <div className="space-y-6">
-      <div className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">{t("Items", "条目")}</h1>
-        <p className="text-muted-foreground">
-          {t("Each item links to a nested route such as ", "每个条目都链接到一个嵌套路由，比如 ")}
-          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">#/items/1</code>
-          {t(". Open one, then reload — the deep link loads directly.", "。打开其中一个再刷新——深链接会直接加载。")}
-        </p>
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        {items.map((item) => (
-          <Link key={item.id} to={"/items/" + item.id} className="block">
-            <Card className="h-full transition-colors hover:border-primary/50">
-              <CardHeader>
-                <CardTitle className="text-base">{item.name}</CardTitle>
-                <CardDescription>{item.hint}</CardDescription>
-              </CardHeader>
-            </Card>
-          </Link>
-        ))}
-      </div>
-    </div>
-  )
-}
-"""
-
-
-def _default_page_item_detail_tsx() -> str:
-    # Demo dynamic route: src/pages/items/[id].tsx -> /items/:id. Reads the id
-    # param and is directly deep-linkable / refreshable.
-    return """import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Link, t, type PageProps } from "../../router"
-
-const codeClass = "rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
-
-export default function ItemDetail({ params }: PageProps) {
-  return (
-    <div className="space-y-6">
-      <Link to="/items" className="text-sm text-muted-foreground underline underline-offset-4">
-        {t("← Back to Items", "← 返回 Items")}
-      </Link>
-
-      <Card>
-        <CardHeader>
-          {/* w-fit: CardHeader is a flex column (align-items: stretch), which
-              blockifies an inline-flex Badge and stretches it to full width. */}
-          <Badge className="w-fit">{t("Nested route", "嵌套路由")}</Badge>
-          <CardTitle>{t("Item", "条目")} {params.id}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm text-muted-foreground">
-          <p>
-            {t("This page is ", "这个页面是 ")}
-            <code className={codeClass}>src/pages/items/[id].tsx</code>
-            {t(", matched from the URL. The ", "，根据 URL 匹配。参数 ")}
-            <code className={codeClass}>id</code>
-            {t(" parameter is ", " 的值是 ")}
-            <code className={codeClass}>{params.id}</code>.
-          </p>
-          <p>{t("Reload the page — this deep link resolves on the client, in private and public modes.", "刷新页面——这个深链接会在客户端解析，私有和公开模式都一样。")}</p>
-        </CardContent>
-      </Card>
+    <div className="space-y-3">
+      <h1 className="text-xl font-semibold">Second page</h1>
+      <p className="text-sm text-muted-foreground">
+        Add a file under <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">src/pages/</code> and it
+        becomes a route. Delete or replace these starter pages.
+      </p>
+      <Link to="/" className="text-sm underline underline-offset-4">← Home</Link>
     </div>
   )
 }

@@ -733,11 +733,11 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert (page_dir / "api" / "health.ts").exists()
 
 
-def test_fresh_workspace_scaffolds_multipage_demo(monkeypatch, tmp_path):
-    # A brand-new Show Page workspace starts as a working multi-page app: a router,
-    # a nav derived from the pages, and at least two routes including a nested
-    # dynamic one. Adding a page is just dropping a file under src/pages/ (found via
-    # import.meta.glob), so the shell (index.html/main.tsx) is never edited.
+def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):
+    # A brand-new Show Page workspace starts as a clean "being generated"
+    # placeholder for the user, plus a minimal file-based router and one extra page
+    # so the agent can see the multi-page affordance. It is intentionally small and
+    # English-only — a starting point, not a content template.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     page_dir = ensure_show_page_dir("sesmulti")
 
@@ -752,32 +752,42 @@ def test_fresh_workspace_scaffolds_multipage_demo(monkeypatch, tmp_path):
     assert "useSyncExternalStore" in router
     # A concrete path wins over a matching [param] route of the same length.
     assert "routeSpecificity" in router
-    assert "navItems" in router
     assert "export function RouterView" in router
     # A malformed hash param must degrade gracefully, not throw and blank the app.
     assert "safeDecode" in router
     # Pages exported as React exotic components (memo/forwardRef) are accepted.
     assert "isRenderablePage" in router
     assert "$$typeof" in router
+    # The locale/nav machinery from the old rich demo is gone (English-only, no nav).
+    assert "activeLocale" not in router
+    assert "navItems" not in router
 
-    # Demo pages: a home, a nested list, and a nested dynamic detail route.
+    # The home page is the user-facing placeholder, and it hints the built-in UI by
+    # rendering one component (Card) with a couple more as commented imports.
     home = (page_dir / "src" / "pages" / "index.tsx").read_text(encoding="utf-8")
-    assert "export const meta" in home
     assert "export default function" in home
-    assert (page_dir / "src" / "pages" / "items" / "index.tsx").exists()
-    detail = page_dir / "src" / "pages" / "items" / "[id].tsx"
-    assert detail.exists()
-    detail_src = detail.read_text(encoding="utf-8")
-    # The dynamic route reads its captured param.
-    assert "params.id" in detail_src
-    # The Badge sits in a flex-column CardHeader; w-fit keeps it from stretching
-    # to full width (see the demo detail page).
-    assert '<Badge className="w-fit">' in detail_src
+    assert "being generated" in home
+    assert "@/components/ui/card" in home
+    assert "// import { Button }" in home
+    assert "// import { Badge }" in home
 
-    # App composes the router and its nav; it does not hardcode a route table.
+    # One extra page demonstrates "add a file = add a route"; the old items demo is gone.
+    second = page_dir / "src" / "pages" / "second.tsx"
+    assert second.exists()
+    assert "Second page" in second.read_text(encoding="utf-8")
+    assert not (page_dir / "src" / "pages" / "items").exists()
+
+    # App is a minimal shell that renders the router — no hardcoded nav/route table.
     app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert "navItems" in app_tsx
     assert "<RouterView" in app_tsx
+    assert "navItems" not in app_tsx
+    assert "activeLocale" not in app_tsx
+
+    # The whole starter is English-only (no CJK), even though the agent prompt is
+    # localized elsewhere.
+    for rel in ("src/pages/index.tsx", "src/pages/second.tsx", "src/router.tsx", "src/App.tsx"):
+        text = (page_dir / rel).read_text(encoding="utf-8")
+        assert not any("一" <= ch <= "鿿" for ch in text), f"unexpected CJK in {rel}"
 
     # styles.css keeps the two imports the runtime's Tailwind pipeline requires,
     # with the tailwindcss import first.
