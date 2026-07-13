@@ -890,6 +890,50 @@ def test_copy_directory_failure_cleans_partial_stage_and_destination(tmp_path, m
     assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
 
 
+def test_copy_cleanup_never_chmods_symlink_target(tmp_path, monkeypatch):
+    external = tmp_path / "external.txt"
+    external.write_text("external", encoding="utf-8")
+    external.chmod(0o600)
+    source = tmp_path / "source"
+    locked = source / "locked"
+    locked.mkdir(parents=True)
+    (locked / "external-link").symlink_to(external)
+    locked.chmod(0o500)
+    destination = tmp_path / "destination"
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError(errno.EIO, "publish failed")
+
+    monkeypatch.setattr(fs, "_publish_staged_copy", fail_publish)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.copy_path(str(source), str(destination))
+
+    assert exc.value.code == "fs_error"
+    assert external.stat().st_mode & 0o777 == 0o600
+    assert not destination.exists()
+    assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
+
+
+def test_copy_file_size_cap_rejects_before_staging(tmp_path, monkeypatch):
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"12345")
+    destination = tmp_path / "destination.bin"
+    monkeypatch.setenv(fs._COPY_TOTAL_SIZE_CAP_ENV, "4")
+    monkeypatch.setattr(
+        fs,
+        "_new_copy_stage_path",
+        lambda _target: (_ for _ in ()).throw(AssertionError("copy should reject before staging")),
+    )
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.copy_path(str(source), str(destination))
+
+    assert exc.value.status_code == 413
+    assert exc.value.code == "too_large"
+    assert not destination.exists()
+
+
 def test_copy_directory_size_cap_rejects_before_staging(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()

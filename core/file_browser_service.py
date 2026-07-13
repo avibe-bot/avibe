@@ -1169,8 +1169,8 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[str, Any]:
     """Copy one entry while preserving modes; copied mtimes are not guaranteed.
 
-    Directory sources are measured before staging and copied without following
-    symlinks. The 2 GB default cap is configurable through
+    Sources are measured before staging and copied without following symlinks.
+    The 2 GB default cap is configurable through
     ``AVIBE_FILES_COPY_SIZE_CAP_BYTES``. The completed copy is published from a
     sibling temporary entry, so the destination never exposes a partial tree.
     """
@@ -1198,17 +1198,19 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 
     source_fd: int | None = None
     source_link: str | None = None
+    size_cap = _copy_total_size_cap_bytes()
     try:
         if source_is_dir and os.name == "posix":
             source_fd = _open_copy_directory(source, source_stat)
             scan_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd)
             try:
-                _measure_copy_directory_fd(scan_fd, _copy_total_size_cap_bytes())
+                _measure_copy_directory_fd(scan_fd, size_cap)
             finally:
                 os.close(scan_fd)
         elif source_is_dir:
-            _measure_copy_directory_path(source, source_stat, _copy_total_size_cap_bytes())
+            _measure_copy_directory_path(source, source_stat, size_cap)
         elif source_is_file:
+            _add_copy_size(0, source_stat.st_size, size_cap)
             source_fd = _open_copy_file(source, source_stat)
         else:
             source_link = os.readlink(source)
@@ -1221,7 +1223,6 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
                     if source_is_dir:
                         stage = _new_copy_stage_path(target)
                         budget = [0]
-                        size_cap = _copy_total_size_cap_bytes()
                         if source_fd is not None:
                             copy_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd)
                             try:
@@ -1234,7 +1235,7 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
                         stage = _new_copy_stage_path(target)
                         assert source_fd is not None
                         os.lseek(source_fd, 0, os.SEEK_SET)
-                        _copy_file_from_fd(source_fd, stage, source_stat)
+                        _copy_file_from_fd(source_fd, stage, source_stat, budget=[0], size_cap=size_cap)
                     else:
                         assert source_link is not None
                         stage = _stage_copy_symlink(target, source_link)
@@ -1430,7 +1431,7 @@ def _open_copy_file(path: str | Path, expected: os.stat_result, *, dir_fd: int |
 def _add_copy_size(total: int, size: int, cap: int) -> int:
     total += size
     if total > cap:
-        raise FileBrowserError("too_large", "Folder is too large to copy", 413)
+        raise FileBrowserError("too_large", "Copy is too large", 413)
     return total
 
 
@@ -1634,17 +1635,41 @@ def _publish_staged_copy(stage: Path, target: Path, *, source_is_dir: bool, over
 def _remove_copy_stage_best_effort(path: Path) -> None:
     try:
         if _is_dir_no_follow(path):
-            def _make_writable_and_retry(func, failed_path, _exc_info):
-                os.chmod(failed_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-                func(failed_path)
-
-            shutil.rmtree(path, onerror=_make_writable_and_retry)
+            _make_copy_tree_removable(path)
+            shutil.rmtree(path)
         else:
             path.unlink()
     except FileNotFoundError:
         pass
     except OSError:
         logger.debug("Failed to remove copy staging path", exc_info=True)
+
+
+def _make_copy_tree_removable(root: Path) -> None:
+    stack = [(root, root.lstat())]
+    while stack:
+        directory, expected = stack.pop()
+        _make_copy_directory_writable(directory, expected)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                entry_stat = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    stack.append((directory / entry.name, entry_stat))
+
+
+def _make_copy_directory_writable(path: Path, expected: os.stat_result) -> None:
+    mode = stat.S_IMODE(expected.st_mode) | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    if os.name == "posix":
+        fd = _open_copy_directory(path, expected)
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        return
+    current = path.lstat()
+    if not stat.S_ISDIR(current.st_mode) or not _same_copy_entry(expected, current):
+        raise FileBrowserError("fs_error", "Copy staging tree changed during cleanup", 400)
+    path.chmod(mode)
 
 
 def _delete_undo_remove_path(path: Path) -> bool:
