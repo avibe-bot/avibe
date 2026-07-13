@@ -100,14 +100,27 @@ export interface MonacoEditorProps {
   onChange?: (value: string) => void;
   /** Save the file — bound to ⌘S / Ctrl+S inside the editor (the IDE has no visible save button). */
   onSave?: () => void;
-  /** Live 1-based cursor position, for an IDE status bar (`Ln x, Col y`). */
-  onCursorChange?: (line: number, column: number) => void;
+  /**
+   * Live status for an IDE status bar: the 1-based cursor position (`Ln x, Col y`) plus the model's
+   * RESOLVED indentation (`insertSpaces` / `tabSize`) after Monaco's `detectIndentation` runs. Fires
+   * on mount, on cursor moves, and when the model's indentation is (re)detected.
+   */
+  onCursorChange?: (line: number, column: number, indent: { insertSpaces: boolean; tabSize: number }) => void;
   /**
    * Jump to + select a match (from cross-file search). `line` is 1-based; `column`/`endColumn`
    * are 0-based offsets within the line (the search backend's convention). `nonce` makes a
    * repeated jump to the same spot re-fire.
    */
   reveal?: { line: number; column: number; endColumn: number; nonce: number } | null;
+}
+
+// The model's RESOLVED indentation (post-`detectIndentation`), for the IDE status bar. Reads the
+// model's own options rather than the construction defaults, so a tabs file reports tabs and a
+// 4-space file reports 4. The `?? 2` guards only the unreachable no-model case (mount / cursor /
+// options events always have a model); it mirrors the editor's own 2-space fallback below.
+function readIndent(editor: monaco.editor.IStandaloneCodeEditor): { insertSpaces: boolean; tabSize: number } {
+  const opts = editor.getModel()?.getOptions();
+  return { insertSpaces: opts?.insertSpaces ?? true, tabSize: opts?.tabSize ?? 2 };
 }
 
 function applyReveal(editor: monaco.editor.IStandaloneCodeEditor, reveal: { line: number; column: number; endColumn: number }) {
@@ -140,9 +153,16 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current?.());
+    // Report the initial cursor + detected indentation, then keep both live: the cursor on every
+    // move, and indentation whenever Monaco (re)detects it (detectIndentation resolves the model's
+    // options at creation, and a manual indentation change fires onDidChangeModelOptions too).
     const pos = editor.getPosition();
-    if (pos) onCursorRef.current?.(pos.lineNumber, pos.column);
-    editor.onDidChangeCursorPosition((e) => onCursorRef.current?.(e.position.lineNumber, e.position.column));
+    if (pos) onCursorRef.current?.(pos.lineNumber, pos.column, readIndent(editor));
+    editor.onDidChangeCursorPosition((e) => onCursorRef.current?.(e.position.lineNumber, e.position.column, readIndent(editor)));
+    editor.onDidChangeModelOptions(() => {
+      const p = editor.getPosition();
+      onCursorRef.current?.(p?.lineNumber ?? 1, p?.column ?? 1, readIndent(editor));
+    });
     if (revealRef.current) applyReveal(editor, revealRef.current);
   };
 
@@ -211,6 +231,11 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             automaticLayout: true,
+            // Detect indentation from the file's own content so the status bar reports the model's
+            // real resolved insertSpaces/tabSize. `tabSize: 2` is only the FALLBACK for content with
+            // no detectable indentation (new/empty buffers) — detectIndentation always overrides it
+            // when the file has real indentation, so this keeps the 2-space default without lying.
+            detectIndentation: true,
             tabSize: 2,
             renderWhitespace: 'selection',
             smoothScrolling: true,

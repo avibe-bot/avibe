@@ -103,8 +103,9 @@ export const FileEditorPane: React.FC<{
    * be a redundant second header. Standalone uses keep the header (default).
    */
   chromeless?: boolean;
-  /** Live 1-based cursor position, surfaced in the IDE status bar. */
-  onCursor?: (line: number, column: number) => void;
+  /** Live status for the IDE status bar: 1-based cursor position plus the model's resolved
+   *  indentation (insertSpaces / tabSize). Forwarded straight to Monaco's onCursorChange. */
+  onCursor?: (line: number, column: number, indent: { insertSpaces: boolean; tabSize: number }) => void;
   /**
    * Untitled buffers (path === null) call this with the buffer text on save; the parent runs the
    * save-as picker + write, then re-points this pane at the chosen path.

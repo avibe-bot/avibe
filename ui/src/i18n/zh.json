@@ -643,6 +643,7 @@
       "selectFileHint": "从左侧资源管理器选择文件进行编辑",
       "lineCol": "行 {{line}}，列 {{col}}",
       "spaces": "空格：{{n}}",
+      "tabSize": "制表符宽度：{{n}}",
       "plainText": "纯文本",
       "source": "源码",
       "preview": "预览",
