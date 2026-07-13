@@ -123,7 +123,10 @@ export const Dock: React.FC = () => {
 
   return (
     <div className="relative">
-      <div className="relative flex items-end gap-2 rounded-2xl border border-border-strong bg-surface-2/95 p-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)] backdrop-blur-xl">
+      {/* Bound the panel to the viewport and scroll horizontally: with many pinned
+          apps the resident row would otherwise run off-screen (the popover sits at
+          the bottom-left), leaving later tiles unreachable for open/reorder/unpin. */}
+      <div className="relative flex max-w-[min(88vw,880px)] items-end gap-2 overflow-x-auto overscroll-x-contain rounded-2xl border border-border-strong bg-surface-2/95 p-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)] backdrop-blur-xl">
         <Reorder.Group axis="x" values={localOrder} onReorder={setLocalOrder} as="div" className="flex items-end gap-2">
           {localOrder.map((id) => {
             const item = resolveItem(id);
