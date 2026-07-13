@@ -116,10 +116,11 @@ export interface MonacoEditorProps {
 
 // The model's RESOLVED indentation (post-`detectIndentation`), for the IDE status bar. Reads the
 // model's own options rather than the construction defaults, so a tabs file reports tabs and a
-// 4-space file reports 4. Falls back to Monaco's defaults only in the (unreachable here) no-model case.
+// 4-space file reports 4. The `?? 2` guards only the unreachable no-model case (mount / cursor /
+// options events always have a model); it mirrors the editor's own 2-space fallback below.
 function readIndent(editor: monaco.editor.IStandaloneCodeEditor): { insertSpaces: boolean; tabSize: number } {
   const opts = editor.getModel()?.getOptions();
-  return { insertSpaces: opts?.insertSpaces ?? true, tabSize: opts?.tabSize ?? 4 };
+  return { insertSpaces: opts?.insertSpaces ?? true, tabSize: opts?.tabSize ?? 2 };
 }
 
 function applyReveal(editor: monaco.editor.IStandaloneCodeEditor, reveal: { line: number; column: number; endColumn: number }) {
@@ -230,9 +231,12 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             automaticLayout: true,
-            // Detect indentation from the file's own content (VS Code default) instead of forcing a
-            // fixed tab size — the status bar then reports the model's real resolved insertSpaces/tabSize.
+            // Detect indentation from the file's own content so the status bar reports the model's
+            // real resolved insertSpaces/tabSize. `tabSize: 2` is only the FALLBACK for content with
+            // no detectable indentation (new/empty buffers) — detectIndentation always overrides it
+            // when the file has real indentation, so this keeps the 2-space default without lying.
             detectIndentation: true,
+            tabSize: 2,
             renderWhitespace: 'selection',
             smoothScrolling: true,
             cursorBlinking: 'smooth',
