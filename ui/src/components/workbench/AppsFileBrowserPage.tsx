@@ -155,13 +155,13 @@ function contentHitRow(r: SearchFileResult): RowItem {
   };
 }
 
-// A content-search hit is "hidden" when any component of its rel path starts with a dot. The content
-// backend (searchFiles) has no show_hidden option and walks dotfiles/dot-dirs, so when "Show hidden
-// files" is off we drop those hits client-side — matching name search and the listing, which never
-// surface hidden entries then (otherwise content search could leak e.g. `.env` the browser hides).
-function isHiddenRel(rel: string): boolean {
-  return rel.split('/').some((seg) => seg.startsWith('.'));
-}
+// Content search (searchFiles) has no show_hidden option, so when "Show hidden files" is off we ask
+// the backend to EXCLUDE hidden entries via its glob `exclude` (the same mechanism the editor's
+// cross-file search uses). `.*` — deliberately slash-free — matches any dotfile basename AND, because
+// slash-free excludes also prune walked directory names, skips hidden dot-directories at every depth.
+// Doing it in the REQUEST (not client-side after the fact) means hidden hits never consume the
+// backend's file/match cap, so visible matches can't be crowded out by many hidden ones.
+const HIDDEN_EXCLUDE_GLOB = '.*';
 
 // Keep-both cap for the move name-clash dialog: after this many same-named copies we stop retrying
 // and report failure rather than spin. A destination holding ~100 identical names is pathological.
@@ -292,8 +292,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setSearchBusy(true);
       const search =
         searchMode === 'content'
-          ? searchFiles(cwd, q, {}, ac.signal).then((r) => ({
-              rows: r.results.filter((hit) => showHidden || !isHiddenRel(hit.rel)).map(contentHitRow),
+          ? searchFiles(cwd, q, showHidden ? {} : { exclude: HIDDEN_EXCLUDE_GLOB }, ac.signal).then((r) => ({
+              rows: r.results.map(contentHitRow),
               truncated: r.truncated,
             }))
           : searchNames(cwd, q, showHidden, ac.signal).then((r) => ({ rows: r.results.map(nameHitRow), truncated: r.truncated }));
