@@ -115,6 +115,7 @@
     "projects": "项目",
     "capabilities": "能力",
     "more": "更多",
+    "apps": "Apps",
     "workbench": "工作台"
   },
   "more": {
@@ -122,6 +123,7 @@
     "controlPanel": "设置",
     "controlPanelDesc": "控制台 · 远程访问 · 通讯平台 · 后端 · 高级设置",
     "appearance": "外观",
+    "account": "账号",
     "connection": "连接",
     "host": "本机地址"
   },
@@ -734,6 +736,7 @@
       "showAllWindows": "显示所有窗口",
       "openInNewTab": "在新标签页打开",
       "unpin": "从 Dock 取消固定",
+      "syncedCaption": "与桌面 Dock 同步",
       "emptyHint": "Dock 为空 · 打开应用库"
     },
     "launcher": {

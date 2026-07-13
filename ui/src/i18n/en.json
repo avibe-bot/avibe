@@ -115,6 +115,7 @@
     "projects": "Projects",
     "capabilities": "Capabilities",
     "more": "More",
+    "apps": "Apps",
     "workbench": "Workbench"
   },
   "more": {
@@ -122,6 +123,7 @@
     "controlPanel": "Settings",
     "controlPanelDesc": "Dashboard · Remote Access · Messaging Platforms · Backends · Advanced Settings",
     "appearance": "Appearance",
+    "account": "Account",
     "connection": "Connection",
     "host": "Local address"
   },
@@ -734,6 +736,7 @@
       "showAllWindows": "Show All Windows",
       "openInNewTab": "Open in New Tab",
       "unpin": "Unpin from Dock",
+      "syncedCaption": "Synced with desktop Dock",
       "emptyHint": "Dock is empty · Open App Library"
     },
     "launcher": {

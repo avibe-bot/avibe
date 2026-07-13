@@ -20,7 +20,6 @@ import { HarnessPage } from './components/workbench/HarnessPage';
 import { VaultsPage } from './components/workbench/VaultsPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
-import { MorePage } from './components/workbench/MorePage';
 import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
@@ -62,6 +61,11 @@ const AppsEditorPage = lazy(() =>
   import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
 );
 const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ default: m.LibraryApp })));
+// The mobile full-screen Show Page route body. Lazy so the iframe frame + session
+// lookup load only when a pinned page is opened, not into the main entry.
+const ShowPageRoute = lazy(() =>
+  import('./components/apps/ShowPageRoute').then((m) => ({ default: m.ShowPageRoute })),
+);
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
@@ -400,7 +404,10 @@ const router = createBrowserRouter(
         <Route path="/harness" element={<HarnessPage />} />
         <Route path="/vaults" element={<VaultsPage />} />
         <Route path="/projects" element={<ProjectsPage />} />
-        <Route path="/more" element={<MorePage />} />
+        {/* /more retired: the workbench Apps tab now summons the Dock drawer
+            (§7.1b), which absorbed the old More-page content. Redirect any
+            lingering link/bookmark home. */}
+        <Route path="/more" element={<Navigate to="/" replace />} />
         {/* Apps layer — File Browser (Phase 1) + Terminal (Phase 2). The
             sidebar Apps launcher opens these; /apps lands on the file browser. */}
         <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
@@ -429,6 +436,16 @@ const router = createBrowserRouter(
           }
         />
         <Route path="/apps/library" element={<LibraryRoute />} />
+        {/* A pinned Show Page opened as an app. Desktop opens a window and hands
+            back to the canvas; mobile frames it full-screen (§7.1b). */}
+        <Route
+          path="/apps/show/:sessionId"
+          element={
+            <Suspense fallback={<AppsRouteFallback />}>
+              <ShowPageRoute />
+            </Suspense>
+          }
+        />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
 
         {/* Control Panel mode — existing pages moved under /admin/* */}

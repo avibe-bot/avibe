@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, ChevronDown, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -17,6 +17,7 @@ import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerContext';
 import { DockProvider } from '../context/DockContext';
 import { WindowLayer } from './apps/WindowLayer';
+import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
 import { Button } from './ui/button';
@@ -222,6 +223,9 @@ export const AppShell: React.FC = () => {
   // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
   // route changes so tapping any item in the sheet dismisses it.
   const [adminMenuOpen, setAdminMenuOpen] = useState(false);
+  // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
+  // sheet it closes on any route change — tapping a tile navigates + dismisses.
+  const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -250,10 +254,11 @@ export const AppShell: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Close the mobile admin nav sheet on any route change (tapping an item in it
-  // navigates, which should dismiss the sheet).
+  // Close the mobile transient surfaces (admin nav sheet + Apps Dock drawer) on
+  // any route change — tapping an item in either navigates, which dismisses it.
   useEffect(() => {
     setAdminMenuOpen(false);
+    setAppsDrawerOpen(false);
   }, [location.pathname]);
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
@@ -356,7 +361,10 @@ export const AppShell: React.FC = () => {
       icon: LayoutGrid,
       match: (p) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
     },
-    { to: '/more', label: t('nav.more'), icon: Menu, match: (p) => p.startsWith('/more') },
+    // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
+    // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
+    // it from Capabilities' `layout-grid`.
+    { label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen },
   ];
 
   // Chat is a full-screen detail (own composer) and Search is a full-screen
@@ -581,6 +589,13 @@ export const AppShell: React.FC = () => {
             </nav>
           </div>
         </div>
+      )}
+
+      {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
+          (md:hidden internally); mounted inside DockProvider so it reads the same
+          docked tiles + order as the desktop Dock. */}
+      {shellMode === 'workbench' && (
+        <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
       <NewSessionSheet
