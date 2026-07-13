@@ -1,0 +1,261 @@
+# Dock-Pinned Show Page Apps
+
+Status: design approved-pending-owner-review · Plan created 2026-07-13
+Owner: PM session `sesf875xc5svz` · Design frames: `design.pen` (see §8)
+
+## 1. Background & Goal
+
+Show Pages today are per-session visualizations opened from the chat header.
+The product direction is: **a Show Page is an app the agent built for the
+user**. This feature makes that literal — the user can pin a session's Show
+Page to the workbench Dock, where it behaves like any other app: a Dock tile,
+a Mac-style window, minimize/maximize/close, open-in-browser-tab.
+
+This is deliberately the seed of the "Avibe as Agent OS installs apps" model
+(§7): the v1 data model (ordered dock list + param-driven app windows) must
+survive that evolution.
+
+Non-goals (v1): mobile window management (windows stay desktop-only, ≥ md),
+publishing a session page as a standalone/detached app, third-party app
+installation, per-app permissions.
+
+## 2. UX Spec
+
+### 2.1 Pin from the share popover
+- `ShowPageShareControl` (chat header, visible in show-page mode) gains a
+  **Pin to Dock** section: icon + label + `Switch`, with a one-line caption
+  ("Shown in the Dock and opens as an app").
+- Pinning is **independent of share visibility** — a private page can be
+  pinned. Pin/unpin never changes visibility, never deletes the page.
+- The popover already calls `ensureShowPage` on open, so the page exists by
+  the time the toggle renders. Toggle is optimistic with server round-trip.
+
+### 2.2 Dock tile
+- Pinned pages appear in the Dock after the built-in tiles, in user order.
+- Tile visual: rounded-square **letter avatar** — first grapheme of the app
+  title (supports CJK/emoji) on an accent tint **derived by hashing
+  `session_id`** into the brand accent set (mint/cyan/violet/gold), so
+  multiple pinned apps are distinguishable without an icon pipeline.
+- Label + running indicator + minimized thumbnails behave exactly like
+  built-in apps (same `Dock.tsx` tile anatomy).
+- Title = live session title when loadable, else `title_snapshot` from the
+  pin record, else `session_id` prefix.
+
+### 2.3 Window behavior
+- Click tile → focus existing window for that `session_id` if one is open,
+  else `openApp('showpage', { params: { sessionId, title } })`.
+- Window = existing `AppWindow` chrome: traffic lights (close / min / max),
+  drag, 8-dir resize, persistence — all inherited, no new window code.
+- **New:** title-bar **right side** gets an "open in new tab" icon button
+  (generalized as `AppDefinition.externalHref?(params)`; only `showpage`
+  defines it in v1). Opens the private URL in a browser tab.
+- Body = same-origin `<iframe src="/show/<session_id>/">` — always the
+  **owner (authed) surface**, regardless of visibility (authed workbench
+  context; HMR means the app updates live while the agent keeps building
+  it). Copy the sandbox attrs from `ChatPage.tsx`; per the standing decision
+  the workbench show-page iframe is intentionally same-origin-trusted — do
+  not harden.
+- **Amendment (2026-07-13, review round 1-6 root cause):** the existing
+  `serve_private_show_page` route 404s when `visibility == "public"`, which
+  would break pinned public pages. Decision: **extend the authed `/show/
+  <session_id>/` route to serve `private` AND `public` pages** (identical
+  surface); `offline` keeps returning not-found (window placeholder covers
+  it). No new exposure: the route stays behind workbench auth, and a public
+  page is already anonymously readable via `/p/`; anonymous access still has
+  exactly one surface (`/p/`). ChatPage's public→`/p/` switch is untouched.
+- Missing/archived/offline page → window body renders a friendly placeholder
+  (never a dead button): explain + "Unpin" shortcut. Opening a pinned app
+  must **not** auto-create/ensure a page.
+
+### 2.4 Dock management
+- **Drag to reorder**: the resident tile row (built-ins + pinned) is
+  reorderable via `framer-motion` `Reorder` (already a dependency; do not add
+  dnd-kit). Order persists server-side on drop. Minimized-window thumbnails
+  section is not reorderable.
+- **Right-click menu**: converge the Dock's inline menu onto the shared
+  `ui/context-menu.tsx` primitive (reuse ladder: promote the near-duplicate).
+  Pinned tiles add **Unpin from Dock**; built-ins (`files`/`terminal`/
+  `editor`) have no unpin item in v1. All tiles keep New Window / Show All
+  Windows; pinned tiles also get Open in New Tab.
+- Unpinning while a window is open leaves the window open; the tile then
+  behaves like `preview` (transient tile while any window exists).
+
+## 3. Data Model & Persistence
+
+Pins are **durable product state, not per-browser UI state** → server-side,
+in the existing `state_meta` KV (`get_state_meta`/`set_state_meta`), single
+key:
+
+```
+state_meta["workbench.dock.v1"] = {
+  "order": ["files", "terminal", "editor", "show:<session_id>", ...],
+  "pins":  [{ "session_id": str, "title_snapshot": str, "pinned_at": iso8601 }]
+}
+```
+
+- `DockItemId` namespace: builtin ids verbatim; pinned pages as
+  `show:<session_id>`; future kinds get new prefixes (`app:<id>`), so the
+  order list survives the §7 evolution.
+- `order` covers **all resident tiles including built-ins** (built-ins are
+  reorderable, just not unpinnable).
+- Reconciliation on read (client): drop unknown ids, append missing built-ins
+  and missing pins at the end. Server validates writes (set-equality against
+  known ids, caps list size, rejects duplicates).
+- Window layout stays in localStorage as today (`workbenchPersistence.ts`);
+  `showpage` windows rehydrate because the registry knows the appId and
+  `params` are persisted already.
+
+## 4. API Contract (freeze before implementation)
+
+All under the existing authed `/api` surface (native FastAPI routes must go
+through `CompatApp.dispatch_native_request` so they inherit
+`enforce_remote_access_cookie` + CSRF — see the #659 lesson).
+
+```
+GET    /api/dock                     → { ok: true, dock: DockDoc }
+POST   /api/dock/pins                { session_id }        → { ok, dock }   # idempotent
+DELETE /api/dock/pins/{session_id}                          → { ok, dock }   # idempotent
+PUT    /api/dock/order               { order: string[] }    → { ok, dock }
+
+DockDoc = { order: string[], pins: DockPin[] }
+DockPin = { session_id: string, title_snapshot: string, pinned_at: string }
+```
+
+- `POST pins` appends `show:<sid>` to the end of `order`; captures
+  `title_snapshot` from the session's current title server-side.
+- Errors: 404 unknown session / no show page on pin; 400 invalid order.
+
+## 5. Frontend Changes (map to real files)
+
+| Change | Where |
+| --- | --- |
+| `showpage` app registration (non-resident, param-driven like `preview`; `lockTheme` unset) | `ui/src/apps/registry.tsx` |
+| Iframe window body + placeholder state + letter-avatar icon helper | new `ui/src/apps/ShowPageApp.tsx` (+ small pure helper w/ vitest) |
+| Title-bar right-side external-link button via `AppDefinition.externalHref?` | `ui/src/components/apps/AppWindow.tsx` |
+| Dock: render pinned tiles from context; Reorder wrapper; shared context menu; unpin item | `ui/src/components/apps/Dock.tsx` |
+| `DockProvider` (fetch/reconcile/actions; optimistic) mounted in `AppShell` | new `ui/src/context/DockContext.tsx` |
+| Pin section in share popover | `ui/src/components/workbench/ShowPageShareControl.tsx` |
+| API methods `getDock` / `pinDockShowPage` / `unpinDockShowPage` / `setDockOrder` | `ui/src/context/ApiContext.tsx` |
+| i18n strings (en + zh) | `ui/src/i18n/en.json`, `zh.json` |
+
+Backend: `vibe/api.py` handlers + `vibe/ui_server.py` routes + a small
+`core/dock_store.py` (or colocated helpers) over `state_meta`; pytest
+coverage for round-trip, idempotency, order validation, unknown-session pin.
+
+## 6. Edge Cases & Rules
+
+- Pin survives session archive; window shows placeholder; unpin always works.
+- Never surface `/p/<share_id>` inside the workbench app window (private
+  surface only); external-tab open also uses `/show/<sid>/`.
+- Two browser tabs: dock doc is last-write-wins on order; pins idempotent.
+- Multiple windows of the same pinned app allowed (New Window), matching
+  built-ins; tile click focuses the most recent.
+- Mobile (< md): windows don't exist; v1 ships desktop-only and files a
+  follow-up to surface pinned apps in the mobile Apps surface.
+
+## 7. Future: the OS model (direction, not v1 scope)
+
+1. **App = manifest, not code.** `AppManifest { id, kind: builtin | showpage
+   | remote | package, name, icon, entry (component key | url), source,
+   permissions? }`. Registry = static built-ins ∪ server-registered
+   manifests (`GET /api/apps`). Dock, launcher, and windows consume manifests
+   uniformly. Pinned show pages are the first dynamic kind — this PR.
+2. **Install = registering a manifest.** Sources: agent-built show pages
+   (now), skill-bundled web apps (`askill` ships a `ui` entry), user-added
+   remote URLs, later a store. "Publish" flow detaches a session page into a
+   standalone app (stable id, own icon/name, copied workspace) — the full
+   "agent ships an app to its user" story.
+3. **App Library.** A management surface (Settings → Apps, or a built-in
+   Library app): installed list w/ kind badges, show-in-Dock toggle, order,
+   uninstall, per-app permission tier (third-party kinds get the sandbox
+   work: realpath-gate + kernel sandbox). Dock = pinned ⊆ installed + running
+   transients.
+4. **Compatibility guarantee.** v1's `order` id namespace, pin records, and
+   param-driven windows all carry over; nothing here needs re-migration.
+
+### 7.1 Phase 2 (owner decision 2026-07-13): App Library subsumes the Show Pages admin page
+
+The existing `/admin/show-pages` page (`ui/src/components/ShowPagesPage.tsx`,
+control-panel nav) does two jobs: full show-page inventory + visibility/link
+management. Once pins ship, keeping it standalone would leave two lists over
+the same objects. Decision: fold it into the App Library.
+
+- **Library = one built-in app, two views.**
+  - *Apps*: exactly the docked set — **one state bit: being an app ≡ being
+    in the Dock; no installed-but-undocked middle state** (owner-confirmed
+    2026-07-13 evening after the toggle-vs-delete ambiguity). Row actions by
+    kind: reorder (all) · remove-from-Dock (showpage — the page itself stays
+    in the inventory) · uninstall (remote/package — actually removes) ·
+    built-ins locked · Add App (remote URL, §7.3). NO per-row Dock toggle
+    here; the Show Pages view's toggle is the single promote/demote gesture.
+    (Not every Show Page is an app; every session has a page, so the full
+    inventory must not masquerade as the app list.)
+  - *Show Pages*: the full inventory (today's admin page content: status,
+    visibility private/public/offline, link + share-id, open) **plus a
+    per-row "Pin to Dock" toggle** — pinning is the "install" gesture.
+  - Same data sources (`/api/show-pages` + `/api/dock`), two projections; no
+    new backend.
+- **Library ships as built-in app #4** (like Launchpad/App Store: the app
+  manager is itself an app) — reorderable, not unpinnable, same as the other
+  built-ins.
+- **Remove** the `/admin/show-pages` route + nav item; redirect the old route.
+  Control panel returns to pure ops/config.
+- **Mobile**: windows are desktop-only, so the Library body must also render
+  as a full-screen route on mobile (same component, two shells) — no
+  capability regression vs. the old admin page.
+- **Sequencing**: v1 pin PR (in flight) is scope-frozen and unaffected.
+  Phase 2 is a separate lane/PR after v1 merges.
+- **Concept frames**: `xCSqW` (Apps view, tabbed, one-bit model) + `td17F` (Show Pages view —
+  tabs, filters, expanded row w/ visibility+link+suffix mgmt, per-row Dock
+  toggle), both in design.pen right of `NbPMq`.
+
+### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
+
+Pinning **is** installing — no separate ceremony. Two entrances, one action:
+the share-popover switch (v1) and the per-row Dock toggle in the Library's
+Show Pages view (Phase 2). The full ladder: **page (session byproduct) → pin
+(lightweight app, one switch) → publish (standalone app, stable id/icon,
+detached from the session lifecycle — future)**.
+
+### 7.3 User-added URL apps (kind: remote) — Phase 3
+
+Owner confirmed the bookmark-style want: Add App → name + URL → appears in
+the Apps list, pinnable to Dock, opens as a window. Requirements settled now
+so Phase 2 leaves no dead end:
+
+- **Embedding fallback is mandatory**: many sites refuse framing
+  (X-Frame-Options / CSP `frame-ancestors`). A remote app window must detect
+  failure and degrade to "open in new tab" (and/or a per-app "opens in:
+  window | tab" setting).
+- **Sandbox required**: unlike same-origin-trusted Show Pages, remote
+  content gets a sandboxed iframe — this is the on-ramp to third-party app
+  permission tiers.
+- **Data model**: already compatible — a new `DockItemId` prefix (e.g.
+  `app:<id>`/`url:<id>`) and an `apps`/manifest list alongside `pins`; no
+  migration of v1 state.
+- **Sequencing**: Phase 3, right after Phase 2 (kept out of Phase 2 to keep
+  that lane small: Library + migration only).
+
+## 8. Design Frames (design.pen)
+
+Dark-theme frames alongside the Apps v2 set (right of `NbPMq`, y=-2315):
+
+| Frame | id | Content |
+| --- | --- | --- |
+| Apps · Pin Show Page — Share Popover | `s2YOlP` | popover w/ Pin to Dock switch + rules legend |
+| Apps · Dock — Pinned Show Page Apps | `zn8tz` | pinned letter-avatar tiles, context menu, reorder scene, menu rules |
+| Apps · Show Page App Window | `vxbaK` | `X7d3Ev` AppWindow instance + title-bar external-open + iframe dashboard body |
+| Apps · Future — App Library / Apps View | `xCSqW` | manifest model, kinds, show-in-Dock toggles, evolution path (not v1) |
+
+## 9. Delivery
+
+Single lane, single PR (frontend-heavy + small backend), per
+`.agents/skills/pr-delivery-loop/SKILL.md`. Evidence: pytest (dock API),
+vitest (reconcile + avatar helpers), `npm run build`, manual checklist in a
+local Incus regression. Docs follow-up in `avibe-docs` after merge.
+
+Owner decisions embodied in the design (flag if you want them changed):
+1. Pins are server-side/cross-device (`state_meta`), not per-browser.
+2. Pinned-tile icon = letter avatar + hashed accent (no icon pipeline in v1).
+3. Built-ins are reorderable but not unpinnable.
+4. App window always uses the private `/show/` surface.
