@@ -218,6 +218,44 @@ the same objects. Decision: fold it into the App Library.
   tabs, filters, expanded row w/ visibility+link+suffix mgmt, per-row Dock
   toggle), both in design.pen right of `NbPMq`.
 
+### 7.1c Phase 2.1 — acceptance-feedback round (owner hands-on, 2026-07-13 23:27; SUPERSEDES the one-bit model)
+
+Owner used the shipped Library and upgraded the model to **two layers**:
+**Apps list = "installed" set** · **Dock = the resident subset**. His 7 points,
+integrated:
+
+1. **Built-ins are undockable too** (reverses the v1 lock): every tile —
+   files/terminal/editor/library — can be unpinned from the Dock via
+   right-click or the Apps-view action. Built-ins can NEVER be removed from
+   the Apps LIST (no 移出 for them); no lock icons anywhere.
+2. **Library tab rename**: "Show Pages / 展示页面" view → **"AI"** (en+zh
+   both "AI").
+3. **Apps view rows get two distinct actions**: 取消固定/固定到 Dock
+   (toggles Dock membership, row STAYS in the list) and — AI-kind rows only —
+   **移出** (removes from the Apps list entirely; page itself untouched).
+4. **Row click opens the app** (both views).
+5. **AI view per-row control**: the Dock switch → an **"添加到 App" button**
+   (Button primitive, state-aware: 添加到 App ↔ 移出). It toggles APPS-LIST
+   membership; adding also docks by default (keeps the v1 one-gesture feel);
+   removing removes from both. (PM default — flag if wrong.)
+6. **AI view open affordance**: remove the standalone Open button; an open
+   icon sits beside the row title; clicking title/row **opens the app
+   window** (reuse the showpage window), NOT a browser tab. Share-link
+   management stays in the expanded panel.
+7. **Library is itself a listed built-in app** (appears in the Apps view,
+   dockable/undockable like the rest), and a **permanent 应用库 entry lives
+   in the control-panel sidebar** (undismissable escape hatch; links to the
+   existing /apps/library route).
+
+Data model (compatible evolution, no migration): `pins` = installed AI
+pages; `order` = docked ids and becomes a **SUBSET** of {built-ins ∪ pins}
+(server validation: unique, known ids, subset — no longer set-equality;
+reconcile stops force-appending built-ins). Existing docs (all built-ins in
+order) remain valid. API surface unchanged: dock/undock = PUT order with/
+without the id; install/remove = POST/DELETE pins (POST also appends to
+order per §5 default). Empty Dock is allowed; when empty, the Dock popover
+shows an App Library shortcut hint (never a dead surface).
+
 ### 7.1b Mobile Dock — Option B locked (owner decision 2026-07-13 22:22)
 
 - The mobile 更多 tab becomes **Apps** (grid icon). Tapping summons a bottom
