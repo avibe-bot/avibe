@@ -9,6 +9,7 @@ import {
   ClipboardPaste,
   Copy,
   Download,
+  Eye,
   FileCode2,
   FileSearch,
   FileText,
@@ -37,7 +38,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile, isEditableMeta, previewOverlayKind, previewWindowKind } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
 import {
   contentUrl,
   copyPath,
@@ -64,6 +65,7 @@ import {
   type Favorite,
   type FsEntry,
   type FsListing,
+  type FsMeta,
   type NameHit,
   type SearchFileResult,
 } from '../../lib/filesApi';
@@ -247,10 +249,9 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setSort((s) => (s?.col !== col ? { col, dir: 'asc' } : s.dir === 'asc' ? { col, dir: 'desc' } : null)),
     [],
   );
-  // Quick-look image preview: a raster image opens in an in-window overlay (Finder-style) instead
-  // of downloading. Kept in-window (not a portaled Dialog) so it stays inside the window's dark
-  // data-theme scope and bounds.
-  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
+  // Mobile quick look stays inside the Files surface because phones have no window layer. Keep the
+  // edit capability with the preview so editable formats can switch surfaces from its toolbar.
+  const [preview, setPreview] = useState<{ path: string; name: string; mtime: number | null; editable: boolean } | null>(null);
   useEffect(() => {
     if (!preview) return;
     const onKey = (ev: KeyboardEvent) => {
@@ -398,6 +399,19 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     [wm, routerNavigate],
   );
 
+  // Preview capability is shared across breakpoints; only its presentation differs. The caller
+  // supplies resolved metadata when it has already been fetched (content hits / ambiguous names).
+  const openPreview = useCallback(
+    (item: RowItem, entry: FsEntry = item.entry, editable = isEditableFile(entry), mtime = entry.mtime) => {
+      if (window.matchMedia('(min-width: 768px)').matches) {
+        wm.openApp('preview', { title: entry.name, params: { path: item.full, name: entry.name } });
+      } else {
+        setPreview({ path: item.full, name: entry.name, mtime, editable });
+      }
+    },
+    [wm],
+  );
+
   // Open a terminal rooted at a folder ("Open Terminal Here"): desktop opens a Terminal window
   // whose first tab starts in `dir`; mobile — which has no window layer — navigates to the terminal
   // route with the dir in router state. Mirrors openInEditor.
@@ -421,9 +435,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       navigate(item.full);
       return;
     }
-    const desktop = window.matchMedia('(min-width: 768px)').matches;
     // Content-search hits carry no size (the search API omits it), so the synchronous size gates in
-    // previewWindowKind / previewOverlayKind would treat them as unbounded and could route an
+    // previewWindowKind would treat them as unbounded and could route an
     // oversized file (e.g. a >1 MB Markdown) into a preview the listing path would refuse. For those,
     // fetch metadata up front and route with the REAL size + text sniff — so a content hit opens
     // exactly like the same file from a listing/name row.
@@ -431,10 +444,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       try {
         const m = await fileMeta(item.full);
         const sized: FsEntry = { ...item.entry, size: m.size };
-        if (desktop && previewWindowKind(sized)) {
-          wm.openApp('preview', { title: sized.name, params: { path: item.full, name: sized.name } });
-        } else if (!desktop && previewOverlayKind(sized)) {
-          setPreview({ path: item.full, name: sized.name });
+        if (previewWindowKind(sized)) {
+          openPreview(item, sized, isEditableMeta(m), m.mtime);
         } else if (isEditableMeta(m)) {
           openInEditor(item.full, sized.name, m.mtime);
         } else {
@@ -442,22 +453,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         }
       } catch {
         // Meta unavailable: best-effort by name, mirroring the fallback in the listing path below.
-        if (isEditableFile(item.entry)) openInEditor(item.full, item.entry.name, item.entry.mtime);
+        if (previewWindowKind(item.entry)) openPreview(item);
+        else if (isEditableFile(item.entry)) openInEditor(item.full, item.entry.name, item.entry.mtime);
         else downloadFile(item.full);
       }
       return;
     }
-    if (desktop) {
-      // Desktop: image / PDF / Office / Markdown open the dedicated, resizable Preview window.
-      if (previewWindowKind(item.entry)) {
-        wm.openApp('preview', { title: item.entry.name, params: { path: item.full, name: item.entry.name } });
-        return;
-      }
-    } else if (previewOverlayKind(item.entry)) {
-      // Mobile has no window layer: only NON-editable rich files (image / PDF / Office) open the
-      // in-page overlay. Markdown/SVG are previewable too but ALSO editable, so they fall through to
-      // the editor below (it has its own Source⇄Preview toggle) instead of a read-only overlay.
-      setPreview({ path: item.full, name: item.entry.name });
+    if (previewWindowKind(item.entry)) {
+      openPreview(item);
       return;
     }
     // Fetch CURRENT metadata (content-sniffs `text`) and decide by CONTENT, not just the extension —
@@ -704,13 +707,36 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
   // ---- Context menu ----------------------------------------------------------------------------
   // `item` is null for blank space (offers New File/Folder only).
-  const [menu, setMenu] = useState<{ x: number; y: number; item: RowItem | null; items: RowItem[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; item: RowItem | null; items: RowItem[]; meta?: FsMeta | null } | null>(null);
+  const menuRequest = useRef(0);
   const openMenu = useCallback((ev: React.MouseEvent, item: RowItem | null, items: RowItem[] = []) => {
     ev.preventDefault();
     ev.stopPropagation();
-    setMenu({ x: ev.clientX, y: ev.clientY, item, items });
+    const request = ++menuRequest.current;
+    const next = { x: ev.clientX, y: ev.clientY, item, items };
+    // Listing metadata is enough for named formats. Resolve only ambiguous/content-search files so
+    // extensionless text gets an Editor action while binaries never advertise one.
+    const needsMeta =
+      item?.entry.kind === 'file' &&
+      items.length <= 1 &&
+      (item.matchCount != null || (!previewWindowKind(item.entry) && !isEditableFile(item.entry)));
+    if (!needsMeta) {
+      setMenu(next);
+      return;
+    }
+    setMenu(null);
+    void fileMeta(item.full)
+      .then((meta) => {
+        if (menuRequest.current === request) setMenu({ ...next, meta });
+      })
+      .catch(() => {
+        if (menuRequest.current === request) setMenu({ ...next, meta: null });
+      });
   }, []);
-  const closeMenu = useCallback(() => setMenu(null), []);
+  const closeMenu = useCallback(() => {
+    menuRequest.current += 1;
+    setMenu(null);
+  }, []);
 
   // ---- Drag-and-drop move ----------------------------------------------------------------------
   // The dragged row is held in a ref (no re-render mid-drag); `dropTarget` (a folder path) drives the
@@ -1276,13 +1302,21 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
   const showInitialSpinner = inSearch ? searchBusy && searchRows === null : loading && !listing;
   const showEmpty = inSearch ? !searchBusy && (searchRows?.length ?? 0) === 0 : !!listing && rows.length === 0 && newEntry === null;
-  // Single row keeps its original four actions plus Copy/Duplicate; a batch has four batch actions.
+  const menuEntry = menu?.item && menu.meta ? { ...menu.item.entry, size: menu.meta.size, mtime: menu.meta.mtime } : menu?.item?.entry;
+  const menuPreviewable = menuEntry ? previewWindowKind(menuEntry) != null : false;
+  const menuEditable = menu?.item
+    ? menu.meta
+      ? isEditableMeta(menu.meta)
+      : isEditableFile(menu.item.entry)
+    : false;
+
+  // Single-file menus add only the explicit routes the selected entry actually supports.
   // Blank space keeps New File/Folder + Terminal and gains Paste while the in-app clipboard is set.
   const menuItemCount = menu
     ? menu.item
       ? menu.items.length > 1
         ? 4
-        : 6
+        : 6 + (menuPreviewable ? 1 : 0) + (menuEditable ? 1 : 0)
       : (cwd ? 3 : 2) + (clipboard.length > 0 && cwd ? 1 : 0)
     : 0;
 
@@ -1737,6 +1771,23 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
             <FileText className="size-4 shrink-0 text-muted" />
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>
+            {preview.editable && (
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-7 shrink-0 text-muted"
+                aria-label={t('apps.fileBrowser.openInEditor')}
+                title={t('apps.fileBrowser.openInEditor')}
+                onClick={() => {
+                  const current = preview;
+                  setPreview(null);
+                  openInEditor(current.path, current.name, current.mtime);
+                }}
+              >
+                <Pencil className="size-3.5" />
+              </Button>
+            )}
             <Button
               type="button"
               size="icon"
@@ -1872,6 +1923,31 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                     void openItem(it);
                   }}
                 />
+                {menuPreviewable && menuEntry && (
+                  <ContextMenuItem
+                    icon={<Eye className="size-3.5 text-cyan" />}
+                    label={t('apps.fileBrowser.preview')}
+                    onClick={() => {
+                      const it = menu.item as RowItem;
+                      const editable = menu.meta ? isEditableMeta(menu.meta) : isEditableFile(menuEntry);
+                      const mtime = menu.meta?.mtime ?? menuEntry.mtime;
+                      closeMenu();
+                      openPreview(it, menuEntry, editable, mtime);
+                    }}
+                  />
+                )}
+                {menuEditable && (
+                  <ContextMenuItem
+                    icon={<FileCode2 className="size-3.5 text-mint" />}
+                    label={t('apps.fileBrowser.openInEditor')}
+                    onClick={() => {
+                      const it = menu.item as RowItem;
+                      const mtime = menu.meta?.mtime ?? it.entry.mtime;
+                      closeMenu();
+                      openInEditor(it.full, it.entry.name, mtime);
+                    }}
+                  />
+                )}
                 {menu.item.entry.kind === 'dir' && (
                   <ContextMenuItem
                     icon={<SquareTerminal className="size-3.5 text-mint" />}

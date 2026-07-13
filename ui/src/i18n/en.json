@@ -734,6 +734,8 @@
       "uploadNoFolders": "Folders can't be uploaded — drop files only.",
       "uploadError": "{{name}}: {{message}}",
       "open": "Open",
+      "preview": "Preview",
+      "openInEditor": "Open in Editor",
       "openTerminalHere": "Open Terminal Here",
       "copy": "Copy",
       "paste": "Paste",
