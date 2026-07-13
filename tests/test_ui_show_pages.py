@@ -245,6 +245,51 @@ def test_private_show_page_serves_locally(monkeypatch, tmp_path):
     assert b"Show Page" in response.content
 
 
+def test_public_show_page_serves_from_authed_route(monkeypatch, tmp_path):
+    # Spec amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
+    # pages too, so a Show Page pinned to the Dock while public still opens.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "public")
+
+    response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 200
+    assert b"Show Page" in response.content
+
+
+def test_public_show_page_still_requires_remote_login(monkeypatch, tmp_path):
+    # Auth parity: serving public pages here adds no anonymous exposure — the
+    # authed route still bounces a remote request without a session to login
+    # (anonymous access stays on /p/<share_id> only).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "public")
+
+    response = app.test_client().get(
+        "/show/ses123/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+
+
+def test_offline_show_page_not_served_by_authed_route(monkeypatch, tmp_path):
+    # The amendment serves private + public only; offline still returns the
+    # explanatory offline page (never the live surface).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "offline")
+
+    response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
+
+    assert b"This Show Page is offline" in response.content
+    assert b"window.showPage" not in response.content  # the live app.js is never served
+
+
 def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

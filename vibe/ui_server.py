@@ -8988,7 +8988,15 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_not_found_response()
         if page.visibility == "offline":
             return _show_page_offline_response()
-        if page.visibility != "private":
+        # Amendment (2026-07-13, docs/plans/dock-pinned-show-page-apps.md §2.3): the
+        # authed workbench `/show/<id>/` surface serves BOTH private and public
+        # pages, so a Show Page pinned to the Dock while public still opens (a
+        # pinned public page must not open a broken window). This is no new
+        # exposure — the route stays behind workbench auth, and a public page is
+        # already anonymously readable via `/p/<share_id>`, which remains the only
+        # anonymous surface. `offline` (handled above) and any unexpected
+        # visibility still fall through to not-found.
+        if page.visibility not in {"private", "public"}:
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
             return _show_page_file_not_found_response()
