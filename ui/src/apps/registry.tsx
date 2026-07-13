@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { CodeXml, Eye, Folder, MonitorPlay, SquareTerminal } from 'lucide-react';
+import { CodeXml, Eye, Folder, LayoutGrid, MonitorPlay, SquareTerminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LucideIcon } from 'lucide-react';
 
@@ -11,7 +11,7 @@ import { showPagePrivatePath } from './showPageAvatar';
 // so opening the workbench doesn't pull file-browser / xterm code into the main
 // bundle — each loads only when its window first opens.
 
-export type AppId = 'files' | 'terminal' | 'editor' | 'preview' | 'showpage';
+export type AppId = 'files' | 'terminal' | 'editor' | 'preview' | 'showpage' | 'library';
 
 export interface AppDefinition {
   id: AppId;
@@ -55,6 +55,7 @@ const PreviewBody = lazy(() =>
   import('../components/workbench/AppsPreviewPage').then((m) => ({ default: m.AppsPreviewPage })),
 );
 const ShowPageBody = lazy(() => import('./ShowPageApp').then((m) => ({ default: m.ShowPageApp })));
+const LibraryBody = lazy(() => import('./LibraryApp').then((m) => ({ default: m.LibraryApp })));
 
 export const APP_REGISTRY: Record<AppId, AppDefinition> = {
   files: {
@@ -134,8 +135,23 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
       return typeof sessionId === 'string' && sessionId ? showPagePrivatePath(sessionId) : undefined;
     },
   },
+  // The App Library — the app manager, itself a built-in app (§7.1). Two views
+  // (Apps + Show Pages) over the Dock + Show Pages data. Opened from its Dock
+  // tile on desktop and the /apps/library route (full-screen on mobile).
+  library: {
+    id: 'library',
+    titleKey: 'library.title',
+    icon: LayoutGrid,
+    accent: '--gold',
+    defaultSize: { width: 940, height: 640 },
+    Component: ({ windowId, params }) => (
+      <Suspense fallback={<Loading />}>
+        <LibraryBody windowId={windowId} params={params} />
+      </Suspense>
+    ),
+  },
 };
 
 // Dock launcher tiles — the resident apps. `preview` and `showpage` are intentionally excluded
 // (opened on demand / while pinned).
-export const APP_LIST: AppDefinition[] = [APP_REGISTRY.files, APP_REGISTRY.terminal, APP_REGISTRY.editor];
+export const APP_LIST: AppDefinition[] = [APP_REGISTRY.files, APP_REGISTRY.terminal, APP_REGISTRY.editor, APP_REGISTRY.library];

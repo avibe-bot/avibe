@@ -7,7 +7,7 @@ versioned key, alongside the other cross-device workbench state. v1 knows two
 kinds of dock item:
 
 - built-in apps, keyed by their app id verbatim (``files`` / ``terminal`` /
-  ``editor``). They are reorderable but not unpinnable.
+  ``editor`` / ``library``). They are reorderable but not unpinnable.
 - pinned Show Pages, keyed ``show:<session_id>``.
 
 Future item kinds (``app:<id>`` …) slot into the same ``order`` list without a
@@ -44,14 +44,17 @@ _DOCK_MUTATION_LOCK = threading.Lock()
 # Built-in resident apps, in their canonical Dock order. Mirrors the frontend
 # APP_LIST ids (ui/src/apps/registry.tsx); these ids are a stable contract
 # shared across the client/server boundary — keep the two in sync.
-BUILTIN_DOCK_IDS: tuple[str, ...] = ("files", "terminal", "editor")
+BUILTIN_DOCK_IDS: tuple[str, ...] = ("files", "terminal", "editor", "library")
 
 # Namespace prefix for a pinned Show Page dock id.
 SHOW_PREFIX = "show:"
 
 # Defensive cap on the resident-tile count so one corrupt/hostile write can't
-# balloon the order list. Far above any real Dock (built-ins + pinned pages).
-MAX_DOCK_ITEMS = 200
+# balloon the order list. Expressed as built-ins + a FIXED pin budget (not a flat
+# constant) so adding a built-in never shrinks the pin budget or drops an existing
+# valid pin on reconcile. Far above any real Dock (built-ins + pinned pages).
+MAX_PINNED_PAGES = 197
+MAX_DOCK_ITEMS = len(BUILTIN_DOCK_IDS) + MAX_PINNED_PAGES
 
 
 class DockError(ValueError):

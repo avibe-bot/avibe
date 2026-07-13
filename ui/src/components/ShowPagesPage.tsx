@@ -1,82 +1,72 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Check,
   ChevronDown,
   ChevronUp,
-  CloudOff,
   Copy,
   ExternalLink,
-  Globe,
   Link2,
-  Lock,
   RefreshCw,
   RotateCw,
   TriangleAlert,
-  type LucideIcon,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 
-import { useApi } from '../context/ApiContext';
-import { useToast } from '../context/ToastContext';
+import { useDock } from '../context/DockContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
+import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
+import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
+import { ShowPageAvatarTile } from '../apps/showPageAvatarTile';
 import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import { Switch } from './ui/switch';
 import { SegmentedRadio, type SegmentedTone } from './ui/segmented';
-
-type Visibility = 'private' | 'public' | 'offline';
-type Filter = 'online' | Visibility;
-
-interface ShowPage {
-  session_id: string;
-  visibility: Visibility;
-  title: string | null;
-  platform: string | null;
-  agent: string | null;
-  path: string;
-  active_url: string | null;
-  private_url: string | null;
-  public_url: string | null;
-  url_available: boolean;
-  share_id: string | null;
-  offline: boolean;
-  offline_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
 
 const LABEL = 'font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted';
 
-const STATUS: Record<
-  Visibility,
-  { Icon: LucideIcon; badge: 'warning' | 'info' | 'secondary'; tone: SegmentedTone; dot: string; tile: string; iconColor: string }
-> = {
-  public: { Icon: Globe, badge: 'warning', tone: 'gold', dot: 'bg-gold', tile: 'border-gold/40 bg-gold/10', iconColor: 'text-gold' },
-  private: { Icon: Lock, badge: 'info', tone: 'cyan', dot: 'bg-cyan', tile: 'border-cyan/40 bg-cyan-soft', iconColor: 'text-cyan' },
-  offline: { Icon: CloudOff, badge: 'secondary', tone: 'muted', dot: 'bg-muted', tile: 'border-border-strong bg-foreground/[0.04]', iconColor: 'text-muted' },
+// Visibility → badge variant, active segmented tone, and status dot. The row
+// tile is now a letter avatar (hashed by session), so visibility reads from the
+// badge rather than a per-state icon.
+const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; tone: SegmentedTone; dot: string }> = {
+  public: { badge: 'warning', tone: 'gold', dot: 'bg-gold' },
+  private: { badge: 'info', tone: 'cyan', dot: 'bg-cyan' },
+  offline: { badge: 'secondary', tone: 'muted', dot: 'bg-muted' },
 };
-
 
 interface RowProps {
   page: ShowPage;
   expanded: boolean;
   busy: boolean;
   copied: boolean;
+  pinned: boolean;
   onToggle: () => void;
+  onTogglePin: (next: boolean) => void;
   onSetVisibility: (visibility: Visibility) => void;
   onRotate: () => void;
   onCopy: () => void;
   onShareIdSaved: (payload: ShowPageLinkInfo) => void;
 }
 
-function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, onRotate, onCopy, onShareIdSaved }: RowProps) {
+function ShowPageRow({
+  page,
+  expanded,
+  busy,
+  copied,
+  pinned,
+  onToggle,
+  onTogglePin,
+  onSetVisibility,
+  onRotate,
+  onCopy,
+  onShareIdSaved,
+}: RowProps) {
   const { t, i18n } = useTranslation();
   const status = STATUS[page.visibility];
-  const { Icon } = status;
   const label = page.title || page.session_id;
   const sub = [page.platform ? t(`platform.${page.platform}.title`, { defaultValue: page.platform }) : null, page.agent]
     .filter(Boolean)
@@ -109,23 +99,18 @@ function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, 
         tabIndex={0}
         onClick={onToggle}
         onKeyDown={(e) => {
-          // Only the row itself toggles via keyboard; let Enter/Space on nested
-          // interactives (the live-link anchor) activate them normally instead
-          // of being swallowed by the row toggle.
           if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
             e.preventDefault();
             onToggle();
           }
         }}
         className={clsx(
-          'flex w-full cursor-pointer items-center gap-4 px-6 py-3.5 text-left transition-colors',
-          expanded ? 'bg-surface-2' : 'hover:bg-foreground/[0.02]'
+          'flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors sm:gap-4 sm:px-5',
+          expanded ? 'bg-surface-2' : 'hover:bg-foreground/[0.02]',
         )}
       >
         <span className="flex min-w-0 flex-1 items-center gap-3">
-          <span className={clsx('flex size-8 shrink-0 items-center justify-center rounded-lg border', status.tile)}>
-            <Icon size={16} className={status.iconColor} />
-          </span>
+          <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
           <span className="min-w-0">
             <span className={clsx('block truncate text-[13px] font-semibold text-foreground', !page.title && 'font-mono')}>
               {label}
@@ -134,42 +119,38 @@ function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, 
           </span>
         </span>
 
-        <span className="w-[120px] shrink-0">
-          <Badge variant={status.badge}>
-            <span className={clsx('size-1.5 rounded-full', status.dot)} />
-            {t(`showPages.status.${page.visibility}`)}
-          </Badge>
+        <Badge variant={status.badge} className="hidden sm:inline-flex">
+          <span className={clsx('size-1.5 rounded-full', status.dot)} />
+          {t(`showPages.status.${page.visibility}`)}
+        </Badge>
+
+        {/* The single promote/demote gesture: the Dock switch pins (installs) or
+            unpins the page. Stop propagation so toggling it never expands the row. */}
+        <span className="flex shrink-0 flex-col items-center gap-1" onClick={(e) => e.stopPropagation()}>
+          <Switch checked={pinned} onCheckedChange={onTogglePin} label={t('library.dock.toggle')} />
+          <span className="font-mono text-[9px] font-bold uppercase tracking-[0.1em] text-muted">{t('library.dock.label')}</span>
         </span>
 
-        <span className="hidden w-[280px] shrink-0 items-center gap-1.5 lg:flex">
-          {shown && href ? (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              title={href}
-              className="flex min-w-0 items-center gap-1 font-mono text-[12px] text-muted transition-colors hover:text-foreground hover:underline"
-            >
-              <span className="truncate">{shown}</span>
-              <ExternalLink size={12} className="shrink-0" />
-            </a>
-          ) : shown ? (
-            <span className="truncate font-mono text-[12px] text-muted">{shown}</span>
-          ) : (
-            <span className="text-[13px] text-muted">—</span>
-          )}
-        </span>
+        <button
+          type="button"
+          title={t('showPages.open')}
+          disabled={!href}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (href) window.open(href, '_blank', 'noopener,noreferrer');
+          }}
+          className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
+        >
+          <ExternalLink size={15} />
+        </button>
 
-        <span className="hidden w-[96px] shrink-0 text-[12px] text-muted sm:block">{relative(page.updated_at)}</span>
-
-        <span className="flex w-[24px] shrink-0 justify-end">
+        <span className="flex w-[20px] shrink-0 justify-end">
           {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} className="text-muted" />}
         </span>
       </div>
 
       {expanded ? (
-        <div className="bg-surface-2 px-6 pb-6 pt-2">
+        <div className="bg-surface-2 px-5 pb-6 pt-2">
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
             <div className="flex flex-col gap-5">
               <div className="flex flex-col gap-2">
@@ -284,66 +265,17 @@ function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, 
   );
 }
 
-export function ShowPagesPage() {
+// The full Show Pages inventory view: search + visibility filter + expandable
+// rows, each with the Dock switch that pins/unpins the page. Shared by the App
+// Library window and the mobile full-screen route; the caller owns the pages
+// state via useShowPages so both projections stay consistent.
+export function ShowPagesView({ pages, busyId, setVisibility, rotate, onShareIdSaved, reload }: ShowPagesController) {
   const { t } = useTranslation();
-  const api = useApi();
-  const { showToast } = useToast();
-  const [pages, setPages] = useState<ShowPage[]>([]);
+  const { isPinned, pin, unpin } = useDock();
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<Filter>('online');
+  const [filter, setFilter] = useState<ShowPageFilter>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
-
-  const load = useCallback(() => {
-    api
-      .getShowPages()
-      .then((res: any) => setPages(Array.isArray(res?.pages) ? res.pages : []))
-      .catch(() => {});
-  }, [api]);
-
-  useEffect(() => {
-    load();
-  }, [load, refreshTrigger]);
-
-  const mergePage = (next: ShowPage) =>
-    setPages((prev) => prev.map((page) => (page.session_id === next.session_id ? { ...page, ...next } : page)));
-
-  const setVisibility = async (page: ShowPage, visibility: Visibility) => {
-    if (page.visibility === visibility || busyId) return;
-    setBusyId(page.session_id);
-    try {
-      const res = await api.setShowPageVisibility(page.session_id, visibility);
-      mergePage(res);
-      showToast(t('showPages.toast.updated'));
-    } catch {
-      // ApiContext surfaces a toast on failure.
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const rotate = async (page: ShowPage) => {
-    if (busyId) return;
-    setBusyId(page.session_id);
-    try {
-      const res = await api.rotateShowPageShare(page.session_id);
-      mergePage(res);
-      showToast(t('showPages.toast.rotated'));
-    } catch {
-      // handled by ApiContext
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  // The custom-link field owns its own request/validation; the page only merges
-  // the returned payload (new share_id, updated_at) and confirms.
-  const onShareIdSaved = (next: ShowPageLinkInfo) => {
-    mergePage(next as ShowPage);
-    showToast(t('showPages.shareId.toast.saved'));
-  };
 
   const copy = async (page: ShowPage) => {
     const href = copyHref(page);
@@ -353,93 +285,64 @@ export function ShowPagesPage() {
     window.setTimeout(() => setCopiedId((id) => (id === page.session_id ? null : id)), 1600);
   };
 
-  const visible = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return pages.filter((page) => {
-      // "online" = live pages (private + public), i.e. everything but offline.
-      if (filter === 'online' ? page.visibility === 'offline' : page.visibility !== filter) return false;
-      if (!query) return true;
-      return (page.title || '').toLowerCase().includes(query) || page.session_id.toLowerCase().includes(query);
-    });
-  }, [pages, filter, search]);
+  const visible = useMemo(() => filterShowPages(pages, filter, search), [pages, filter, search]);
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-col gap-1.5">
-          <h1 className="text-[28px] font-bold leading-tight tracking-[-0.4px] text-foreground">{t('showPages.title')}</h1>
-          <p className="text-[14px] leading-[1.55] text-muted">{t('showPages.subtitle')}</p>
-        </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5">
         <div className="flex items-center gap-2">
           <SearchField
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('showPages.searchPlaceholder')}
-            className="w-full sm:w-[280px]"
+            placeholder={t('library.searchPages')}
+            className="w-full sm:w-[240px]"
           />
           <Button
             type="button"
             variant="secondary"
             size="sm"
-            onClick={() => setRefreshTrigger((v) => v + 1)}
+            onClick={reload}
             title={t('common.refresh', { defaultValue: 'Refresh' })}
-            className="px-3"
+            className="px-2.5"
           >
             <RefreshCw size={14} />
           </Button>
         </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3 px-1 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[15px] font-semibold text-foreground">{t('showPages.allPages')}</span>
-          <span className="rounded-full bg-foreground/[0.08] px-1.5 py-0.5 font-mono text-[11px] font-bold text-muted">
-            {pages.length}
-          </span>
-          <span className="text-[12px] text-muted">· {t('showPages.sortedRecent')}</span>
-        </div>
-        <SegmentedRadio<Filter>
+        <SegmentedRadio<ShowPageFilter>
           value={filter}
           onChange={setFilter}
           ariaLabel={t('showPages.filterAria')}
           options={[
-            { id: 'online', label: t('showPages.filter.online') },
-            { id: 'private', label: t('showPages.filter.private') },
+            { id: 'all', label: t('showPages.filter.all') },
             { id: 'public', label: t('showPages.filter.public') },
+            { id: 'private', label: t('showPages.filter.private') },
             { id: 'offline', label: t('showPages.filter.offline') },
           ]}
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {visible.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-[13px] text-muted">
+          <div className="m-4 rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-[13px] text-muted">
             {pages.length === 0 ? t('showPages.empty') : t('showPages.emptyFiltered')}
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-border bg-background">
-            <div className="flex items-center gap-4 border-b border-border bg-surface px-6 py-3">
-              <span className={clsx(LABEL, 'flex-1')}>{t('showPages.col.session')}</span>
-              <span className={clsx(LABEL, 'w-[120px] shrink-0')}>{t('showPages.col.visibility')}</span>
-              <span className={clsx(LABEL, 'hidden w-[280px] shrink-0 lg:block')}>{t('showPages.col.link')}</span>
-              <span className={clsx(LABEL, 'hidden w-[96px] shrink-0 sm:block')}>{t('showPages.col.updated')}</span>
-              <span className="w-[24px] shrink-0" />
-            </div>
-            {visible.map((page) => (
-              <ShowPageRow
-                key={page.session_id}
-                page={page}
-                expanded={expandedId === page.session_id}
-                busy={busyId === page.session_id}
-                copied={copiedId === page.session_id}
-                onToggle={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
-                onSetVisibility={(visibility) => setVisibility(page, visibility)}
-                onRotate={() => rotate(page)}
-                onCopy={() => copy(page)}
-                onShareIdSaved={onShareIdSaved}
-              />
-            ))}
-          </div>
+          visible.map((page) => (
+            <ShowPageRow
+              key={page.session_id}
+              page={page}
+              expanded={expandedId === page.session_id}
+              busy={busyId === page.session_id}
+              copied={copiedId === page.session_id}
+              pinned={isPinned(page.session_id)}
+              onToggle={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
+              onTogglePin={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
+              onSetVisibility={(visibility) => setVisibility(page, visibility)}
+              onRotate={() => rotate(page)}
+              onCopy={() => copy(page)}
+              onShareIdSaved={onShareIdSaved}
+            />
+          ))
         )}
       </div>
     </div>

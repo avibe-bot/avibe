@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { dockIdToSession, reconcileDock, showDockId, type DockDoc } from './DockContext';
+import { dockIdToSession, MAX_PINNED_PAGES, reconcileDock, showDockId, type DockDoc } from './DockContext';
 
 const BUILTINS = ['files', 'terminal', 'editor'];
 
@@ -93,12 +93,14 @@ describe('reconcileDock', () => {
     expect(out.order).toEqual(['files', 'terminal', 'editor']);
   });
 
-  it('clamps oversized pins to the cap, always keeping the built-ins', () => {
-    // Far more pins than the 200 cap allows; only the first (cap - built-ins) survive.
+  it('clamps oversized pins to the fixed pin budget, always keeping the built-ins', () => {
+    // Far more pins than the budget allows; only the first MAX_PINNED_PAGES survive.
+    // The budget is FIXED (independent of the built-in count), so adding a built-in
+    // never shrinks it — a valid pre-Phase-2 dock keeps all its pins.
     const pins = Array.from({ length: 250 }, (_, i) => ({ session_id: `ses_${i}`, title_snapshot: '', pinned_at: '' }));
     const out = reconcileDock({ order: [], pins }, BUILTINS);
-    expect(out.pins).toHaveLength(200 - BUILTINS.length); // 197
-    expect(out.order).toHaveLength(200);
+    expect(out.pins).toHaveLength(MAX_PINNED_PAGES); // 197, regardless of built-in count
+    expect(out.order).toHaveLength(BUILTINS.length + MAX_PINNED_PAGES);
     expect(out.order.slice(0, BUILTINS.length)).toEqual(BUILTINS);
   });
 

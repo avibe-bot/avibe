@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -295,7 +295,6 @@ export const AppShell: React.FC = () => {
       icon: Bot,
       match: (p) => p.startsWith('/admin/settings/backends'),
     },
-    { to: '/admin/show-pages', label: t('nav.showPages'), icon: MonitorPlay },
     {
       // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
       // backends moved out to their own sidebar destinations above, so exclude

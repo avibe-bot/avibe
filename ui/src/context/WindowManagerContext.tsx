@@ -55,6 +55,9 @@ export interface WindowManagerValue {
   /** Set (or clear) a window's title — e.g. the Editor reflecting its active file so several open
    *  windows are distinguishable in the Dock + titlebar. No-op when the title is unchanged. */
   setTitle: (id: string, title: string | undefined) => void;
+  /** Merge a patch into a window's launch params — lets an external navigation
+   *  (e.g. the /admin/show-pages redirect) hand an already-open app a request. */
+  setParams: (id: string, params: Record<string, unknown>) => void;
   /**
    * Register (or clear, by passing null) a guard a window body uses to veto closing.
    * The getter returns a confirm message when closing would lose work, else null.
@@ -284,6 +287,10 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
     });
   }, []);
 
+  const setParams = useCallback((id: string, patch: Record<string, unknown>) => {
+    setWindows((prev) => prev.map((w) => (w.id === id ? { ...w, params: { ...w.params, ...patch } } : w)));
+  }, []);
+
   // If the shell mounted below md (initializer skipped restore), restore the saved layout the first
   // time the viewport crosses to desktop — BEFORE the now-enabled saves could persist an empty list
   // over it. The window list is still empty while narrow (windowed apps open only from the
@@ -341,12 +348,13 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       toggleMaximize,
       setBounds,
       setTitle,
+      setParams,
       setCloseGuard,
       setStateProvider,
       markClosing,
       confirmClose,
     }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setCloseGuard, setStateProvider, markClosing, confirmClose],
+    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;

@@ -27,9 +27,11 @@ export type DockDoc = {
 
 export const SHOW_DOCK_PREFIX = 'show:';
 
-// Defensive cap on resident tiles, mirroring the backend MAX_DOCK_ITEMS — so a
-// corrupt/oversized server (or optimistic) doc can't render unbounded tiles.
-export const MAX_DOCK_ITEMS = 200;
+// Fixed defensive cap on PINNED Show Pages, mirroring core/dock_store.py's
+// MAX_PINNED_PAGES. reconcile clamps pins to this FIXED budget (independent of
+// the built-in count) so a corrupt/oversized doc stays bounded AND adding a
+// built-in never shrinks the budget or drops an existing valid pin on reconcile.
+export const MAX_PINNED_PAGES = 197;
 
 /** The Dock id for a pinned Show Page session. */
 export function showDockId(sessionId: string): string {
@@ -69,8 +71,9 @@ export function reconcileDock(doc: DockDoc | null | undefined, builtinIds: strin
   }
 
   // Clamp on read (mirrors the backend): built-ins are always kept; excess pins
-  // beyond the cap are dropped so a corrupt/oversized doc stays bounded.
-  const maxPins = Math.max(0, MAX_DOCK_ITEMS - builtinIds.length);
+  // beyond the FIXED pin budget are dropped so a corrupt/oversized doc stays
+  // bounded (the budget doesn't shrink when a built-in is added).
+  const maxPins = MAX_PINNED_PAGES;
   const clampedPins = pins.length > maxPins ? pins.slice(0, maxPins) : pins;
 
   const pinIds = clampedPins.map((pin) => showDockId(pin.session_id));
