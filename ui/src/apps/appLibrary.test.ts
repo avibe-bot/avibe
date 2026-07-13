@@ -2,24 +2,45 @@ import { describe, expect, it } from 'vitest';
 
 import { deriveAppRows, filterShowPages, type FilterablePage } from './appLibrary';
 
-const BUILTINS = new Set(['files', 'terminal', 'editor', 'library']);
+const BUILTINS = ['files', 'terminal', 'editor', 'library'];
+const pin = (id: string) => ({ session_id: id });
 
-describe('deriveAppRows', () => {
-  it('keeps the docked set in order, resolving kinds', () => {
-    const rows = deriveAppRows(['files', 'terminal', 'editor', 'show:s1', 'show:s2'], BUILTINS, 'library');
-    expect(rows.map((r) => r.dockId)).toEqual(['files', 'terminal', 'editor', 'show:s1', 'show:s2']);
-    expect(rows.map((r) => r.kind)).toEqual(['builtin', 'builtin', 'builtin', 'showpage', 'showpage']);
-    expect(rows[3]).toMatchObject({ kind: 'showpage', sessionId: 's1', removable: true });
+describe('deriveAppRows (installed set)', () => {
+  it('lists every built-in then every installed page, resolving kinds', () => {
+    const rows = deriveAppRows(BUILTINS, [pin('s1'), pin('s2')], ['files', 'show:s1']);
+    expect(rows.map((r) => r.dockId)).toEqual(['files', 'terminal', 'editor', 'library', 'show:s1', 'show:s2']);
+    expect(rows.map((r) => r.kind)).toEqual(['builtin', 'builtin', 'builtin', 'builtin', 'showpage', 'showpage']);
+    expect(rows[4]).toMatchObject({ kind: 'showpage', sessionId: 's1', removable: true });
     expect(rows[0]).toMatchObject({ kind: 'builtin', builtinId: 'files', removable: false });
   });
 
-  it('excludes the Library app itself from the list', () => {
-    const rows = deriveAppRows(['files', 'library', 'show:s1'], BUILTINS, 'library');
-    expect(rows.map((r) => r.dockId)).toEqual(['files', 'show:s1']);
+  it('includes the Library itself — it lists itself now (§7.1c)', () => {
+    const rows = deriveAppRows(BUILTINS, [], []);
+    expect(rows.map((r) => r.dockId)).toContain('library');
   });
 
-  it('drops unknown ids and de-duplicates', () => {
-    const rows = deriveAppRows(['files', 'files', 'app:remote1', 'show:s1'], BUILTINS, 'library');
+  it('flags docked membership from `order`, independent of list membership', () => {
+    // files + library + s1 are docked; terminal/editor + s2 are installed but undocked.
+    const rows = deriveAppRows(BUILTINS, [pin('s1'), pin('s2')], ['files', 'library', 'show:s1']);
+    const byId = Object.fromEntries(rows.map((r) => [r.dockId, r.docked]));
+    expect(byId).toMatchObject({
+      files: true,
+      terminal: false,
+      editor: false,
+      library: true,
+      'show:s1': true,
+      'show:s2': false,
+    });
+  });
+
+  it('keeps an undocked built-in in the list (empty order still lists every built-in)', () => {
+    const rows = deriveAppRows(BUILTINS, [], []);
+    expect(rows.map((r) => r.dockId)).toEqual(BUILTINS);
+    expect(rows.every((r) => r.docked === false)).toBe(true);
+  });
+
+  it('de-duplicates a pin that repeats', () => {
+    const rows = deriveAppRows(['files'], [pin('s1'), pin('s1')], []);
     expect(rows.map((r) => r.dockId)).toEqual(['files', 'show:s1']);
   });
 });

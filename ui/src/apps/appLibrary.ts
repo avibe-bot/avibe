@@ -3,7 +3,7 @@
 // layer (LibraryApp / ShowPagesView) resolves each row's icon, title, and badge
 // from the registry + loaded Show Pages.
 
-import { dockIdToSession } from '../context/DockContext';
+import { showDockId } from '../context/DockContext';
 
 export type AppRowKind = 'builtin' | 'showpage';
 
@@ -11,34 +11,46 @@ export interface AppRow {
   /** The persisted Dock id: a built-in app id verbatim, or `show:<session_id>`. */
   dockId: string;
   kind: AppRowKind;
-  /** Built-in app id (files / terminal / editor …) when kind === 'builtin'. */
+  /** Built-in app id (files / terminal / editor / library) when kind === 'builtin'. */
   builtinId?: string;
   /** Session id when kind === 'showpage'. */
   sessionId?: string;
-  /** Show Pages can be removed from the Dock (the page survives); built-ins can't. */
+  /** Whether this app currently sits in the Dock (a member of `order`). */
+  docked: boolean;
+  /** Can be removed from the Apps LIST entirely (Show Pages yes — the page
+   *  survives; built-ins never leave the list). */
   removable: boolean;
 }
 
 /**
- * Project the Dock order into the Apps-view rows: the docked set, in order,
- * minus the Library app itself (a manager never lists itself) and any ids this
- * client doesn't know (a future kind not yet shipped). Built-ins are matched
- * against ``builtinIds``; every ``show:<id>`` is a pinned Show Page.
+ * Project the two-layer state into the Apps-view rows: the INSTALLED set, not
+ * the docked subset (§7.1c). Rows are every built-in (including the Library
+ * itself — it now lists itself, dockable like the rest) in canonical order,
+ * then every installed Show Page (`pins`) in pin order. Each row carries a
+ * ``docked`` flag (is it in ``order`` right now?) that drives the
+ * dock/undock toggle; the docked subset no longer decides membership, so an
+ * undocked built-in or undocked page still appears in the list.
  */
-export function deriveAppRows(order: string[], builtinIds: ReadonlySet<string>, selfId: string): AppRow[] {
+export function deriveAppRows(
+  builtinIds: readonly string[],
+  pins: readonly { session_id: string }[],
+  order: readonly string[],
+): AppRow[] {
+  const docked = new Set(order);
   const rows: AppRow[] = [];
   const seen = new Set<string>();
-  for (const dockId of order) {
+  for (const id of builtinIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    rows.push({ dockId: id, kind: 'builtin', builtinId: id, docked: docked.has(id), removable: false });
+  }
+  for (const pin of pins) {
+    const sid = pin.session_id;
+    if (!sid) continue;
+    const dockId = showDockId(sid);
     if (seen.has(dockId)) continue;
     seen.add(dockId);
-    if (dockId === selfId) continue; // the Library app is not listed among the apps it manages
-    const sessionId = dockIdToSession(dockId);
-    if (sessionId !== null) {
-      rows.push({ dockId, kind: 'showpage', sessionId, removable: true });
-    } else if (builtinIds.has(dockId)) {
-      rows.push({ dockId, kind: 'builtin', builtinId: dockId, removable: false });
-    }
-    // else: an id this client can't resolve (unknown/future kind) → skip it
+    rows.push({ dockId, kind: 'showpage', sessionId: sid, docked: docked.has(dockId), removable: true });
   }
   return rows;
 }
