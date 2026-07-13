@@ -155,6 +155,14 @@ function contentHitRow(r: SearchFileResult): RowItem {
   };
 }
 
+// A content-search hit is "hidden" when any component of its rel path starts with a dot. The content
+// backend (searchFiles) has no show_hidden option and walks dotfiles/dot-dirs, so when "Show hidden
+// files" is off we drop those hits client-side — matching name search and the listing, which never
+// surface hidden entries then (otherwise content search could leak e.g. `.env` the browser hides).
+function isHiddenRel(rel: string): boolean {
+  return rel.split('/').some((seg) => seg.startsWith('.'));
+}
+
 // Keep-both cap for the move name-clash dialog: after this many same-named copies we stop retrying
 // and report failure rather than spin. A destination holding ~100 identical names is pathological.
 const MAX_KEEP_BOTH = 99;
@@ -284,7 +292,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setSearchBusy(true);
       const search =
         searchMode === 'content'
-          ? searchFiles(cwd, q, {}, ac.signal).then((r) => ({ rows: r.results.map(contentHitRow), truncated: r.truncated }))
+          ? searchFiles(cwd, q, {}, ac.signal).then((r) => ({
+              rows: r.results.filter((hit) => showHidden || !isHiddenRel(hit.rel)).map(contentHitRow),
+              truncated: r.truncated,
+            }))
           : searchNames(cwd, q, showHidden, ac.signal).then((r) => ({ rows: r.results.map(nameHitRow), truncated: r.truncated }));
       search
         .then(({ rows: hitRows, truncated }) => {
@@ -365,6 +376,31 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       return;
     }
     const desktop = window.matchMedia('(min-width: 768px)').matches;
+    // Content-search hits carry no size (the search API omits it), so the synchronous size gates in
+    // previewWindowKind / previewOverlayKind would treat them as unbounded and could route an
+    // oversized file (e.g. a >1 MB Markdown) into a preview the listing path would refuse. For those,
+    // fetch metadata up front and route with the REAL size + text sniff — so a content hit opens
+    // exactly like the same file from a listing/name row.
+    if (item.matchCount != null) {
+      try {
+        const m = await fileMeta(item.full);
+        const sized: FsEntry = { ...item.entry, size: m.size };
+        if (desktop && previewWindowKind(sized)) {
+          wm.openApp('preview', { title: sized.name, params: { path: item.full, name: sized.name } });
+        } else if (!desktop && previewOverlayKind(sized)) {
+          setPreview({ path: item.full, name: sized.name });
+        } else if (isEditableMeta(m)) {
+          openInEditor(item.full, sized.name, m.mtime);
+        } else {
+          downloadFile(item.full);
+        }
+      } catch {
+        // Meta unavailable: best-effort by name, mirroring the fallback in the listing path below.
+        if (isEditableFile(item.entry)) openInEditor(item.full, item.entry.name, item.entry.mtime);
+        else downloadFile(item.full);
+      }
+      return;
+    }
     if (desktop) {
       // Desktop: image / PDF / Office / Markdown open the dedicated, resizable Preview window.
       if (previewWindowKind(item.entry)) {
@@ -589,7 +625,15 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       const moved = joinPath(destDir, name);
       await movePath(item.full, moved, overwrite);
       setError(null);
-      if (!overwrite) showUndo({ kind: 'move', label: name, from: moved, to: item.full });
+      if (overwrite) {
+        // Replace is a non-undoable mutation: any older move/delete undo bar now describes a stale
+        // world (its paths may point at the entry we just clobbered), so clear it — mirroring the
+        // permanent-delete path — rather than leaving a stale Undo that could move the wrong file.
+        if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+        setUndoEntry(null);
+      } else {
+        showUndo({ kind: 'move', label: name, from: moved, to: item.full });
+      }
       refreshAll();
     },
     [showUndo, refreshAll],
