@@ -54,6 +54,10 @@ export function useShowPageInventory(enabled = true) {
   const [loadRequest, setLoadRequest] = useState(0);
   const loadSeqRef = useRef(0);
   const revisionRef = useRef(0);
+  const pagesRef = useRef(pages);
+  const loadedRef = useRef(loaded);
+  pagesRef.current = pages;
+  loadedRef.current = loaded;
 
   const requestLoad = useCallback(() => setLoadRequest((request) => request + 1), []);
 
@@ -110,13 +114,19 @@ export function useShowPageInventory(enabled = true) {
       onConnected: requestLoad,
       onSessionActivity: (data) => {
         if (data.event === 'archived') {
-          removePage(data.session_id);
-          requestLoad();
+          if (pagesRef.current.some((page) => page.session_id === data.session_id)) {
+            removePage(data.session_id);
+          } else if (!loadedRef.current) {
+            requestLoad();
+          }
           return;
         }
         if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) {
-          mergePage({ session_id: data.session_id, title: data.title ?? null });
-          requestLoad();
+          if (pagesRef.current.some((page) => page.session_id === data.session_id)) {
+            mergePage({ session_id: data.session_id, title: data.title ?? null });
+          } else if (!loadedRef.current) {
+            requestLoad();
+          }
           return;
         }
         // Runtime Show activity can materialize a page outside this browser.
