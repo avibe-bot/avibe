@@ -6,6 +6,7 @@ import { ExternalLink, MessageCircle, Minus, Plus, X, type LucideIcon } from 'lu
 
 import { APP_REGISTRY } from '../../apps/registry';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
+import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
 import { ErrorBoundary } from '../ui/error-boundary';
 
@@ -28,6 +29,9 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   const { t } = useTranslation();
   const wm = useWindowManager();
   const navigate = useNavigate();
+  // Gate the chat-bubble's SPA navigation through the same unsaved-changes guard the
+  // sidebar uses, so a route-level dirty blocker can veto it (and the minimize) as one.
+  const authorizeRouteAction = useUnsavedChangesActionGuard();
   const def = APP_REGISTRY[win.appId];
   const rootRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
@@ -246,9 +250,14 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
+                // A route-level unsaved-changes blocker can veto this navigation; authorize
+                // first so a cancelled prompt aborts the WHOLE action instead of half-applying
+                // (window minimized into the Dock while the route never left the dirty page).
+                const authorization = authorizeRouteAction();
+                if (!authorization) return;
                 // Jump to the owning session's chat and drop the window to the Dock
                 // (chat visible immediately; the Dock thumbnail brings the app back).
-                navigate(chatHref);
+                authorization.runNavigation(() => navigate(chatHref));
                 wm.minimize(win.id);
               }}
               className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
