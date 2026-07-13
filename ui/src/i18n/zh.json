@@ -794,7 +794,8 @@
       "newTab": "新建标签",
       "reconnect": "重新连接",
       "exitCode": "退出码 {{code}}",
-      "disabled": "终端不可用:可能在服务端被关掉(VIBE_UI_ENABLE_TERMINAL=0),或当前会话未获授权。",
+      "disabled": "本服务已关闭终端,或当前会话无权使用。运行本服务的人可以在服务配置中开启它。",
+      "pasteBlocked": "无法读取剪贴板,请检查浏览器的剪贴板权限后重试。",
       "status": {
         "connecting": "连接中…",
         "ready": "已连接",
@@ -803,6 +804,7 @@
         "error": "已断开"
       },
       "keys": {
+        "paste": "粘贴",
         "esc": "Esc",
         "tab": "Tab",
         "ctrl": "Ctrl",
