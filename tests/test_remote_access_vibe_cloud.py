@@ -6,6 +6,7 @@ import threading
 import time
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
@@ -203,6 +204,62 @@ def test_exchange_oauth_code_reports_immature_token_as_clock_mismatch(monkeypatc
         remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
 
     assert exc_info.value.reason == "immature_id_token"
+
+
+@pytest.mark.parametrize(
+    ("issued_at_offset", "expected_reason"),
+    (
+        pytest.param(30, None, id="within-leeway"),
+        pytest.param(60, "immature_id_token", id="beyond-leeway"),
+    ),
+)
+def test_exchange_oauth_code_allows_30_seconds_of_clock_skew(
+    monkeypatch,
+    issued_at_offset: int,
+    expected_reason: str | None,
+) -> None:
+    config = _config()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    issued_at = int(time.time()) + issued_at_offset
+    id_token = remote_access.jwt.encode(
+        {
+            "sub": "user-1",
+            "aud": config.remote_access.vibe_cloud.client_id,
+            "iss": config.remote_access.vibe_cloud.issuer,
+            "iat": issued_at,
+            "exp": issued_at + 300,
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "email_verified": True,
+        },
+        private_key,
+        algorithm="RS256",
+    )
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id_token": id_token}
+
+    class JwkClientStub:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def get_signing_key_from_jwt(self, token):
+            assert token == id_token
+            return type("SigningKey", (), {"key": private_key.public_key()})()
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+    monkeypatch.setattr(remote_access, "PyJWKClient", JwkClientStub)
+
+    if expected_reason is None:
+        result = remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+        assert result["claims"]["sub"] == "user-1"
+    else:
+        with pytest.raises(remote_access.OAuthCodeExchangeError) as exc_info:
+            remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+        assert exc_info.value.reason == expected_reason
 
 
 def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:

@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
 SESSION_TTL_SECONDS = 24 * 60 * 60
+OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
@@ -1214,6 +1215,7 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
             algorithms=["RS256"],
             audience=cloud.client_id,
             issuer=cloud.issuer,
+            leeway=OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS,
         )
     except jwt.InvalidIssuerError as exc:
         raise OAuthCodeExchangeError("invalid_issuer", str(exc)) from exc
