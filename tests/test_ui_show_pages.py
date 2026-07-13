@@ -846,6 +846,87 @@ def test_private_show_page_proxies_relative_relocated_vite_cache_at_fs(monkeypat
     assert manager.calls[0][1].endswith("/@fs/.vite-cache/deps/react.js")
 
 
+def test_public_show_page_denies_at_fs_workspace_symlink_escape(monkeypatch, tmp_path):
+    # A workspace file that symlinks OUT of the workspace must NOT be served on the
+    # public surface — otherwise a share link could read any host file the service
+    # can read. It is denied before proxying. (The private surface keeps it; below.)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    workspace = paths.get_show_page_dir("ses123")
+    secret = tmp_path / "outside_secret.txt"
+    secret.write_text("TOPSECRET", encoding="utf-8")
+    link = workspace / "evil.txt"
+    os.symlink(secret, link)
+    manager = _FakeShowRuntimeManager(body=b"TOPSECRET")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/@fs{link.as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
+def test_public_show_page_allows_at_fs_dependency_outside_workspace(monkeypatch, tmp_path):
+    # The public confinement targets workspace symlink escapes only; a genuine
+    # dependency @fs path (its parent is literally outside the workspace) is still
+    # deferred to the runtime, so public pages keep loading their deps.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    dep = tmp_path / "runtime" / "node_modules" / "vite" / "dist" / "client" / "env.mjs"
+    dep.parent.mkdir(parents=True, exist_ok=True)
+    dep.write_text("export const x = 1", encoding="utf-8")
+    manager = _FakeShowRuntimeManager(
+        body=b"export const x = 1", extra_headers={"content-type": "text/javascript"}
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/@fs{dep.as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert manager.calls
+
+
+def test_private_show_page_allows_at_fs_workspace_symlink(monkeypatch, tmp_path):
+    # The private authoring surface intentionally allows a workspace symlink to a
+    # disk file (a supported feature). Only the public surface confines it.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    workspace = paths.get_show_page_dir("ses123")
+    data = tmp_path / "outside_data.txt"
+    data.write_text("linked data", encoding="utf-8")
+    link = workspace / "data.txt"
+    os.symlink(data, link)
+    manager = _FakeShowRuntimeManager(
+        body=b"linked data", extra_headers={"content-type": "text/plain"}
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/@fs{link.as_posix()}",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert manager.calls
+
+
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

@@ -7853,27 +7853,29 @@ def _is_show_runtime_sensitive_file_segment(segment: str) -> bool:
     )
 
 
-def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bool:
+def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, public: bool = False) -> bool:
     decoded = _decode_show_page_asset_path(asset_path)
     segments = [segment for segment in decoded.split("/") if segment]
     if any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments):
         return True
+    if any(segment in {".", ".."} for segment in segments):
+        return True
+    # Vite `@fs/<abs>` paths can be non-dot (e.g. a workspace symlink `evil.txt`),
+    # so classify them fully here rather than through the dot-segment fast path.
+    if decoded.startswith("@fs/"):
+        return _is_denied_show_page_at_fs_path(decoded, session_id=session_id, public=public)
     dot_segments = [index for index, segment in enumerate(segments) if segment.startswith(".")]
     if not dot_segments:
         return False
-    if any(segment in {".", ".."} for segment in segments):
-        return True
-
+    # A non-@fs dot path is private unless it is an optimized Vite dependency.
     vite_dependency = (
         (len(segments) >= 4 and segments[:3] == ["node_modules", ".vite", "deps"] and dot_segments == [1])
         or (len(segments) >= 3 and segments[:2] == [".vite", "deps"] and dot_segments == [0])
     )
-    if vite_dependency:
-        return False
+    return not vite_dependency
 
-    if not decoded.startswith("@fs/"):
-        return True
 
+def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bool) -> bool:
     # Recover the absolute filesystem path from Vite's `/@fs/<abs>` convention,
     # mirroring Vite's own fsPathFromId. This route stripped the URL's single
     # leading slash, so a POSIX request arrives as `@fs/home/...` (restore the
@@ -7881,10 +7883,10 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bo
     # already carry an absolute path, so leave those intact — prepending a slash
     # to `C:/...` would corrupt the Windows path. Leave the synthetic relative
     # relocated-cache form (e.g. `@fs/.vite-cache/deps/...`) relative so the
-    # allowance below handles it. Parsing with `removeprefix("@fs/")` alone
-    # dropped the single POSIX slash and mis-read a real request as relative,
-    # denying legitimate external deps (notably the Vite HMR client's `env.mjs`)
-    # so nothing mounted on the private `/show/` surface.
+    # allowance below handles it. Parsing with `removeprefix("@fs/")` alone dropped
+    # the single POSIX slash and mis-read a real request as relative, denying
+    # legitimate external deps (notably the Vite HMR client's `env.mjs`) so nothing
+    # mounted on the private `/show/` surface.
     fs_remainder = decoded.removeprefix("@fs/")
     if (
         fs_remainder
@@ -7899,18 +7901,31 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str) -> bo
         # Vite cache deps; otherwise deny so a hidden path can't be proxied here.
         return not _is_relocated_vite_dep_path(decoded)
 
-    target = fs_path.resolve(strict=False)
     workspace = paths.get_show_page_dir(session_id).resolve(strict=False)
+    target = fs_path.resolve(strict=False)  # follows symlinks, like the runtime will
     try:
         workspace_relative = target.relative_to(workspace)
     except ValueError:
+        # The resolved target is outside the workspace. On the PUBLIC surface,
+        # untrusted viewers must not read through a workspace file that symlinks OUT
+        # of the workspace (a symlink escape), so confine them to the workspace. The
+        # private authoring surface keeps this — an agent may legitimately symlink a
+        # disk file into its own page — and a genuine dependency path (its parent is
+        # literally outside the workspace) is still deferred to the Show Runtime's
+        # fs allowlist on both surfaces.
+        if public:
+            try:
+                fs_path.parent.resolve(strict=False).relative_to(workspace)
+                return True
+            except ValueError:
+                pass
         # Outside the workspace: defer to the Show Runtime, which owns the
         # authoritative fs allowlist for its dependency/cache roots — the default
         # `~/.avibe/runtime`, a custom `VIBE_SHOW_RUNTIME_BIN` provider (e.g. an
         # nvm/global install), per-session extras — and still denies sensitive
         # filenames and non-allowlisted paths there. avibe cannot enumerate those
-        # roots without breaking supported providers, so here it enforces only what
-        # it can decide authoritatively: the sensitive-filename check above and the
+        # roots without breaking supported providers, so it enforces only what it
+        # can decide authoritatively: the sensitive-filename check (caller) and the
         # workspace-internal dot-path check below.
         return False
     return any(part.startswith(".") for part in workspace_relative.parts)
@@ -8954,7 +8969,7 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
+        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id, public=True):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method != "GET":
