@@ -2379,7 +2379,10 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     store = ShowPageStore()
     try:
         page = store.get(session_id)
-        if page is None or page.visibility != "private":
+        # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
+        # pages too, so a public page framed in the Dock app must also get live
+        # HMR. Mirror the serve route's private+public visibility gate here.
+        if page is None or page.visibility not in {"private", "public"}:
             await websocket.close(code=1008)
             return
     finally:
@@ -8961,7 +8964,10 @@ def redirect_private_show_page_to_canonical_path(session_id):
         page = store.get(session_id)
         if page is None:
             return _show_page_not_found_response()
-        if page.visibility not in {"private", "offline"}:
+        # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
+        # pages too, so the sibling no-trailing-slash canonical redirect must
+        # accept public as well (offline still redirects to its offline page).
+        if page.visibility not in {"private", "public", "offline"}:
             return _show_page_not_found_response()
         return redirect(f"/show/{quote(session_id, safe='')}/")
     finally:

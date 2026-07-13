@@ -290,6 +290,20 @@ def test_offline_show_page_not_served_by_authed_route(monkeypatch, tmp_path):
     assert b"window.showPage" not in response.content  # the live app.js is never served
 
 
+def test_public_show_page_no_slash_redirects_to_canonical(monkeypatch, tmp_path):
+    # The sibling no-trailing-slash canonical redirect must accept public pages
+    # too now that /show/ serves them (amendment §2.3), else the slash-less URL
+    # 404s while the canonical one works.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "public")
+
+    response = app.test_client().get("/show/ses123", base_url="http://127.0.0.1:5123", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/show/ses123/")
+
+
 def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -3063,6 +3077,35 @@ def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypat
     finally:
         set_show_runtime_manager_for_tests(None)
 
+
+def test_public_show_page_hmr_websocket_accepts_local_peer(monkeypatch, tmp_path):
+    # Amendment §2.3: the HMR socket serves public pages too, so a public page's
+    # /show/ HMR socket gets PAST the visibility gate (then fails at the fake
+    # runtime proxy with 1011 — not the 1008 visibility rejection an offline page
+    # would get), keeping live HMR for a page pinned while public.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.ui.setup_host = "192.168.2.3"
+    config.save()
+    _mock_interface(monkeypatch, "192.168.2.3", 24)
+    _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        with app.test_client().websocket_connect(
+            "/show/ses123/__vite_hmr",
+            headers={
+                "host": "192.168.2.3:5123",
+                "x-vibe-test-remote-addr": "192.168.2.44",
+            },
+            subprotocols=["vite-hmr"],
+        ) as websocket:
+            websocket.receive_text()
+    except Exception as exc:
+        assert getattr(exc, "code", None) == 1011  # accepted past the visibility gate; proxy then fails
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
     assert manager.websocket_paths == ["/show/ses123/__vite_hmr"]
 
 
@@ -3469,8 +3512,10 @@ def test_public_and_private_paths_are_canonical_by_visibility(monkeypatch, tmp_p
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
 
-    private_response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
-    assert private_response.status_code == 404
+    # Amendment (§2.3, 2026-07-13): the authed /show/ surface now serves public
+    # pages too (a page pinned while public must open), so this is 200, not 404.
+    authed_response = app.test_client().get("/show/ses123/", base_url="http://127.0.0.1:5123")
+    assert authed_response.status_code == 200
 
     store = ShowPageStore()
     try:
@@ -3478,6 +3523,8 @@ def test_public_and_private_paths_are_canonical_by_visibility(monkeypatch, tmp_p
     finally:
         store.close()
 
+    # The anonymous /p/<share_id> surface still serves ONLY public pages — a
+    # private page is never reachable there.
     public_response = app.test_client().get(f"/p/{share_id}/", base_url="http://127.0.0.1:5123")
     assert public_response.status_code == 404
 
