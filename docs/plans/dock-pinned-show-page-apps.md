@@ -246,6 +246,10 @@ integrated:
    dockable/undockable like the rest), and a **permanent 应用库 entry lives
    in the control-panel sidebar** (undismissable escape hatch; links to the
    existing /apps/library route).
+8. **(owner 23:38)** The bottom-left Apps launcher button gets a
+   **right-click context menu** (shared primitive): 打开应用库 (+ 显示所有
+   窗口 only if trivially supported). Third Library escape hatch alongside
+   the sidebar entry and the empty-dock hint.
 
 Data model (compatible evolution, no migration): `pins` = installed AI
 pages; `order` = docked ids and becomes a **SUBSET** of {built-ins ∪ pins}
@@ -272,6 +276,24 @@ shows an App Library shortcut hint (never a dead surface).
 - Evolution: this drawer grows into the Option-C home-screen page when the
   app count justifies it (same tab slot, same mental model).
 - Design frame `Zb74E` (final, chips updated). Own lane after v1.1.
+
+### 7.1d Ideas 3+4 approved (owner 2026-07-14 02:32)
+
+- **⌘K search reaches apps**: the global search adds an "Apps" result
+  section — built-ins + installed apps + ALL AI pages (inventory; searching
+  an uninstalled page and opening it is a feature). Enter/click: desktop →
+  open the app window (showpage window for pages); mobile → the existing
+  mobile open behavior. Additive to existing result sections.
+- **Keyboard dock switching**: desktop-only chord to focus/launch the Nth
+  Dock tile in current order. NOTE: browsers reserve ⌘/Ctrl+1-9 for tab
+  switching (not interceptable) — use **⌥/Alt+1-9** (verify interceptability
+  in-code; follow the existing ⌘W/⌘M chord pattern in WindowLayer).
+- **AI-view inline rename**: rename affordance in the AI row's expanded
+  management panel; saves the SESSION title via the existing session PATCH
+  (same as the chat header TitleField). Display already prefers the live
+  title everywhere; `title_snapshot` remains a fallback only. Built-ins not
+  renamable. (Idea 1 — agent-suggested pinning — deliberately deferred;
+  idea 2 — update dots — not scheduled yet.)
 
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 

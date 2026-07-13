@@ -7,7 +7,7 @@ import clsx from 'clsx';
 import { APP_LIST, APP_REGISTRY, type AppDefinition, type AppId } from './registry';
 import { deriveAppRows, type AppRow } from './appLibrary';
 import { ShowPageAvatarTile } from './showPageAvatarTile';
-import { showPagePrivatePath } from './showPageAvatar';
+import { showAppRoutePath } from '../components/apps/mobileDock';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { ShowPagesView } from '../components/ShowPagesPage';
@@ -34,12 +34,10 @@ type LibraryTab = 'apps' | 'showpages';
 
 /**
  * Open an app the way the current surface can show it. On desktop that's a
- * workbench window (`openApp`). On mobile there is no window layer: built-ins
- * have in-shell `/apps/*` routes, so navigate there (keeping the AppShell). A
- * Show Page has no in-shell mobile route yet (that lands with the §7.1b mobile
- * Dock), so open its private `/show/` surface in a NEW TAB rather than replacing
- * the current one — this tab keeps the AppShell / Library / Dock chrome instead
- * of dropping the user onto the raw page.
+ * workbench window (`openApp`). On mobile there is no window layer, so built-ins
+ * navigate to their in-shell `/apps/*` route and a Show Page navigates to the
+ * full-screen `/apps/show/:sessionId` route (§7.1b) — both keep the AppShell
+ * chrome instead of dropping the user onto the raw page or a new browser tab.
  */
 function useOpenApp() {
   const wm = useWindowManager();
@@ -55,7 +53,7 @@ function useOpenApp() {
         return;
       }
       if (appId === 'showpage') {
-        if (opts?.sessionId) window.open(showPagePrivatePath(opts.sessionId), '_blank', 'noopener,noreferrer');
+        if (opts?.sessionId) navigate(showAppRoutePath(opts.sessionId));
       } else {
         navigate(`/apps/${appId}`);
       }
