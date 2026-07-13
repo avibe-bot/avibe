@@ -49,6 +49,15 @@ installation, per-app permissions.
 - **New:** title-bar **right side** gets an "open in new tab" icon button
   (generalized as `AppDefinition.externalHref?(params)`; only `showpage`
   defines it in v1). Opens the private URL in a browser tab.
+- **v1.1 (owner ask 2026-07-13 21:49, ships as a follow-up PR after #899):**
+  a **chat-bubble button to the LEFT of the external-open button** — click
+  navigates the workbench to the owning session's Chat page and minimizes
+  the window (chat visible immediately; the Dock thumbnail brings the app
+  back). Showpage-only, via the same optional-hook pattern as
+  `externalHref` (or a small generalization to a title-bar-actions hook —
+  implementer's choice, keep it idiomatic). Archived/missing session: still
+  navigate; the chat surface owns its own not-found state. Design frame
+  updated (`q4E5yl`).
 - Body = same-origin `<iframe src="/show/<session_id>/">` — always the
   **owner (authed) surface**, regardless of visibility (authed workbench
   context; HMR means the app updates live while the agent keeps building
@@ -209,6 +218,23 @@ the same objects. Decision: fold it into the App Library.
   tabs, filters, expanded row w/ visibility+link+suffix mgmt, per-row Dock
   toggle), both in design.pen right of `NbPMq`.
 
+### 7.1b Mobile Dock — Option B locked (owner decision 2026-07-13 22:22)
+
+- The mobile 更多 tab becomes **Apps** (grid icon). Tapping summons a bottom
+  drawer = the mobile Dock: same tiles, same server-side order as desktop
+  (pin anywhere → appears everywhere). One tap to any app; apps open
+  full-screen (existing `/apps/*` routes; pinned pages via a full-screen
+  show-page route). Long-press tile = manage/unpin; built-ins locked.
+- Former More-page content compresses into a drawer footer chip row:
+  **设置** (RENAMED from 控制台 — copy alignment with desktop, owner ask),
+  账号 (signed-in / sign-out), 外观, remaining items under 更多….
+- **Copy rename ships early**: `more.controlPanel` zh 控制台→设置 (en
+  aligned to "Settings") goes into the v1.1 micro-lane (2 i18n lines) so the
+  interim UI is aligned before the drawer lands.
+- Evolution: this drawer grows into the Option-C home-screen page when the
+  app count justifies it (same tab slot, same mental model).
+- Design frame `Zb74E` (final, chips updated). Own lane after v1.1.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:
@@ -216,6 +242,25 @@ the share-popover switch (v1) and the per-row Dock toggle in the Library's
 Show Pages view (Phase 2). The full ladder: **page (session byproduct) → pin
 (lightweight app, one switch) → publish (standalone app, stable id/icon,
 detached from the session lifecycle — future)**.
+
+### 7.3a Chat as an App — windowed chat (owner-approved direction 2026-07-13 22:06)
+
+The chat-bubble button's end state is **opening a Chat window beside the app
+window** (watch the dashboard while instructing the agent; HMR shows the
+change live) — not navigating away. Approved plan, two steps:
+
+1. **v1.1 ships navigate+minimize** (§2.3 v1.1) — usable immediately, zero
+   risk; its click handler is later swapped for the window-open call, nothing
+   wasted.
+2. **Chat-as-an-App is its own milestone** (after Phase 2): extract a
+   container-relative `ChatSurface` from `ChatPage` (page and window render
+   the same component — the exact one-source/two-shells pattern used for
+   `ShowPagesView` in #899), register a `chat` app kind (param `sessionId`,
+   multi-instance), and upgrade the chat-bubble to open the chat window
+   adjacent to the app window. The routed Chat page stays canonical (deep
+   links, notifications, mobile). Design frames before kickoff. Product
+   significance: chat itself becomes an app in the OS — the Agent-OS metaphor
+   completes.
 
 ### 7.3 User-added URL apps (kind: remote) — Phase 3
 
@@ -244,7 +289,7 @@ Dark-theme frames alongside the Apps v2 set (right of `NbPMq`, y=-2315):
 | --- | --- | --- |
 | Apps · Pin Show Page — Share Popover | `s2YOlP` | popover w/ Pin to Dock switch + rules legend |
 | Apps · Dock — Pinned Show Page Apps | `zn8tz` | pinned letter-avatar tiles, context menu, reorder scene, menu rules |
-| Apps · Show Page App Window | `vxbaK` | `X7d3Ev` AppWindow instance + title-bar external-open + iframe dashboard body |
+| Apps · Show Page App Window | `q4E5yl` | `X7d3Ev` AppWindow instance + title-bar external-open + iframe dashboard body |
 | Apps · Future — App Library / Apps View | `xCSqW` | manifest model, kinds, show-in-Dock toggles, evolution path (not v1) |
 
 ## 9. Delivery
