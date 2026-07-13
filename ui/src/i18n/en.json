@@ -643,6 +643,7 @@
       "selectFileHint": "Select a file from the explorer to edit",
       "lineCol": "Ln {{line}}, Col {{col}}",
       "spaces": "Spaces: {{n}}",
+      "tabSize": "Tab Size: {{n}}",
       "plainText": "Plain Text",
       "source": "Source",
       "preview": "Preview",

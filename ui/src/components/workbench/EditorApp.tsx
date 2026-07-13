@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FileText, FolderOpen, GitBranch, Image as ImageIcon, Search, Settings, X } from 'lucide-react';
+import { Clock, CodeXml, FilePlus, Files, FileText, FolderOpen, Image as ImageIcon, Search, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -70,6 +70,11 @@ type PickerState = {
 // couldn't be reached right now (leave the row — it may still exist).
 type RecentOpenResult = 'opened' | 'gone' | 'unavailable';
 
+// One tab's status-bar data: the 1-based cursor position plus the model's resolved indentation
+// (Monaco's detected insertSpaces / tabSize). Stored per tab so switching tabs shows the target
+// file's real values immediately, without waiting for its cursor to move.
+type PaneStatus = { line: number; col: number; insertSpaces: boolean; tabSize: number };
+
 // Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
 const LANGUAGE_LABEL: Record<string, string> = {
   ts: 'TypeScript',
@@ -134,7 +139,10 @@ export const EditorApp: React.FC<{
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null); // active tab id
   const [dirty, setDirty] = useState<Record<string, boolean>>({}); // keyed by tab id
-  const [cursor, setCursor] = useState<{ line: number; col: number } | null>(null);
+  // Status-bar data (cursor + resolved indentation) keyed by tab id. Every open pane reports its
+  // own — including inactive ones (all panes are mounted) — so switching tabs reads the target's
+  // cached values instantly instead of showing stale data until its cursor next moves.
+  const [status, setStatus] = useState<Record<string, PaneStatus>>({});
   const [picker, setPicker] = useState<PickerState | null>(null);
   const [view, setView] = useState<'files' | 'search'>('files');
   // A pending Monaco jump (from a cross-file search result), scoped to one tab. The nonce makes a
@@ -167,7 +175,6 @@ export const EditorApp: React.FC<{
       // so a reload doesn't re-stamp restored files as freshly opened.
       rememberRecentFile(path, name);
       setRoot((r) => r ?? parentDir(path));
-      if (!target) setCursor(null);
       setTabs((ts) => {
         // Dedup inside the updater so two concurrent opens of the same file (e.g. a fast double-click
         // firing two fileMeta requests) can't both append a tab — both see the same current `ts`.
@@ -197,7 +204,6 @@ export const EditorApp: React.FC<{
       const existing = ts.find((x) => x.path === path);
       const id = existing ? existing.id : `t${++tabSeq.current}`;
       setActive(id);
-      setCursor(null);
       if (existing) return ts;
       return [...ts, { id, path, name, mtime: null, kind: 'preview' }];
     });
@@ -306,6 +312,11 @@ export const EditorApp: React.FC<{
       setActive((cur) => (cur && closeIds.has(cur) ? (rest.length ? rest[rest.length - 1].id : null) : cur));
       setDirty((d) => {
         const n = { ...d };
+        closeIds.forEach((id) => delete n[id]);
+        return n;
+      });
+      setStatus((s) => {
+        const n = { ...s };
         closeIds.forEach((id) => delete n[id]);
         return n;
       });
@@ -442,6 +453,12 @@ export const EditorApp: React.FC<{
       delete n[id];
       return n;
     });
+    setStatus((s) => {
+      if (!(id in s)) return s;
+      const n = { ...s };
+      delete n[id];
+      return n;
+    });
   };
 
   // Open Folder: pick a folder via the in-window FilePicker (no manual path typing), set it as the
@@ -464,7 +481,6 @@ export const EditorApp: React.FC<{
     const id = `t${++tabSeq.current}`;
     setTabs((ts) => [...ts, { id, path: null, name: t('apps.editor.untitled', { n: ++untitledSeq.current }), mtime: null }]);
     setActive(id);
-    setCursor(null);
   }, [t]);
 
   // Save As (for an untitled buffer): pick a folder + filename, write create-only (so it can't
@@ -581,11 +597,14 @@ export const EditorApp: React.FC<{
   const showWelcome = root == null && tabs.length === 0;
   const activeTab = tabs.find((x) => x.id === active);
   const activeName = activeTab?.name;
+  const activeStatus = active ? status[active] : undefined;
 
   return (
     <div className="relative flex h-full min-h-0 w-full flex-col bg-surface">
       <div className="flex min-h-0 flex-1">
-        {/* Activity bar — Files / Search switch the left panel; the rest are inert placeholders. */}
+        {/* Activity bar — Files / Search switch the left panel. Dead placeholder icons (Git / Bug /
+            Blocks / Settings) were removed as honest chrome; a real Git view slots back into this
+            column when Git integration lands (out of scope here). */}
         <div className="flex w-12 shrink-0 flex-col items-center justify-between border-r border-border bg-surface-3 py-3">
           <div className="flex flex-col items-center gap-[18px]">
             {([
@@ -618,11 +637,9 @@ export const EditorApp: React.FC<{
                 <Icon className="size-5" />
               </button>
             ))}
-            {[GitBranch, Bug, Blocks].map((Icon, i) => (
-              <Icon key={i} className="size-5 text-muted" />
-            ))}
           </div>
-          <Settings className="size-5 text-muted" />
+          {/* Bottom slot (Settings / SCM status) intentionally empty until wired — the column keeps
+              its two-slot layout so a future control can slot back in here. */}
         </div>
 
         {/* Left panel — Explorer (Files view) or the cross-file Search view. Collapses via the
@@ -710,10 +727,7 @@ export const EditorApp: React.FC<{
                     >
                       <button
                         type="button"
-                        onClick={() => {
-                          if (tab.id !== active) setCursor(null);
-                          setActive(tab.id);
-                        }}
+                        onClick={() => setActive(tab.id)}
                         className="flex items-center gap-1.5"
                       >
                         {tab.kind === 'preview' ? (
@@ -753,7 +767,7 @@ export const EditorApp: React.FC<{
                             mtime={tab.mtime}
                             chromeless
                             onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
-                            onCursor={active === tab.id ? (line, col) => setCursor({ line, col }) : undefined}
+                            onCursor={(line, col, indent) => setStatus((s) => ({ ...s, [tab.id]: { line, col, insertSpaces: indent.insertSpaces, tabSize: indent.tabSize } }))}
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}
                             reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
                             reloadNonce={tab.reload}
@@ -785,8 +799,16 @@ export const EditorApp: React.FC<{
           <span className="ml-auto truncate">{t('preview.title')}</span>
         ) : active ? (
           <>
-            <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>
-            <span>{t('apps.editor.spaces', { n: 2 })}</span>
+            <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: activeStatus?.line ?? 1, col: activeStatus?.col ?? 1 })}</span>
+            {/* Real, live indentation from the active model — spaces show "Spaces: N", tabs show
+                "Tab Size: N" (VS Code wording). Omitted until Monaco reports, rather than guessing. */}
+            {activeStatus && (
+              <span>
+                {activeStatus.insertSpaces
+                  ? t('apps.editor.spaces', { n: activeStatus.tabSize })
+                  : t('apps.editor.tabSize', { n: activeStatus.tabSize })}
+              </span>
+            )}
             <span className="truncate">{languageLabel(activeName) ?? t('apps.editor.plainText')}</span>
           </>
         ) : (
