@@ -119,7 +119,7 @@
   "more": {
     "title": "更多",
     "controlPanel": "设置",
-    "controlPanelDesc": "频道 · 用户 · 展示页面 · 设置 · 日志",
+    "controlPanelDesc": "控制台 · 远程访问 · 通讯平台 · 后端 · 高级设置",
     "appearance": "外观",
     "connection": "连接",
     "host": "本机地址"

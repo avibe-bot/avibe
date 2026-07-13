@@ -119,7 +119,7 @@
   "more": {
     "title": "More",
     "controlPanel": "Settings",
-    "controlPanelDesc": "Channels · Users · Show Pages · Settings · Logs",
+    "controlPanelDesc": "Dashboard · Remote Access · Messaging Platforms · Backends · Advanced Settings",
     "appearance": "Appearance",
     "connection": "Connection",
     "host": "Local address"
