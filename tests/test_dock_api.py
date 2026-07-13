@@ -117,6 +117,22 @@ def test_pin_is_idempotent(monkeypatch, tmp_path):
     assert len(second["pins"]) == 1
 
 
+def test_pin_multiple_sessions_all_survive(monkeypatch, tmp_path):
+    # Pinning distinct sessions accumulates — a later pin must never drop an
+    # earlier one (the read-modify-write is serialized under a lock so concurrent
+    # pins can't lost-update).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    for sid in ("ses_a", "ses_b", "ses_c"):
+        _seed_session(sid, title=sid.upper())
+        _make_show_page(sid)
+        api.pin_dock_show_page(sid)
+
+    dock = api.get_dock()["dock"]
+    assert dock["order"] == [*BUILTIN_DOCK_IDS, _show("ses_a"), _show("ses_b"), _show("ses_c")]
+    assert [pin["session_id"] for pin in dock["pins"]] == ["ses_a", "ses_b", "ses_c"]
+
+
 def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

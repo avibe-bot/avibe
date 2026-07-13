@@ -36,7 +36,10 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
       .getSession(sessionId, { cache: true, handleError: false })
       .then((session) => {
         if (cancelled) return;
-        if (!session || session.status === 'archived') {
+        // handleError:false resolves (does not throw) on a 404, returning the raw
+        // error body — so a response without a real session id, or an archived
+        // session, is the "missing" signal, same as a rejection.
+        if (!session || typeof session.id !== 'string' || session.status === 'archived') {
           setState('missing');
           return;
         }

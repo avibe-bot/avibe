@@ -2295,8 +2295,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {}),
     getSession: (sessionId, params) =>
       params?.cache === false
-        ? getJson(`/api/sessions/${encodeURIComponent(sessionId)}`)
-        : getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+        ? getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
+        : getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError }),
     getSessionBootstrap: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
     updateSession: async (sessionId, payload) => {

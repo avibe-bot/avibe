@@ -118,15 +118,24 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Latest committed doc for the async actions' rollback (avoids stale closures).
   const docRef = useRef(doc);
   docRef.current = doc;
+  // Monotonic mutation counter. A server response (or the one-time initial load)
+  // is applied only if no newer local mutation has started since it was
+  // dispatched — otherwise an out-of-order response on a slow/remote connection
+  // could revert the user's latest pin/unpin/reorder (Codex).
+  const mutationSeqRef = useRef(0);
 
   const apply = useCallback((next: DockDoc) => setDoc(reconcileDock(next)), []);
 
   useEffect(() => {
     let cancelled = false;
+    const loadSeq = mutationSeqRef.current;
     api
       .getDock()
       .then((res) => {
-        if (!cancelled && res?.dock) setDoc(reconcileDock(res.dock));
+        // Drop the initial snapshot if a mutation started before it resolved, so a
+        // slow GET can't clobber a just-pinned page (Codex).
+        if (cancelled || mutationSeqRef.current !== loadSeq) return;
+        if (res?.dock) setDoc(reconcileDock(res.dock));
       })
       // A failed load (offline / auth) leaves the builtins-only default in place.
       .catch(() => undefined);
@@ -139,15 +148,17 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async (sessionId: string) => {
       const prev = docRef.current;
       if (prev.pins.some((p) => p.session_id === sessionId)) return; // already pinned
+      const seq = (mutationSeqRef.current += 1);
       apply({
         order: [...prev.order, showDockId(sessionId)],
         pins: [...prev.pins, { session_id: sessionId, title_snapshot: '', pinned_at: '' }],
       });
       try {
         const res = await api.pinDockShowPage(sessionId);
+        if (mutationSeqRef.current !== seq) return; // a newer mutation supersedes this response
         if (res?.dock) setDoc(reconcileDock(res.dock));
       } catch {
-        setDoc(prev); // rollback
+        if (mutationSeqRef.current === seq) setDoc(prev); // rollback only if still the latest
       }
     },
     [api, apply],
@@ -156,15 +167,17 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const unpin = useCallback(
     async (sessionId: string) => {
       const prev = docRef.current;
+      const seq = (mutationSeqRef.current += 1);
       apply({
         order: prev.order.filter((id) => id !== showDockId(sessionId)),
         pins: prev.pins.filter((p) => p.session_id !== sessionId),
       });
       try {
         const res = await api.unpinDockShowPage(sessionId);
+        if (mutationSeqRef.current !== seq) return; // a newer mutation supersedes this response
         if (res?.dock) setDoc(reconcileDock(res.dock));
       } catch {
-        setDoc(prev); // rollback
+        if (mutationSeqRef.current === seq) setDoc(prev); // rollback only if still the latest
       }
     },
     [api, apply],
@@ -173,16 +186,18 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const setOrder = useCallback(
     async (order: string[]) => {
       const prev = docRef.current;
+      const seq = (mutationSeqRef.current += 1);
       apply({ order, pins: prev.pins });
       try {
         const res = await api.setDockOrder(order);
+        if (mutationSeqRef.current !== seq) return; // a newer mutation supersedes this response
         // The server rejects a stale order (its id set no longer matches) with
         // ok:false; roll back to the last good doc and let the next action /
         // reload reconcile. A thrown error (network) rolls back the same way.
         if (res?.ok && res.dock) setDoc(reconcileDock(res.dock));
         else setDoc(prev);
       } catch {
-        setDoc(prev);
+        if (mutationSeqRef.current === seq) setDoc(prev);
       }
     },
     [api, apply],

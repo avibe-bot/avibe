@@ -21,6 +21,7 @@ bounded), so a stale or corrupt blob can never desync the Dock.
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,14 @@ from storage.sessions_service import read_session_display_meta
 
 # The single state_meta key holding the whole dock document.
 DOCK_STATE_KEY = "workbench.dock.v1"
+
+# Every Dock mutation funnels through the single local vibe process — multiple
+# devices/tabs are multiple clients of ONE server — so a module lock makes each
+# read-modify-write of the document atomic. Without it, two near-simultaneous
+# pins both load the same doc and the later ``_save`` silently drops the other's
+# pin. This matches the whole ``state_meta`` layer's single-process assumption;
+# it does not (and need not here) guard against multiple OS processes.
+_DOCK_MUTATION_LOCK = threading.Lock()
 
 # Built-in resident apps, in their canonical Dock order. Mirrors the frontend
 # APP_LIST ids (ui/src/apps/registry.tsx); these ids are a stable contract
@@ -159,19 +168,21 @@ def pin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, 
     if page is None:
         raise DockError("This session has no Show Page to pin.", code="show_page_not_found")
 
-    doc = _load(db_path)
-    if any(pin["session_id"] == session_id for pin in doc["pins"]):
-        return doc  # already pinned → idempotent no-op (keeps its place + snapshot)
+    # Serialize the whole read-modify-write so a concurrent pin can't lost-update.
+    with _DOCK_MUTATION_LOCK:
+        doc = _load(db_path)
+        if any(pin["session_id"] == session_id for pin in doc["pins"]):
+            return doc  # already pinned → idempotent no-op (keeps its place + snapshot)
 
-    meta = read_session_display_meta([session_id], db_path=db_path)
-    title = (meta.get(session_id) or {}).get("title") or ""
-    doc["pins"].append(
-        {"session_id": session_id, "title_snapshot": title, "pinned_at": _utc_now_iso()}
-    )
-    doc["order"].append(_show_id(session_id))
-    doc = _reconcile(doc["order"], doc["pins"])
-    _save(doc, db_path)
-    return doc
+        meta = read_session_display_meta([session_id], db_path=db_path)
+        title = (meta.get(session_id) or {}).get("title") or ""
+        doc["pins"].append(
+            {"session_id": session_id, "title_snapshot": title, "pinned_at": _utc_now_iso()}
+        )
+        doc["order"].append(_show_id(session_id))
+        doc = _reconcile(doc["order"], doc["pins"])
+        _save(doc, db_path)
+        return doc
 
 
 def unpin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, Any]:
@@ -182,15 +193,16 @@ def unpin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str
     """
     sid = (session_id or "").strip()
     show_id = _show_id(sid)
-    doc = _load(db_path)
-    pinned = any(pin["session_id"] == sid for pin in doc["pins"])
-    if not pinned and show_id not in doc["order"]:
-        return doc  # nothing to remove → idempotent no-op
-    pins = [pin for pin in doc["pins"] if pin["session_id"] != sid]
-    order = [item for item in doc["order"] if item != show_id]
-    doc = _reconcile(order, pins)
-    _save(doc, db_path)
-    return doc
+    with _DOCK_MUTATION_LOCK:
+        doc = _load(db_path)
+        pinned = any(pin["session_id"] == sid for pin in doc["pins"])
+        if not pinned and show_id not in doc["order"]:
+            return doc  # nothing to remove → idempotent no-op
+        pins = [pin for pin in doc["pins"] if pin["session_id"] != sid]
+        order = [item for item in doc["order"] if item != show_id]
+        doc = _reconcile(order, pins)
+        _save(doc, db_path)
+        return doc
 
 
 def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]:
@@ -208,11 +220,12 @@ def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]
     if len(order) != len(set(order)):
         raise DockError("Dock order has duplicate ids.", code="invalid_order")
 
-    doc = _load(db_path)
-    known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
-    if set(order) != known:
-        raise DockError("Dock order must match the current dock items.", code="invalid_order")
+    with _DOCK_MUTATION_LOCK:
+        doc = _load(db_path)
+        known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
+        if set(order) != known:
+            raise DockError("Dock order must match the current dock items.", code="invalid_order")
 
-    doc = {"order": list(order), "pins": doc["pins"]}
-    _save(doc, db_path)
-    return doc
+        doc = {"order": list(order), "pins": doc["pins"]}
+        _save(doc, db_path)
+        return doc
