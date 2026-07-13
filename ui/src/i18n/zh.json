@@ -734,6 +734,8 @@
       "uploadNoFolders": "无法上传文件夹，只能拖放文件。",
       "uploadError": "{{name}}：{{message}}",
       "open": "打开",
+      "preview": "预览",
+      "openInEditor": "用编辑器打开",
       "openTerminalHere": "在此处打开终端",
       "copy": "复制",
       "paste": "粘贴",

@@ -216,9 +216,8 @@ export function editorPreviewKind(name: string): EditorPreviewKind | null {
   return null;
 }
 
-// What opens in the File Browser's read-only PREVIEW overlay (vs. the editor): a non-editable rich
-// file — raster image, PDF, or Office doc — within the content cap. Editable text (incl. svg / html /
-// markdown / code / json / csv) opens in the editor instead, which carries its own preview toggle.
+// Non-editable rich files that use a read-only preview tab inside Editor. Keep editable formats out
+// of this set so "Open in Editor" always lands on a source tab.
 export type PreviewOverlayKind = 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
 export function previewOverlayKind(entry: { kind: string; name: string; size: number | null }): PreviewOverlayKind | null {
   if (entry.kind !== 'file') return null;
@@ -227,17 +226,19 @@ export function previewOverlayKind(entry: { kind: string; name: string; size: nu
   return rk === 'image' || rk === 'pdf' || rk === 'docx' || rk === 'xlsx' || rk === 'pptx' ? rk : null;
 }
 
-// What opens in the standalone Preview WINDOW: everything previewOverlayKind covers (image / PDF /
-// Office) PLUS Markdown, which renders to a read-only document view. Editable code / plain-text /
-// json / csv / svg / html still open in the editor (which carries its own preview toggle). The File
-// Browser routes a double-click here on desktop (a real window) and to an in-page overlay on mobile.
-export type PreviewWindowKind = PreviewOverlayKind | 'markdown';
+// What the Files app opens in Preview: a standalone window on desktop and its in-page overlay on
+// mobile. Alongside rich files, Markdown and SVG stay preview-first, and CSV/TSV render as tables
+// through the shared papaparse-backed kernel. Those text-derived formats still expose an explicit
+// editor action. JSON deliberately stays editor-first because config-file opens usually carry edit
+// intent. Desktop and mobile intentionally share this set; only the presentation surface differs.
+export type PreviewWindowKind = PreviewOverlayKind | 'markdown' | 'svg' | 'csv';
 export function previewWindowKind(entry: { kind: string; name: string; size: number | null }): PreviewWindowKind | null {
   const overlay = previewOverlayKind(entry);
   if (overlay) return overlay;
   if (entry.kind !== 'file') return null;
   if (entry.size != null && entry.size > PREVIEW_MAX_BYTES) return null;
-  return previewRenderKind(entry.name) === 'markdown' ? 'markdown' : null;
+  const rk = previewRenderKind(entry.name);
+  return rk === 'markdown' || rk === 'svg' || rk === 'csv' ? rk : null;
 }
 
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.
