@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, CodeXml, FolderTree, Link as LinkIcon, LogOut, SlidersHorizontal, SquareTerminal } from 'lucide-react';
+import { ArrowRight, CodeXml, FolderTree, LayoutGrid, Link as LinkIcon, LogOut, SlidersHorizontal, SquareTerminal } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -109,6 +109,22 @@ export const MorePage: React.FC = () => {
           <span className="min-w-0 flex-1">
             <span className="block text-[15px] font-semibold">{t('apps.editor.label')}</span>
             <span className="block truncate text-[11.5px] text-muted">{t('apps.editor.desc')}</span>
+          </span>
+          <ArrowRight className="size-[18px] shrink-0 text-muted" />
+        </Link>
+        {/* App Library — the mobile entry to apps + the Show Pages inventory
+            (there is no Dock on mobile, and the control-panel Show Pages entry
+            was retired), so phone users keep a discoverable path. */}
+        <Link
+          to="/apps/library"
+          className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3.5 transition hover:bg-foreground/[0.04]"
+        >
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-gold/[0.12]">
+            <LayoutGrid className="size-[18px] text-gold" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-semibold">{t('library.title')}</span>
+            <span className="block truncate text-[11.5px] text-muted">{t('library.desc')}</span>
           </span>
           <ArrowRight className="size-[18px] shrink-0 text-muted" />
         </Link>

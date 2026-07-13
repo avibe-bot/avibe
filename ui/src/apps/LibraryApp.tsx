@@ -27,11 +27,17 @@ const BUILTIN_IDS = new Set<string>(APP_LIST.map((app) => app.id));
 
 type LibraryTab = 'apps' | 'showpages';
 
-export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = () => {
+export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, unknown>; initialTab?: LibraryTab }> = ({
+  params,
+  initialTab,
+}) => {
   const { t } = useTranslation();
   const controller = useShowPages();
   const { order } = useDock();
-  const [tab, setTab] = useState<LibraryTab>('apps');
+  // The legacy /admin/show-pages redirect (mobile via prop, desktop window via
+  // params) can request the Show Pages tab up front; default to Apps otherwise.
+  const startTab: LibraryTab = initialTab === 'showpages' || params?.initialTab === 'showpages' ? 'showpages' : 'apps';
+  const [tab, setTab] = useState<LibraryTab>(startTab);
 
   const appsCount = useMemo(() => deriveAppRows(order, BUILTIN_IDS, LIBRARY_APP_ID).length, [order]);
 

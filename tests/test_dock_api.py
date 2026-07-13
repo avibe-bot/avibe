@@ -168,6 +168,15 @@ def test_load_dock_clamps_oversized_corrupt_pins(monkeypatch, tmp_path):
     assert len(dock["order"]) == 5  # 4 built-ins + 1 pin
 
 
+def test_pin_budget_survives_new_builtin():
+    # Adding library (the 4th built-in) must not shrink the pin budget: the cap is
+    # built-ins + a fixed budget, so a valid pre-Phase-2 dock (up to 197 pins)
+    # never loses a pin on reconcile when a built-in is added.
+    from core.dock_store import BUILTIN_DOCK_IDS, MAX_DOCK_ITEMS
+
+    assert MAX_DOCK_ITEMS - len(BUILTIN_DOCK_IDS) == 197
+
+
 def test_load_dock_appends_library_to_pre_phase2_order(monkeypatch, tmp_path):
     # A dock doc persisted before ``library`` became a built-in (its ``order``
     # lacks it) must gain it on read via the reconcile rule (spec §3: missing

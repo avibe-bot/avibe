@@ -320,7 +320,11 @@ const LibraryRoute = () => {
   const isDesktop = useIsDesktop();
   const wm = useWindowManager();
   const navigate = useNavigate();
+  const location = useLocation();
   const handledRef = useRef(false);
+  // The retired /admin/show-pages redirect carries ?view=pages so the Library
+  // opens on the Show Pages inventory the bookmark asked for, not the Apps tab.
+  const initialTab = new URLSearchParams(location.search).get('view') === 'pages' ? ('showpages' as const) : undefined;
 
   useEffect(() => {
     if (!isDesktop || handledRef.current) return;
@@ -329,15 +333,15 @@ const LibraryRoute = () => {
     const visible = own.find((w) => !w.minimized);
     if (visible) wm.focus(visible.id);
     else if (own.length > 0) wm.restore(own[0].id);
-    else wm.openApp('library');
+    else wm.openApp('library', { params: { initialTab } });
     navigate('/', { replace: true });
-  }, [isDesktop, wm, navigate]);
+  }, [isDesktop, wm, navigate, initialTab]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (
     <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-border bg-surface">
       <Suspense fallback={<AppsRouteFallback />}>
-        <LibraryAppBody />
+        <LibraryAppBody initialTab={initialTab} />
       </Suspense>
     </div>
   );
@@ -428,8 +432,9 @@ const router = createBrowserRouter(
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />
         {/* Show Pages moved into the App Library (workbench). Redirect the old
-            control-panel page so bookmarks + external links keep working. */}
-        <Route path="/admin/show-pages" element={<Navigate to="/apps/library" replace />} />
+            control-panel page (?view=pages so it lands on the Show Pages tab the
+            bookmark asked for) so bookmarks + external links keep working. */}
+        <Route path="/admin/show-pages" element={<Navigate to="/apps/library?view=pages" replace />} />
         <Route path="/admin/logs" element={<SettingsLogsPage standalone />} />
         {/* No client-side route at /admin/settings: Flask owns GET /settings as
             a JSON API. The Flask handler redirects browser-Accept hits to

@@ -210,6 +210,7 @@
   },
   "library": {
     "title": "应用库",
+    "desc": "你的应用与展示页面",
     "tab": {
       "apps": "应用",
       "showPages": "展示页面"

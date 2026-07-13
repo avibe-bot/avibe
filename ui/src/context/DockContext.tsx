@@ -27,9 +27,11 @@ export type DockDoc = {
 
 export const SHOW_DOCK_PREFIX = 'show:';
 
-// Defensive cap on resident tiles, mirroring the backend MAX_DOCK_ITEMS — so a
-// corrupt/oversized server (or optimistic) doc can't render unbounded tiles.
-export const MAX_DOCK_ITEMS = 200;
+// Defensive cap on resident tiles, mirroring the backend: built-ins (4) + a
+// FIXED 197-pin budget = 201 (core/dock_store.py derives the same). Keeping the
+// pin budget fixed means adding a built-in never shrinks it or drops a valid pin
+// on reconcile — bump this in step with the backend if a built-in is added.
+export const MAX_DOCK_ITEMS = 201;
 
 /** The Dock id for a pinned Show Page session. */
 export function showDockId(sessionId: string): string {

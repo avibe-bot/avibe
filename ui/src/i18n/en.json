@@ -210,6 +210,7 @@
   },
   "library": {
     "title": "App Library",
+    "desc": "Your apps and Show Pages",
     "tab": {
       "apps": "Apps",
       "showPages": "Show Pages"

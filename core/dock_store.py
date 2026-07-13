@@ -50,8 +50,11 @@ BUILTIN_DOCK_IDS: tuple[str, ...] = ("files", "terminal", "editor", "library")
 SHOW_PREFIX = "show:"
 
 # Defensive cap on the resident-tile count so one corrupt/hostile write can't
-# balloon the order list. Far above any real Dock (built-ins + pinned pages).
-MAX_DOCK_ITEMS = 200
+# balloon the order list. Expressed as built-ins + a FIXED pin budget (not a flat
+# constant) so adding a built-in never shrinks the pin budget or drops an existing
+# valid pin on reconcile. Far above any real Dock (built-ins + pinned pages).
+MAX_PINNED_PAGES = 197
+MAX_DOCK_ITEMS = len(BUILTIN_DOCK_IDS) + MAX_PINNED_PAGES
 
 
 class DockError(ValueError):
