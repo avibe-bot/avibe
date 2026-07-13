@@ -1,7 +1,9 @@
 import { Suspense, lazy } from 'react';
-import { CodeXml, Eye, Folder, SquareTerminal } from 'lucide-react';
+import { CodeXml, Eye, Folder, MonitorPlay, SquareTerminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LucideIcon } from 'lucide-react';
+
+import { showPagePrivatePath } from './showPageAvatar';
 
 // The catalogue of windowed apps. The WindowManager + Dock are headless of any
 // specific app; everything app-specific (title, icon, default window size, body)
@@ -9,7 +11,7 @@ import type { LucideIcon } from 'lucide-react';
 // so opening the workbench doesn't pull file-browser / xterm code into the main
 // bundle — each loads only when its window first opens.
 
-export type AppId = 'files' | 'terminal' | 'editor' | 'preview';
+export type AppId = 'files' | 'terminal' | 'editor' | 'preview' | 'showpage';
 
 export interface AppDefinition {
   id: AppId;
@@ -27,6 +29,12 @@ export interface AppDefinition {
    * this and follows the workbench theme.
    */
   lockTheme?: 'dark';
+  /**
+   * When set, the window title bar shows an "open in new tab" button that opens this URL — the app
+   * has a standalone browser surface (a Show Page's own `/show/<id>/`). Returns undefined when the
+   * params can't resolve one. Only `showpage` defines this in v1.
+   */
+  externalHref?: (params?: Record<string, unknown>) => string | undefined;
 }
 
 const Loading: React.FC = () => {
@@ -46,6 +54,7 @@ const EditorBody = lazy(() =>
 const PreviewBody = lazy(() =>
   import('../components/workbench/AppsPreviewPage').then((m) => ({ default: m.AppsPreviewPage })),
 );
+const ShowPageBody = lazy(() => import('./ShowPageApp').then((m) => ({ default: m.ShowPageApp })));
 
 export const APP_REGISTRY: Record<AppId, AppDefinition> = {
   files: {
@@ -105,7 +114,28 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
       </Suspense>
     ),
   },
+  // A pinned session Show Page opened as an app. Like `preview` it is NOT in APP_LIST — it has no
+  // permanent launcher tile; a Dock tile appears only while the page is pinned (see DockContext /
+  // Dock.tsx), and the window is param-driven by { sessionId, title }. The window body always frames
+  // the private /show/<id>/ surface, and the title bar offers an open-in-new-tab to the same url.
+  showpage: {
+    id: 'showpage',
+    titleKey: 'apps.showPage.label',
+    icon: MonitorPlay,
+    accent: '--mint',
+    defaultSize: { width: 1040, height: 720 },
+    Component: ({ windowId, params }) => (
+      <Suspense fallback={<Loading />}>
+        <ShowPageBody windowId={windowId} params={params} />
+      </Suspense>
+    ),
+    externalHref: (params) => {
+      const sessionId = params?.sessionId;
+      return typeof sessionId === 'string' && sessionId ? showPagePrivatePath(sessionId) : undefined;
+    },
+  },
 };
 
-// Dock launcher tiles — the resident apps. `preview` is intentionally excluded (opened on demand).
+// Dock launcher tiles — the resident apps. `preview` and `showpage` are intentionally excluded
+// (opened on demand / while pinned).
 export const APP_LIST: AppDefinition[] = [APP_REGISTRY.files, APP_REGISTRY.terminal, APP_REGISTRY.editor];

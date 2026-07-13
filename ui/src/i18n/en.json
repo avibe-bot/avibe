@@ -705,17 +705,26 @@
     "dock": {
       "newInstanceHint": "⌘-click for a new window",
       "newWindow": "New Window",
-      "showAllWindows": "Show All Windows"
+      "showAllWindows": "Show All Windows",
+      "openInNewTab": "Open in New Tab",
+      "unpin": "Unpin from Dock"
     },
     "window": {
       "minimize": "Minimize",
       "maximize": "Maximize",
-      "restore": "Restore"
+      "restore": "Restore",
+      "openInNewTab": "Open in New Tab"
     },
     "preview": {
       "label": "Preview",
       "openInEditor": "Open in Editor",
       "empty": "No file to preview."
+    },
+    "showPage": {
+      "label": "Show Page",
+      "missingTitle": "This app isn't available",
+      "missingBody": "The Show Page for this session is missing or was archived. It may come back if the session does.",
+      "unpin": "Unpin from Dock"
     },
     "fileBrowser": {
       "label": "Files",
@@ -2173,6 +2182,9 @@
       "offlineNote": "This Show Page is offline and can't be shared right now.",
       "publicUnavailable": "Connect Avibe Cloud to get a public link others can open.",
       "loadError": "Couldn't load this Show Page.",
+      "pinToDock": "Pin to Dock",
+      "pinToDockCaption": "Opens as an app from the Dock",
+      "pinnedConfirm": "Pinned — “{{title}}” is in your Dock",
       "addToHomeTitle": "Add to Home Screen",
       "addToHomeBodySafari": "Tap here to open in a new tab, then Share → “Add to Home Screen”.",
       "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”."

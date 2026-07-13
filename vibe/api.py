@@ -1183,6 +1183,39 @@ def set_show_page_share_id(session_id: str, share_id: str) -> dict:
     return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
+def get_dock() -> dict:
+    """The workbench Dock document — resident-tile order + pinned Show Pages."""
+    from core.dock_store import load_dock
+
+    return {"ok": True, "dock": load_dock()}
+
+
+def pin_dock_show_page(session_id: str) -> dict:
+    """Pin a session's Show Page to the Dock (idempotent).
+
+    Raises ``ShowPageError`` (malformed id → 400) or ``DockError`` (no Show Page
+    → 404), which the route layer maps to a 4xx response.
+    """
+    from core.dock_store import pin_show_page
+
+    return {"ok": True, "dock": pin_show_page(session_id)}
+
+
+def unpin_dock_show_page(session_id: str) -> dict:
+    """Unpin a Show Page from the Dock (idempotent; leaves the page untouched)."""
+    from core.dock_store import unpin_show_page
+
+    return {"ok": True, "dock": unpin_show_page(session_id)}
+
+
+def set_dock_order(order: list) -> dict:
+    """Persist a new resident-tile order. Raises ``DockError`` for an invalid
+    order (wrong id set / duplicates / too large), mapped to a 400."""
+    from core.dock_store import set_dock_order as _set_dock_order
+
+    return {"ok": True, "dock": _set_dock_order(order)}
+
+
 def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:

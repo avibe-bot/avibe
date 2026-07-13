@@ -3,6 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
+import type { DockDoc } from './DockContext';
+
+// The workbench Dock API response shape ({ ok, dock }); the Dock document type
+// itself lives with the DockProvider that owns reconciliation.
+export type DockResponse = { ok: boolean; dock: DockDoc };
 
 // One backend's *global* instructions file, surfaced by the Global Prompts
 // editor. ``backend`` is an agent backend id (claude / opencode / codex).
@@ -364,6 +369,15 @@ export type ApiContextType = {
   rotateShowPageShare: (sessionId: string) => Promise<any>;
   /** Set a custom public link suffix (public pages only); rejects on a taken/invalid id. */
   setShowPageShareId: (sessionId: string, shareId: string) => Promise<any>;
+  /** The workbench Dock document (resident-tile order + pinned Show Pages). */
+  getDock: () => Promise<DockResponse>;
+  /** Pin a session's Show Page to the Dock as an app (idempotent). */
+  pinDockShowPage: (sessionId: string) => Promise<DockResponse>;
+  /** Unpin a session's Show Page from the Dock (idempotent; leaves the page). */
+  unpinDockShowPage: (sessionId: string) => Promise<DockResponse>;
+  /** Persist a new resident-tile order (silent on rejection so a stale reorder
+   *  rolls back without a toast). Returns the payload; check ``ok``. */
+  setDockOrder: (order: string[]) => Promise<DockResponse>;
   getBindCodes: () => Promise<any>;
   createBindCode: (type: string, expiresAt?: string) => Promise<any>;
   deleteBindCode: (code: string) => Promise<any>;
@@ -502,7 +516,7 @@ export type ApiContextType = {
   listSessions: (params?: { projectId?: string; status?: 'active' | 'archived' | 'all'; limit?: number; beforeId?: string; q?: string; cache?: boolean }) => Promise<{ sessions: WorkbenchSession[]; next_before_id: string | null }>;
   createSession: (payload: WorkbenchSessionCreate) => Promise<WorkbenchSession>;
   forkSession: (sessionId: string) => Promise<WorkbenchSession>;
-  getSession: (sessionId: string, params?: { cache?: boolean }) => Promise<WorkbenchSession>;
+  getSession: (sessionId: string, params?: { cache?: boolean; handleError?: boolean }) => Promise<WorkbenchSession>;
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
@@ -2096,6 +2110,26 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     rotateShowPageShare: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/rotate-share`, {}),
     setShowPageShareId: (sessionId, shareId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/share-id`, { share_id: shareId }),
+    getDock: () => getJson('/api/dock'),
+    pinDockShowPage: (sessionId) => postJson('/api/dock/pins', { session_id: sessionId }),
+    unpinDockShowPage: (sessionId) => deleteJson(`/api/dock/pins/${encodeURIComponent(sessionId)}`),
+    setDockOrder: async (order) => {
+      // Suppress the global error toast: a concurrent-reorder rejection (the
+      // server rejects an order that no longer matches the known id set) is
+      // handled by the optimistic rollback in DockContext, not a user-facing
+      // error. The caller inspects ``ok``.
+      const { payloadJson } = await requestJson(
+        '/api/dock/order',
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order }),
+        },
+        'PUT /api/dock/order',
+        { handleError: false },
+      );
+      return payloadJson;
+    },
     getBindCodes: () => getJson('/api/bind-codes'),
     createBindCode: (type, expiresAt) => postJson('/api/bind-codes', { type, expires_at: expiresAt }),
     deleteBindCode: (code) => deleteJson(`/api/bind-codes/${encodeURIComponent(code)}`),

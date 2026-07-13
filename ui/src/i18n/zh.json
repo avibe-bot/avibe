@@ -705,17 +705,26 @@
     "dock": {
       "newInstanceHint": "⌘ 点击可新建窗口",
       "newWindow": "新建窗口",
-      "showAllWindows": "显示所有窗口"
+      "showAllWindows": "显示所有窗口",
+      "openInNewTab": "在新标签页打开",
+      "unpin": "从 Dock 取消固定"
     },
     "window": {
       "minimize": "最小化",
       "maximize": "最大化",
-      "restore": "还原"
+      "restore": "还原",
+      "openInNewTab": "在新标签页打开"
     },
     "preview": {
       "label": "预览",
       "openInEditor": "用编辑器打开",
       "empty": "没有可预览的文件。"
+    },
+    "showPage": {
+      "label": "Show Page",
+      "missingTitle": "无法打开此应用",
+      "missingBody": "这个会话的 Show Page 已丢失或被归档，若会话恢复它可能会重新出现。",
+      "unpin": "从 Dock 取消固定"
     },
     "fileBrowser": {
       "label": "文件",
@@ -2173,6 +2182,9 @@
       "offlineNote": "这个 Show Page 已离线，暂时无法分享。",
       "publicUnavailable": "连接 Avibe Cloud 后才能获得别人可打开的公开链接。",
       "loadError": "无法加载这个 Show Page。",
+      "pinToDock": "固定到 Dock",
+      "pinToDockCaption": "作为应用从 Dock 打开",
+      "pinnedConfirm": "已固定 —「{{title}}」已在你的 Dock 中",
       "addToHomeTitle": "添加到主屏幕",
       "addToHomeBodySafari": "点此处在新页面中打开，再点「分享」 →「添加到主屏幕」。",
       "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。"

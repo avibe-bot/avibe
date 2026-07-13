@@ -15,6 +15,7 @@ import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerContext';
+import { DockProvider } from '../context/DockContext';
 import { WindowLayer } from './apps/WindowLayer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
@@ -374,6 +375,7 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <WindowManagerProvider>
+    <DockProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
@@ -597,6 +599,7 @@ export const AppShell: React.FC = () => {
           the sidebar launcher. */}
       <WindowLayer />
     </div>
+    </DockProvider>
     </WindowManagerProvider>
   );
 };

@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, Copy, Loader2, Plus, Share2 } from 'lucide-react';
+import { Check, Copy, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Select } from '../ui/select';
+import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
+import { useDock } from '../../context/DockContext';
 import { copyTextToClipboard } from '../../lib/utils';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -16,6 +18,9 @@ type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
   url_guidance: string | null;
   offline: boolean;
+  // The live session title (joined server-side by ensureShowPage); labels the
+  // pinned-app confirmation. Null for untitled IM-dispatch sessions.
+  title?: string | null;
 };
 
 // Share affordance shown only while the Show Page is open (the in-chat view).
@@ -33,6 +38,7 @@ export const ShowPageShareControl: React.FC<{
 }> = ({ sessionId, onPayloadChange, onOpenChange }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const dock = useDock();
   const [open, setOpen] = useState(false);
   const [payload, setPayload] = useState<ShowPagePayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -258,6 +264,41 @@ export const ShowPageShareControl: React.FC<{
               </div>
             )}
           </>
+        )}
+
+        {/* Pin to Dock — records the session's Show Page as a Dock app. Deliberately
+            OUTSIDE the visibility branches: pinning is independent of public/private
+            (a private page can be pinned) and never changes visibility or deletes the
+            page. Shown whenever the page exists (the popover ensured it on open). */}
+        {payload && (
+          <div className="border-t border-border pt-3">
+            <div className="flex items-center gap-3">
+              <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-foreground/[0.03] text-cyan">
+                <LayoutGrid className="size-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">{t('chat.showPage.pinToDock')}</div>
+                <div className="text-xs text-muted">{t('chat.showPage.pinToDockCaption')}</div>
+              </div>
+              <Switch
+                checked={dock.isPinned(sessionId)}
+                onCheckedChange={(next) => {
+                  void (next ? dock.pin(sessionId) : dock.unpin(sessionId));
+                }}
+                label={t('chat.showPage.pinToDock')}
+              />
+            </div>
+            {dock.isPinned(sessionId) && (
+              <div className="mt-2 flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.08] px-2.5 py-1.5 text-xs text-foreground">
+                <Check className="size-3.5 shrink-0 text-mint" />
+                <span className="truncate">
+                  {t('chat.showPage.pinnedConfirm', {
+                    title: (payload.title ?? '').trim() || t('chat.showPage.title'),
+                  })}
+                </span>
+              </div>
+            )}
+          </div>
         )}
       </PopoverContent>
     </Popover>

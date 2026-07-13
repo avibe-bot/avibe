@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Minus, Plus, X, type LucideIcon } from 'lucide-react';
+import { ExternalLink, Minus, Plus, X, type LucideIcon } from 'lucide-react';
 
 import { APP_REGISTRY } from '../../apps/registry';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
@@ -106,6 +106,9 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   const Body = def.Component;
   const Icon = def.icon;
   const focused = wm.focusedId === win.id;
+  // A standalone-surface app (v1: showpage) exposes an external URL for its own
+  // browser tab; the title bar then shows an open-in-new-tab button.
+  const externalHref = def.externalHref?.(win.params);
 
   const style: React.CSSProperties = win.maximized
     ? { left: 0, top: 0, width: layerWidth, height: layerHeight, zIndex: win.z }
@@ -225,8 +228,25 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
           <Icon className="size-3.5 shrink-0" style={{ color: `var(${def.accent})` }} />
           <span className="truncate text-[13px] font-semibold text-foreground">{win.title ?? t(def.titleKey)}</span>
         </div>
-        {/* Right spacer balances the traffic lights so the title stays centered. */}
-        <div className="w-[52px] shrink-0" />
+        {/* Right cluster balances the traffic lights so the title stays centered; a
+            standalone-surface app also gets an open-in-new-tab button here. */}
+        <div className="flex w-[52px] shrink-0 items-center justify-end">
+          {externalHref && (
+            <a
+              href={externalHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={t('apps.window.openInNewTab')}
+              aria-label={t('apps.window.openInNewTab')}
+              // Stop the titlebar drag/focus gesture from starting on this click.
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+            >
+              <ExternalLink className="size-3.5" />
+            </a>
+          )}
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
