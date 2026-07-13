@@ -981,6 +981,36 @@ def test_public_show_page_denies_at_fs_vite_cache_named_workspace_symlink(monkey
     assert manager.calls == []
 
 
+def test_public_show_page_denies_at_fs_symlinked_home_ancestor_escape(monkeypatch, tmp_path):
+    # AVIBE_HOME reached through a symlinked ancestor: a request spelled with the
+    # UNRESOLVED (symlink) workspace prefix whose real target escapes must still be
+    # denied — the confinement checks both the resolved and unresolved spelling.
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    link_home = tmp_path / "link_home"
+    os.symlink(real_home, link_home)
+    monkeypatch.setenv("AVIBE_HOME", str(link_home))
+    _save_config(link_home)
+    share_id = _create_show_page("ses123", "public")
+    workspace = paths.get_show_page_dir("ses123")  # unresolved link_home spelling
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("TOPSECRET", encoding="utf-8")
+    os.symlink(outside, workspace / "pwn.txt")
+    manager = _FakeShowRuntimeManager(body=b"TOPSECRET")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/@fs{(workspace / 'pwn.txt').as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

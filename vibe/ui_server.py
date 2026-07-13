@@ -7917,13 +7917,18 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bo
             # Compare the requested path lexically (symlinks NOT followed here;
             # `..` was already rejected): a request ROOTED in the workspace whose
             # real target escapes it is a symlink escape — via a symlinked file OR
-            # a symlinked directory in the path — so deny it. A genuine dependency
-            # (rooted outside the workspace) still defers to the runtime.
-            try:
-                Path(os.path.normpath(str(fs_path))).relative_to(workspace)
-                return True
-            except ValueError:
-                pass
+            # a symlinked directory in the path — so deny it. Match against the
+            # workspace under both its resolved and unresolved spelling so a
+            # symlinked AVIBE_HOME ancestor can't be used to dodge the prefix test.
+            # A genuine dependency (rooted outside the workspace under either
+            # spelling) still defers to the runtime.
+            requested = Path(os.path.normpath(str(fs_path)))
+            for ws_spelling in {workspace, paths.get_show_page_dir(session_id)}:
+                try:
+                    requested.relative_to(ws_spelling)
+                    return True
+                except ValueError:
+                    continue
         # Outside the workspace: defer to the Show Runtime, which owns the
         # authoritative fs allowlist for its dependency/cache roots — the default
         # `~/.avibe/runtime`, a custom `VIBE_SHOW_RUNTIME_BIN` provider (e.g. an
