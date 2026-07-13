@@ -34,10 +34,12 @@ type LibraryTab = 'apps' | 'showpages';
 
 /**
  * Open an app the way the current surface can show it. On desktop that's a
- * workbench window (`openApp`); on mobile there is no window layer, so route to
- * the app's full-screen surface instead of opening an invisible window — the
- * built-ins have `/apps/*` routes, and a Show Page falls back to its private
- * `/show/` surface (the in-app mobile show route lands with the §7.1b Dock).
+ * workbench window (`openApp`). On mobile there is no window layer: built-ins
+ * have in-shell `/apps/*` routes, so navigate there (keeping the AppShell). A
+ * Show Page has no in-shell mobile route yet (that lands with the §7.1b mobile
+ * Dock), so open its private `/show/` surface in a NEW TAB rather than replacing
+ * the current one — this tab keeps the AppShell / Library / Dock chrome instead
+ * of dropping the user onto the raw page.
  */
 function useOpenApp() {
   const wm = useWindowManager();
@@ -53,7 +55,7 @@ function useOpenApp() {
         return;
       }
       if (appId === 'showpage') {
-        if (opts?.sessionId) window.location.assign(showPagePrivatePath(opts.sessionId));
+        if (opts?.sessionId) window.open(showPagePrivatePath(opts.sessionId), '_blank', 'noopener,noreferrer');
       } else {
         navigate(`/apps/${appId}`);
       }

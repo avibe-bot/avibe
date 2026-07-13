@@ -375,9 +375,11 @@ export type ApiContextType = {
   pinDockShowPage: (sessionId: string) => Promise<DockResponse>;
   /** Unpin a session's Show Page from the Dock (idempotent; leaves the page). */
   unpinDockShowPage: (sessionId: string) => Promise<DockResponse>;
-  /** Persist a new resident-tile order (silent on rejection so a stale reorder
-   *  rolls back without a toast). Returns the payload; check ``ok``. */
-  setDockOrder: (order: string[]) => Promise<DockResponse>;
+  /** Persist a new resident-tile (docked-subset) order. ``known`` is the client's
+   *  baseline id set (built-ins ∪ pins) for optimistic concurrency: a stale
+   *  reorder is rejected server-side and re-synced without a toast. Returns the
+   *  payload; check ``ok``. */
+  setDockOrder: (order: string[], known?: string[]) => Promise<DockResponse>;
   getBindCodes: () => Promise<any>;
   createBindCode: (type: string, expiresAt?: string) => Promise<any>;
   deleteBindCode: (code: string) => Promise<any>;
@@ -2113,17 +2115,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getDock: () => getJson('/api/dock'),
     pinDockShowPage: (sessionId) => postJson('/api/dock/pins', { session_id: sessionId }),
     unpinDockShowPage: (sessionId) => deleteJson(`/api/dock/pins/${encodeURIComponent(sessionId)}`),
-    setDockOrder: async (order) => {
-      // Suppress the global error toast: a concurrent-reorder rejection (the
-      // server rejects an order that no longer matches the known id set) is
-      // handled by the optimistic rollback in DockContext, not a user-facing
-      // error. The caller inspects ``ok``.
+    setDockOrder: async (order, known) => {
+      // Suppress the global error toast: a stale-reorder rejection (the server
+      // rejects an order whose ``known`` baseline no longer matches its installed
+      // set) is handled by the optimistic re-sync in DockContext, not a
+      // user-facing error. ``known`` is the client's current id set (built-ins ∪
+      // pins), sent so the server can reject a stale tab that would otherwise
+      // silently undock a pin another tab installed. The caller inspects ``ok``.
       const { payloadJson } = await requestJson(
         '/api/dock/order',
         {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ order }),
+          body: JSON.stringify(known ? { order, known } : { order }),
         },
         'PUT /api/dock/order',
         { handleError: false },

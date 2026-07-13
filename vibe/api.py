@@ -1208,12 +1208,14 @@ def unpin_dock_show_page(session_id: str) -> dict:
     return {"ok": True, "dock": unpin_show_page(session_id)}
 
 
-def set_dock_order(order: list) -> dict:
-    """Persist a new resident-tile order. Raises ``DockError`` for an invalid
-    order (wrong id set / duplicates / too large), mapped to a 400."""
+def set_dock_order(order: list, known: list | None = None) -> dict:
+    """Persist a new resident-tile (docked-subset) order. ``known`` is the
+    client's optimistic-concurrency baseline id set; when it no longer matches the
+    server's, the write is rejected as stale so a stale tab can't silently undock a
+    newer pin. Raises ``DockError`` for an invalid/stale order, mapped to a 400."""
     from core.dock_store import set_dock_order as _set_dock_order
 
-    return {"ok": True, "dock": _set_dock_order(order)}
+    return {"ok": True, "dock": _set_dock_order(order, known=known)}
 
 
 def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:

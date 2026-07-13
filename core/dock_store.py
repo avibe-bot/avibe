@@ -235,7 +235,7 @@ def unpin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str
         return doc
 
 
-def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]:
+def set_dock_order(order: Any, *, known: Any = None, db_path: Path | None = None) -> dict[str, Any]:
     """Persist the docked subset, in order.
 
     Under the two-layer model (§7.1c) the order is a SUBSET of the known ids
@@ -243,7 +243,17 @@ def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]
     OMITTED — that is how a tile (built-in included) is undocked — and the empty
     order (nothing docked) is valid. An id that is not a real dock item is still
     rejected, so a stale client that references a pin removed by another tab
-    can't resurrect it. Raises ``DockError`` (``invalid_order`` → 400).
+    can't resurrect it.
+
+    ``known`` is optimistic-concurrency guard: the full id set the client based
+    this order on. Because omission now means "undock", a stale tab (loaded before
+    another tab installed a page) would otherwise silently undock the newer pin —
+    its ``show:<id>`` is simply absent from the stale order, and subset validation
+    accepts it. So when the client declares ``known`` and it no longer equals the
+    server's current known set, the write is rejected as stale (the client
+    re-syncs and retries). When ``known`` is omitted (legacy client) we can't
+    tell, so subset validation alone applies. Raises ``DockError``
+    (``invalid_order`` / ``stale_order`` → 400).
     """
     if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
         raise DockError("Dock order must be a list of ids.", code="invalid_order")
@@ -254,8 +264,13 @@ def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]
 
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
-        known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
-        if not set(order) <= known:
+        server_known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
+        if known is not None:
+            if not isinstance(known, list) or not all(isinstance(item, str) for item in known):
+                raise DockError("Dock known-set must be a list of ids.", code="invalid_order")
+            if set(known) != server_known:
+                raise DockError("Dock order is based on a stale view of the installed apps.", code="stale_order")
+        if not set(order) <= server_known:
             raise DockError("Dock order has an unknown id.", code="invalid_order")
 
         doc = {"order": list(order), "pins": doc["pins"]}

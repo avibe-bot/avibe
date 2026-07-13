@@ -329,6 +329,41 @@ def test_set_order_accepts_empty_dock(monkeypatch, tmp_path):
     assert api.get_dock()["dock"]["order"] == []
 
 
+def test_set_order_rejects_stale_known(monkeypatch, tmp_path):
+    # Optimistic concurrency: a client whose ``known`` baseline is missing a pin
+    # another tab just installed is rejected as stale, so its reorder can't
+    # silently undock that newer pin (which install docked by default). Subset
+    # validation alone would have accepted the omission.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_new", title="New")
+    _make_show_page("ses_new")
+    api.pin_dock_show_page("ses_new")  # server now has show:ses_new installed + docked
+
+    stale_known = list(BUILTIN_DOCK_IDS)  # a tab that never saw ses_new
+    with pytest.raises(DockError) as excinfo:
+        api.set_dock_order(["editor", "files", "terminal", "library"], known=stale_known)
+    assert excinfo.value.code == "stale_order"
+    # The pin survived: the stale write was rejected, not applied.
+    assert _show("ses_new") in api.get_dock()["dock"]["order"]
+
+
+def test_set_order_with_matching_known_allows_intentional_undock(monkeypatch, tmp_path):
+    # When ``known`` matches the server's installed set, an omitted id is an
+    # INTENTIONAL undock (distinct from a stale omission) and is accepted — the
+    # page stays installed.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_k", title="K")
+    _make_show_page("ses_k")
+    api.pin_dock_show_page("ses_k")
+
+    known = [*BUILTIN_DOCK_IDS, _show("ses_k")]
+    dock = api.set_dock_order(list(BUILTIN_DOCK_IDS), known=known)["dock"]  # undock ses_k
+    assert _show("ses_k") not in dock["order"]
+    assert [pin["session_id"] for pin in dock["pins"]] == ["ses_k"]  # still installed
+
+
 def test_undocked_builtin_persists_across_reload(monkeypatch, tmp_path):
     # An undocked built-in stays undocked across a reload — reconcile never
     # re-adds it (the whole point of built-ins being undockable now).

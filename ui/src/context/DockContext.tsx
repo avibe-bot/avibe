@@ -238,8 +238,14 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const setOrder = useCallback(
-    (order: string[]): Promise<void> =>
-      runMutation({ order, pins: docRef.current.pins }, () => api.setDockOrder(order)),
+    (order: string[]): Promise<void> => {
+      // Send the client's baseline id set (built-ins ∪ installed pins) so the
+      // server can reject a STALE reorder: because omission now means "undock", a
+      // tab that hasn't seen a pin another tab just installed would otherwise
+      // silently undock it. On rejection runMutation re-syncs from the server.
+      const known = [...BUILTIN_DOCK_IDS, ...docRef.current.pins.map((p) => showDockId(p.session_id))];
+      return runMutation({ order, pins: docRef.current.pins }, () => api.setDockOrder(order, known));
+    },
     [api, runMutation],
   );
 

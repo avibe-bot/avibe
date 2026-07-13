@@ -3606,7 +3606,11 @@ def dock_order_put():
 
     payload = request.json or {}
     try:
-        return jsonify(api.set_dock_order(payload.get("order")))
+        # ``known`` (optional) is the client's baseline id set for optimistic
+        # concurrency — set_dock_order rejects the write as stale when it no
+        # longer matches the server's, so a stale tab can't silently undock a pin
+        # another tab installed.
+        return jsonify(api.set_dock_order(payload.get("order"), known=payload.get("known")))
     except DockError as exc:
         return _dock_error_response(exc)
 
