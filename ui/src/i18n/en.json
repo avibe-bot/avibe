@@ -101,6 +101,7 @@
   },
   "nav": {
     "dashboard": "Dashboard",
+    "appLibrary": "App Library",
     "channels": "Groups",
     "users": "Direct Messages",
     "showPages": "Show Pages",
@@ -213,7 +214,7 @@
     "desc": "Your apps and Show Pages",
     "tab": {
       "apps": "Apps",
-      "showPages": "Show Pages"
+      "ai": "AI"
     },
     "searchApps": "Search apps…",
     "searchPages": "Search pages…",
@@ -221,15 +222,15 @@
       "builtin": "Built-in",
       "showPage": "Show Page"
     },
-    "dock": {
-      "label": "Dock",
-      "toggle": "Show in Dock"
-    },
     "apps": {
       "system": "system",
-      "remove": "Remove from Dock",
-      "locked": "Built-in apps can't be removed",
+      "dock": "Dock",
+      "undock": "Undock",
+      "remove": "Remove",
       "empty": "No apps match your search."
+    },
+    "ai": {
+      "add": "Add to Apps"
     }
   },
   "settings": {
@@ -732,7 +733,8 @@
       "newWindow": "New Window",
       "showAllWindows": "Show All Windows",
       "openInNewTab": "Open in New Tab",
-      "unpin": "Unpin from Dock"
+      "unpin": "Unpin from Dock",
+      "emptyHint": "Dock is empty · Open App Library"
     },
     "window": {
       "minimize": "Minimize",

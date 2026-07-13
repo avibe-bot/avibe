@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react';
 import {
+  AppWindow as AppWindowIcon,
   Check,
   ChevronDown,
   ChevronUp,
   Copy,
   ExternalLink,
   Link2,
+  Plus,
   RefreshCw,
   RotateCw,
+  Trash2,
   TriangleAlert,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -24,7 +27,6 @@ import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { Switch } from './ui/switch';
 import { SegmentedRadio, type SegmentedTone } from './ui/segmented';
 
 const LABEL = 'font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted';
@@ -43,9 +45,10 @@ interface RowProps {
   expanded: boolean;
   busy: boolean;
   copied: boolean;
-  pinned: boolean;
-  onToggle: () => void;
-  onTogglePin: (next: boolean) => void;
+  installed: boolean;
+  onOpen: () => void;
+  onToggleExpand: () => void;
+  onToggleInstall: (next: boolean) => void;
   onSetVisibility: (visibility: Visibility) => void;
   onRotate: () => void;
   onCopy: () => void;
@@ -57,9 +60,10 @@ function ShowPageRow({
   expanded,
   busy,
   copied,
-  pinned,
-  onToggle,
-  onTogglePin,
+  installed,
+  onOpen,
+  onToggleExpand,
+  onToggleInstall,
   onSetVisibility,
   onRotate,
   onCopy,
@@ -94,26 +98,37 @@ function ShowPageRow({
 
   return (
     <div className={clsx('border-b border-border last:border-b-0', expanded && 'border-y border-mint/30')}>
+      {/* The row itself opens the page as an app window (not a browser tab) —
+          click the row or its title. Expand (share-link management) is a separate,
+          explicit affordance: the chevron on the right. */}
       <div
         role="button"
         tabIndex={0}
-        onClick={onToggle}
+        onClick={onOpen}
         onKeyDown={(e) => {
           if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
             e.preventDefault();
-            onToggle();
+            onOpen();
           }
         }}
         className={clsx(
-          'flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors sm:gap-4 sm:px-5',
+          'group flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors sm:gap-4 sm:px-5',
           expanded ? 'bg-surface-2' : 'hover:bg-foreground/[0.02]',
         )}
       >
         <span className="flex min-w-0 flex-1 items-center gap-3">
           <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
           <span className="min-w-0">
-            <span className={clsx('block truncate text-[13px] font-semibold text-foreground', !page.title && 'font-mono')}>
-              {label}
+            <span className="flex items-center gap-1.5">
+              <span className={clsx('truncate text-[13px] font-semibold text-foreground', !page.title && 'font-mono')}>
+                {label}
+              </span>
+              {/* Open affordance beside the title — the row opens the app window. */}
+              <AppWindowIcon
+                size={13}
+                aria-hidden
+                className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
+              />
             </span>
             {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
           </span>
@@ -124,29 +139,34 @@ function ShowPageRow({
           {t(`showPages.status.${page.visibility}`)}
         </Badge>
 
-        {/* The single promote/demote gesture: the Dock switch pins (installs) or
-            unpins the page. Stop propagation so toggling it never expands the row. */}
-        <span className="flex shrink-0 flex-col items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          <Switch checked={pinned} onCheckedChange={onTogglePin} label={t('library.dock.toggle')} />
-          <span className="font-mono text-[9px] font-bold uppercase tracking-[0.1em] text-muted">{t('library.dock.label')}</span>
-        </span>
-
-        <button
+        {/* Install toggle — adds the page to the Apps list (and docks it) or
+            removes it from both. Stop propagation so it never opens the app. */}
+        <Button
           type="button"
-          title={t('showPages.open')}
-          disabled={!href}
+          variant={installed ? 'secondary' : 'accent'}
+          size="xs"
           onClick={(e) => {
             e.stopPropagation();
-            if (href) window.open(href, '_blank', 'noopener,noreferrer');
+            onToggleInstall(!installed);
           }}
-          className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
         >
-          <ExternalLink size={15} />
-        </button>
+          {installed ? <Trash2 /> : <Plus />}
+          <span className="hidden sm:inline">{installed ? t('library.apps.remove') : t('library.ai.add')}</span>
+        </Button>
 
-        <span className="flex w-[20px] shrink-0 justify-end">
-          {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} className="text-muted" />}
-        </span>
+        {/* Explicit expand affordance for the management panel. */}
+        <button
+          type="button"
+          aria-label={t('showPages.details')}
+          aria-expanded={expanded}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand();
+          }}
+          className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+        >
+          {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} />}
+        </button>
       </div>
 
       {expanded ? (
@@ -265,11 +285,21 @@ function ShowPageRow({
   );
 }
 
-// The full Show Pages inventory view: search + visibility filter + expandable
-// rows, each with the Dock switch that pins/unpins the page. Shared by the App
-// Library window and the mobile full-screen route; the caller owns the pages
-// state via useShowPages so both projections stay consistent.
-export function ShowPagesView({ pages, busyId, setVisibility, rotate, onShareIdSaved, reload }: ShowPagesController) {
+// The full Show Pages inventory view (the "AI" tab): search + visibility filter +
+// rows that OPEN the page as an app window on click, each with a state-aware
+// install toggle (添加到 App ↔ 移出) and an explicit chevron for the share-link
+// management panel. Shared by the App Library window and the mobile full-screen
+// route; the caller owns the pages state via useShowPages so both projections stay
+// consistent, and passes `onOpenApp` so opening reuses the showpage window.
+export function ShowPagesView({
+  pages,
+  busyId,
+  setVisibility,
+  rotate,
+  onShareIdSaved,
+  reload,
+  onOpenApp,
+}: ShowPagesController & { onOpenApp?: (sessionId: string, title?: string) => void }) {
   const { t } = useTranslation();
   const { isPinned, pin, unpin } = useDock();
   const [search, setSearch] = useState('');
@@ -334,9 +364,10 @@ export function ShowPagesView({ pages, busyId, setVisibility, rotate, onShareIdS
               expanded={expandedId === page.session_id}
               busy={busyId === page.session_id}
               copied={copiedId === page.session_id}
-              pinned={isPinned(page.session_id)}
-              onToggle={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
-              onTogglePin={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
+              installed={isPinned(page.session_id)}
+              onOpen={() => onOpenApp?.(page.session_id, page.title ?? undefined)}
+              onToggleExpand={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
+              onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
               onSetVisibility={(visibility) => setVisibility(page, visibility)}
               onRotate={() => rotate(page)}
               onCopy={() => copy(page)}
