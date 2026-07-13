@@ -6,6 +6,7 @@ import { dockIndexFromShortcut } from '../../apps/dockShortcuts';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useApi } from '../../context/ApiContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { useShowPageInventory } from '../useShowPages';
 import { AppWindow } from './AppWindow';
 
 // In the TERMINAL, Ctrl is a control-character stream — ^W deletes a word, ^M is
@@ -34,20 +35,21 @@ export const WindowLayer: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { order, pins } = useDock();
+  const { pages } = useShowPageInventory();
   const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
     useWindowManager();
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const windowsRef = useRef(windows);
-  const dockRef = useRef({ order, pins });
+  const dockRef = useRef({ order, pins, pages });
 
   useEffect(() => {
     windowsRef.current = windows;
   }, [windows]);
 
   useEffect(() => {
-    dockRef.current = { order, pins };
-  }, [order, pins]);
+    dockRef.current = { order, pins, pages };
+  }, [order, pages, pins]);
 
   useEffect(() => {
     const el = ref.current;
@@ -112,23 +114,30 @@ export const WindowLayer: React.FC = () => {
           : win.appId === 'showpage' && win.params?.sessionId === sessionId,
       );
       const visible = own.filter((win) => !win.minimized);
+      const focusWindowDom = (id: string) =>
+        document.querySelector<HTMLElement>(`[data-window-id="${id}"]`)?.focus({ preventScroll: true });
       if (visible.length > 0) {
         const target = visible.reduce((top, win) => (win.z > top.z ? win : top));
         focus(target.id);
-        document.querySelector<HTMLElement>(`[data-window-id="${target.id}"]`)?.focus({ preventScroll: true });
+        focusWindowDom(target.id);
         return;
       }
       if (own.length > 0) {
-        restore(own.reduce((top, win) => (win.z > top.z ? win : top)).id);
+        const target = own.reduce((top, win) => (win.z > top.z ? win : top));
+        restore(target.id);
+        focusWindowDom(target.id);
         return;
       }
       if (sessionId === null) {
-        openApp(appId);
+        const id = openApp(appId);
+        window.requestAnimationFrame(() => focusWindowDom(id));
         return;
       }
+      const page = dockRef.current.pages.find((candidate) => candidate.session_id === sessionId);
       const snapshot = dockRef.current.pins.find((pin) => pin.session_id === sessionId)?.title_snapshot?.trim();
-      const title = snapshot || t('chat.untitled');
-      openApp('showpage', { title, params: { sessionId, title } });
+      const title = page ? page.title?.trim() || t('chat.untitled') : snapshot || t('chat.untitled');
+      const id = openApp('showpage', { title, params: { sessionId, title } });
+      window.requestAnimationFrame(() => focusWindowDom(id));
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
