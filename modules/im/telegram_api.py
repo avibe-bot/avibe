@@ -107,6 +107,33 @@ async def clear_message_reaction(bot_token: str, chat_id: str, message_id: str, 
     return await call_api(bot_token, "setMessageReaction", payload, proxy_url=proxy_url)
 
 
+async def set_my_commands(
+    bot_token: str,
+    commands: list[dict[str, str]],
+    *,
+    language_code: Optional[str] = None,
+    proxy_url: Optional[str] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"commands": commands}
+    if language_code:
+        payload["language_code"] = language_code
+    return await call_api(bot_token, "setMyCommands", payload, proxy_url=proxy_url)
+
+
+async def set_chat_menu_button(
+    bot_token: str,
+    *,
+    menu_button: dict[str, Any],
+    proxy_url: Optional[str] = None,
+) -> dict[str, Any]:
+    return await call_api(
+        bot_token,
+        "setChatMenuButton",
+        {"menu_button": menu_button},
+        proxy_url=proxy_url,
+    )
+
+
 async def send_multipart_file(
     bot_token: str,
     method: str,

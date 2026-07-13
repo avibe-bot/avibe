@@ -95,6 +95,16 @@ class TelegramBot(BaseIMClient):
 
     _MAX_IN_FLIGHT_UPDATE_TASKS = 100
     _MAX_IN_FLIGHT_MESSAGE_CALLBACK_TASKS = 100
+    _COMMAND_MENU = (
+        ("start", "telegram.commandMenu.start"),
+        ("new", "telegram.commandMenu.new"),
+        ("cwd", "telegram.commandMenu.cwd"),
+        ("setcwd", "telegram.commandMenu.setcwd"),
+        ("resume", "telegram.commandMenu.resume"),
+        ("setup", "telegram.commandMenu.setup"),
+        ("settings", "telegram.commandMenu.settings"),
+        ("stop", "telegram.commandMenu.stop"),
+    )
     _RICH_MARKDOWN_BLOCK_RE = re.compile(
         r"(?m)^(?:#{1,6}\s+\S|[-*+]\s+\S|\d+\.\s+\S|>\s?\S|---\s*$|\|.*\|\s*$|\$\$)"
         r"|```|<details\b|<tg-|!\[[^\]]*\]\(\s*<?https?://",
@@ -142,6 +152,7 @@ class TelegramBot(BaseIMClient):
         self._on_ready: Optional[Callable] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._poll_task: Optional[asyncio.Task[Any]] = None
+        self._command_menu_task: Optional[asyncio.Task[Any]] = None
         self._update_tasks: set[asyncio.Task[Any]] = set()
         self._message_callback_tasks: set[asyncio.Task[Any]] = set()
         self._update_scope_gates: dict[str, _TelegramUpdateScopeGate] = {}
@@ -216,6 +227,7 @@ class TelegramBot(BaseIMClient):
         try:
             self._bot_user = (await telegram_api.get_me(self.config.bot_token, proxy_url=self._proxy_url)).get("result")
             logger.info("Telegram bot connected as @%s", self._bot_user.get("username") if self._bot_user else "unknown")
+            self._command_menu_task = asyncio.create_task(self._sync_command_menu())
             if self._on_ready:
                 await self._on_ready()
 
@@ -245,7 +257,48 @@ class TelegramBot(BaseIMClient):
                     await asyncio.sleep(2)
         finally:
             self._poll_task = None
+            command_menu_task = self._command_menu_task
+            self._command_menu_task = None
+            if command_menu_task is not None:
+                if not command_menu_task.done():
+                    command_menu_task.cancel()
+                await asyncio.gather(command_menu_task, return_exceptions=True)
             await self._drain_background_tasks()
+
+    def _build_command_menu(self, language: str) -> list[dict[str, str]]:
+        return [
+            {"command": command, "description": i18n_t(key, language)}
+            for command, key in self._COMMAND_MENU
+        ]
+
+    async def _sync_command_menu(self) -> None:
+        registrations: list[tuple[Optional[str], str]] = [(None, "en")]
+        registrations.extend(
+            (language, language)
+            for language in get_supported_languages()
+            if re.fullmatch(r"[a-z]{2}", language)
+        )
+
+        for language_code, translation_language in registrations:
+            try:
+                await telegram_api.set_my_commands(
+                    self.config.bot_token,
+                    self._build_command_menu(translation_language),
+                    language_code=language_code,
+                    proxy_url=self._proxy_url,
+                )
+            except Exception as err:
+                label = language_code or "default"
+                logger.warning("Failed to sync Telegram command menu for %s: %s", label, err)
+
+        try:
+            await telegram_api.set_chat_menu_button(
+                self.config.bot_token,
+                menu_button={"type": "commands"},
+                proxy_url=self._proxy_url,
+            )
+        except Exception as err:
+            logger.warning("Failed to enable Telegram command menu button: %s", err)
 
     def _spawn_update_task(self, update: dict[str, Any]) -> None:
         scope_key = self._extract_update_scope_key(update)
