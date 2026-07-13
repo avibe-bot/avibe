@@ -39,6 +39,16 @@ export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, u
   const startTab: LibraryTab = initialTab === 'showpages' || params?.initialTab === 'showpages' ? 'showpages' : 'apps';
   const [tab, setTab] = useState<LibraryTab>(startTab);
 
+  // Honor an external tab request — the /admin/show-pages redirect focusing an
+  // already-open window bumps params.navKey — by adjusting state during render
+  // (React's recommended alternative to a prop-syncing effect).
+  const [seenNavKey, setSeenNavKey] = useState(params?.navKey);
+  if (params?.navKey !== seenNavKey) {
+    setSeenNavKey(params?.navKey);
+    const navTab = params?.navTab;
+    if (navTab === 'apps' || navTab === 'showpages') setTab(navTab);
+  }
+
   const appsCount = useMemo(() => deriveAppRows(order, BUILTIN_IDS, LIBRARY_APP_ID).length, [order]);
 
   return (

@@ -330,12 +330,18 @@ const LibraryRoute = () => {
     if (!isDesktop || handledRef.current) return;
     handledRef.current = true;
     const own = wm.windows.filter((w) => w.appId === 'library');
-    const visible = own.find((w) => !w.minimized);
-    if (visible) wm.focus(visible.id);
-    else if (own.length > 0) wm.restore(own[0].id);
-    else wm.openApp('library', { params: { initialTab } });
+    const target = own.find((w) => !w.minimized) ?? own[0];
+    if (target) {
+      if (target.minimized) wm.restore(target.id);
+      else wm.focus(target.id);
+      // Honor the requested tab on an already-open window (its LibraryApp reads
+      // navKey/navTab), so an old /admin/show-pages link still lands on Show Pages.
+      if (initialTab) wm.setParams(target.id, { navTab: initialTab, navKey: location.key });
+    } else {
+      wm.openApp('library', { params: { initialTab } });
+    }
     navigate('/', { replace: true });
-  }, [isDesktop, wm, navigate, initialTab]);
+  }, [isDesktop, wm, navigate, initialTab, location.key]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (
