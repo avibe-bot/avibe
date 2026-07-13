@@ -133,19 +133,31 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const runMutation = useCallback(
     (optimistic: DockDoc, request: () => Promise<{ ok?: boolean; dock?: DockDoc } | undefined>): Promise<void> => {
-      const prev = docRef.current;
       const seq = (mutationSeqRef.current += 1);
       apply(optimistic);
       const task = async () => {
         try {
           const res = await request();
-          if (mutationSeqRef.current !== seq) return; // a newer mutation supersedes this response
-          // ok:false is a server rejection (e.g. a stale order no longer matching
-          // the known id set) → roll back to the last good doc.
-          if (res?.dock && res.ok !== false) setDoc(reconcileDock(res.dock));
-          else setDoc(prev);
+          if (mutationSeqRef.current !== seq) return; // superseded → the newer mutation is authoritative
+          if (res?.dock && res.ok !== false) {
+            setDoc(reconcileDock(res.dock)); // success → adopt the server doc
+            return;
+          }
+          // else: server rejected (ok:false, e.g. a stale order) → fall through to re-sync
         } catch {
-          if (mutationSeqRef.current === seq) setDoc(prev); // network error → roll back if still latest
+          if (mutationSeqRef.current !== seq) return; // superseded
+          // network error → fall through to re-sync
+        }
+        // The latest mutation failed. Re-sync the authoritative doc from the
+        // server rather than rolling back to a captured `prev`: an earlier
+        // superseded failure may have been baked into this optimistic state, so a
+        // `prev` rollback could re-introduce a phantom tile (Codex). Still
+        // seq-guarded so a newer mutation still wins.
+        try {
+          const fresh = await api.getDock();
+          if (mutationSeqRef.current === seq && fresh?.dock) setDoc(reconcileDock(fresh.dock));
+        } catch {
+          // Offline: best-effort; the next successful load or mutation reconciles.
         }
       };
       // Chain regardless of the previous task's outcome so one failure can't stall the queue.
@@ -153,7 +165,7 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
       queueRef.current = next;
       return next;
     },
-    [apply],
+    [api, apply],
   );
 
   useEffect(() => {
