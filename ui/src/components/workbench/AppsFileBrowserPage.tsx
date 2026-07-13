@@ -8,6 +8,7 @@ import {
   ChevronUp,
   Download,
   FileCode2,
+  FileSearch,
   FileText,
   File as FileIcon,
   Folder,
@@ -51,6 +52,7 @@ import {
   parentDir,
   pathCrumbs,
   renamePath,
+  searchFiles,
   searchNames,
   systemFavorites,
   uploadFile,
@@ -59,10 +61,12 @@ import {
   type FsEntry,
   type FsListing,
   type NameHit,
+  type SearchFileResult,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { FilePreview } from '../ui/file-preview';
 import { InlineNameInput } from '../ui/inline-name-input';
 
@@ -100,8 +104,9 @@ const FAV_ICON: Record<string, LucideIcon> = {
 
 // One row in the listing OR the recursive-search results. `full` is the absolute path; `dir` is its
 // parent (where rename/delete/move resolve); `rel` (search hits only) is the path relative to the
-// search root, so a nested hit can show the folder it lives in.
-type RowItem = { entry: FsEntry; full: string; dir: string; rel?: string };
+// search root, so a nested hit can show the folder it lives in; `matchCount` (content-search hits
+// only) is how many matches the file had, shown as a small chip on the row.
+type RowItem = { entry: FsEntry; full: string; dir: string; rel?: string; matchCount?: number };
 
 function formatSize(n: number | null): string {
   if (n == null) return '—';
@@ -126,6 +131,41 @@ function formatMtime(seconds: number | null): string {
 function relFolder(rel: string | undefined): string {
   if (!rel || !rel.includes('/')) return '';
   return rel.slice(0, rel.lastIndexOf('/'));
+}
+
+// A recursive NAME-search hit → a RowItem. `dir` (the parent, where open/rename/move resolve) is
+// derived from the absolute path; `rel` (relative to the search root) drives the folder label.
+function nameHitRow(h: NameHit): RowItem {
+  return { entry: h, full: h.path, dir: parentDir(h.path), rel: h.rel };
+}
+
+// A CONTENT-search hit (a file whose text matched) → a RowItem. Content search returns no dir/size,
+// so synthesize the entry from the path: kind is always 'file', name/ext from the basename, size
+// null. `matchCount` renders as a per-row chip; opening behaves exactly like a name-search file row.
+function contentHitRow(r: SearchFileResult): RowItem {
+  const name = r.rel.slice(r.rel.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 ? name.slice(dot + 1) : '';
+  return {
+    entry: { name, kind: 'file', size: null, mtime: r.mtime, ext },
+    full: r.path,
+    dir: parentDir(r.path),
+    rel: r.rel,
+    matchCount: r.match_count,
+  };
+}
+
+// Keep-both cap for the move name-clash dialog: after this many same-named copies we stop retrying
+// and report failure rather than spin. A destination holding ~100 identical names is pathological.
+const MAX_KEEP_BOTH = 99;
+
+// Build a de-duplicated entry name for "Keep both": `report.txt` → `report (2).txt`. Splits at the
+// LAST dot so a compound extension keeps its tail (`a.tar.gz` → `a.tar (2).gz`); a dotfile /
+// extensionless name (`.env`, `Makefile`) gets the counter appended whole.
+function dedupeName(name: string, n: number): string {
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return `${name} (${n})`;
+  return `${name.slice(0, dot)} (${n})${name.slice(dot)}`;
 }
 
 // Upload parallelism cap: a big multi-select / drop uploads at most this many files at once so a
@@ -215,10 +255,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden]);
 
-  // ---- Recursive name search (backend: /api/files/search_names) --------------------------------
-  // A non-empty query switches the listing to recursive file/folder NAME results under `cwd`. The
-  // search is debounced and abortable so fast typing doesn't pile up stale requests.
-  const [searchResults, setSearchResults] = useState<NameHit[] | null>(null);
+  // ---- Recursive search: file/folder NAME (default) or file CONTENT ------------------------------
+  // A non-empty query switches the listing to recursive results under `cwd`. The toggle in the search
+  // box picks NAME search (backend: /api/files/search_names) or CONTENT search (/api/files/search —
+  // the same grep the editor's cross-file search uses). Both are debounced and abortable so fast
+  // typing doesn't pile up stale requests, and both normalize to RowItem so the listing renders them
+  // identically; content hits carry a `matchCount` chip.
+  const [searchMode, setSearchMode] = useState<'name' | 'content'>('name');
+  const [searchRows, setSearchRows] = useState<RowItem[] | null>(null);
   const [searchTruncated, setSearchTruncated] = useState(false);
   const [searchBusy, setSearchBusy] = useState(false);
   const searchSeq = useRef(0);
@@ -230,7 +274,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       const q = raw.trim();
       searchAbort.current?.abort();
       if (!q || !cwd) {
-        setSearchResults(null);
+        setSearchRows(null);
         setSearchBusy(false);
         return;
       }
@@ -238,22 +282,26 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       searchAbort.current = ac;
       const seq = ++searchSeq.current;
       setSearchBusy(true);
-      searchNames(cwd, q, showHidden, ac.signal)
-        .then((r) => {
+      const search =
+        searchMode === 'content'
+          ? searchFiles(cwd, q, {}, ac.signal).then((r) => ({ rows: r.results.map(contentHitRow), truncated: r.truncated }))
+          : searchNames(cwd, q, showHidden, ac.signal).then((r) => ({ rows: r.results.map(nameHitRow), truncated: r.truncated }));
+      search
+        .then(({ rows: hitRows, truncated }) => {
           if (seq !== searchSeq.current) return;
-          setSearchResults(r.results);
-          setSearchTruncated(r.truncated);
+          setSearchRows(hitRows);
+          setSearchTruncated(truncated);
         })
         .catch((e: unknown) => {
           if (seq !== searchSeq.current || (e as { name?: string })?.name === 'AbortError') return;
-          setSearchResults([]);
+          setSearchRows([]);
           setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.searchFailed')));
         })
         .finally(() => {
           if (seq === searchSeq.current) setSearchBusy(false);
         });
     },
-    [cwd, showHidden, t],
+    [cwd, showHidden, searchMode, t],
   );
 
   // Debounce the search as the user types; also re-fires when cwd/showHidden change (runSearch
@@ -262,7 +310,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     const q = query.trim();
     if (!q) {
       searchAbort.current?.abort();
-      setSearchResults(null);
+      setSearchRows(null);
       setSearchBusy(false);
       return;
     }
@@ -530,6 +578,30 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // hover highlight. Folders — rows, rail favorites/projects, and breadcrumbs — are drop targets.
   const dragRef = useRef<RowItem | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  // Move `item` into `destDir` under `name`. On success: clear the error and refresh. A name clash
+  // (errors.exists) is NOT swallowed here — it throws so the caller (the drag drop, or the clash
+  // dialog's retries) can react. A non-overwriting move offers a reverse-move Undo (a mis-drop is
+  // easy — drop targets are everywhere — and the reverse needs no backend support, just move it
+  // back); an overwrite (Replace) offers none, since the clobbered file is gone and can't be
+  // losslessly restored, so we don't imply it can.
+  const applyMove = useCallback(
+    async (item: RowItem, destDir: string, name: string, overwrite: boolean) => {
+      const moved = joinPath(destDir, name);
+      await movePath(item.full, moved, overwrite);
+      setError(null);
+      if (!overwrite) showUndo({ kind: 'move', label: name, from: moved, to: item.full });
+      refreshAll();
+    },
+    [showUndo, refreshAll],
+  );
+
+  // ---- Drag-move name-clash dialog (Replace / Keep both / Cancel) --------------------------------
+  // A drag-move onto a folder that already holds that name opens this dialog instead of the bare
+  // error strip. Replace overwrites; Keep both retries under `name (2).ext`, `name (3).ext`, … until
+  // the backend accepts (or MAX_KEEP_BOTH is hit); `busy` names which action is mid-flight.
+  const [moveClash, setMoveClash] = useState<{ item: RowItem; destDir: string } | null>(null);
+  const [moveClashBusy, setMoveClashBusy] = useState<'replace' | 'keep' | null>(null);
+
   const moveInto = useCallback(
     async (destDir: string) => {
       const item = dragRef.current;
@@ -539,20 +611,60 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       // a folder into its own subtree, which surfaces as an error below.
       if (!item || item.dir === destDir || item.full === destDir) return;
       try {
-        const moved = joinPath(destDir, item.entry.name);
-        await movePath(item.full, moved);
-        setError(null);
-        // A mis-drop is easy (drop targets are everywhere), so offer a short revert: the reverse
-        // move needs no backend support — just move it back where it came from.
-        showUndo({ kind: 'move', label: item.entry.name, from: moved, to: item.full });
-        refreshAll();
+        await applyMove(item, destDir, item.entry.name, false);
       } catch (e: unknown) {
+        // A name clash opens the Replace / Keep both / Cancel dialog; any other failure is the strip.
+        if (e instanceof FilesApiError && e.code === 'exists') {
+          setMoveClash({ item, destDir });
+          return;
+        }
         setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.moveFailed')));
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, refreshAll],
+    [applyMove, t],
   );
+
+  const replaceClash = useCallback(async () => {
+    if (!moveClash) return;
+    setMoveClashBusy('replace');
+    try {
+      await applyMove(moveClash.item, moveClash.destDir, moveClash.item.entry.name, true);
+      setMoveClash(null);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.moveFailed')));
+      setMoveClash(null);
+    } finally {
+      setMoveClashBusy(null);
+    }
+  }, [moveClash, applyMove, t]);
+
+  const keepBothClash = useCallback(async () => {
+    if (!moveClash) return;
+    const { item, destDir } = moveClash;
+    setMoveClashBusy('keep');
+    try {
+      // Try `name (2).ext`, `name (3).ext`, … skipping candidates the backend still rejects as
+      // clashes, until one lands or we hit the cap. overwrite stays false so a de-duped name can
+      // never clobber a real neighbour.
+      for (let n = 2; n <= MAX_KEEP_BOTH; n++) {
+        try {
+          await applyMove(item, destDir, dedupeName(item.entry.name, n), false);
+          setMoveClash(null);
+          return;
+        } catch (e: unknown) {
+          if (e instanceof FilesApiError && e.code === 'exists') continue;
+          throw e;
+        }
+      }
+      setError(t('apps.fileBrowser.moveClashTooMany'));
+      setMoveClash(null);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.moveFailed')));
+      setMoveClash(null);
+    } finally {
+      setMoveClashBusy(null);
+    }
+  }, [moveClash, applyMove, t]);
   // Drop-target props for any folder (row / rail / breadcrumb). Only active while a drag is in flight
   // and never onto the dragged item itself.
   const dropProps = (destDir: string) => ({
@@ -745,9 +857,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // Rows come from the recursive search when a query is active (backend walk order: shallow first),
   // otherwise from the current-folder listing (dirs-first, then the active column sort).
   const rows = useMemo<RowItem[]>(() => {
-    if (query.trim()) {
-      return (searchResults ?? []).map((h) => ({ entry: h as FsEntry, full: h.path, dir: parentDir(h.path), rel: h.rel }));
-    }
+    if (query.trim()) return searchRows ?? [];
     const all = [...(listing?.entries ?? [])].sort((a, b) => {
       // Folders always group before files, regardless of column/direction (Finder-like).
       if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
@@ -760,12 +870,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       return sort.dir === 'asc' ? r : -r;
     });
     return all.map((e) => ({ entry: e, full: joinPath(cwd, e.name), dir: cwd }));
-  }, [query, searchResults, listing, sort, cwd]);
+  }, [query, searchRows, listing, sort, cwd]);
 
   const selectedEntry = useMemo(() => (selected ? rows.find((r) => r.full === selected)?.entry ?? null : null), [rows, selected]);
 
-  const showInitialSpinner = inSearch ? searchBusy && searchResults === null : loading && !listing;
-  const showEmpty = inSearch ? !searchBusy && (searchResults?.length ?? 0) === 0 : !!listing && rows.length === 0 && newEntry === null;
+  const showInitialSpinner = inSearch ? searchBusy && searchRows === null : loading && !listing;
+  const showEmpty = inSearch ? !searchBusy && (searchRows?.length ?? 0) === 0 : !!listing && rows.length === 0 && newEntry === null;
   // Row: file = Open/Download/Rename/Delete (4); dir = Open/Open Terminal Here/Rename/Delete (4).
   // Blank: New File/New Folder (+ Open Terminal Here when a folder is loaded).
   const menuItemCount = menu ? (menu.item ? 4 : cwd ? 3 : 2) : 0;
@@ -811,9 +921,23 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('apps.fileBrowser.searchPlaceholder')}
+              placeholder={t(searchMode === 'content' ? 'apps.fileBrowser.searchContentPlaceholder' : 'apps.fileBrowser.searchPlaceholder')}
               className="w-28 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none"
             />
+            {/* Mode toggle: file/folder NAME search (default) ⇄ file CONTENT search; pressed = content. */}
+            <button
+              type="button"
+              aria-pressed={searchMode === 'content'}
+              aria-label={t('apps.fileBrowser.searchContents')}
+              title={t('apps.fileBrowser.searchContents')}
+              onClick={() => setSearchMode((m) => (m === 'content' ? 'name' : 'content'))}
+              className={clsx(
+                'grid size-5 shrink-0 place-items-center rounded transition',
+                searchMode === 'content' ? 'bg-cyan-soft text-cyan' : 'text-muted hover:bg-foreground/10 hover:text-foreground',
+              )}
+            >
+              <FileSearch className="size-3.5" />
+            </button>
             {query && (
               <button type="button" onClick={() => setQuery('')} className="shrink-0 text-muted transition hover:text-foreground" aria-label={t('common.close')}>
                 <X className="size-3" strokeWidth={2.5} />
@@ -838,6 +962,57 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             {uploadProgress ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />} {t('apps.fileBrowser.upload')}
           </Button>
         </div>
+
+        {/* Mobile favorites/projects strip: the rail (below) is hidden under md, so surface the same
+            destinations — system favorites then project folders — as a horizontal chip row pinned
+            under the toolbar. Tap navigates; the current folder's chip is highlighted. */}
+        {(sysFavs.length > 0 || projectFavs.length > 0) && (
+          <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-surface-2/60 px-3 py-2 md:hidden">
+            {sysFavs.map((f) => {
+              const Icon = FAV_ICON[f.key] ?? Folder;
+              const active = cwd === f.path;
+              return (
+                <button
+                  key={f.path}
+                  type="button"
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => {
+                    setQuery('');
+                    navigate(f.path);
+                  }}
+                  className={clsx(
+                    'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
+                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
+                  )}
+                >
+                  <Icon className="size-3.5 shrink-0" />
+                  <span className="max-w-[140px] truncate">{f.path.split('/').filter(Boolean).pop() || f.path}</span>
+                </button>
+              );
+            })}
+            {projectFavs.map((f) => {
+              const active = cwd === f.path;
+              return (
+                <button
+                  key={f.path}
+                  type="button"
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => {
+                    setQuery('');
+                    navigate(f.path);
+                  }}
+                  className={clsx(
+                    'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
+                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
+                  )}
+                >
+                  <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan' : 'text-cyan/70')} />
+                  <span className="max-w-[140px] truncate">{f.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
 
@@ -1002,6 +1177,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                       <Icon className="size-4 shrink-0" style={{ color }} />
                       <span className="truncate">{item.entry.name}</span>
                       {folder && <span className="min-w-0 shrink truncate text-[11px] text-muted">{folder}</span>}
+                      {item.matchCount != null && (
+                        <span
+                          className="ml-auto shrink-0 rounded-full bg-surface-3 px-1.5 font-mono text-[10px] text-muted"
+                          title={t('apps.fileBrowser.matchCount', { count: item.matchCount })}
+                        >
+                          {item.matchCount}
+                        </span>
+                      )}
                     </span>
                     <span className="w-20 shrink-0 text-right font-mono text-[11px] text-muted">{isDir ? '—' : formatSize(item.entry.size)}</span>
                     <span className="w-36 shrink-0 pl-4 font-mono text-[11px] text-muted">{formatMtime(item.entry.mtime)}</span>
@@ -1128,6 +1311,36 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         confirmLabel={t('apps.fileBrowser.replace')}
         onConfirm={() => answerReplace(true)}
       />
+
+      {/* Drag-move name-clash: Replace / Keep both / Cancel. Purpose-built on the Dialog primitive
+          because ConfirmDialog's footer is fixed to two actions — but it reuses the same primitives,
+          so the look matches. Dismissal is blocked while a retry is in flight. */}
+      <Dialog
+        open={moveClash !== null}
+        onOpenChange={(open) => {
+          if (!open && moveClashBusy === null) setMoveClash(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('apps.fileBrowser.moveClashTitle', { name: moveClash?.item.entry.name ?? '' })}</DialogTitle>
+            <DialogDescription>{t('apps.fileBrowser.moveClashDesc')}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setMoveClash(null)} disabled={moveClashBusy !== null}>
+              {t('common.cancel')}
+            </Button>
+            <Button variant="outline" onClick={() => void keepBothClash()} disabled={moveClashBusy !== null}>
+              {moveClashBusy === 'keep' ? <Loader2 className="size-4 animate-spin" /> : null}
+              {t('apps.fileBrowser.keepBoth')}
+            </Button>
+            <Button variant="default" onClick={() => void replaceClash()} disabled={moveClashBusy !== null}>
+              {moveClashBusy === 'replace' ? <Loader2 className="size-4 animate-spin" /> : null}
+              {t('apps.fileBrowser.replace')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} itemCount={menuItemCount}>
