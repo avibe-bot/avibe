@@ -6,6 +6,7 @@ import { CodeXml, FolderOpen } from 'lucide-react';
 import { Button } from '../ui/button';
 import { useUnsavedChanges } from '../../context/useUnsavedChanges';
 import { FileEditorPane } from './FileEditorPane';
+import { EditorFontSizePopover } from './EditorFontSizePopover';
 
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). On desktop it
 // mounts the same full Editor IDE the Dock window uses; on phones — where there is no window layer —
@@ -141,6 +142,7 @@ const MobileEditor: React.FC<{
           filename={file.filename}
           mtime={file.mtime}
           onOpenFile={openAnother}
+          headerActions={<EditorFontSizePopover trigger="mobile" />}
           onDirtyChange={onDirtyChange}
         />
       ) : (

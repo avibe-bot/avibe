@@ -2,7 +2,12 @@ import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ClipboardCopy, TextSelect } from 'lucide-react';
 import * as monaco from 'monaco-editor';
-import { DiffEditor, Editor, loader, type OnChange, type OnMount } from '@monaco-editor/react';
+import { DiffEditor, Editor, loader, type DiffOnMount, type OnChange, type OnMount } from '@monaco-editor/react';
+
+import {
+  getEditorFontSize,
+  subscribeEditorFontSize,
+} from '../../lib/editorFontSize';
 
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
@@ -150,8 +155,14 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
     revealRef.current = reveal;
   });
 
+  useEffect(
+    () => subscribeEditorFontSize((fontSize) => editorRef.current?.updateOptions({ fontSize })),
+    [],
+  );
+
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
+    editor.updateOptions({ fontSize: getEditorFontSize() });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current?.());
     // Report the initial cursor + detected indentation, then keep both live: the cursor on every
     // move, and indentation whenever Monaco (re)detects it (detectIndentation resolves the model's
@@ -226,7 +237,7 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
           }
           options={{
             readOnly,
-            fontSize: 13,
+            fontSize: getEditorFontSize(),
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
@@ -304,6 +315,15 @@ export interface MonacoDiffEditorProps {
 // this is a comparison, not a merge surface; the conflict is resolved via Reload / Overwrite instead.
 export function MonacoDiffEditor({ original, modified, language, dark = true }: MonacoDiffEditorProps) {
   const { t } = useTranslation();
+  const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
+  useEffect(
+    () => subscribeEditorFontSize((fontSize) => editorRef.current?.updateOptions({ fontSize })),
+    [],
+  );
+  const handleMount: DiffOnMount = (editor) => {
+    editorRef.current = editor;
+    editor.updateOptions({ fontSize: getEditorFontSize() });
+  };
   return (
     <DiffEditor
       theme={dark ? 'avibe-dark' : 'light'}
@@ -311,6 +331,7 @@ export function MonacoDiffEditor({ original, modified, language, dark = true }: 
       original={original}
       modified={modified}
       beforeMount={setupMonaco}
+      onMount={handleMount}
       loading={
         <div className="grid h-full w-full place-items-center bg-surface-2 text-[12px] text-muted">
           {t('common.loading')}
@@ -322,7 +343,7 @@ export function MonacoDiffEditor({ original, modified, language, dark = true }: 
         // Side-by-side per the design; Monaco auto-collapses to inline when the pane is too narrow
         // (its default useInlineViewWhenSpaceIsLimited), so the mobile single-file page stays legible.
         renderSideBySide: true,
-        fontSize: 13,
+        fontSize: getEditorFontSize(),
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         minimap: { enabled: false },
         scrollBeyondLastLine: false,

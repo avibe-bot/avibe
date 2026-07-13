@@ -95,6 +95,8 @@ export const FileEditorPane: React.FC<{
    * no header.
    */
   onOpenFile?: () => void;
+  /** Optional controls appended to the standalone pane header (the mobile editor uses font size). */
+  headerActions?: React.ReactNode;
   /** Report dirty state up (used by the Editor IDE to aggregate one close guard over its tabs). */
   onDirtyChange?: (dirty: boolean) => void;
   /**
@@ -121,7 +123,7 @@ export const FileEditorPane: React.FC<{
    * window-level ⌘S itself — scoped by this flag so only the foreground tab saves.
    */
   saveHotkey?: boolean;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, headerActions, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -411,6 +413,7 @@ export const FileEditorPane: React.FC<{
               <PanelRightOpen className="size-3.5" />
             </Button>
           )}
+          {headerActions}
           {!readOnly && (
             <Button
               type="button"

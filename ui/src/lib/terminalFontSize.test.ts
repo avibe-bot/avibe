@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createFontSizeStore } from './fontSizeStore';
 import {
   TERMINAL_FONT_DEFAULT,
   TERMINAL_FONT_MAX,
@@ -11,7 +12,49 @@ import {
   _resetTerminalFontSize,
 } from './terminalFontSize';
 
-afterEach(() => _resetTerminalFontSize());
+afterEach(() => {
+  _resetTerminalFontSize();
+  vi.unstubAllGlobals();
+});
+
+describe('font size store factory', () => {
+  it('uses each instance config and storage key', () => {
+    const stored = new Map([['test.font.v2', '18.6']]);
+    const localStorage = {
+      getItem: vi.fn((key: string) => stored.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => stored.set(key, value)),
+    };
+    vi.stubGlobal('window', { localStorage });
+
+    const store = createFontSizeStore('test.font.v2', { min: 10, max: 20, default: 12 });
+    expect(store.get()).toBe(19);
+
+    store.adjust(100);
+    expect(store.get()).toBe(20);
+    expect(localStorage.setItem).toHaveBeenLastCalledWith('test.font.v2', '20');
+    expect(createFontSizeStore('test.font.v2', { min: 10, max: 20, default: 12 }).get()).toBe(20);
+  });
+
+  it('keeps updates and subscriptions working when storage is unavailable', () => {
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: () => {
+          throw new Error('blocked');
+        },
+        setItem: () => {
+          throw new Error('blocked');
+        },
+      },
+    });
+    const store = createFontSizeStore('test.blocked.v1', { min: 9, max: 24, default: 13 });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.adjust(1);
+    expect(store.get()).toBe(14);
+    expect(listener).toHaveBeenCalledWith(14);
+  });
+});
 
 describe('terminal font size preference', () => {
   it('starts at the default size', () => {

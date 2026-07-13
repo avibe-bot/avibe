@@ -7,11 +7,13 @@ import { useWindowCloseGuard, useWindowManager, useWindowState } from '../../con
 import { MAX_RESTORED_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
 import { FilesApiError, contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
+import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
 import { FilePicker, type FilePickerMode } from './FilePicker';
 import { EditorSearchView } from './EditorSearchView';
+import { EditorFontSizePopover } from './EditorFontSizePopover';
 
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
@@ -74,6 +76,21 @@ type RecentOpenResult = 'opened' | 'gone' | 'unavailable';
 // (Monaco's detected insertSpaces / tabSize). Stored per tab so switching tabs shows the target
 // file's real values immediately, without waiting for its cursor to move.
 type PaneStatus = { line: number; col: number; insertSpaces: boolean; tabSize: number };
+
+const IS_APPLE =
+  typeof navigator !== 'undefined' &&
+  /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
+
+type FontZoom = 'in' | 'out' | 'reset';
+function fontZoomIntent(e: KeyboardEvent): FontZoom | null {
+  if (e.altKey) return null;
+  const modifier = IS_APPLE ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (!modifier) return null;
+  if (e.key === '+' || e.key === '=') return 'in';
+  if (e.key === '-') return 'out';
+  if (e.key === '0') return 'reset';
+  return null;
+}
 
 // Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
 const LANGUAGE_LABEL: Record<string, string> = {
@@ -564,6 +581,30 @@ export const EditorApp: React.FC<{
     return () => window.removeEventListener('keydown', onKey, true);
   }, [windowId, openFolder, newFile, picker, wm.focusedId]);
 
+  // Claim browser-style zoom only for the focused Editor surface. A window additionally checks real
+  // DOM focus so an Editor left open while the user works in the sidebar doesn't steal browser zoom.
+  // The route stays inactive while a floating window is on top. Capture prevents Monaco's session-only
+  // font zoom from also handling the key.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const focusedWindow = document.activeElement instanceof Element
+        ? document.activeElement.closest('[data-window-id]')?.getAttribute('data-window-id')
+        : null;
+      const foreground = windowId
+        ? wm.focusedId === windowId && focusedWindow === windowId
+        : wm.focusedId === null;
+      if (!foreground) return;
+      const zoom = fontZoomIntent(e);
+      if (!zoom) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (zoom === 'reset') resetEditorFontSize();
+      else adjustEditorFontSize(zoom === 'in' ? 1 : -1);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [windowId, wm.focusedId]);
+
   // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
   // border). Width persists for the window's lifetime (state, not navigation).
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
@@ -602,9 +643,7 @@ export const EditorApp: React.FC<{
   return (
     <div className="relative flex h-full min-h-0 w-full flex-col bg-surface">
       <div className="flex min-h-0 flex-1">
-        {/* Activity bar — Files / Search switch the left panel. Dead placeholder icons (Git / Bug /
-            Blocks / Settings) were removed as honest chrome; a real Git view slots back into this
-            column when Git integration lands (out of scope here). */}
+        {/* Activity bar — Files / Search switch the left panel; Settings owns persisted editor prefs. */}
         <div className="flex w-12 shrink-0 flex-col items-center justify-between border-r border-border bg-surface-3 py-3">
           <div className="flex flex-col items-center gap-[18px]">
             {([
@@ -638,8 +677,7 @@ export const EditorApp: React.FC<{
               </button>
             ))}
           </div>
-          {/* Bottom slot (Settings / SCM status) intentionally empty until wired — the column keeps
-              its two-slot layout so a future control can slot back in here. */}
+          <EditorFontSizePopover trigger="activity" />
         </div>
 
         {/* Left panel — Explorer (Files view) or the cross-file Search view. Collapses via the
