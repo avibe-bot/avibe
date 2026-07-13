@@ -176,6 +176,7 @@ export const EditorApp: React.FC<{
   // would clobber the stored tabs). Cleared as the restored tabs become live — see the mount effect.
   const restorePendingRef = useRef(false);
   const treeRefreshSeq = useRef(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   // Latest tabs + dirty for async callbacks (reloadTabs) so a reload landing after an in-flight
   // replace never acts on a stale snapshot and clobbers a buffer the user just edited.
   const dirtyRef = useRef(dirty);
@@ -592,7 +593,7 @@ export const EditorApp: React.FC<{
         : null;
       const foreground = windowId
         ? wm.focusedId === windowId && focusedWindow === windowId
-        : wm.focusedId === null;
+        : wm.focusedId === null && !!rootRef.current?.contains(document.activeElement);
       if (!foreground) return;
       const zoom = fontZoomIntent(e);
       if (!zoom) return;
@@ -641,7 +642,7 @@ export const EditorApp: React.FC<{
   const activeStatus = active ? status[active] : undefined;
 
   return (
-    <div className="relative flex h-full min-h-0 w-full flex-col bg-surface">
+    <div ref={rootRef} className="relative flex h-full min-h-0 w-full flex-col bg-surface">
       <div className="flex min-h-0 flex-1">
         {/* Activity bar — Files / Search switch the left panel; Settings owns persisted editor prefs. */}
         <div className="flex w-12 shrink-0 flex-col items-center justify-between border-r border-border bg-surface-3 py-3">
