@@ -449,6 +449,16 @@
     "zh": "中文"
   },
   "telegram": {
+    "commandMenu": {
+      "start": "打开主菜单",
+      "new": "开始全新会话",
+      "cwd": "查看当前工作目录",
+      "setcwd": "更改工作目录",
+      "resume": "恢复最近的会话",
+      "setup": "修复后端登录",
+      "settings": "打开设置",
+      "stop": "停止当前任务"
+    },
     "autoTopicGeneralNotice": "已为这次请求创建新的 Topic：{topic}，请在那里继续。",
     "autoTopicIntro": "已创建新的会话 Topic：{topic}",
     "cwdPromptTitle": "更改工作目录",

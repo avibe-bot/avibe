@@ -449,6 +449,16 @@
     "zh": "\u4e2d\u6587"
   },
   "telegram": {
+    "commandMenu": {
+      "start": "Open the main menu",
+      "new": "Start a fresh session",
+      "cwd": "Show the working directory",
+      "setcwd": "Change the working directory",
+      "resume": "Resume a recent session",
+      "setup": "Repair backend login",
+      "settings": "Open settings",
+      "stop": "Stop the current task"
+    },
     "autoTopicGeneralNotice": "Started a new topic for this request: {topic}. Continue there.",
     "autoTopicIntro": "New session topic created: {topic}",
     "cwdPromptTitle": "Change working directory",

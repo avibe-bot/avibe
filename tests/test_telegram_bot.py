@@ -18,6 +18,7 @@ from modules.agents.native_sessions import NativeResumeSession
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from modules.im.multi import MultiIMClient
 from modules.im.telegram import TelegramBot
+from modules.im import telegram_api
 from config.v2_config import TelegramConfig
 
 
@@ -351,11 +352,91 @@ def test_run_dispatches_telegram_updates_concurrently() -> None:
 
     with patch("modules.im.telegram.telegram_api.get_me", new=AsyncMock(return_value={"result": {"username": "bot"}})):
         with patch("modules.im.telegram.telegram_api.get_updates", new=AsyncMock(side_effect=fake_get_updates)):
-            with patch.object(bot, "_handle_update", new=fake_handle):
-                asyncio.run(asyncio.wait_for(bot._run(), timeout=0.2))
+            with patch.object(bot, "_sync_command_menu", new=AsyncMock()) as sync_mock:
+                with patch.object(bot, "_handle_update", new=fake_handle):
+                    asyncio.run(asyncio.wait_for(bot._run(), timeout=0.2))
 
     assert second_started.is_set()
     assert started == [1, 2]
+    sync_mock.assert_awaited_once()
+
+
+def test_sync_command_menu_registers_localized_commands_and_menu_button() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token", proxy_url="socks5://127.0.0.1:1080"))
+
+    with patch(
+        "modules.im.telegram.telegram_api.set_my_commands",
+        new=AsyncMock(return_value={"ok": True}),
+    ) as commands_mock:
+        with patch(
+            "modules.im.telegram.telegram_api.set_chat_menu_button",
+            new=AsyncMock(return_value={"ok": True}),
+        ) as menu_mock:
+            asyncio.run(bot._sync_command_menu())
+
+    assert [call.kwargs["language_code"] for call in commands_mock.await_args_list] == [None, "en", "zh"]
+    default_commands = commands_mock.await_args_list[0].args[1]
+    chinese_commands = commands_mock.await_args_list[2].args[1]
+    assert [item["command"] for item in default_commands] == [
+        "start",
+        "new",
+        "cwd",
+        "setcwd",
+        "resume",
+        "setup",
+        "settings",
+        "stop",
+    ]
+    assert default_commands[0]["description"] == "Open the main menu"
+    assert chinese_commands[0]["description"] == "打开主菜单"
+    assert all(call.kwargs["proxy_url"] == "socks5://127.0.0.1:1080" for call in commands_mock.await_args_list)
+    menu_mock.assert_awaited_once_with(
+        "123456:test-token",
+        menu_button={"type": "commands"},
+        proxy_url="socks5://127.0.0.1:1080",
+    )
+
+
+def test_sync_command_menu_keeps_going_after_registration_failure() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+
+    with patch(
+        "modules.im.telegram.telegram_api.set_my_commands",
+        new=AsyncMock(side_effect=[RuntimeError("default failed"), {"ok": True}, {"ok": True}]),
+    ) as commands_mock:
+        with patch(
+            "modules.im.telegram.telegram_api.set_chat_menu_button",
+            new=AsyncMock(return_value={"ok": True}),
+        ) as menu_mock:
+            asyncio.run(bot._sync_command_menu())
+
+    assert commands_mock.await_count == 3
+    menu_mock.assert_awaited_once()
+
+
+def test_set_my_commands_builds_language_payload_and_uses_proxy() -> None:
+    with patch(
+        "modules.im.telegram_api.call_api",
+        new=AsyncMock(return_value={"ok": True}),
+    ) as call_mock:
+        asyncio.run(
+            telegram_api.set_my_commands(
+                "123456:test-token",
+                [{"command": "start", "description": "Open the main menu"}],
+                language_code="en",
+                proxy_url="socks5://127.0.0.1:1080",
+            )
+        )
+
+    call_mock.assert_awaited_once_with(
+        "123456:test-token",
+        "setMyCommands",
+        {
+            "commands": [{"command": "start", "description": "Open the main menu"}],
+            "language_code": "en",
+        },
+        proxy_url="socks5://127.0.0.1:1080",
+    )
 
 
 def test_spawn_update_task_keeps_same_scope_updates_ordered() -> None:
