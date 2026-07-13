@@ -21,7 +21,11 @@
     "truncated": "文件较大，仅显示开头部分。",
     "empty": "此文件为空。",
     "csvTruncated": "仅显示前 {{count}} 行",
-    "csvColsTruncated": "显示前 {{shown}} 列，共 {{total}} 列"
+    "csvColsTruncated": "显示前 {{shown}} 列，共 {{total}} 列",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "resetZoom": "重置缩放",
+    "download": "下载"
   },
   "common": {
     "back": "返回",

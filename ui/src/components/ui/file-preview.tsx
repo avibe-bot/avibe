@@ -1,8 +1,9 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Loader2, Maximize2, ZoomIn, ZoomOut } from 'lucide-react';
 import clsx from 'clsx';
 
+import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { useTheme } from '@/context/ThemeContext';
 import { apiFetch } from '@/lib/apiFetch';
@@ -17,6 +18,7 @@ import {
   codeLanguage,
   previewRenderKind,
 } from '@/lib/filePreview';
+import { FIT_VIEW, type ImageView, clampPan, maxScale, oneToOneScale, toggleScale, zoomPercent, zoomToPoint } from '@/lib/imageZoom';
 
 // ── Shared file-preview kernel ("Quick Look") ───────────────────────────────
 // One read-only renderer for every previewable file, reused by the File Browser overlay, the editor's
@@ -44,17 +46,22 @@ export type PreviewSource = {
 // lives in its own module and loads lazily here.
 const PreviewJson = React.lazy(() => import('@/components/ui/preview-json'));
 
-export const FilePreview: React.FC<{ source: PreviewSource; className?: string; onText?: (text: string) => void }> = ({
+// ``onDownload`` — optional. When set, the image renderer's control cluster shows a download button
+// that invokes it. Only a shell that does NOT already expose its own download affordance should pass
+// it (today: the editor's preview tab); the chat modal, Files Preview window and mobile overlay carry
+// download in their own chrome, so they leave this unset to avoid a duplicate control.
+export const FilePreview: React.FC<{ source: PreviewSource; className?: string; onText?: (text: string) => void; onDownload?: () => void }> = ({
   source,
   className,
   onText,
+  onDownload,
 }) => {
   const { t } = useTranslation();
   const kind = previewRenderKind(source.name, source.mime, source.ext);
 
   if (!kind) return <Centered className={className}>{t('preview.unsupported')}</Centered>;
   if (kind === 'image')
-    return source.url ? <ImageBody src={source.url} name={source.name} className={className} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
+    return source.url ? <ImageBody src={source.url} name={source.name} className={className} onDownload={onDownload} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
   if (kind === 'pdf')
     return source.url ? <PdfView url={source.url} className={className} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
   if (kind === 'docx' || kind === 'xlsx' || kind === 'pptx') {
@@ -83,34 +90,209 @@ const Spinner: React.FC<{ className?: string }> = ({ className }) => (
 );
 
 // ── Image / SVG ──────────────────────────────────────────────────────────────
-// Fit-to-container by default; click toggles 1:1 actual size. `src` is a content URL (raster) or a
-// data: URL (SVG rendered from its text) — an <img> neutralizes any script in an SVG, so it's safe.
-const ImageBody: React.FC<{ src: string; name?: string; className?: string }> = ({ src, name, className }) => {
+// Fit-to-container by default, with zoom/pan matching the chat lightbox's feel (image-viewer.tsx):
+// wheel / trackpad zoom anchored at the cursor, pinch zoom + drag pan on touch, double-click / tap to
+// toggle fit ⇄ 100% (actual pixels), and a floating control cluster (zoom out / percent / zoom in /
+// reset — plus an optional download when the surrounding shell offers none of its own). The transform
+// is hand-rolled (pure math in ``@/lib/imageZoom``) rather than pulling react-zoom-pan-pinch into the
+// kernel: the kernel keeps every heavy engine out of the shared bundle, and a single <img>'s zoom does
+// not warrant a dependency. Every shell that renders the kernel inherits this automatically. `src` is a
+// content URL (raster) or a data: URL (SVG rendered from its text — an <img> neutralizes any SVG script).
+const WHEEL_ZOOM_SENSITIVITY = 0.0015; // per normalized wheel-delta pixel; a ~100px notch is ~±16%
+const BUTTON_ZOOM_STEP = 1.5; // ×/÷ per zoom-in / zoom-out button press
+// Overlay buttons sit on the dark image mat, so the themed ghost foreground/hover (tuned for app
+// surfaces) would vanish — override to white-on-translucent, compact, while keeping Button's focus /
+// disabled / aria→title behavior. Mirrors image-viewer.tsx's OVERLAY_BTN.
+const ZOOM_BTN = 'h-8 w-8 rounded-full text-white hover:bg-white/15 hover:text-white';
+
+const ImageBody: React.FC<{ src: string; name?: string; className?: string; onDownload?: () => void }> = ({ src, name, className, onDownload }) => {
   const { t } = useTranslation();
   const [status, setStatus] = React.useState<'loading' | 'ready' | 'error'>('loading');
-  const [actual, setActual] = React.useState(false);
+  const [view, setView] = React.useState<ImageView>(FIT_VIEW);
+  // The 1:1 scale (natural ÷ fit): drives the percent readout, the double-click 100% target and the
+  // max zoom. Measured on load and re-measured on resize, because the fit size tracks the container.
+  const [oneToOne, setOneToOne] = React.useState(1);
+
+  const stageRef = React.useRef<HTMLDivElement>(null);
+  const imgRef = React.useRef<HTMLImageElement>(null);
+  // Live touch/mouse pointers, tracked across moves so lifting one finger transitions cleanly from a
+  // pinch back to a one-finger pan. ``pinch`` holds the previous two-finger distance/midpoint.
+  const pointers = React.useRef(new Map<number, { x: number; y: number }>());
+  const pinch = React.useRef<{ dist: number; midX: number; midY: number } | null>(null);
+
   React.useEffect(() => {
     setStatus('loading');
-    setActual(false);
+    setView(FIT_VIEW);
   }, [src]);
 
+  // Read geometry straight from the DOM on every gesture, so zoom/pan stays correct after the shell
+  // (e.g. the Preview window) is resized with no stored size to go stale. ``offsetWidth/Height`` are
+  // the untransformed fit-layout sizes — the CSS transform doesn't affect them. Coordinates returned
+  // are the stage centre in client space (the anchor origin the zoom math expects).
+  const measure = React.useCallback(() => {
+    const stage = stageRef.current;
+    const img = imgRef.current;
+    if (!stage || !img) return null;
+    const rect = stage.getBoundingClientRect();
+    const one = oneToOneScale(img.naturalWidth, img.offsetWidth);
+    return { cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2, cw: rect.width, ch: rect.height, fw: img.offsetWidth, fh: img.offsetHeight, one, max: maxScale(one) };
+  }, []);
+
+  // Native, non-passive wheel listener: React's synthetic onWheel is passive, so preventDefault (which
+  // stops the shell/page from scrolling while we zoom) wouldn't take. Cursor-anchored.
+  React.useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const m = measure();
+      if (!m) return;
+      // Normalize line / page delta modes to pixels so a mouse wheel and a trackpad feel consistent.
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? m.ch : 1;
+      const factor = Math.exp(-e.deltaY * unit * WHEEL_ZOOM_SENSITIVITY);
+      setView((v) => clampPan(zoomToPoint(v, v.scale * factor, e.clientX - m.cx, e.clientY - m.cy, m.max), m.fw, m.fh, m.cw, m.ch));
+    };
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onWheel);
+  }, [measure]);
+
+  // Re-clamp the pan (and refresh the 1:1 scale for the readout) when the stage resizes — a shrunk
+  // window must not leave a zoomed image showing dead margin.
+  React.useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      const m = measure();
+      if (!m) return;
+      setOneToOne(m.one);
+      setView((v) => clampPan(v, m.fw, m.fh, m.cw, m.ch));
+    });
+    ro.observe(stage);
+    return () => ro.disconnect();
+  }, [measure]);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (status !== 'ready') return;
+    stageRef.current?.setPointerCapture(e.pointerId);
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y), midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2 };
+    }
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const prev = pointers.current.get(e.pointerId);
+    if (!prev) return;
+    const cur = { x: e.clientX, y: e.clientY };
+    pointers.current.set(e.pointerId, cur);
+    const m = measure();
+    if (!m) return;
+    if (pointers.current.size >= 2 && pinch.current) {
+      // Pinch: scale by the change in finger distance (anchored at the midpoint) AND pan by the
+      // midpoint's own movement, so two fingers zoom and drag at once.
+      const [a, b] = [...pointers.current.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      const ratio = pinch.current.dist > 0 ? dist / pinch.current.dist : 1;
+      const dx = midX - pinch.current.midX;
+      const dy = midY - pinch.current.midY;
+      pinch.current = { dist, midX, midY };
+      setView((v) => {
+        const zoomed = zoomToPoint(v, v.scale * ratio, midX - m.cx, midY - m.cy, m.max);
+        return clampPan({ scale: zoomed.scale, x: zoomed.x + dx, y: zoomed.y + dy }, m.fw, m.fh, m.cw, m.ch);
+      });
+    } else if (pointers.current.size === 1) {
+      // Drag pan — only meaningful once zoomed in (clampPan pins a fit-sized image centred anyway).
+      const dx = cur.x - prev.x;
+      const dy = cur.y - prev.y;
+      setView((v) => (v.scale > 1 ? clampPan({ scale: v.scale, x: v.x + dx, y: v.y + dy }, m.fw, m.fh, m.cw, m.ch) : v));
+    }
+  };
+
+  const endPointer = (e: React.PointerEvent) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) pinch.current = null;
+  };
+
+  const onDoubleClick = (e: React.MouseEvent) => {
+    if (status !== 'ready') return;
+    const m = measure();
+    if (!m) return;
+    setView((v) => clampPan(zoomToPoint(v, toggleScale(v.scale, m.one, m.max), e.clientX - m.cx, e.clientY - m.cy, m.max), m.fw, m.fh, m.cw, m.ch));
+  };
+
+  // Buttons zoom about the stage centre (anchor 0,0 in centre-relative coords).
+  const zoomByButton = (dir: 1 | -1) => {
+    const m = measure();
+    if (!m) return;
+    setView((v) => clampPan(zoomToPoint(v, dir > 0 ? v.scale * BUTTON_ZOOM_STEP : v.scale / BUTTON_ZOOM_STEP, 0, 0, m.max), m.fw, m.fh, m.cw, m.ch));
+  };
+
   if (status === 'error') return <Centered className={clsx('!bg-[#0c0c0f]', className)}>{t('preview.failed')}</Centered>;
+
+  const atFit = view.scale <= 1.001;
+  const atMax = view.scale >= maxScale(oneToOne) - 0.001;
+
   return (
-    <div className={clsx('grid h-full min-h-0 place-items-center overflow-auto bg-[#0c0c0f] p-4', className)}>
-      {status === 'loading' && <div className="col-start-1 row-start-1 text-[12px] text-muted">{t('common.loading')}</div>}
-      <img
-        src={src}
-        alt={name || ''}
-        onLoad={() => setStatus('ready')}
-        onError={() => setStatus('error')}
-        onClick={() => setActual((a) => !a)}
-        draggable={false}
-        className={clsx(
-          'col-start-1 row-start-1 select-none',
-          actual ? 'max-w-none cursor-zoom-out' : 'max-h-full max-w-full cursor-zoom-in object-contain',
-          status !== 'ready' && 'opacity-0',
-        )}
-      />
+    <div className={clsx('relative h-full min-h-0 overflow-hidden bg-[#0c0c0f]', className)}>
+      <div
+        ref={stageRef}
+        className="absolute inset-0 touch-none select-none overflow-hidden"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        onDoubleClick={onDoubleClick}
+      >
+        {status === 'loading' && <div className="absolute inset-0 grid place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
+        <img
+          ref={imgRef}
+          src={src}
+          alt={name || ''}
+          onLoad={() => {
+            setStatus('ready');
+            const m = measure();
+            if (m) setOneToOne(m.one);
+          }}
+          onError={() => setStatus('error')}
+          draggable={false}
+          style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
+          className={clsx(
+            'absolute inset-0 m-auto max-h-full max-w-full object-contain',
+            status !== 'ready' && 'opacity-0',
+            view.scale > 1 ? 'cursor-grab active:cursor-grabbing' : 'cursor-zoom-in',
+          )}
+        />
+      </div>
+      {status === 'ready' && (
+        // Control cluster — a sibling of the gesture stage so its own clicks/wheel never feed the
+        // pan/zoom handlers. The strip is transparent to pointer events except the pill; the bottom
+        // safe-area inset keeps it clear of the mobile home indicator inside the full-screen overlay.
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-3" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-black/55 px-1 py-1 text-white shadow-lg backdrop-blur-sm">
+            <Button variant="ghost" size="icon" className={ZOOM_BTN} onClick={() => zoomByButton(-1)} disabled={atFit} aria-label={t('preview.zoomOut')}>
+              <ZoomOut className="size-4" />
+            </Button>
+            <span className="min-w-[3.25rem] text-center text-[11px] font-medium tabular-nums" aria-live="polite">
+              {zoomPercent(view.scale, oneToOne)}%
+            </span>
+            <Button variant="ghost" size="icon" className={ZOOM_BTN} onClick={() => zoomByButton(1)} disabled={atMax} aria-label={t('preview.zoomIn')}>
+              <ZoomIn className="size-4" />
+            </Button>
+            <span className="mx-0.5 h-4 w-px bg-white/20" aria-hidden />
+            <Button variant="ghost" size="icon" className={ZOOM_BTN} onClick={() => setView(FIT_VIEW)} disabled={atFit} aria-label={t('preview.resetZoom')}>
+              <Maximize2 className="size-4" />
+            </Button>
+            {onDownload && (
+              <Button variant="ghost" size="icon" className={ZOOM_BTN} onClick={onDownload} aria-label={t('preview.download')}>
+                <Download className="size-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

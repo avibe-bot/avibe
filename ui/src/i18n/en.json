@@ -21,7 +21,11 @@
     "truncated": "Large file — showing only the first part.",
     "empty": "This file is empty.",
     "csvTruncated": "Showing the first {{count}} rows",
-    "csvColsTruncated": "Showing {{shown}} of {{total}} columns"
+    "csvColsTruncated": "Showing {{shown}} of {{total}} columns",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "resetZoom": "Reset zoom",
+    "download": "Download"
   },
   "common": {
     "back": "Back",
