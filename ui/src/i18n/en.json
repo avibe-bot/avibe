@@ -118,7 +118,7 @@
   },
   "more": {
     "title": "More",
-    "controlPanel": "Control Panel",
+    "controlPanel": "Settings",
     "controlPanelDesc": "Channels · Users · Show Pages · Settings · Logs",
     "appearance": "Appearance",
     "connection": "Connection",
@@ -738,7 +738,8 @@
       "minimize": "Minimize",
       "maximize": "Maximize",
       "restore": "Restore",
-      "openInNewTab": "Open in New Tab"
+      "openInNewTab": "Open in New Tab",
+      "openChat": "Open Chat"
     },
     "preview": {
       "label": "Preview",

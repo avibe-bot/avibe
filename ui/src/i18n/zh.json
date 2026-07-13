@@ -118,7 +118,7 @@
   },
   "more": {
     "title": "更多",
-    "controlPanel": "控制面板",
+    "controlPanel": "设置",
     "controlPanelDesc": "频道 · 用户 · 展示页面 · 设置 · 日志",
     "appearance": "外观",
     "connection": "连接",
@@ -738,7 +738,8 @@
       "minimize": "最小化",
       "maximize": "最大化",
       "restore": "还原",
-      "openInNewTab": "在新标签页打开"
+      "openInNewTab": "在新标签页打开",
+      "openChat": "打开聊天"
     },
     "preview": {
       "label": "预览",

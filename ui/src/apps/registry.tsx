@@ -3,7 +3,7 @@ import { CodeXml, Eye, Folder, LayoutGrid, MonitorPlay, SquareTerminal } from 'l
 import { useTranslation } from 'react-i18next';
 import type { LucideIcon } from 'lucide-react';
 
-import { showPagePrivatePath } from './showPageAvatar';
+import { sessionChatPath, showPagePrivatePath } from './showPageAvatar';
 
 // The catalogue of windowed apps. The WindowManager + Dock are headless of any
 // specific app; everything app-specific (title, icon, default window size, body)
@@ -35,6 +35,14 @@ export interface AppDefinition {
    * params can't resolve one. Only `showpage` defines this in v1.
    */
   externalHref?: (params?: Record<string, unknown>) => string | undefined;
+  /**
+   * When set, the title bar shows a chat-bubble button (left of the external-open button) that
+   * navigates the workbench to this in-app route and minimizes the window — the app was built by an
+   * agent in a session, and this jumps back to that session's chat. Returns undefined when the params
+   * can't resolve one. Only `showpage` defines this in v1; §7.3a later upgrades the click to open a
+   * chat window beside the app instead of navigating away.
+   */
+  chatHref?: (params?: Record<string, unknown>) => string | undefined;
 }
 
 const Loading: React.FC = () => {
@@ -133,6 +141,10 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     externalHref: (params) => {
       const sessionId = params?.sessionId;
       return typeof sessionId === 'string' && sessionId ? showPagePrivatePath(sessionId) : undefined;
+    },
+    chatHref: (params) => {
+      const sessionId = params?.sessionId;
+      return typeof sessionId === 'string' && sessionId ? sessionChatPath(sessionId) : undefined;
     },
   },
   // The App Library — the app manager, itself a built-in app (§7.1). Two views

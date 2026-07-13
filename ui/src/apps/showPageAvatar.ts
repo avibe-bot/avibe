@@ -45,3 +45,10 @@ export function showPageAvatar(sessionId: string, title: string): { letter: stri
 export function showPagePrivatePath(sessionId: string): string {
   return `/show/${encodeURIComponent(sessionId)}/`;
 }
+
+/** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The
+ *  Show Page window's chat-bubble button navigates here (SPA nav, not a new tab)
+ *  and minimizes the window. Pure. */
+export function sessionChatPath(sessionId: string): string {
+  return `/chat/${encodeURIComponent(sessionId)}`;
+}

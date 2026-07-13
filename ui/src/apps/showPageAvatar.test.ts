@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { SHOW_PAGE_ACCENTS, accentForSession, firstGrapheme, showPageAvatar, showPagePrivatePath } from './showPageAvatar';
+import {
+  SHOW_PAGE_ACCENTS,
+  accentForSession,
+  firstGrapheme,
+  sessionChatPath,
+  showPageAvatar,
+  showPagePrivatePath,
+} from './showPageAvatar';
 
 describe('firstGrapheme', () => {
   it('takes the first letter of an ASCII title', () => {
@@ -70,5 +77,12 @@ describe('showPagePrivatePath', () => {
   it('always points at the private /show/ surface, url-encoded', () => {
     expect(showPagePrivatePath('ses_1')).toBe('/show/ses_1/');
     expect(showPagePrivatePath('a/b')).toBe('/show/a%2Fb/');
+  });
+});
+
+describe('sessionChatPath', () => {
+  it('points at the in-app chat route for the session, url-encoded', () => {
+    expect(sessionChatPath('ses_1')).toBe('/chat/ses_1');
+    expect(sessionChatPath('a/b')).toBe('/chat/a%2Fb');
   });
 });
