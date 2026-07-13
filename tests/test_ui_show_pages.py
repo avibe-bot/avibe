@@ -927,6 +927,60 @@ def test_private_show_page_allows_at_fs_workspace_symlink(monkeypatch, tmp_path)
     assert manager.calls
 
 
+def test_public_show_page_denies_at_fs_workspace_dir_symlink_escape(monkeypatch, tmp_path):
+    # A symlinked DIRECTORY inside the workspace (assets -> outside) must be confined
+    # on the public surface too, not only symlinked files.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    workspace = paths.get_show_page_dir("ses123")
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("TOPSECRET", encoding="utf-8")
+    os.symlink(outside_dir, workspace / "assets")
+    manager = _FakeShowRuntimeManager(body=b"TOPSECRET")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/@fs{(workspace / 'assets' / 'secret.txt').as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
+def test_public_show_page_denies_at_fs_vite_cache_named_workspace_symlink(monkeypatch, tmp_path):
+    # A workspace path that merely contains `vite-cache/deps` must not skip the
+    # public symlink confinement: the relocated-cache exception no longer bypasses
+    # the absolute @fs checks.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    workspace = paths.get_show_page_dir("ses123")
+    (workspace / "vite-cache" / "deps").mkdir(parents=True)
+    secret = tmp_path / "cache_secret.txt"
+    secret.write_text("TOPSECRET", encoding="utf-8")
+    link = workspace / "vite-cache" / "deps" / "link.js"
+    os.symlink(secret, link)
+    manager = _FakeShowRuntimeManager(body=b"TOPSECRET")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/@fs{link.as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert manager.calls == []
+
+
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

@@ -7881,18 +7881,18 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bo
     # leading slash, so a POSIX request arrives as `@fs/home/...` (restore the
     # slash); `@fs//home/...` (double slash) and `@fs/C:/...` (Windows drive)
     # already carry an absolute path, so leave those intact — prepending a slash
-    # to `C:/...` would corrupt the Windows path. Leave the synthetic relative
-    # relocated-cache form (e.g. `@fs/.vite-cache/deps/...`) relative so the
-    # allowance below handles it. Parsing with `removeprefix("@fs/")` alone dropped
-    # the single POSIX slash and mis-read a real request as relative, denying
-    # legitimate external deps (notably the Vite HMR client's `env.mjs`) so nothing
-    # mounted on the private `/show/` surface.
+    # to `C:/...` would corrupt the Windows path. Parsing with `removeprefix("@fs/")`
+    # alone dropped the single POSIX slash and mis-read a real request as relative,
+    # denying legitimate external deps (notably the Vite HMR client's `env.mjs`) so
+    # nothing mounted on the private `/show/` surface. Every genuine @fs URL is
+    # absolute, so restore the slash unconditionally — a workspace path that merely
+    # contains `vite-cache/deps` must still reach the workspace/escape checks below,
+    # not slip through the relative allowance.
     fs_remainder = decoded.removeprefix("@fs/")
     if (
         fs_remainder
         and not fs_remainder.startswith("/")
         and not re.match(r"^[A-Za-z]:", fs_remainder)
-        and not _is_relocated_vite_dep_path(decoded)
     ):
         fs_remainder = "/" + fs_remainder
     fs_path = Path(fs_remainder)
@@ -7914,8 +7914,13 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bo
         # literally outside the workspace) is still deferred to the Show Runtime's
         # fs allowlist on both surfaces.
         if public:
+            # Compare the requested path lexically (symlinks NOT followed here;
+            # `..` was already rejected): a request ROOTED in the workspace whose
+            # real target escapes it is a symlink escape — via a symlinked file OR
+            # a symlinked directory in the path — so deny it. A genuine dependency
+            # (rooted outside the workspace) still defers to the runtime.
             try:
-                fs_path.parent.resolve(strict=False).relative_to(workspace)
+                Path(os.path.normpath(str(fs_path))).relative_to(workspace)
                 return True
             except ValueError:
                 pass
