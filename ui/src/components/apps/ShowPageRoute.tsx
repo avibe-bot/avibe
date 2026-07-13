@@ -60,7 +60,10 @@ export const ShowPageRoute: React.FC = () => {
   }, [isDesktop, sessionId, wm, navigate]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
-  return <MobileShowPage sessionId={sessionId} />;
+  // Key by sessionId: React Router keeps this route element mounted across param
+  // changes, so remount on a new session to reset loading state + title — a fresh
+  // fetch with no stale title or missing/archived frame from the previous page.
+  return <MobileShowPage key={sessionId} sessionId={sessionId} />;
 };
 
 // Full-screen mobile body: a back-affordance header over the framed Show Page.

@@ -7,7 +7,6 @@ import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registr
 import { showPageAvatar } from '../../apps/showPageAvatar';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useAuthAccount } from '../../lib/useAuthAccount';
-import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
 import { mobileRouteForDockId } from './mobileDock';
 
@@ -32,9 +31,11 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   const { order, pins, undock, unpin } = useDock();
   const { email } = useAuthAccount();
 
-  // Long-press context menu (touch) on the shared ContextMenu primitive,
-  // positioned at the press point. Tap opens the app; long-press manages the tile.
-  const [menu, setMenu] = useState<{ x: number; y: number; item: ResidentTile } | null>(null);
+  // Long-press manage sheet (touch): a bottom action sheet keyed to a tile. Tap
+  // opens the app; a press-hold opens the sheet. A cursor-positioned ContextMenu
+  // isn't used here — its close backdrop is z-40, below this z-50 drawer, so taps
+  // outside the menu would fall through to the tiles instead of dismissing it.
+  const [menu, setMenu] = useState<{ item: ResidentTile; label: string } | null>(null);
   // Which footer overflow sheet is open (账号 / 外观 / 更多) — one reusable shell.
   const [sheet, setSheet] = useState<FooterSheet | null>(null);
 
@@ -78,13 +79,12 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
     onClose();
   };
 
-  const onTilePointerDown = (e: React.PointerEvent, item: ResidentTile) => {
-    const { clientX, clientY } = e;
+  const onTilePointerDown = (item: ResidentTile, label: string) => {
     clearTimer();
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       suppressClickRef.current = true;
-      setMenu({ x: clientX, y: clientY, item });
+      setMenu({ item, label });
     }, 480);
   };
 
@@ -155,7 +155,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                   type="button"
                   aria-label={label}
                   onClick={() => onTileClick(item)}
-                  onPointerDown={(e) => onTilePointerDown(e, item)}
+                  onPointerDown={() => onTilePointerDown(item, label)}
                   onPointerUp={clearTimer}
                   onPointerMove={clearTimer}
                   onPointerLeave={clearTimer}
@@ -179,6 +179,24 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
               );
             })}
           </div>
+        )}
+
+        {/* Library is undockable (§7.1c); when it isn't docked but other tiles are,
+            keep a route back to it here. The drawer is the only mobile Apps surface,
+            so it must never strand the user with no way to re-dock apps (the empty
+            state's hint covers the all-undocked case above). */}
+        {order.length > 0 && !order.includes('library') && (
+          <button
+            type="button"
+            onClick={() => {
+              navigate('/apps/library');
+              onClose();
+            }}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 text-[12.5px] font-medium text-muted transition-colors hover:border-cyan/60 hover:text-foreground"
+          >
+            <LayoutGrid className="size-4 shrink-0 text-cyan" />
+            <span>{t('apps.launcher.openLibrary')}</span>
+          </button>
         )}
 
         {/* Footer chip row — the absorbed More-page content. 设置 navigates; the
@@ -205,36 +223,46 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
         </div>
       </div>
 
-      {/* Long-press manage menu — reuses the shared cursor-positioned primitive. */}
+      {/* Long-press manage sheet — a bottom action sheet with its OWN backdrop
+          above the drawer (z-[60]), so a tap outside the actions dismisses it
+          instead of falling through to the tiles/chips below. */}
       {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          onClose={() => setMenu(null)}
-          width={200}
-          itemCount={menu.item.kind === 'showpage' ? 2 : 1}
-        >
-          <ContextMenuItem
-            icon={<PinOff className="size-[15px]" />}
-            label={t('apps.dock.unpin')}
-            danger
-            onClick={() => {
-              void undock(menu.item.id);
-              setMenu(null);
-            }}
+        <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true">
+          <button
+            type="button"
+            aria-label={t('common.close')}
+            onClick={() => setMenu(null)}
+            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
           />
-          {menu.item.kind === 'showpage' && (
-            <ContextMenuItem
-              icon={<Trash2 className="size-[15px]" />}
-              label={t('library.apps.remove')}
-              danger
+          <div className="absolute inset-x-0 bottom-0 rounded-t-3xl border-t border-border bg-surface px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-2">
+            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" />
+            <div className="truncate px-2 pb-1 text-center text-[12px] font-medium text-muted">{menu.label}</div>
+            <button
+              type="button"
               onClick={() => {
-                if (menu.item.kind === 'showpage') void unpin(menu.item.sessionId);
+                void undock(menu.item.id);
                 setMenu(null);
               }}
-            />
-          )}
-        </ContextMenu>
+              className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive transition hover:bg-destructive/[0.08]"
+            >
+              <PinOff className="size-[18px] shrink-0" />
+              {t('apps.dock.unpin')}
+            </button>
+            {menu.item.kind === 'showpage' && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (menu.item.kind === 'showpage') void unpin(menu.item.sessionId);
+                  setMenu(null);
+                }}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive transition hover:bg-destructive/[0.08]"
+              >
+                <Trash2 className="size-[18px] shrink-0" />
+                {t('library.apps.remove')}
+              </button>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Footer overflow sheet (账号 / 外观 / 更多) — a focused bottom modal above
