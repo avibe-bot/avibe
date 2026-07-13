@@ -154,4 +154,4 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
 
 // Dock launcher tiles — the resident apps. `preview` and `showpage` are intentionally excluded
 // (opened on demand / while pinned).
-export const APP_LIST: AppDefinition[] = [APP_REGISTRY.files, APP_REGISTRY.terminal, APP_REGISTRY.editor];
+export const APP_LIST: AppDefinition[] = [APP_REGISTRY.files, APP_REGISTRY.terminal, APP_REGISTRY.editor, APP_REGISTRY.library];

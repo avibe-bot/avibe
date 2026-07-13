@@ -7,7 +7,7 @@ versioned key, alongside the other cross-device workbench state. v1 knows two
 kinds of dock item:
 
 - built-in apps, keyed by their app id verbatim (``files`` / ``terminal`` /
-  ``editor``). They are reorderable but not unpinnable.
+  ``editor`` / ``library``). They are reorderable but not unpinnable.
 - pinned Show Pages, keyed ``show:<session_id>``.
 
 Future item kinds (``app:<id>`` …) slot into the same ``order`` list without a
@@ -44,7 +44,7 @@ _DOCK_MUTATION_LOCK = threading.Lock()
 # Built-in resident apps, in their canonical Dock order. Mirrors the frontend
 # APP_LIST ids (ui/src/apps/registry.tsx); these ids are a stable contract
 # shared across the client/server boundary — keep the two in sync.
-BUILTIN_DOCK_IDS: tuple[str, ...] = ("files", "terminal", "editor")
+BUILTIN_DOCK_IDS: tuple[str, ...] = ("files", "terminal", "editor", "library")
 
 # Namespace prefix for a pinned Show Page dock id.
 SHOW_PREFIX = "show:"

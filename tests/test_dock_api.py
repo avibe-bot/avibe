@@ -138,12 +138,12 @@ def test_pin_rejects_when_dock_is_full(monkeypatch, tmp_path):
     # can grow past it and every later reorder is rejected.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 4)  # 3 built-ins + room for one pin
+    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 5)  # 4 built-ins + room for one pin
     for sid in ("ses_full1", "ses_full2"):
         _seed_session(sid)
         _make_show_page(sid)
 
-    api.pin_dock_show_page("ses_full1")  # fills the Dock (3 built-ins + 1 pin = 4)
+    api.pin_dock_show_page("ses_full1")  # fills the Dock (4 built-ins + 1 pin = 5)
     with pytest.raises(DockError) as excinfo:
         api.pin_dock_show_page("ses_full2")
     assert excinfo.value.code == "dock_full"
@@ -157,7 +157,7 @@ def test_load_dock_clamps_oversized_corrupt_pins(monkeypatch, tmp_path):
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 4)  # 3 built-ins + room for one pin
+    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 5)  # 4 built-ins + room for one pin
     set_state_meta(
         DOCK_STATE_KEY,
         {"order": [], "pins": [{"session_id": f"ses_{i}", "title_snapshot": "", "pinned_at": ""} for i in range(10)]},
@@ -165,7 +165,31 @@ def test_load_dock_clamps_oversized_corrupt_pins(monkeypatch, tmp_path):
 
     dock = api.get_dock()["dock"]
     assert len(dock["pins"]) == 1  # clamped to MAX_DOCK_ITEMS - built-ins
-    assert len(dock["order"]) == 4  # 3 built-ins + 1 pin
+    assert len(dock["order"]) == 5  # 4 built-ins + 1 pin
+
+
+def test_load_dock_appends_library_to_pre_phase2_order(monkeypatch, tmp_path):
+    # A dock doc persisted before ``library`` became a built-in (its ``order``
+    # lacks it) must gain it on read via the reconcile rule (spec §3: missing
+    # built-ins appended), without dropping the pin or reordering existing tiles.
+    from core.chat_discovery import set_state_meta
+    from core.dock_store import DOCK_STATE_KEY
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    set_state_meta(
+        DOCK_STATE_KEY,
+        {
+            "order": ["files", "terminal", "editor", _show("ses_legacy")],
+            "pins": [{"session_id": "ses_legacy", "title_snapshot": "Legacy", "pinned_at": "2026-01-01T00:00:00+00:00"}],
+        },
+    )
+
+    dock = api.get_dock()["dock"]
+
+    # Existing tiles keep their order, the pin survives, and library is appended.
+    assert dock["order"] == ["files", "terminal", "editor", _show("ses_legacy"), "library"]
+    assert [pin["session_id"] for pin in dock["pins"]] == ["ses_legacy"]
 
 
 def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
@@ -213,7 +237,24 @@ def test_set_order_persists_valid_permutation(monkeypatch, tmp_path):
     _make_show_page("ses_o")
     api.pin_dock_show_page("ses_o")
 
-    new_order = [_show("ses_o"), "editor", "files", "terminal"]
+    new_order = [_show("ses_o"), "library", "editor", "files", "terminal"]
+    dock = api.set_dock_order(new_order)["dock"]
+
+    assert dock["order"] == new_order
+    assert api.get_dock()["dock"]["order"] == new_order
+
+
+def test_set_order_accepts_library_builtin(monkeypatch, tmp_path):
+    # ``library`` is a built-in Dock tile (Phase 2), so a full-set reorder that
+    # includes it is accepted and persists — the same reorder path #892 shipped,
+    # now covering the 4th built-in.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_lib", title="Ordered")
+    _make_show_page("ses_lib")
+    api.pin_dock_show_page("ses_lib")
+
+    new_order = [_show("ses_lib"), "library", "editor", "terminal", "files"]
     dock = api.set_dock_order(new_order)["dock"]
 
     assert dock["order"] == new_order
