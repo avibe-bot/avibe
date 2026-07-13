@@ -21,7 +21,9 @@ function inTerminalSurface(el: Element | null): boolean {
 function inTextEntrySurface(el: Element | null): boolean {
   return (
     el instanceof HTMLElement &&
-    !!el.closest('input, textarea, select, [contenteditable="true"], [role="textbox"], .xterm')
+    !!el.closest(
+      'input, textarea, select, [contenteditable="true"], [role="textbox"], .monaco-editor, .xterm',
+    )
   );
 }
 

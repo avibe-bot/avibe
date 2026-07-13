@@ -28,6 +28,21 @@ export interface ShowPage {
 type ShowPagePatch = Pick<ShowPage, 'session_id'> & Partial<ShowPage>;
 const INVENTORY_REFRESH_EVENTS = new Set(['created', 'user_message', 'show_event']);
 
+export function replaceShowPageTitleIfCurrent(
+  pages: ShowPage[],
+  sessionId: string,
+  expectedTitle: string | null,
+  nextTitle: string | null,
+): ShowPage[] {
+  const index = pages.findIndex(
+    (page) => page.session_id === sessionId && page.title === expectedTitle,
+  );
+  if (index < 0) return pages;
+  const next = [...pages];
+  next[index] = { ...next[index], title: nextTitle };
+  return next;
+}
+
 // Read-side Show Page inventory shared by the Library, Dock, and global search.
 // Session-title edits already publish `session.activity`; subscribe here so each
 // mounted projection prefers the live title while `title_snapshot` remains only
@@ -37,8 +52,11 @@ export function useShowPageInventory(enabled = true) {
   const [pages, setPages] = useState<ShowPage[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [loadRequest, setLoadRequest] = useState(0);
   const loadSeqRef = useRef(0);
   const revisionRef = useRef(0);
+
+  const requestLoad = useCallback(() => setLoadRequest((request) => request + 1), []);
 
   const mergePage = useCallback((next: ShowPagePatch) => {
     revisionRef.current += 1;
@@ -52,6 +70,16 @@ export function useShowPageInventory(enabled = true) {
     setPages((prev) => prev.filter((page) => page.session_id !== sessionId));
   }, []);
 
+  const replaceTitleIfCurrent = useCallback(
+    (sessionId: string, expectedTitle: string | null, nextTitle: string | null) => {
+      revisionRef.current += 1;
+      setPages((prev) =>
+        replaceShowPageTitleIfCurrent(prev, sessionId, expectedTitle, nextTitle),
+      );
+    },
+    [],
+  );
+
   const load = useCallback(async () => {
     if (!enabled) return;
     const seq = (loadSeqRef.current += 1);
@@ -59,7 +87,11 @@ export function useShowPageInventory(enabled = true) {
     setLoading(true);
     try {
       const res = (await api.getShowPages()) as { pages?: unknown };
-      if (seq !== loadSeqRef.current || revision !== revisionRef.current) return;
+      if (seq !== loadSeqRef.current) return;
+      if (revision !== revisionRef.current) {
+        requestLoad();
+        return;
+      }
       setPages(Array.isArray(res.pages) ? (res.pages as ShowPage[]) : []);
       setLoaded(true);
     } catch {
@@ -67,33 +99,37 @@ export function useShowPageInventory(enabled = true) {
     } finally {
       if (seq === loadSeqRef.current) setLoading(false);
     }
-  }, [api, enabled]);
+  }, [api, enabled, requestLoad]);
+
+  useEffect(() => {
+    if (enabled) void load();
+  }, [enabled, load, loadRequest]);
 
   useEffect(() => {
     if (!enabled) return;
-    void load();
     return api.connectWorkbenchEvents({
-      onConnected: () => void load(),
+      onConnected: requestLoad,
       onSessionActivity: (data) => {
         if (data.event === 'archived') {
           removePage(data.session_id);
+          requestLoad();
           return;
         }
         if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) {
           mergePage({ session_id: data.session_id, title: data.title ?? null });
-          void load();
+          requestLoad();
           return;
         }
         // A newly ensured Show Page is followed by the prompt's user_message;
         // show_event covers pages first materialized by runtime activity.
-        if (INVENTORY_REFRESH_EVENTS.has(data.event)) void load();
+        if (INVENTORY_REFRESH_EVENTS.has(data.event)) requestLoad();
       },
     });
-  }, [api, enabled, load, mergePage, removePage]);
+  }, [api, enabled, mergePage, removePage, requestLoad]);
 
-  const reload = useCallback(() => void load(), [load]);
+  const reload = requestLoad;
 
-  return { pages, loading, loaded, mergePage, reload };
+  return { pages, loading, loaded, mergePage, replaceTitleIfCurrent, reload };
 }
 
 // The Show Pages inventory: fetch + the visibility / share-id / rotate mutations,
@@ -104,7 +140,8 @@ export function useShowPages() {
   const api = useApi();
   const { showToast } = useToast();
   const { t } = useTranslation();
-  const { pages, loading, loaded, mergePage, reload } = useShowPageInventory();
+  const { pages, loading, loaded, mergePage, replaceTitleIfCurrent, reload } =
+    useShowPageInventory();
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const setVisibility = async (page: ShowPage, visibility: Visibility) => {
@@ -143,15 +180,15 @@ export function useShowPages() {
   };
 
   const rename = async (page: ShowPage, title: string | null) => {
-    const previousTitle = page.title;
+    const previousTitle = page.title?.trim() || null;
     const nextTitle = title?.trim() || null;
     if (nextTitle === previousTitle) return;
     mergePage({ session_id: page.session_id, title: nextTitle });
     try {
       const updated = await api.updateSession(page.session_id, { title: nextTitle });
-      mergePage({ session_id: page.session_id, title: updated.title ?? null });
+      replaceTitleIfCurrent(page.session_id, nextTitle, updated.title?.trim() || null);
     } catch (error) {
-      mergePage({ session_id: page.session_id, title: previousTitle });
+      replaceTitleIfCurrent(page.session_id, nextTitle, previousTitle);
       throw error;
     }
   };

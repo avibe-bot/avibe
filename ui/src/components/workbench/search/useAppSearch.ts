@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { APP_LIST } from '../../../apps/registry';
 import { showAppRoutePath } from '../../apps/mobileDock';
@@ -45,6 +45,7 @@ export function useAppSearchResults(query: string, enabled = true) {
 export function useOpenSearchApp() {
   const wm = useWindowManager();
   const navigate = useNavigate();
+  const location = useLocation();
 
   return useCallback(
     (result: AppSearchResult) => {
@@ -57,6 +58,10 @@ export function useOpenSearchApp() {
               ? { sessionId: result.sessionId, title: result.title }
               : undefined,
         });
+        if (location.pathname === '/search') {
+          if (location.key === 'default') navigate('/inbox', { replace: true });
+          else navigate(-1);
+        }
         return;
       }
       if (result.kind === 'showpage') {
@@ -65,6 +70,6 @@ export function useOpenSearchApp() {
         navigate(`/apps/${result.appId}`);
       }
     },
-    [navigate, wm],
+    [location.key, location.pathname, navigate, wm],
   );
 }

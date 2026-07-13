@@ -422,26 +422,20 @@ export function ShowPagesView({
 
   const visible = useMemo(() => filterShowPages(pages, filter, search), [pages, filter, search]);
 
-  const renamePage = async (page: ShowPage, title: string | null) => {
-    const previousTitle = page.title?.trim() || t('chat.untitled');
-    const nextTitle = title?.trim() || t('chat.untitled');
-    const matchingWindows = windows.filter(
-      (win) => win.appId === 'showpage' && win.params?.sessionId === page.session_id,
-    );
-    matchingWindows.forEach((win) => {
-      setTitle(win.id, nextTitle);
-      setParams(win.id, { title: nextTitle });
+  // The inventory is the title source for this view. Project it into matching
+  // windows so optimistic edits, rollbacks, and newer session.activity events
+  // all take the same ordered path instead of racing independent callbacks.
+  useEffect(() => {
+    pages.forEach((page) => {
+      const title = page.title?.trim() || t('chat.untitled');
+      windows
+        .filter((win) => win.appId === 'showpage' && win.params?.sessionId === page.session_id)
+        .forEach((win) => {
+          if (win.title !== title) setTitle(win.id, title);
+          if (win.params?.title !== title) setParams(win.id, { title });
+        });
     });
-    try {
-      await rename(page, title);
-    } catch (error) {
-      matchingWindows.forEach((win) => {
-        setTitle(win.id, previousTitle);
-        setParams(win.id, { title: previousTitle });
-      });
-      throw error;
-    }
-  };
+  }, [pages, setParams, setTitle, t, windows]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -495,7 +489,7 @@ export function ShowPagesView({
               onOpen={() => onOpenApp?.(page.session_id, page.title ?? undefined)}
               onToggleExpand={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
               onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
-              onRename={(title) => renamePage(page, title)}
+              onRename={(title) => rename(page, title)}
               onSetVisibility={(visibility) => setVisibility(page, visibility)}
               onRotate={() => rotate(page)}
               onCopy={() => copy(page)}
