@@ -6313,6 +6313,27 @@ async def files_move(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/files/copy", include_in_schema=False)
+async def files_copy(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.copy_path,
+                    payload.get("src") or "",
+                    payload.get("dst") or "",
+                    overwrite=_parse_explicit_bool(payload.get("overwrite")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.post("/api/files/delete", include_in_schema=False)
 async def files_delete(starlette_request: FastAPIRequest):
     async def handler():

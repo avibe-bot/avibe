@@ -763,6 +763,178 @@ def test_upload_file_read_failure_leaves_no_partial_file(tmp_path):
     assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
 
 
+def test_copy_file_and_directory_preserve_content_and_modes(tmp_path):
+    source_file = tmp_path / "source.txt"
+    source_file.write_text("source", encoding="utf-8")
+    source_file.chmod(0o640)
+    copied_file = tmp_path / "copied.txt"
+
+    assert fs.copy_path(str(source_file), str(copied_file)) == {"ok": True, "path": str(copied_file)}
+    assert source_file.read_text(encoding="utf-8") == "source"
+    assert copied_file.read_text(encoding="utf-8") == "source"
+    assert copied_file.stat().st_mode & 0o777 == 0o640
+
+    source_dir = tmp_path / "source-dir"
+    nested = source_dir / "nested"
+    nested.mkdir(parents=True)
+    nested.chmod(0o750)
+    child = nested / "child.bin"
+    child.write_bytes(b"child")
+    child.chmod(0o600)
+    copied_dir = tmp_path / "copied-dir"
+
+    assert fs.copy_path(str(source_dir), str(copied_dir)) == {"ok": True, "path": str(copied_dir)}
+    assert (copied_dir / "nested" / "child.bin").read_bytes() == b"child"
+    assert (copied_dir / "nested").stat().st_mode & 0o777 == 0o750
+    assert (copied_dir / "nested" / "child.bin").stat().st_mode & 0o777 == 0o600
+
+
+def test_copy_conflict_without_overwrite_and_replaces_with_overwrite(tmp_path):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("new", encoding="utf-8")
+    destination.write_text("old", encoding="utf-8")
+
+    with pytest.raises(ConflictError) as exc:
+        fs.copy_path(str(source), str(destination))
+
+    assert exc.value.code == "exists"
+    assert destination.read_text(encoding="utf-8") == "old"
+    assert fs.copy_path(str(source), str(destination), overwrite=True) == {
+        "ok": True,
+        "path": str(destination),
+    }
+    assert source.read_text(encoding="utf-8") == "new"
+    assert destination.read_text(encoding="utf-8") == "new"
+
+
+def test_copy_directory_overwrite_replaces_complete_tree(tmp_path):
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "new.txt").write_text("new", encoding="utf-8")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    (destination / "old.txt").write_text("old", encoding="utf-8")
+
+    result = fs.copy_path(str(source), str(destination), overwrite=True)
+
+    assert result == {"ok": True, "path": str(destination)}
+    assert not (destination / "old.txt").exists()
+    assert (destination / "nested" / "new.txt").read_text(encoding="utf-8") == "new"
+    assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
+    assert not list(tmp_path.glob(".avibe-overwrite-*"))
+
+
+def test_copy_directory_rejects_own_subtree(tmp_path):
+    source = tmp_path / "source"
+    child = source / "child"
+    child.mkdir(parents=True)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.copy_path(str(source), str(child / "copy"))
+
+    assert exc.value.code == "invalid_path"
+    assert not (child / "copy").exists()
+
+
+def test_copy_symlinks_as_links_without_reading_targets(tmp_path, monkeypatch):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not copied", encoding="utf-8")
+    source_link = tmp_path / "source-link"
+    source_link.symlink_to(secret)
+    copied_link = tmp_path / "copied-link"
+
+    assert fs.copy_path(str(source_link), str(copied_link)) == {"ok": True, "path": str(copied_link)}
+    assert copied_link.is_symlink()
+    assert os.readlink(copied_link) == str(secret)
+
+    source_dir = tmp_path / "source-dir"
+    source_dir.mkdir()
+    (source_dir / "secret-link").symlink_to(secret)
+    copied_dir = tmp_path / "copied-dir"
+    monkeypatch.setenv(fs._COPY_TOTAL_SIZE_CAP_ENV, "0")
+
+    fs.copy_path(str(source_dir), str(copied_dir))
+
+    assert (copied_dir / "secret-link").is_symlink()
+    assert os.readlink(copied_dir / "secret-link") == str(secret)
+    assert secret.read_text(encoding="utf-8") == "not copied"
+
+
+def test_copy_directory_failure_cleans_partial_stage_and_destination(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    (destination / "original.txt").write_text("original", encoding="utf-8")
+    real_copy = fs._copy_file_from_fd
+    calls = {"count": 0}
+
+    def fail_after_copy(*args, **kwargs):
+        real_copy(*args, **kwargs)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError(errno.EIO, "copy failed")
+
+    monkeypatch.setattr(fs, "_copy_file_from_fd", fail_after_copy)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.copy_path(str(source), str(destination), overwrite=True)
+
+    assert exc.value.code == "fs_error"
+    assert (destination / "original.txt").read_text(encoding="utf-8") == "original"
+    assert not (destination / "first.txt").exists()
+    assert not (destination / "second.txt").exists()
+    assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
+
+
+def test_copy_directory_size_cap_rejects_before_staging(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "large.bin").write_bytes(b"12345")
+    destination = tmp_path / "destination"
+    monkeypatch.setenv(fs._COPY_TOTAL_SIZE_CAP_ENV, "4")
+    monkeypatch.setattr(
+        fs,
+        "_new_copy_stage_path",
+        lambda _target: (_ for _ in ()).throw(AssertionError("copy should reject before staging")),
+    )
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.copy_path(str(source), str(destination))
+
+    assert exc.value.status_code == 413
+    assert exc.value.code == "too_large"
+    assert not destination.exists()
+    assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "expected_code"),
+    [
+        ("relative-source", "/tmp/destination", "invalid_path"),
+        ("/tmp/source", "relative-destination", "invalid_path"),
+        ("/tmp/source", "/tmp/parent/..", "invalid_path"),
+        ("/tmp/source", "/tmp/bad\\name", "invalid_name"),
+    ],
+)
+def test_copy_rejects_traversal_and_invalid_names(tmp_path, src, dst, expected_code):
+    source = tmp_path / "source"
+    source.write_text("source", encoding="utf-8")
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    src = str(source) if src == "/tmp/source" else src
+    dst = str(parent / "..") if dst == "/tmp/parent/.." else dst
+    dst = str(tmp_path / "bad\\name") if dst == "/tmp/bad\\name" else dst
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.copy_path(src, dst)
+
+    assert exc.value.code == expected_code
+
+
 def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="core.file_browser_service")
     folder = tmp_path / "folder"
@@ -1856,6 +2028,61 @@ def test_http_routes_return_contract_and_headers(tmp_path):
     assert upload_body["name"] == "uploaded.bin"
     assert upload_body["size"] == 6
     assert (tmp_path / "uploaded.bin").read_bytes() == b"upload"
+
+
+def test_http_copy_returns_contract_and_maps_name_clash(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    destination = tmp_path / "destination.txt"
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    response = client.post(
+        "/api/files/copy",
+        json={"src": str(source), "dst": str(destination)},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "path": str(destination)}
+    assert destination.read_text(encoding="utf-8") == "source"
+
+    source.write_text("updated", encoding="utf-8")
+    conflict = client.post(
+        "/api/files/copy",
+        json={"src": str(source), "dst": str(destination), "overwrite": "false"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.get_json() == {
+        "ok": False,
+        "error": {"code": "exists", "message": "Destination already exists"},
+    }
+    assert destination.read_text(encoding="utf-8") == "source"
+
+    replaced = client.post(
+        "/api/files/copy",
+        json={"src": str(source), "dst": str(destination), "overwrite": True},
+        headers=headers,
+    )
+    assert replaced.status_code == 200
+    assert replaced.get_json() == {"ok": True, "path": str(destination)}
+    assert destination.read_text(encoding="utf-8") == "updated"
+
+
+def test_http_copy_enforces_csrf(tmp_path):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/files/copy",
+        json={"src": str(source), "dst": str(destination)},
+    )
+
+    assert response.status_code == 403
+    assert not destination.exists()
 
 
 def test_http_upload_maps_too_large_and_leaves_no_partial(tmp_path, monkeypatch):
