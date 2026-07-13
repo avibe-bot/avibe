@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import { APP_LIST } from '../../../apps/registry';
-import { showPagePrivatePath } from '../../../apps/showPageAvatar';
+import { showAppRoutePath } from '../../apps/mobileDock';
 import { useShowPageInventory } from '../../useShowPages';
 import { useWindowManager } from '../../../context/WindowManagerContext';
 import { filterAppSearchResults, type AppSearchResult } from './appSearch';
@@ -60,9 +60,7 @@ export function useOpenSearchApp() {
         return;
       }
       if (result.kind === 'showpage') {
-        if (result.sessionId) {
-          window.open(showPagePrivatePath(result.sessionId), '_blank', 'noopener,noreferrer');
-        }
+        if (result.sessionId) navigate(showAppRoutePath(result.sessionId));
       } else {
         navigate(`/apps/${result.appId}`);
       }
