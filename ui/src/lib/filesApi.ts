@@ -313,6 +313,19 @@ export async function movePath(src: string, dst: string, overwrite = false): Pro
   );
 }
 
+// Copy an entry to an absolute destination. The backend preserves symlinks as links, applies a
+// total-size cap to directory copies, and publishes the completed copy atomically. Callers retry
+// `exists` with either overwrite=true (Replace) or a de-duplicated destination (Keep both).
+export async function copyPath(src: string, dst: string, overwrite = false): Promise<{ ok: true; path: string }> {
+  return parse(
+    await apiFetch('/api/files/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src, dst, overwrite: overwrite || undefined }),
+    }),
+  );
+}
+
 // Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
 // col/end are full-line UTF-16 offsets (the editor jump target); preview_col/preview_end index
 // into `text` (the possibly windowed preview) for the row highlight.
