@@ -152,6 +152,7 @@
     "sortedRecent": "按最近活动排序",
     "filterAria": "按可见性筛选",
     "filter": {
+      "all": "全部",
       "online": "在线",
       "private": "私有",
       "public": "公开",
@@ -205,6 +206,29 @@
     "toast": {
       "updated": "展示页面已更新",
       "rotated": "分享链接已更换"
+    }
+  },
+  "library": {
+    "title": "应用库",
+    "tab": {
+      "apps": "应用",
+      "showPages": "展示页面"
+    },
+    "searchApps": "搜索应用…",
+    "searchPages": "搜索页面…",
+    "kind": {
+      "builtin": "内置",
+      "showPage": "展示页面"
+    },
+    "dock": {
+      "label": "Dock",
+      "toggle": "显示在 Dock"
+    },
+    "apps": {
+      "system": "系统",
+      "remove": "移出 Dock",
+      "locked": "内置应用不可移除",
+      "empty": "没有匹配的应用。"
     }
   },
   "settings": {

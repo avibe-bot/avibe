@@ -24,7 +24,6 @@ import { MorePage } from './components/workbench/MorePage';
 import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
-import { ShowPagesPage } from './components/ShowPagesPage';
 import { RemoteAccessPage } from './components/RemoteAccessPage';
 import { SettingsDiagnosticsPage } from './components/settings/SettingsDiagnosticsPage';
 import { SettingsBackendsPage } from './components/settings/SettingsBackendsPage';
@@ -38,6 +37,7 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { StatusProvider } from './context/StatusContext';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
+import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
@@ -61,6 +61,7 @@ const AppsTerminalPage = lazy(() =>
 const AppsEditorPage = lazy(() =>
   import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
 );
+const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ default: m.LibraryApp })));
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
@@ -296,6 +297,52 @@ const AppsRouteFallback = () => {
   return <div className="grid min-h-[40vh] place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
 };
 
+// Reactive desktop (≥ md) check for the mobile-vs-window split.
+function useIsDesktop(): boolean {
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 768px)').matches,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(min-width: 768px)');
+    const onChange = () => setIsDesktop(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+  return isDesktop;
+}
+
+// /apps/library — the App Library route and the redirect target for the retired
+// /admin/show-pages page. On desktop the Library is a workbench window, so open
+// (or focus) it and hand back to the canvas; on mobile there are no windows, so
+// render the Library body full-screen (the same component, its page shell).
+const LibraryRoute = () => {
+  const isDesktop = useIsDesktop();
+  const wm = useWindowManager();
+  const navigate = useNavigate();
+  const handledRef = useRef(false);
+
+  useEffect(() => {
+    if (!isDesktop || handledRef.current) return;
+    handledRef.current = true;
+    const own = wm.windows.filter((w) => w.appId === 'library');
+    const visible = own.find((w) => !w.minimized);
+    if (visible) wm.focus(visible.id);
+    else if (own.length > 0) wm.restore(own[0].id);
+    else wm.openApp('library');
+    navigate('/', { replace: true });
+  }, [isDesktop, wm, navigate]);
+
+  if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
+  return (
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-border bg-surface">
+      <Suspense fallback={<AppsRouteFallback />}>
+        <LibraryAppBody />
+      </Suspense>
+    </div>
+  );
+};
+
 // Sets the browser tab title to "Avibe - <name>" from config (configured
 // instance name, else system hostname). Config is cached in ApiContext, so this
 // mount-time fetch is deduplicated with the AuthGuard's own config read.
@@ -371,6 +418,7 @@ const router = createBrowserRouter(
             </Suspense>
           }
         />
+        <Route path="/apps/library" element={<LibraryRoute />} />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
 
         {/* Control Panel mode — existing pages moved under /admin/* */}
@@ -379,7 +427,9 @@ const router = createBrowserRouter(
         <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />
-        <Route path="/admin/show-pages" element={<ShowPagesPage />} />
+        {/* Show Pages moved into the App Library (workbench). Redirect the old
+            control-panel page so bookmarks + external links keep working. */}
+        <Route path="/admin/show-pages" element={<Navigate to="/apps/library" replace />} />
         <Route path="/admin/logs" element={<SettingsLogsPage standalone />} />
         {/* No client-side route at /admin/settings: Flask owns GET /settings as
             a JSON API. The Flask handler redirects browser-Accept hits to

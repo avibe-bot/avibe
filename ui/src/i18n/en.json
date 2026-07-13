@@ -152,6 +152,7 @@
     "sortedRecent": "Sorted by most recent",
     "filterAria": "Filter by visibility",
     "filter": {
+      "all": "All",
       "online": "Online",
       "private": "Private",
       "public": "Public",
@@ -205,6 +206,29 @@
     "toast": {
       "updated": "Show Page updated",
       "rotated": "Share link rotated"
+    }
+  },
+  "library": {
+    "title": "App Library",
+    "tab": {
+      "apps": "Apps",
+      "showPages": "Show Pages"
+    },
+    "searchApps": "Search apps…",
+    "searchPages": "Search pages…",
+    "kind": {
+      "builtin": "Built-in",
+      "showPage": "Show Page"
+    },
+    "dock": {
+      "label": "Dock",
+      "toggle": "Show in Dock"
+    },
+    "apps": {
+      "system": "system",
+      "remove": "Remove from Dock",
+      "locked": "Built-in apps can't be removed",
+      "empty": "No apps match your search."
     }
   },
   "settings": {
