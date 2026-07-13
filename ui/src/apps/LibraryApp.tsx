@@ -1,31 +1,68 @@
-import { useMemo, useState } from 'react';
-import { Lock, PinOff } from 'lucide-react';
+import { useCallback, useMemo, useState } from 'react';
+import { Pin, PinOff, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 
 import { APP_LIST, APP_REGISTRY, type AppDefinition, type AppId } from './registry';
 import { deriveAppRows, type AppRow } from './appLibrary';
 import { ShowPageAvatarTile } from './showPageAvatarTile';
+import { showPagePrivatePath } from './showPageAvatar';
 import { useDock } from '../context/DockContext';
+import { useWindowManager } from '../context/WindowManagerContext';
 import { ShowPagesView } from '../components/ShowPagesPage';
 import { useShowPages, type ShowPage } from '../components/useShowPages';
 import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
 import { SearchField } from '../components/settings/SettingsPrimitives';
 
 // The App Library: the app manager, itself a built-in app (§7.1). Two views over
-// the same data — the docked set (Apps) and the full Show Pages inventory — with
-// ONE state bit between them: being an app ≡ being in the Dock. The Show Pages
-// view's per-row Dock switch is the single promote/demote gesture; the Apps view
-// only lists + removes. Renders as a window body (desktop) and as a full-screen
-// route (mobile), so `windowId`/`params` are accepted but unused.
+// the two-layer state (§7.1c): the INSTALLED set (Apps) and the full Show Pages
+// inventory (AI). "Installed" (a member of `pins`, plus the always-installed
+// built-ins) is now distinct from "docked" (a member of the Dock `order`): every
+// row opens the app on click and carries a state-aware dock/undock action that
+// keeps it in the list, and AI-kind rows additionally get a 移出 (uninstall).
+// Renders as a window body (desktop) and as a full-screen route (mobile), so
+// `windowId`/`params` are accepted but unused.
 
-// The Library never lists itself among the apps it manages.
-const LIBRARY_APP_ID: AppId = 'library';
-// The client's built-in Dock ids (files / terminal / editor / library), the set
-// deriveAppRows classifies against. Mirrors DockContext's BUILTIN_DOCK_IDS.
-const BUILTIN_IDS = new Set<string>(APP_LIST.map((app) => app.id));
+// The client's built-in Dock ids (files / terminal / editor / library), in
+// canonical order. Mirrors DockContext's BUILTIN_DOCK_IDS. The Library now lists
+// itself among them (§7.1c #7), so nothing is excluded.
+const BUILTIN_DOCK_IDS: string[] = APP_LIST.map((app) => app.id);
 
 type LibraryTab = 'apps' | 'showpages';
+
+/**
+ * Open an app the way the current surface can show it. On desktop that's a
+ * workbench window (`openApp`). On mobile there is no window layer: built-ins
+ * have in-shell `/apps/*` routes, so navigate there (keeping the AppShell). A
+ * Show Page has no in-shell mobile route yet (that lands with the §7.1b mobile
+ * Dock), so open its private `/show/` surface in a NEW TAB rather than replacing
+ * the current one — this tab keeps the AppShell / Library / Dock chrome instead
+ * of dropping the user onto the raw page.
+ */
+function useOpenApp() {
+  const wm = useWindowManager();
+  const navigate = useNavigate();
+  return useCallback(
+    (appId: AppId, opts?: { title?: string; sessionId?: string }) => {
+      const desktop = typeof window !== 'undefined' && !!window.matchMedia?.('(min-width: 768px)').matches;
+      if (desktop) {
+        wm.openApp(appId, {
+          title: opts?.title,
+          params: opts?.sessionId ? { sessionId: opts.sessionId, title: opts.title } : undefined,
+        });
+        return;
+      }
+      if (appId === 'showpage') {
+        if (opts?.sessionId) window.open(showPagePrivatePath(opts.sessionId), '_blank', 'noopener,noreferrer');
+      } else {
+        navigate(`/apps/${appId}`);
+      }
+    },
+    [wm, navigate],
+  );
+}
 
 export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, unknown>; initialTab?: LibraryTab }> = ({
   params,
@@ -33,9 +70,10 @@ export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, u
 }) => {
   const { t } = useTranslation();
   const controller = useShowPages();
-  const { order } = useDock();
+  const { order, pins } = useDock();
+  const openApp = useOpenApp();
   // The legacy /admin/show-pages redirect (mobile via prop, desktop window via
-  // params) can request the Show Pages tab up front; default to Apps otherwise.
+  // params) can request the AI (Show Pages) tab up front; default to Apps otherwise.
   const startTab: LibraryTab = initialTab === 'showpages' || params?.initialTab === 'showpages' ? 'showpages' : 'apps';
   const [tab, setTab] = useState<LibraryTab>(startTab);
 
@@ -49,7 +87,7 @@ export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, u
     if (navTab === 'apps' || navTab === 'showpages') setTab(navTab);
   }
 
-  const appsCount = useMemo(() => deriveAppRows(order, BUILTIN_IDS, LIBRARY_APP_ID).length, [order]);
+  const appsCount = useMemo(() => deriveAppRows(BUILTIN_DOCK_IDS, pins, order).length, [pins, order]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface text-foreground">
@@ -58,12 +96,16 @@ export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, u
         <TabButton
           active={tab === 'showpages'}
           onClick={() => setTab('showpages')}
-          label={t('library.tab.showPages')}
+          label={t('library.tab.ai')}
           count={controller.pages.length}
         />
       </div>
       <div className="min-h-0 flex-1">
-        {tab === 'apps' ? <AppsView pages={controller.pages} /> : <ShowPagesView {...controller} />}
+        {tab === 'apps' ? (
+          <AppsView pages={controller.pages} openApp={openApp} />
+        ) : (
+          <ShowPagesView {...controller} onOpenApp={(sessionId, title) => openApp('showpage', { sessionId, title })} />
+        )}
       </div>
     </div>
   );
@@ -97,18 +139,19 @@ interface ResolvedRow {
   def?: AppDefinition;
 }
 
-// Apps view: the docked set, in order, minus the Library itself. Built-ins show
-// their icon + a locked badge (not removable); pinned Show Pages show a letter
-// avatar + a remove-from-Dock action that unpins without deleting the page. No
-// per-row toggles, no reorder (that lives on the Dock), no Add App (Phase 3).
-const AppsView: React.FC<{ pages: ShowPage[] }> = ({ pages }) => {
+// Apps view: the INSTALLED set (built-ins + pinned Show Pages), in canonical
+// order. Every row opens the app on click and carries a state-aware Dock toggle
+// (固定到 Dock ↔ 取消固定) that never removes it from the list; Show Page rows add a
+// 移出 that uninstalls the app (the page itself is untouched). Built-ins have no
+// 移出 and no lock — they simply can't leave the list.
+const AppsView: React.FC<{ pages: ShowPage[]; openApp: ReturnType<typeof useOpenApp> }> = ({ pages, openApp }) => {
   const { t } = useTranslation();
-  const { order, pins, unpin } = useDock();
+  const { order, pins, dock, undock, unpin } = useDock();
   const [query, setQuery] = useState('');
 
   const pinBySession = useMemo(() => new Map(pins.map((p) => [p.session_id, p])), [pins]);
   const pageBySession = useMemo(() => new Map(pages.map((p) => [p.session_id, p])), [pages]);
-  const rows = useMemo(() => deriveAppRows(order, BUILTIN_IDS, LIBRARY_APP_ID), [order]);
+  const rows = useMemo(() => deriveAppRows(BUILTIN_DOCK_IDS, pins, order), [pins, order]);
 
   const resolved = useMemo<ResolvedRow[]>(
     () =>
@@ -135,6 +178,14 @@ const AppsView: React.FC<{ pages: ShowPage[] }> = ({ pages }) => {
     return q ? resolved.filter((item) => item.name.toLowerCase().includes(q)) : resolved;
   }, [resolved, query]);
 
+  const openRow = (row: AppRow) =>
+    row.kind === 'builtin'
+      ? openApp(row.builtinId as AppId)
+      : openApp('showpage', {
+          sessionId: row.sessionId ?? '',
+          title: pageBySession.get(row.sessionId ?? '')?.title ?? undefined,
+        });
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center border-b border-border px-4 py-3 sm:px-5">
@@ -156,7 +207,16 @@ const AppsView: React.FC<{ pages: ShowPage[] }> = ({ pages }) => {
             return (
               <div
                 key={row.dockId}
-                className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0 sm:gap-4 sm:px-5"
+                role="button"
+                tabIndex={0}
+                onClick={() => openRow(row)}
+                onKeyDown={(e) => {
+                  if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault();
+                    openRow(row);
+                  }
+                }}
+                className="flex w-full cursor-pointer items-center gap-3 border-b border-border px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-foreground/[0.02] sm:gap-4 sm:px-5"
               >
                 {def && Icon ? (
                   <span
@@ -173,31 +233,42 @@ const AppsView: React.FC<{ pages: ShowPage[] }> = ({ pages }) => {
                   {subtitle ? <span className="truncate font-mono text-[11px] text-muted">{subtitle}</span> : null}
                 </span>
                 {row.kind === 'builtin' ? (
-                  <Badge variant="outline" className="font-mono text-[10px] uppercase tracking-wide">
+                  <Badge variant="outline" className="hidden font-mono text-[10px] uppercase tracking-wide sm:inline-flex">
                     {t('library.kind.builtin')}
                   </Badge>
                 ) : (
-                  <Badge variant="success">{t('library.kind.showPage')}</Badge>
+                  <Badge variant="success" className="hidden sm:inline-flex">
+                    {t('library.kind.showPage')}
+                  </Badge>
                 )}
-                {row.removable ? (
+                {/* State-aware Dock toggle — the row stays in the list either way. */}
+                <Button
+                  type="button"
+                  variant={row.docked ? 'secondary' : 'outline'}
+                  size="xs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void (row.docked ? undock(row.dockId) : dock(row.dockId));
+                  }}
+                >
+                  {row.docked ? <PinOff /> : <Pin />}
+                  <span className="hidden sm:inline">{row.docked ? t('library.apps.undock') : t('library.apps.dock')}</span>
+                </Button>
+                {/* 移出 — uninstall (Show Pages only; the page itself is untouched). */}
+                {row.kind === 'showpage' ? (
                   <button
                     type="button"
                     title={t('library.apps.remove')}
                     aria-label={t('library.apps.remove')}
-                    onClick={() => row.sessionId && unpin(row.sessionId)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (row.sessionId) void unpin(row.sessionId);
+                    }}
                     className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-destructive/10 hover:text-destructive"
                   >
-                    <PinOff size={15} />
+                    <Trash2 size={15} />
                   </button>
-                ) : (
-                  <span
-                    className="grid size-8 shrink-0 place-items-center text-muted/60"
-                    title={t('library.apps.locked')}
-                    aria-label={t('library.apps.locked')}
-                  >
-                    <Lock size={14} />
-                  </span>
-                )}
+                ) : null}
               </div>
             );
           })

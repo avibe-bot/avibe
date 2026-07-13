@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Select } from '../ui/select';
 import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
-import { useDock } from '../../context/DockContext';
+import { showDockId, useDock } from '../../context/DockContext';
 import { copyTextToClipboard } from '../../lib/utils';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -281,14 +281,23 @@ export const ShowPageShareControl: React.FC<{
                 <div className="text-xs text-muted">{t('chat.showPage.pinToDockCaption')}</div>
               </div>
               <Switch
-                checked={dock.isPinned(sessionId)}
+                checked={dock.isDocked(showDockId(sessionId))}
                 onCheckedChange={(next) => {
-                  void (next ? dock.pin(sessionId) : dock.unpin(sessionId));
+                  // "Pin to Dock" controls DOCK membership (§7.1c two-layer model):
+                  // ON docks (installing first if this page isn't installed yet —
+                  // pinning IS installing, §7.2); OFF undocks but keeps it installed
+                  // (uninstalling is the Library's 移出). Toggling off no longer
+                  // uninstalls, and undocking elsewhere now unchecks this switch.
+                  if (next) {
+                    void (dock.isPinned(sessionId) ? dock.dock(showDockId(sessionId)) : dock.pin(sessionId));
+                  } else {
+                    void dock.undock(showDockId(sessionId));
+                  }
                 }}
                 label={t('chat.showPage.pinToDock')}
               />
             </div>
-            {dock.isPinned(sessionId) && (
+            {dock.isDocked(showDockId(sessionId)) && (
               <div className="mt-2 flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.08] px-2.5 py-1.5 text-xs text-foreground">
                 <Check className="size-3.5 shrink-0 text-mint" />
                 <span className="truncate">

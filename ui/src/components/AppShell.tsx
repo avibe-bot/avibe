@@ -273,6 +273,10 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    // Permanent escape hatch to the App Library (a workbench app). Always present,
+    // so the Library is reachable from the control panel even when it is undocked
+    // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
+    { to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p) => p.startsWith('/apps/library') },
     { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
     {
       // 通讯平台: groups everything about connecting messaging platforms — the

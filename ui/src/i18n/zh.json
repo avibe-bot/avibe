@@ -101,6 +101,7 @@
   },
   "nav": {
     "dashboard": "控制台",
+    "appLibrary": "应用库",
     "channels": "群组",
     "users": "私聊",
     "showPages": "展示页面",
@@ -213,7 +214,7 @@
     "desc": "你的应用与展示页面",
     "tab": {
       "apps": "应用",
-      "showPages": "展示页面"
+      "ai": "AI"
     },
     "searchApps": "搜索应用…",
     "searchPages": "搜索页面…",
@@ -221,15 +222,15 @@
       "builtin": "内置",
       "showPage": "展示页面"
     },
-    "dock": {
-      "label": "Dock",
-      "toggle": "显示在 Dock"
-    },
     "apps": {
       "system": "系统",
-      "remove": "移出 Dock",
-      "locked": "内置应用不可移除",
+      "dock": "固定到 Dock",
+      "undock": "取消固定",
+      "remove": "移出",
       "empty": "没有匹配的应用。"
+    },
+    "ai": {
+      "add": "添加到 App"
     }
   },
   "settings": {
@@ -732,7 +733,11 @@
       "newWindow": "新建窗口",
       "showAllWindows": "显示所有窗口",
       "openInNewTab": "在新标签页打开",
-      "unpin": "从 Dock 取消固定"
+      "unpin": "从 Dock 取消固定",
+      "emptyHint": "Dock 为空 · 打开应用库"
+    },
+    "launcher": {
+      "openLibrary": "打开应用库"
     },
     "window": {
       "minimize": "最小化",

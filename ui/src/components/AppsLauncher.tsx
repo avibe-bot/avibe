@@ -4,16 +4,25 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { Dock } from './apps/Dock';
+import { ContextMenu, ContextMenuItem } from './ui/context-menu';
+import { useWindowManager } from '../context/WindowManagerContext';
 
 // The sidebar bottom-left "Apps" button that reveals the Dock.
-//   - hover  → the Dock floats up ABOVE the button (transient preview; the cursor
-//              can move straight onto it). Mirrors InboxHoverPopover's timer dance.
-//   - click  → pin / unpin toggle (sticky). Unpinning hides it immediately even if
-//              the cursor is still on the button (suppressed until it leaves).
+//   - hover        → the Dock floats up ABOVE the button (transient preview; the
+//                    cursor can move straight onto it). Mirrors InboxHoverPopover.
+//   - click        → pin / unpin toggle (sticky). Unpinning hides it immediately
+//                    even if the cursor is still on the button.
+//   - right-click  → a context menu with an "Open App Library" escape hatch — a
+//                    third way to reach the Library (alongside the sidebar entry
+//                    and the empty-Dock hint), complementing §7.1c point 7. It
+//                    does NOT touch the hover/pin behavior.
 export const AppsLauncher: React.FC = () => {
   const { t } = useTranslation();
+  const wm = useWindowManager();
   const [pinned, setPinned] = useState(false);
   const [hovering, setHovering] = useState(false);
+  // Cursor-positioned right-click menu, on the shared ContextMenu primitive.
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const closeTimer = useRef<number | null>(null);
   // Set on unpin so the lingering hover doesn't immediately re-open the panel;
   // cleared once the cursor actually leaves the trigger+panel.
@@ -54,6 +63,11 @@ export const AppsLauncher: React.FC = () => {
     }
   };
 
+  const openLibrary = () => {
+    wm.openApp('library');
+    setMenu(null);
+  };
+
   return (
     // The sidebar aside owns the stacking context (z-10, below the window layer z-20), so the Apps
     // button is covered by a maximized window like the rest of the sidebar. `relative` is just the
@@ -62,6 +76,10 @@ export const AppsLauncher: React.FC = () => {
       <button
         type="button"
         onClick={onClick}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
         aria-haspopup="menu"
         aria-expanded={visible}
         aria-pressed={pinned}
@@ -91,6 +109,16 @@ export const AppsLauncher: React.FC = () => {
         >
           <Dock />
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={184} itemCount={1}>
+          <ContextMenuItem
+            icon={<LayoutGrid className="size-[15px] text-cyan" />}
+            label={t('apps.launcher.openLibrary')}
+            onClick={openLibrary}
+          />
+        </ContextMenu>
       )}
     </div>
   );

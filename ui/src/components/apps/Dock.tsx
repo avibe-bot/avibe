@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Reorder } from 'framer-motion';
-import { Copy, ExternalLink, PinOff, Plus, SquarePlus } from 'lucide-react';
+import { Copy, ExternalLink, LayoutGrid, PinOff, Plus, SquarePlus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -19,12 +19,15 @@ type ResidentItem =
 // The unified Dock panel: app launcher + running indicators + minimized windows.
 // Built-in apps and pinned Show Pages share one reorderable row (server-persisted
 // order); a running app's tile reveals a ＋ (and a right-click menu) to open
-// another window. Pinned Show Pages add Open in New Tab / Unpin from Dock; the
+// another window. EVERY tile — built-ins included (§7.1c) — can be unpinned from
+// the Dock via the right-click menu (it stays installed, so the Apps view can
+// re-dock it); pinned Show Pages additionally offer Open in New Tab. When the Dock
+// is empty it shows an App Library shortcut rather than a dead surface. The
 // minimized-window strip trails the row and is not reorderable.
 export const Dock: React.FC = () => {
   const { t } = useTranslation();
   const wm = useWindowManager();
-  const { order, pins, unpin, setOrder } = useDock();
+  const { order, pins, undock, setOrder } = useDock();
   const { windows, focusedId } = wm;
   const minimized = windows.filter((w) => w.minimized);
 
@@ -104,8 +107,12 @@ export const Dock: React.FC = () => {
     setMenu(null);
   };
 
-  const unpinItem = (sessionId: string) => {
-    void unpin(sessionId);
+  // Unpin from the Dock = undock (remove from `order`) for ANY tile, built-ins
+  // included. It keeps the app installed (built-ins always; a Show Page stays in
+  // the Apps list), so the tile can be re-docked from the Library — uninstalling
+  // a page is the separate 移出 action there.
+  const undockItem = (dockId: string) => {
+    void undock(dockId);
     setMenu(null);
   };
 
@@ -118,7 +125,9 @@ export const Dock: React.FC = () => {
 
   const menuItemCount = (item: ResidentItem) => {
     const running = windowsFor(item).length > 0;
-    return 1 + (running ? 1 : 0) + (item.kind === 'showpage' ? 2 : 0);
+    // New Window (+ Show All Windows if running) + [Open in New Tab for a
+    // Show Page] + Unpin from Dock (every tile).
+    return 1 + (running ? 1 : 0) + (item.kind === 'showpage' ? 1 : 0) + 1;
   };
 
   return (
@@ -210,6 +219,22 @@ export const Dock: React.FC = () => {
           })}
         </Reorder.Group>
 
+        {/* Empty Dock (every tile undocked) is valid — offer a way back to the App
+            Library instead of a dead, empty surface (§7.1c). */}
+        {localOrder.length === 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              wm.openApp('library');
+              setMenu(null);
+            }}
+            className="flex items-center gap-2 rounded-xl border border-dashed border-border px-3 py-2.5 text-[12px] font-medium text-muted transition-colors hover:border-cyan/60 hover:text-foreground"
+          >
+            <LayoutGrid className="size-4 shrink-0 text-cyan" />
+            <span className="whitespace-nowrap">{t('apps.dock.emptyHint')}</span>
+          </button>
+        )}
+
         {minimized.length > 0 && <div className="mx-1 h-11 w-px shrink-0 self-center bg-border-strong" />}
 
         {/* Minimized windows render as a small window-style thumbnail (a mini titlebar with traffic
@@ -267,20 +292,19 @@ export const Dock: React.FC = () => {
                 />
               )}
               {showpage && (
-                <>
-                  <ContextMenuItem
-                    icon={<ExternalLink className="size-[15px]" />}
-                    label={t('apps.dock.openInNewTab')}
-                    onClick={() => openExternal(showpage.sessionId)}
-                  />
-                  <ContextMenuItem
-                    icon={<PinOff className="size-[15px]" />}
-                    label={t('apps.dock.unpin')}
-                    danger
-                    onClick={() => unpinItem(showpage.sessionId)}
-                  />
-                </>
+                <ContextMenuItem
+                  icon={<ExternalLink className="size-[15px]" />}
+                  label={t('apps.dock.openInNewTab')}
+                  onClick={() => openExternal(showpage.sessionId)}
+                />
               )}
+              {/* Unpin (undock) is available on EVERY tile now, built-ins included. */}
+              <ContextMenuItem
+                icon={<PinOff className="size-[15px]" />}
+                label={t('apps.dock.unpin')}
+                danger
+                onClick={() => undockItem(item.id)}
+              />
             </ContextMenu>
           );
         })()}

@@ -133,54 +133,58 @@ def test_pin_multiple_sessions_all_survive(monkeypatch, tmp_path):
     assert [pin["session_id"] for pin in dock["pins"]] == ["ses_a", "ses_b", "ses_c"]
 
 
-def test_pin_rejects_when_dock_is_full(monkeypatch, tmp_path):
-    # The cap that set_dock_order enforces must also gate new pins, else the order
-    # can grow past it and every later reorder is rejected.
+def test_pin_rejects_when_install_budget_is_full(monkeypatch, tmp_path):
+    # The install (pins) budget the reconcile clamp enforces must also gate new
+    # pins, else a pin can grow ``pins`` past what a read would keep and the
+    # just-added page is silently dropped on the next load.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 5)  # 4 built-ins + room for one pin
+    monkeypatch.setattr("core.dock_store.MAX_PINNED_PAGES", 1)  # room for exactly one pin
     for sid in ("ses_full1", "ses_full2"):
         _seed_session(sid)
         _make_show_page(sid)
 
-    api.pin_dock_show_page("ses_full1")  # fills the Dock (4 built-ins + 1 pin = 5)
+    api.pin_dock_show_page("ses_full1")  # fills the install budget (1 pin)
     with pytest.raises(DockError) as excinfo:
         api.pin_dock_show_page("ses_full2")
     assert excinfo.value.code == "dock_full"
 
 
 def test_load_dock_clamps_oversized_corrupt_pins(monkeypatch, tmp_path):
-    # A corrupt / hand-edited stored doc with more pins than the cap must be
-    # bounded on read, not rendered as thousands of tiles.
+    # A corrupt / hand-edited stored doc with more pins than the budget must be
+    # bounded on read, not rendered as thousands of tiles. The order is honored as
+    # stored (empty here) — reconcile no longer force-appends built-ins.
     from core.chat_discovery import set_state_meta
     from core.dock_store import DOCK_STATE_KEY
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 5)  # 4 built-ins + room for one pin
+    monkeypatch.setattr("core.dock_store.MAX_PINNED_PAGES", 1)  # room for exactly one pin
     set_state_meta(
         DOCK_STATE_KEY,
         {"order": [], "pins": [{"session_id": f"ses_{i}", "title_snapshot": "", "pinned_at": ""} for i in range(10)]},
     )
 
     dock = api.get_dock()["dock"]
-    assert len(dock["pins"]) == 1  # clamped to MAX_DOCK_ITEMS - built-ins
-    assert len(dock["order"]) == 5  # 4 built-ins + 1 pin
+    assert len(dock["pins"]) == 1  # clamped to the install budget
+    assert dock["order"] == []  # stored empty order is honored; nothing force-added
 
 
 def test_pin_budget_survives_new_builtin():
-    # Adding library (the 4th built-in) must not shrink the pin budget: the cap is
-    # built-ins + a fixed budget, so a valid pre-Phase-2 dock (up to 197 pins)
+    # Adding library (the 4th built-in) must not shrink the install budget: the
+    # budget is a fixed constant, so a valid pre-Phase-2 dock (up to 197 pins)
     # never loses a pin on reconcile when a built-in is added.
-    from core.dock_store import BUILTIN_DOCK_IDS, MAX_DOCK_ITEMS
+    from core.dock_store import BUILTIN_DOCK_IDS, MAX_DOCK_ITEMS, MAX_PINNED_PAGES
 
-    assert MAX_DOCK_ITEMS - len(BUILTIN_DOCK_IDS) == 197
+    assert MAX_PINNED_PAGES == 197
+    assert MAX_DOCK_ITEMS - len(BUILTIN_DOCK_IDS) == MAX_PINNED_PAGES
 
 
-def test_load_dock_appends_library_to_pre_phase2_order(monkeypatch, tmp_path):
-    # A dock doc persisted before ``library`` became a built-in (its ``order``
-    # lacks it) must gain it on read via the reconcile rule (spec §3: missing
-    # built-ins appended), without dropping the pin or reordering existing tiles.
+def test_reconcile_does_not_readd_undocked_builtin(monkeypatch, tmp_path):
+    # Two-layer model (§7.1c): built-ins are undockable, so reconcile must NOT
+    # force-append a built-in that a stored doc omits from ``order`` (reverses the
+    # pre-Phase-2.1 append rule). Existing tiles keep their order and the pin
+    # survives; ``library`` stays undocked (installed, but not in the Dock).
     from core.chat_discovery import set_state_meta
     from core.dock_store import DOCK_STATE_KEY
 
@@ -196,9 +200,30 @@ def test_load_dock_appends_library_to_pre_phase2_order(monkeypatch, tmp_path):
 
     dock = api.get_dock()["dock"]
 
-    # Existing tiles keep their order, the pin survives, and library is appended.
-    assert dock["order"] == ["files", "terminal", "editor", _show("ses_legacy"), "library"]
+    assert dock["order"] == ["files", "terminal", "editor", _show("ses_legacy")]
+    assert "library" not in dock["order"]  # NOT force-appended
     assert [pin["session_id"] for pin in dock["pins"]] == ["ses_legacy"]
+
+
+def test_legacy_full_order_doc_still_valid(monkeypatch, tmp_path):
+    # A doc persisted with every built-in already in ``order`` (the common
+    # post-#899 shape) remains valid and unchanged on read.
+    from core.chat_discovery import set_state_meta
+    from core.dock_store import DOCK_STATE_KEY
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    order = ["files", "terminal", "editor", "library", _show("ses_keep")]
+    set_state_meta(
+        DOCK_STATE_KEY,
+        {
+            "order": order,
+            "pins": [{"session_id": "ses_keep", "title_snapshot": "Keep", "pinned_at": "2026-01-01T00:00:00+00:00"}],
+        },
+    )
+
+    dock = api.get_dock()["dock"]
+    assert dock["order"] == order
 
 
 def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
@@ -270,19 +295,117 @@ def test_set_order_accepts_library_builtin(monkeypatch, tmp_path):
     assert api.get_dock()["dock"]["order"] == new_order
 
 
-def test_set_order_rejects_wrong_set(monkeypatch, tmp_path):
+def test_set_order_rejects_unknown_id(monkeypatch, tmp_path):
+    # Subset validation (§7.1c) still rejects an id that is not a real dock item,
+    # so a stale client can't resurrect a pin removed by another tab.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
-    # Missing a built-in id — not set-equal to the known ids.
-    with pytest.raises(DockError) as excinfo:
-        api.set_dock_order(["files", "terminal"])
-    assert excinfo.value.code == "invalid_order"
-
-    # An unknown id that isn't a real dock item.
     with pytest.raises(DockError) as excinfo:
         api.set_dock_order(["files", "terminal", "editor", "show:ghost"])
     assert excinfo.value.code == "invalid_order"
+
+
+def test_set_order_accepts_proper_subset(monkeypatch, tmp_path):
+    # Two-layer model: the order is a SUBSET of the known ids, so omitting a
+    # built-in (undocking it) is accepted and persists — no longer rejected as a
+    # non-set-equal order.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    dock = api.set_dock_order(["files", "terminal"])["dock"]  # editor + library undocked
+    assert dock["order"] == ["files", "terminal"]
+    assert api.get_dock()["dock"]["order"] == ["files", "terminal"]
+
+
+def test_set_order_accepts_empty_dock(monkeypatch, tmp_path):
+    # Undocking everything (including all built-ins) is legal — the empty Dock is
+    # a valid saved state (the popover shows the App Library hint client-side).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    dock = api.set_dock_order([])["dock"]
+    assert dock["order"] == []
+    assert api.get_dock()["dock"]["order"] == []
+
+
+def test_set_order_rejects_stale_known(monkeypatch, tmp_path):
+    # Optimistic concurrency: a client whose ``known`` baseline is missing a pin
+    # another tab just installed is rejected as stale, so its reorder can't
+    # silently undock that newer pin (which install docked by default). Subset
+    # validation alone would have accepted the omission.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_new", title="New")
+    _make_show_page("ses_new")
+    api.pin_dock_show_page("ses_new")  # server now has show:ses_new installed + docked
+
+    stale_known = list(BUILTIN_DOCK_IDS)  # a tab that never saw ses_new
+    with pytest.raises(DockError) as excinfo:
+        api.set_dock_order(["editor", "files", "terminal", "library"], known=stale_known)
+    assert excinfo.value.code == "stale_order"
+    # The pin survived: the stale write was rejected, not applied.
+    assert _show("ses_new") in api.get_dock()["dock"]["order"]
+
+
+def test_set_order_with_matching_known_allows_intentional_undock(monkeypatch, tmp_path):
+    # When ``known`` matches the server's installed set, an omitted id is an
+    # INTENTIONAL undock (distinct from a stale omission) and is accepted — the
+    # page stays installed.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_k", title="K")
+    _make_show_page("ses_k")
+    api.pin_dock_show_page("ses_k")
+
+    known = [*BUILTIN_DOCK_IDS, _show("ses_k")]
+    dock = api.set_dock_order(list(BUILTIN_DOCK_IDS), known=known)["dock"]  # undock ses_k
+    assert _show("ses_k") not in dock["order"]
+    assert [pin["session_id"] for pin in dock["pins"]] == ["ses_k"]  # still installed
+
+
+def test_undocked_builtin_persists_across_reload(monkeypatch, tmp_path):
+    # An undocked built-in stays undocked across a reload — reconcile never
+    # re-adds it (the whole point of built-ins being undockable now).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    api.set_dock_order(["files", "terminal", "editor"])  # library undocked
+    assert "library" not in api.get_dock()["dock"]["order"]
+
+
+def test_installed_page_can_be_undocked_but_stays_installed(monkeypatch, tmp_path):
+    # The core two-layer invariant: a Show Page can be undocked (removed from
+    # ``order``) while REMAINING installed (kept in ``pins``) — install and dock
+    # are separate. Its ``show:`` id is absent from the order but the pin persists.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_keep", title="Keep")
+    _make_show_page("ses_keep")
+    api.pin_dock_show_page("ses_keep")  # installs + docks
+
+    # Undock it (drop only its show id) while keeping every built-in docked.
+    api.set_dock_order(["files", "terminal", "editor", "library"])
+
+    dock = api.get_dock()["dock"]
+    assert _show("ses_keep") not in dock["order"]  # undocked
+    assert [pin["session_id"] for pin in dock["pins"]] == ["ses_keep"]  # still installed
+
+
+def test_delete_pin_cascades_out_of_order(monkeypatch, tmp_path):
+    # DELETE pins (uninstall) removes the page from BOTH pins and order, leaving
+    # the other docked tiles intact.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _seed_session("ses_del", title="Del")
+    _make_show_page("ses_del")
+    api.pin_dock_show_page("ses_del")
+    assert _show("ses_del") in api.get_dock()["dock"]["order"]
+
+    dock = api.unpin_dock_show_page("ses_del")["dock"]
+    assert _show("ses_del") not in dock["order"]
+    assert dock["pins"] == []
+    assert dock["order"] == list(BUILTIN_DOCK_IDS)  # built-ins untouched
 
 
 def test_set_order_rejects_duplicates(monkeypatch, tmp_path):

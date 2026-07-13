@@ -1,22 +1,30 @@
-"""Server-side Dock state: which apps are pinned to the workbench Dock, and in
-what order the resident tiles sit.
+"""Server-side Dock state: which apps are *installed*, and which of them sit in
+the workbench Dock (and in what order).
 
 The Dock is durable *product* state — it follows the user across devices — not
 per-browser UI state, so it lives in the shared ``state_meta`` KV under a single
-versioned key, alongside the other cross-device workbench state. v1 knows two
-kinds of dock item:
+versioned key, alongside the other cross-device workbench state. It knows two
+kinds of item:
 
 - built-in apps, keyed by their app id verbatim (``files`` / ``terminal`` /
-  ``editor`` / ``library``). They are reorderable but not unpinnable.
-- pinned Show Pages, keyed ``show:<session_id>``.
+  ``editor`` / ``library``). Always installed; individually dockable/undockable.
+- pinned Show Pages, keyed ``show:<session_id>``. A pin IS the install record.
 
-Future item kinds (``app:<id>`` …) slot into the same ``order`` list without a
-migration — see docs/plans/dock-pinned-show-page-apps.md §7.
+Future item kinds (``app:<id>`` …) slot into the same lists without a migration —
+see docs/plans/dock-pinned-show-page-apps.md §7 / §7.1c.
 
-``order`` covers every resident tile, built-ins included. The document is
-*reconciled on read* (drop unknown ids, append any missing built-ins/pins) and
-*validated on write* (order must be exactly the known id set, no duplicates,
-bounded), so a stale or corrupt blob can never desync the Dock.
+Two layers (§7.1c):
+
+- ``pins`` — the *installed* AI pages. Built-ins are implicitly installed.
+- ``order`` — the *docked* subset: the resident tiles, in user order. It is a
+  SUBSET of the known ids {built-ins ∪ pins}; any known id may be absent
+  (undocked), built-ins included, and the empty Dock is a valid state.
+
+The document is *reconciled on read* (dedupe pins, drop unknown/duplicate order
+ids — but never force-append, so an undocked tile stays undocked) and *validated
+on write* (order is a subset of the known ids, no duplicates, bounded). An absent
+document seeds the default of every built-in docked; once any document exists it
+is authoritative, so a stale or corrupt blob can never desync the Dock.
 """
 
 from __future__ import annotations
@@ -49,10 +57,11 @@ BUILTIN_DOCK_IDS: tuple[str, ...] = ("files", "terminal", "editor", "library")
 # Namespace prefix for a pinned Show Page dock id.
 SHOW_PREFIX = "show:"
 
-# Defensive cap on the resident-tile count so one corrupt/hostile write can't
-# balloon the order list. Expressed as built-ins + a FIXED pin budget (not a flat
-# constant) so adding a built-in never shrinks the pin budget or drops an existing
-# valid pin on reconcile. Far above any real Dock (built-ins + pinned pages).
+# Defensive cap so one corrupt/hostile write can't balloon the installed set or
+# the order list. ``MAX_PINNED_PAGES`` is the FIXED install budget (not a flat
+# constant) so adding a built-in never shrinks it or drops an existing valid pin
+# on reconcile; ``MAX_DOCK_ITEMS`` bounds the docked order (≤ built-ins ∪ pins).
+# Far above any real Dock.
 MAX_PINNED_PAGES = 197
 MAX_DOCK_ITEMS = len(BUILTIN_DOCK_IDS) + MAX_PINNED_PAGES
 
@@ -105,8 +114,13 @@ def _coerce_doc(raw: Any) -> tuple[list[str], list[dict[str, str]]]:
 
 
 def _reconcile(order: list[str], pins: list[dict[str, str]]) -> dict[str, Any]:
-    """Canonicalize a dock doc: dedupe pins by session id; drop unknown/duplicate
-    order ids; append any missing built-ins, then any missing pins, at the end.
+    """Canonicalize a dock doc under the two-layer model (§7.1c): dedupe pins by
+    session id; drop unknown/duplicate order ids. The order is left as the stored
+    SUBSET — built-ins and pins are NOT force-appended, so an undocked tile
+    (built-in included) stays undocked and the empty Dock survives a round-trip.
+
+    Dropping an order id whose ``show:<sid>`` has no matching pin keeps the Dock
+    pin-consistent (a removed pin cascades out of the order on the next read).
 
     Pure — the same algorithm runs client-side (reconcileDock in DockContext),
     so both ends agree on the canonical shape.
@@ -121,12 +135,12 @@ def _reconcile(order: list[str], pins: list[dict[str, str]]) -> dict[str, Any]:
         deduped_pins.append(pin)
 
     # Clamp on read as well as on write: a corrupt or hand-edited stored doc could
-    # hold more pins than the write paths admit, so bound them here too (built-ins
-    # are always kept; excess pins beyond the cap are dropped) to keep the Dock —
-    # and GET /api/dock — from ballooning.
-    max_pins = max(0, MAX_DOCK_ITEMS - len(BUILTIN_DOCK_IDS))
-    if len(deduped_pins) > max_pins:
-        deduped_pins = deduped_pins[:max_pins]
+    # hold more pins than the write paths admit, so bound them here too (excess
+    # pins beyond the fixed install budget are dropped) to keep the installed set —
+    # and GET /api/dock — from ballooning. Same constant the pin path guards on, so
+    # the two never disagree about what a read would keep.
+    if len(deduped_pins) > MAX_PINNED_PAGES:
+        deduped_pins = deduped_pins[:MAX_PINNED_PAGES]
 
     pin_ids = [_show_id(pin["session_id"]) for pin in deduped_pins]
     known = set(BUILTIN_DOCK_IDS) | set(pin_ids)
@@ -137,19 +151,18 @@ def _reconcile(order: list[str], pins: list[dict[str, str]]) -> dict[str, Any]:
         if item in known and item not in seen:
             result.append(item)
             seen.add(item)
-    for builtin in BUILTIN_DOCK_IDS:
-        if builtin not in seen:
-            result.append(builtin)
-            seen.add(builtin)
-    for pin_id in pin_ids:
-        if pin_id not in seen:
-            result.append(pin_id)
-            seen.add(pin_id)
     return {"order": result, "pins": deduped_pins}
 
 
 def _load(db_path: Path | None) -> dict[str, Any]:
-    order, pins = _coerce_doc(get_state_meta(DOCK_STATE_KEY, db_path=db_path))
+    raw = get_state_meta(DOCK_STATE_KEY, db_path=db_path)
+    if not isinstance(raw, dict):
+        # No dock document has ever been stored → seed the default: every built-in
+        # docked, nothing installed. Only an ABSENT document seeds; a stored doc is
+        # honored as-is (including an empty/partial order — built-ins are
+        # undockable now, so "nothing docked" is a legitimate saved state).
+        return {"order": list(BUILTIN_DOCK_IDS), "pins": []}
+    order, pins = _coerce_doc(raw)
     return _reconcile(order, pins)
 
 
@@ -185,9 +198,10 @@ def pin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, 
         if any(pin["session_id"] == session_id for pin in doc["pins"]):
             return doc  # already pinned → idempotent no-op (keeps its place + snapshot)
 
-        # Enforce the same cap ``set_dock_order`` does, so a new pin can't push the
-        # order past MAX_DOCK_ITEMS (which would then make every reorder rejected).
-        if len(doc["order"]) >= MAX_DOCK_ITEMS:
+        # Bound the installed set to the same fixed budget reconcile clamps to, so
+        # a new pin can't grow ``pins`` past what a read would keep (which would
+        # then silently drop the just-added page).
+        if len(doc["pins"]) >= MAX_PINNED_PAGES:
             raise DockError("The Dock is full — unpin an app before pinning another.", code="dock_full")
 
         meta = read_session_display_meta([session_id], db_path=db_path)
@@ -221,13 +235,25 @@ def unpin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str
         return doc
 
 
-def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]:
-    """Persist a new resident-tile order.
+def set_dock_order(order: Any, *, known: Any = None, db_path: Path | None = None) -> dict[str, Any]:
+    """Persist the docked subset, in order.
 
-    The order must be exactly the current known id set (built-ins + pinned
-    pages), with no duplicates and within the size cap. A stale client — one
-    that omits a pin added by another tab, say — is rejected rather than allowed
-    to clobber the newer pin. Raises ``DockError`` (``invalid_order`` → 400).
+    Under the two-layer model (§7.1c) the order is a SUBSET of the known ids
+    (built-ins ∪ pinned pages): every id must be known and unique, but ids may be
+    OMITTED — that is how a tile (built-in included) is undocked — and the empty
+    order (nothing docked) is valid. An id that is not a real dock item is still
+    rejected, so a stale client that references a pin removed by another tab
+    can't resurrect it.
+
+    ``known`` is optimistic-concurrency guard: the full id set the client based
+    this order on. Because omission now means "undock", a stale tab (loaded before
+    another tab installed a page) would otherwise silently undock the newer pin —
+    its ``show:<id>`` is simply absent from the stale order, and subset validation
+    accepts it. So when the client declares ``known`` and it no longer equals the
+    server's current known set, the write is rejected as stale (the client
+    re-syncs and retries). When ``known`` is omitted (legacy client) we can't
+    tell, so subset validation alone applies. Raises ``DockError``
+    (``invalid_order`` / ``stale_order`` → 400).
     """
     if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
         raise DockError("Dock order must be a list of ids.", code="invalid_order")
@@ -238,9 +264,14 @@ def set_dock_order(order: Any, *, db_path: Path | None = None) -> dict[str, Any]
 
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
-        known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
-        if set(order) != known:
-            raise DockError("Dock order must match the current dock items.", code="invalid_order")
+        server_known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
+        if known is not None:
+            if not isinstance(known, list) or not all(isinstance(item, str) for item in known):
+                raise DockError("Dock known-set must be a list of ids.", code="invalid_order")
+            if set(known) != server_known:
+                raise DockError("Dock order is based on a stale view of the installed apps.", code="stale_order")
+        if not set(order) <= server_known:
+            raise DockError("Dock order has an unknown id.", code="invalid_order")
 
         doc = {"order": list(order), "pins": doc["pins"]}
         _save(doc, db_path)

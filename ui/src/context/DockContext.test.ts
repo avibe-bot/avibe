@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { dockIdToSession, MAX_PINNED_PAGES, reconcileDock, showDockId, type DockDoc } from './DockContext';
+import {
+  dockIdToSession,
+  MAX_PINNED_PAGES,
+  reconcileDock,
+  seedDefaultDock,
+  showDockId,
+  type DockDoc,
+} from './DockContext';
 
 const BUILTINS = ['files', 'terminal', 'editor'];
 
@@ -16,31 +23,45 @@ describe('showDockId / dockIdToSession', () => {
   });
 });
 
-describe('reconcileDock', () => {
-  it('defaults an empty doc to the built-ins in canonical order', () => {
+describe('seedDefaultDock', () => {
+  it('docks every built-in in canonical order, nothing installed', () => {
+    const out = seedDefaultDock(BUILTINS);
+    expect(out.order).toEqual(BUILTINS);
+    expect(out.pins).toEqual([]);
+  });
+});
+
+describe('reconcileDock (two-layer subset model)', () => {
+  it('keeps an empty order empty — never force-seeds built-ins', () => {
+    // The empty Dock is valid: reconcile honors it (only the pre-load default,
+    // seedDefaultDock, docks built-ins).
     const out = reconcileDock({ order: [], pins: [] }, BUILTINS);
-    expect(out.order).toEqual(['files', 'terminal', 'editor']);
+    expect(out.order).toEqual([]);
     expect(out.pins).toEqual([]);
   });
 
-  it('tolerates null / undefined input', () => {
-    expect(reconcileDock(null, BUILTINS).order).toEqual(BUILTINS);
-    expect(reconcileDock(undefined, BUILTINS).order).toEqual(BUILTINS);
+  it('tolerates null / undefined input (empty subset)', () => {
+    expect(reconcileDock(null, BUILTINS).order).toEqual([]);
+    expect(reconcileDock(undefined, BUILTINS).order).toEqual([]);
   });
 
-  it('appends a missing built-in at the end, preserving the stored order', () => {
-    // 'editor' is absent from the stored order → it is appended last.
+  it('does NOT re-add a built-in the stored order omits (undocked stays undocked)', () => {
+    // 'editor' absent from the stored order → it stays out of the Dock.
     const out = reconcileDock({ order: ['terminal', 'files'], pins: [] }, BUILTINS);
-    expect(out.order).toEqual(['terminal', 'files', 'editor']);
+    expect(out.order).toEqual(['terminal', 'files']);
+    expect(out.order).not.toContain('editor');
   });
 
-  it('appends a pinned page that is missing from order', () => {
+  it('does NOT dock an installed pin that is absent from order', () => {
+    // The page is installed (in pins) but undocked (not in order) → order unchanged.
     const doc: DockDoc = {
       order: ['files', 'terminal', 'editor'],
       pins: [{ session_id: 'ses_a', title_snapshot: 'A', pinned_at: 't' }],
     };
     const out = reconcileDock(doc, BUILTINS);
-    expect(out.order).toEqual(['files', 'terminal', 'editor', 'show:ses_a']);
+    expect(out.order).toEqual(['files', 'terminal', 'editor']);
+    expect(out.order).not.toContain('show:ses_a');
+    expect(out.pins).toHaveLength(1); // still installed
   });
 
   it('keeps a valid custom order (pin interleaved with built-ins)', () => {
@@ -53,7 +74,7 @@ describe('reconcileDock', () => {
 
   it('dedupes pins by session id, keeping the first', () => {
     const doc: DockDoc = {
-      order: [],
+      order: ['show:ses_a'],
       pins: [
         { session_id: 'ses_a', title_snapshot: 'first', pinned_at: 't1' },
         { session_id: 'ses_a', title_snapshot: 'second', pinned_at: 't2' },
@@ -93,15 +114,15 @@ describe('reconcileDock', () => {
     expect(out.order).toEqual(['files', 'terminal', 'editor']);
   });
 
-  it('clamps oversized pins to the fixed pin budget, always keeping the built-ins', () => {
+  it('clamps oversized pins to the fixed pin budget', () => {
     // Far more pins than the budget allows; only the first MAX_PINNED_PAGES survive.
     // The budget is FIXED (independent of the built-in count), so adding a built-in
-    // never shrinks it — a valid pre-Phase-2 dock keeps all its pins.
+    // never shrinks it — a valid pre-Phase-2 dock keeps all its pins. The order is
+    // honored as stored (empty here — nothing docked), never force-populated.
     const pins = Array.from({ length: 250 }, (_, i) => ({ session_id: `ses_${i}`, title_snapshot: '', pinned_at: '' }));
     const out = reconcileDock({ order: [], pins }, BUILTINS);
     expect(out.pins).toHaveLength(MAX_PINNED_PAGES); // 197, regardless of built-in count
-    expect(out.order).toHaveLength(BUILTINS.length + MAX_PINNED_PAGES);
-    expect(out.order.slice(0, BUILTINS.length)).toEqual(BUILTINS);
+    expect(out.order).toEqual([]); // stored empty order honored
   });
 
   it('is idempotent', () => {

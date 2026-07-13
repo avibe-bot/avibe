@@ -4,15 +4,19 @@ import { APP_LIST } from '../apps/registry';
 import { useApi } from './ApiContext';
 
 // The workbench Dock is durable, cross-device *product* state (see
-// core/dock_store.py): which apps sit in the Dock and in what order. This
-// provider fetches that document once, keeps it reconciled against the apps the
-// client actually knows, and exposes optimistic pin/unpin/reorder actions that
-// roll back if the server rejects the write.
+// core/dock_store.py). Two layers (§7.1c): `pins` is the INSTALLED set of AI
+// Show Pages (built-ins are implicitly installed); `order` is the DOCKED subset —
+// the resident tiles, in user order, a SUBSET of the known ids. This provider
+// fetches the document once, keeps it reconciled against the apps the client
+// knows, and exposes optimistic install (pin) / uninstall (unpin) /
+// dock / undock / reorder actions that roll back if the server rejects the write.
 //
 // A Dock item id is either a built-in app id verbatim (`files` / `terminal` /
-// `editor`) or a pinned Show Page as `show:<session_id>`. The built-in id set
-// and its canonical order are a contract shared with the backend's
-// BUILTIN_DOCK_IDS — both derive from APP_LIST, so keep them in sync.
+// `editor` / `library`) or a pinned Show Page as `show:<session_id>`. The
+// built-in id set and its canonical order are a contract shared with the
+// backend's BUILTIN_DOCK_IDS — both derive from APP_LIST, so keep them in sync.
+// Any tile, built-ins included, can be undocked (absent from `order`); the empty
+// Dock is a valid state.
 
 export type DockPin = {
   session_id: string;
@@ -53,9 +57,11 @@ const BUILTIN_DOCK_IDS: string[] = APP_LIST.map((app) => app.id);
  * the server applies (core/dock_store._reconcile), so a stale or partial doc
  * from either side converges to one shape:
  *   - dedupe pins by session id (first wins);
- *   - drop unknown / duplicate ids from `order`;
- *   - append any missing built-ins, then any missing pins, at the end.
- * Pure: no I/O, safe to unit-test and to run on every read.
+ *   - clamp pins to the fixed install budget;
+ *   - drop unknown / duplicate ids from `order`.
+ * The order is left as the stored SUBSET — built-ins and pins are NOT
+ * force-appended (§7.1c), so an undocked tile stays undocked and the empty Dock
+ * round-trips. Pure: no I/O, safe to unit-test and to run on every read.
  */
 export function reconcileDock(doc: DockDoc | null | undefined, builtinIds: string[] = BUILTIN_DOCK_IDS): DockDoc {
   const pins: DockPin[] = [];
@@ -87,42 +93,48 @@ export function reconcileDock(doc: DockDoc | null | undefined, builtinIds: strin
       seen.add(id);
     }
   }
-  for (const id of builtinIds) {
-    if (!seen.has(id)) {
-      order.push(id);
-      seen.add(id);
-    }
-  }
-  for (const id of pinIds) {
-    if (!seen.has(id)) {
-      order.push(id);
-      seen.add(id);
-    }
-  }
   return { order, pins: clampedPins };
 }
 
+/**
+ * The pre-load default Dock: every built-in docked, nothing installed — matching
+ * the server's seed for a fresh instance. Used only as the initial state before
+ * the server document loads (avoids a flash of an empty Dock); once the GET
+ * resolves, reconcileDock takes over and an undocked built-in stays undocked.
+ */
+export function seedDefaultDock(builtinIds: string[] = BUILTIN_DOCK_IDS): DockDoc {
+  return { order: [...builtinIds], pins: [] };
+}
+
 export interface DockValue {
-  /** Reconciled resident-tile order (built-in ids + `show:<id>` pins). */
+  /** Reconciled docked subset (built-in ids + `show:<id>` pins), in user order. */
   order: string[];
+  /** Installed AI pages (built-ins are implicitly installed, not listed here). */
   pins: DockPin[];
-  /** Whether a session's Show Page is currently pinned. */
+  /** Whether a session's Show Page is installed (pinned). */
   isPinned: (sessionId: string) => boolean;
+  /** Whether a Dock id (built-in or `show:<id>`) is currently in the Dock. */
+  isDocked: (dockId: string) => boolean;
   /** The pin record for a session, or null. */
   pinFor: (sessionId: string) => DockPin | null;
-  /** Pin a session's Show Page (optimistic; idempotent). */
+  /** Install a session's Show Page — also docks it (optimistic; idempotent). */
   pin: (sessionId: string) => Promise<void>;
-  /** Unpin a session's Show Page (optimistic; idempotent). */
+  /** Uninstall a session's Show Page — removes it from install + Dock (optimistic; idempotent). */
   unpin: (sessionId: string) => Promise<void>;
+  /** Add a known tile (built-in or installed page) to the Dock (optimistic; idempotent). */
+  dock: (dockId: string) => Promise<void>;
+  /** Remove a tile from the Dock, keeping it installed (optimistic; idempotent). */
+  undock: (dockId: string) => Promise<void>;
   /** Persist a new resident-tile order (optimistic; rolls back if rejected). */
   setOrder: (order: string[]) => Promise<void>;
 }
 
 const DockContext = createContext<DockValue | null>(null);
 
-// Builtins-only default so the Dock renders its resident tiles immediately (no
-// flicker) before the server document loads.
-const DEFAULT_DOC: DockDoc = reconcileDock({ order: [], pins: [] });
+// Every-built-in-docked default so the Dock renders its resident tiles
+// immediately (no flicker) before the server document loads. Matches the
+// server's fresh-instance seed; reconcileDock takes over once the GET resolves.
+const DEFAULT_DOC: DockDoc = seedDefaultDock();
 
 export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const api = useApi();
@@ -226,24 +238,56 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const setOrder = useCallback(
-    (order: string[]): Promise<void> =>
-      runMutation({ order, pins: docRef.current.pins }, () => api.setDockOrder(order)),
+    (order: string[]): Promise<void> => {
+      // Send the client's baseline id set (built-ins ∪ installed pins) so the
+      // server can reject a STALE reorder: because omission now means "undock", a
+      // tab that hasn't seen a pin another tab just installed would otherwise
+      // silently undock it. On rejection runMutation re-syncs from the server.
+      const known = [...BUILTIN_DOCK_IDS, ...docRef.current.pins.map((p) => showDockId(p.session_id))];
+      return runMutation({ order, pins: docRef.current.pins }, () => api.setDockOrder(order, known));
+    },
     [api, runMutation],
   );
 
+  // Dock / undock a KNOWN tile (built-in or installed page) by editing the order
+  // subset — install membership (pins) is untouched, so undocking keeps the page
+  // installed. Both go through setOrder (PUT order), reusing its optimistic +
+  // rollback path; idempotent so a redundant toggle makes no request.
+  const dock = useCallback(
+    (dockId: string): Promise<void> => {
+      const cur = docRef.current.order;
+      if (cur.includes(dockId)) return Promise.resolve();
+      return setOrder([...cur, dockId]);
+    },
+    [setOrder],
+  );
+
+  const undock = useCallback(
+    (dockId: string): Promise<void> => {
+      const cur = docRef.current.order;
+      if (!cur.includes(dockId)) return Promise.resolve();
+      return setOrder(cur.filter((id) => id !== dockId));
+    },
+    [setOrder],
+  );
+
   const pinnedSessions = useMemo(() => new Set(doc.pins.map((p) => p.session_id)), [doc.pins]);
+  const dockedSet = useMemo(() => new Set(doc.order), [doc.order]);
 
   const value = useMemo<DockValue>(
     () => ({
       order: doc.order,
       pins: doc.pins,
       isPinned: (sessionId: string) => pinnedSessions.has(sessionId),
+      isDocked: (dockId: string) => dockedSet.has(dockId),
       pinFor: (sessionId: string) => doc.pins.find((p) => p.session_id === sessionId) ?? null,
       pin,
       unpin,
+      dock,
+      undock,
       setOrder,
     }),
-    [doc, pinnedSessions, pin, unpin, setOrder],
+    [doc, pinnedSessions, dockedSet, pin, unpin, dock, undock, setOrder],
   );
 
   return <DockContext.Provider value={value}>{children}</DockContext.Provider>;
