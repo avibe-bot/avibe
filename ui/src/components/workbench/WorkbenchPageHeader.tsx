@@ -19,6 +19,8 @@ export interface WorkbenchPageHeaderProps {
   accent?: Accent;
   /** Right-aligned actions (buttons). */
   actions?: ReactNode;
+  /** Move a dense action group below the title on narrow mobile screens. */
+  stackActionsOnMobile?: boolean;
 }
 
 /**
@@ -27,9 +29,16 @@ export interface WorkbenchPageHeaderProps {
  * headers are identical bar the icon + copy). Extracted so capability pages
  * reuse one header instead of re-rolling the markup.
  */
-export function WorkbenchPageHeader({ icon, title, subtitle, accent = 'mint', actions }: WorkbenchPageHeaderProps) {
+export function WorkbenchPageHeader({
+  icon,
+  title,
+  subtitle,
+  accent = 'mint',
+  actions,
+  stackActionsOnMobile = false,
+}: WorkbenchPageHeaderProps) {
   return (
-    <div className="flex items-center gap-4">
+    <div className={clsx('flex items-center gap-4', stackActionsOnMobile && 'flex-wrap')}>
       <div
         className={clsx(
           'flex size-10 shrink-0 items-center justify-center rounded-[10px] border',
@@ -38,11 +47,20 @@ export function WorkbenchPageHeader({ icon, title, subtitle, accent = 'mint', ac
       >
         {icon}
       </div>
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <h1 className="text-[24px] font-bold text-foreground">{title}</h1>
-        {subtitle ? <p className="text-[12px] text-muted">{subtitle}</p> : null}
+        {subtitle ? <p className="text-[12px] leading-snug text-muted">{subtitle}</p> : null}
       </div>
-      {actions}
+      {actions ? (
+        <div
+          className={clsx(
+            'flex shrink-0 items-center gap-2',
+            stackActionsOnMobile && 'w-full min-w-0 flex-wrap justify-end sm:w-auto sm:flex-nowrap',
+          )}
+        >
+          {actions}
+        </div>
+      ) : null}
     </div>
   );
 }

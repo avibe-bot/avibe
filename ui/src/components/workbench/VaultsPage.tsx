@@ -783,24 +783,38 @@ export const VaultsPage: React.FC = () => {
         icon={<KeyRound className="size-6" />}
         title={t('vaults.title')}
         subtitle={t('vaults.subtitle')}
+        stackActionsOnMobile
         actions={
           <>
-            <VaultLockIndicator />
-            <Button variant={showAudit ? 'secondary' : 'ghost'} size="icon" onClick={toggleAudit} aria-label={t('vaults.history')}>
+            <VaultLockIndicator className="max-sm:order-last max-sm:w-full max-sm:justify-between" />
+            <Button
+              variant={showAudit ? 'secondary' : 'ghost'}
+              size="icon"
+              className="max-sm:border max-sm:border-border max-sm:bg-surface"
+              onClick={toggleAudit}
+              aria-label={t('vaults.history')}
+            >
               <History className="size-4" />
             </Button>
             <Button
               variant={showSettings ? 'secondary' : 'ghost'}
               size="icon"
+              className="max-sm:border max-sm:border-border max-sm:bg-surface"
               onClick={() => setShowSettings(true)}
               aria-label={t('vaults.settings.title')}
             >
               <Settings className="size-4" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={refresh} aria-label={t('vaults.refresh')}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="max-sm:border max-sm:border-border max-sm:bg-surface"
+              onClick={refresh}
+              aria-label={t('vaults.refresh')}
+            >
               <RefreshCw className="size-4" />
             </Button>
-            <Button onClick={() => setAdding(true)}>
+            <Button className="max-sm:flex-1" onClick={() => setAdding(true)}>
               <Plus className="size-4" />
               {t('vaults.add')}
             </Button>

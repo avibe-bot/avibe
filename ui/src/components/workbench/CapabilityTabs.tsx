@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Activity, Bot, KeyRound, WandSparkles } from 'lucide-react';
@@ -17,6 +18,12 @@ const TABS = [
 export const CapabilityTabs: React.FC = () => {
   const { t } = useTranslation();
   const { pathname } = useLocation();
+  const activeTabRef = useRef<HTMLAnchorElement | null>(null);
+
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [pathname]);
+
   return (
     <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-0.5 md:hidden">
       {TABS.map(({ to, icon: Icon, key }) => {
@@ -24,6 +31,7 @@ export const CapabilityTabs: React.FC = () => {
         return (
           <NavLink
             key={to}
+            ref={active ? activeTabRef : undefined}
             to={to}
             className={clsx(
               'flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[12.5px] font-medium transition',
