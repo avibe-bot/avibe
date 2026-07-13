@@ -746,6 +746,7 @@
       "deletedNotice": "Deleted \"{{name}}\"",
       "deletedBatchNotice": "Deleted {{count}} items",
       "movedNotice": "Moved \"{{name}}\"",
+      "movedBatchNotice": "Moved {{count}} items",
       "searchPlaceholder": "Search",
       "colName": "Name",
       "colSize": "Size",

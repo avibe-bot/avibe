@@ -561,9 +561,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // move reverts with a plain reverse move. The bar auto-dismisses; dismissal ≠ token expiry (the
   // backend keeps staged deletes far longer), it just keeps the UI calm.
   type DeleteUndoItem = { label: string; token: string };
+  type MoveUndoItem = { label: string; from: string; to: string };
   type UndoEntry =
     | { kind: 'delete'; label: string; count: number; items: DeleteUndoItem[] }
-    | { kind: 'move'; label: string; from: string; to: string };
+    | { kind: 'move'; label: string; count: number; items: MoveUndoItem[] };
   const [undoEntry, setUndoEntry] = useState<UndoEntry | null>(null);
   const [undoBusy, setUndoBusy] = useState(false);
   const undoTimerRef = useRef<number | null>(null);
@@ -618,39 +619,49 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           if (cur !== entry) return cur;
           if (retryable.length === 0) return null;
           undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
-          return { ...entry, count: retryable.length, items: retryable };
+          return { ...entry, label: retryable[0].label, count: retryable.length, items: retryable };
         });
       }
       setUndoBusy(false);
       return;
     }
-    try {
-      await movePath(entry.from, entry.to);
-      setError(null);
-      refreshAll();
-      // Only clear OUR entry: a slow in-flight undo must not wipe the bar of a NEWER action the
-      // user performed meanwhile (that entry's own timer still governs it).
-      setUndoEntry((cur) => (cur === entry ? null : cur));
-    } catch (e: unknown) {
-      // exists → the original spot is occupied again; expired → the staged copy is gone. Both land
-      // in the standard error strip via the shared code→message mapping.
-      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.undoFailed')));
-      const code = e instanceof FilesApiError ? e.code : null;
-      if (code === 'exists' || code === 'expired') {
-        // Terminal: the revert can never succeed — drop the bar.
-        setUndoEntry((cur) => (cur === entry ? null : cur));
-      } else {
-        // Transient (network etc.): the staged copy / reverse move is still viable — keep the bar
-        // for a retry, with a fresh dismiss window (the original timer was cleared above).
-        setUndoEntry((cur) => {
-          if (cur !== entry) return cur;
-          undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
-          return cur;
-        });
+    const failures: { item: MoveUndoItem; error: unknown }[] = [];
+    // Reverse the original move order so nested or otherwise dependent selections unwind safely.
+    for (const item of [...entry.items].reverse()) {
+      try {
+        await movePath(item.from, item.to);
+      } catch (error) {
+        failures.push({ item, error });
       }
-    } finally {
-      setUndoBusy(false);
     }
+    refreshAll();
+    if (failures.length === 0) {
+      setError(null);
+      setUndoEntry((cur) => (cur === entry ? null : cur));
+    } else {
+      setError(
+        failures.length === 1 && entry.items.length === 1
+          ? fileBrowserErrorMessage(failures[0].error, t, t('apps.fileBrowser.errors.undoFailed'))
+          : failures
+              .map(({ item, error }) =>
+                t('apps.fileBrowser.operationError', {
+                  name: item.label,
+                  message: fileBrowserErrorMessage(error, t, t('apps.fileBrowser.errors.undoFailed')),
+                }),
+              )
+              .join(' · '),
+      );
+      const retryable = failures
+        .filter(({ error }) => !(error instanceof FilesApiError && (error.code === 'exists' || error.code === 'expired')))
+        .map(({ item }) => item);
+      setUndoEntry((cur) => {
+        if (cur !== entry) return cur;
+        if (retryable.length === 0) return null;
+        undoTimerRef.current = window.setTimeout(() => setUndoEntry(null), 8000);
+        return { ...entry, label: retryable[0].label, count: retryable.length, items: retryable };
+      });
+    }
+    setUndoBusy(false);
   }, [undoEntry, undoBusy, refreshAll, t]);
 
   // ---- Delete (product ConfirmDialog + post-delete Undo) ----------------------------------------
@@ -713,20 +724,24 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // back); an overwrite (Replace) offers none, since the clobbered file is gone and can't be
   // losslessly restored, so we don't imply it can.
   const applyMove = useCallback(
-    async (item: RowItem, destDir: string, name: string, overwrite: boolean, refreshAfter = true) => {
+    async (item: RowItem, destDir: string, name: string, overwrite: boolean, refreshAfter = true, manageUndo = true) => {
       const moved = joinPath(destDir, name);
       await movePath(item.full, moved, overwrite);
       if (refreshAfter) setError(null);
+      const undoItem: MoveUndoItem = { label: name, from: moved, to: item.full };
       if (overwrite) {
         // Replace is a non-undoable mutation: any older move/delete undo bar now describes a stale
         // world (its paths may point at the entry we just clobbered), so clear it — mirroring the
         // permanent-delete path — rather than leaving a stale Undo that could move the wrong file.
-        if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
-        setUndoEntry(null);
-      } else {
-        showUndo({ kind: 'move', label: name, from: moved, to: item.full });
+        if (manageUndo) {
+          if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+          setUndoEntry(null);
+        }
+      } else if (manageUndo) {
+        showUndo({ kind: 'move', label: name, count: 1, items: [undoItem] });
       }
       if (refreshAfter) refreshAll();
+      return overwrite ? null : undoItem;
     },
     [showUndo, refreshAll],
   );
@@ -775,21 +790,22 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   }, []);
 
   const moveOne = useCallback(
-    async (item: RowItem, destDir: string, refreshAfter: boolean) => {
+    async (item: RowItem, destDir: string, refreshAfter: boolean, manageUndo: boolean) => {
       try {
-        await applyMove(item, destDir, item.entry.name, false, refreshAfter);
-        return true;
+        const undo = await applyMove(item, destDir, item.entry.name, false, refreshAfter, manageUndo);
+        return { completed: true, undo };
       } catch (error) {
         if (!(error instanceof FilesApiError) || error.code !== 'exists') throw error;
       }
-      return requestNameClash(item, destDir, async (action) => {
+      let undo: MoveUndoItem | null = null;
+      const completed = await requestNameClash(item, destDir, async (action) => {
         if (action === 'replace') {
-          await applyMove(item, destDir, item.entry.name, true, refreshAfter);
+          undo = await applyMove(item, destDir, item.entry.name, true, refreshAfter, manageUndo);
           return;
         }
         for (let n = 2; n <= MAX_KEEP_BOTH; n++) {
           try {
-            await applyMove(item, destDir, dedupeName(item.entry.name, n), false, refreshAfter);
+            undo = await applyMove(item, destDir, dedupeName(item.entry.name, n), false, refreshAfter, manageUndo);
             return;
           } catch (error) {
             if (error instanceof FilesApiError && error.code === 'exists') continue;
@@ -798,6 +814,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         }
         throw new Error(t('apps.fileBrowser.moveClashTooMany'));
       });
+      return { completed, undo };
     },
     [applyMove, requestNameClash, t],
   );
@@ -808,19 +825,36 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       if (candidates.length === 0) return;
       const batch = candidates.length > 1;
       const failures: string[] = [];
+      const batchUndo: MoveUndoItem[] = [];
+      let batchUndoable = true;
       let moved = 0;
       for (const item of candidates) {
         try {
-          if (await moveOne(item, destDir, !batch)) moved += 1;
+          const result = await moveOne(item, destDir, !batch, !batch);
+          if (result.completed) {
+            moved += 1;
+            if (result.undo) batchUndo.push(result.undo);
+            else batchUndoable = false;
+          }
         } catch (error) {
           const message = fileBrowserErrorMessage(error, t, t('apps.fileBrowser.errors.moveFailed'));
           failures.push(batch ? t('apps.fileBrowser.operationError', { name: item.entry.name, message }) : message);
         }
       }
-      if (batch && moved > 0) refreshAll();
+      if (batch && moved > 0) {
+        if (batchUndoable && batchUndo.length > 0) {
+          showUndo({ kind: 'move', label: batchUndo[0].label, count: batchUndo.length, items: batchUndo });
+        } else {
+          // One Replace makes the batch only partially reversible. Offer no Undo rather than imply
+          // the overwritten destination can be recovered alongside the ordinary moves.
+          if (undoTimerRef.current != null) window.clearTimeout(undoTimerRef.current);
+          setUndoEntry(null);
+        }
+        refreshAll();
+      }
       if (batch || failures.length > 0) setError(failures.length ? failures.join(' · ') : null);
     },
-    [moveOne, refreshAll, t],
+    [moveOne, refreshAll, showUndo, t],
   );
 
   const moveInto = useCallback(
@@ -1133,14 +1167,23 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
   const copyOne = useCallback(
     async (item: RowItem, destDir: string) => {
-      try {
-        await applyCopy(item, destDir, item.entry.name, false);
-        return true;
-      } catch (error) {
-        if (!(error instanceof FilesApiError) || error.code !== 'exists') throw error;
+      // Pasting back into the source parent is inherently a clash. In particular, the backend
+      // rejects a directory/symlink `src === dst` before its normal `exists` response, so enter the
+      // same Replace / Keep both decision directly instead of surfacing invalid_path/invalid_copy.
+      const sameParent = item.dir === destDir;
+      if (!sameParent) {
+        try {
+          await applyCopy(item, destDir, item.entry.name, false);
+          return true;
+        } catch (error) {
+          if (!(error instanceof FilesApiError) || error.code !== 'exists') throw error;
+        }
       }
       return requestNameClash(item, destDir, async (action) => {
         if (action === 'replace') {
+          // Replacing an entry with itself is already the requested end state. Treat it as a no-op;
+          // the backend must not be asked to destroy/rebuild a source through the same path.
+          if (sameParent) return;
           await applyCopy(item, destDir, item.entry.name, true);
           return;
         }
@@ -1216,6 +1259,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         // Preserve ordering and avoid collapsing the whole batch into one browser event burst.
         await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
       }
+      // Advance the capped batch: a second Download action now starts with the next selected files
+      // instead of repeating the same first ten. Concurrent selection changes are preserved.
+      const downloaded = new Set(toDownload.map((item) => item.full));
+      setSelected((current) => new Set([...current].filter((path) => !downloaded.has(path))));
       const hints: string[] = [];
       const skippedDirs = items.length - files.length;
       if (skippedDirs > 0) hints.push(t('apps.fileBrowser.downloadFoldersSkipped', { count: skippedDirs }));
@@ -1624,8 +1671,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         {undoEntry && (
           <div className="flex items-center gap-2 border-t border-border bg-surface-2/80 px-3 py-1.5 text-[12px]">
             <span className="min-w-0 flex-1 truncate text-muted">
-              {undoEntry.kind === 'delete' && undoEntry.count > 1
-                ? t('apps.fileBrowser.deletedBatchNotice', { count: undoEntry.count })
+              {undoEntry.count > 1
+                ? t(undoEntry.kind === 'delete' ? 'apps.fileBrowser.deletedBatchNotice' : 'apps.fileBrowser.movedBatchNotice', { count: undoEntry.count })
                 : t(undoEntry.kind === 'delete' ? 'apps.fileBrowser.deletedNotice' : 'apps.fileBrowser.movedNotice', { name: undoEntry.label })}
             </span>
             <Button

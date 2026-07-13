@@ -746,6 +746,7 @@
       "deletedNotice": "已删除“{{name}}”",
       "deletedBatchNotice": "已删除 {{count}} 个项目",
       "movedNotice": "已移动“{{name}}”",
+      "movedBatchNotice": "已移动 {{count}} 个项目",
       "searchPlaceholder": "搜索",
       "colName": "名称",
       "colSize": "大小",
