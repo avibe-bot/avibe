@@ -26,7 +26,6 @@ export interface ShowPage {
 }
 
 type ShowPagePatch = Pick<ShowPage, 'session_id'> & Partial<ShowPage>;
-const INVENTORY_REFRESH_EVENTS = new Set(['created', 'user_message', 'show_event']);
 
 export function replaceShowPageTitleIfCurrent(
   pages: ShowPage[],
@@ -120,9 +119,9 @@ export function useShowPageInventory(enabled = true) {
           requestLoad();
           return;
         }
-        // A newly ensured Show Page is followed by the prompt's user_message;
-        // show_event covers pages first materialized by runtime activity.
-        if (INVENTORY_REFRESH_EVENTS.has(data.event)) requestLoad();
+        // Runtime Show activity can materialize a page outside this browser.
+        // Normal session/user-message events do not change this inventory.
+        if (data.event === 'show_event') requestLoad();
       },
     });
   }, [api, enabled, mergePage, removePage, requestLoad]);

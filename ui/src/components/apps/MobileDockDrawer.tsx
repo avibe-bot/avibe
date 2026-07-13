@@ -7,6 +7,7 @@ import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registr
 import { showPageAvatar } from '../../apps/showPageAvatar';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useAuthAccount } from '../../lib/useAuthAccount';
+import { useShowPageInventory } from '../useShowPages';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
 import { mobileRouteForDockId } from './mobileDock';
 
@@ -30,6 +31,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   const navigate = useNavigate();
   const { order, pins, undock, unpin } = useDock();
   const { email } = useAuthAccount();
+  const { pages } = useShowPageInventory(open);
 
   // Long-press manage sheet (touch): a bottom action sheet keyed to a tile. Tap
   // opens the app; a press-hold opens the sheet. A cursor-positioned ContextMenu
@@ -51,6 +53,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   };
 
   const pinBySession = useMemo(() => new Map(pins.map((pin) => [pin.session_id, pin])), [pins]);
+  const pageBySession = useMemo(() => new Map(pages.map((page) => [page.session_id, page])), [pages]);
 
   // Reset transient sub-surfaces while closed so a reopen starts clean — the
   // codebase's effect-free "adjust state during render" pattern (cf. LibraryApp's
@@ -67,7 +70,10 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   const resolveTile = (id: string): ResidentTile | null => {
     const sessionId = dockIdToSession(id);
     if (sessionId !== null) {
-      const title = pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
+      const page = pageBySession.get(sessionId);
+      const title = page
+        ? page.title?.trim() || t('chat.untitled')
+        : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
       return { kind: 'showpage', id, sessionId, title };
     }
     const def = APP_REGISTRY[id as AppId];
