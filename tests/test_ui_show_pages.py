@@ -1011,6 +1011,29 @@ def test_public_show_page_denies_at_fs_symlinked_home_ancestor_escape(monkeypatc
     assert manager.calls == []
 
 
+def test_public_show_page_denies_at_fs_extra_leading_slash_symlink_escape(monkeypatch, tmp_path):
+    # An `@fs///<ws>/x` request (one extra slash) must not dodge the workspace
+    # confinement: redundant leading slashes are collapsed before the prefix check.
+    # Assert on the gate directly so the exact `//` spelling reaches it regardless
+    # of any client URL normalization.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "public")
+    workspace = paths.get_show_page_dir("ses123")
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("TOPSECRET", encoding="utf-8")
+    os.symlink(outside, workspace / "pwn.txt")
+
+    decoded = f"@fs//{workspace.as_posix()}/pwn.txt"  # `@fs///<ws>/pwn.txt`
+    assert ui_server._is_show_page_runtime_denied_path(
+        decoded, session_id="ses123", public=True
+    )
+    # The same request stays allowed on the private authoring surface.
+    assert not ui_server._is_show_page_runtime_denied_path(
+        decoded, session_id="ses123", public=False
+    )
+
+
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

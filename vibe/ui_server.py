@@ -7895,6 +7895,13 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bo
         and not re.match(r"^[A-Za-z]:", fs_remainder)
     ):
         fs_remainder = "/" + fs_remainder
+    # Collapse redundant leading POSIX slashes (e.g. an `@fs///<ws>/x` request
+    # arrives here as `//<ws>/x`). pathlib keeps a `//` prefix in its parts and
+    # os.path.normpath preserves it, so without this the workspace-prefix checks
+    # below would miss both spellings while Vite still serves the collapsed path —
+    # reopening the escape. A Windows drive/UNC path never starts with `/`.
+    if fs_remainder.startswith("//"):
+        fs_remainder = "/" + fs_remainder.lstrip("/")
     fs_path = Path(fs_remainder)
     if not fs_path.is_absolute():
         # A synthetic/relative @fs form (prewarming/tests). Allow only relocated
