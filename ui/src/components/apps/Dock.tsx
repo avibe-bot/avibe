@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Reorder } from 'framer-motion';
 import { Copy, ExternalLink, LayoutGrid, PinOff, Plus, SquarePlus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,6 +9,7 @@ import { showPageAvatar, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
+import { useShowPageInventory } from '../useShowPages';
 
 // A resident Dock tile resolved from a persisted Dock id: either a built-in app
 // (files/terminal/editor) or a pinned Show Page (`show:<session_id>`).
@@ -28,6 +29,7 @@ export const Dock: React.FC = () => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const { order, pins, undock, setOrder } = useDock();
+  const { pages } = useShowPageInventory();
   const { windows, focusedId } = wm;
   const minimized = windows.filter((w) => w.minimized);
 
@@ -35,30 +37,39 @@ export const Dock: React.FC = () => {
   const [menu, setMenu] = useState<{ x: number; y: number; item: ResidentItem } | null>(null);
 
   const pinBySession = useMemo(() => new Map(pins.map((pin) => [pin.session_id, pin])), [pins]);
+  const pageBySession = useMemo(() => new Map(pages.map((page) => [page.session_id, page])), [pages]);
 
   const resolveItem = useMemo(() => {
     return (id: string): ResidentItem | null => {
       const sessionId = dockIdToSession(id);
       if (sessionId !== null) {
-        const title = pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
+        const page = pageBySession.get(sessionId);
+        const title = page
+          ? page.title?.trim() || t('chat.untitled')
+          : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
         return { kind: 'showpage', id, sessionId, title };
       }
       const def = APP_REGISTRY[id as AppId];
       return def ? { kind: 'builtin', id, def } : null;
     };
-  }, [pinBySession]);
+  }, [pageBySession, pinBySession, t]);
 
   // Local, drag-mutable copy of the order; framer's Reorder updates it live, and
   // it re-syncs whenever the server order changes (load / pin / unpin elsewhere).
-  const [localOrder, setLocalOrder] = useState<string[]>(order);
-  useEffect(() => setLocalOrder(order), [order]);
-  const localRef = useRef(localOrder);
-  localRef.current = localOrder;
+  const [dragOrder, setDragOrder] = useState<string[] | null>(null);
+  const dragRef = useRef<string[] | null>(null);
+  const localOrder = dragOrder ?? order;
+  const reorder = (next: string[]) => {
+    dragRef.current = next;
+    setDragOrder(next);
+  };
 
   // Persist on drop — only when the order actually changed (a plain click can
   // fire a spurious drag-end), so an unchanged reorder makes no request.
   const commitOrder = () => {
-    const next = localRef.current;
+    const next = dragRef.current ?? order;
+    dragRef.current = null;
+    setDragOrder(null);
     if (next.length === order.length && next.every((id, i) => id === order[i])) return;
     void setOrder(next);
   };
@@ -136,8 +147,8 @@ export const Dock: React.FC = () => {
           apps the resident row would otherwise run off-screen (the popover sits at
           the bottom-left), leaving later tiles unreachable for open/reorder/unpin. */}
       <div className="relative flex max-w-[min(88vw,880px)] items-end gap-2 overflow-x-auto overscroll-x-contain rounded-2xl border border-border-strong bg-surface-2/95 p-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)] backdrop-blur-xl">
-        <Reorder.Group axis="x" values={localOrder} onReorder={setLocalOrder} as="div" className="flex items-end gap-2">
-          {localOrder.map((id) => {
+        <Reorder.Group axis="x" values={localOrder} onReorder={reorder} as="div" className="flex items-end gap-2">
+          {localOrder.map((id, index) => {
             const item = resolveItem(id);
             if (!item) return null;
             const running = windowsFor(item).length > 0;
@@ -159,7 +170,9 @@ export const Dock: React.FC = () => {
                 <div className="relative">
                   <button
                     type="button"
-                    title={label}
+                    title={
+                      index < 9 ? `${label} · ${t('apps.dock.switchShortcut', { number: index + 1 })}` : label
+                    }
                     aria-label={label}
                     onClick={(e) => (e.metaKey || e.ctrlKey || e.altKey ? openNew(item) : activate(item))}
                     onContextMenu={(e) => {

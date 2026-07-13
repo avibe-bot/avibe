@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppWindow as AppWindowIcon,
   Check,
@@ -7,6 +7,8 @@ import {
   Copy,
   ExternalLink,
   Link2,
+  Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCw,
@@ -18,6 +20,7 @@ import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 
 import { useDock } from '../context/DockContext';
+import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
@@ -27,6 +30,7 @@ import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import { Input } from './ui/input';
 import { SegmentedRadio, type SegmentedTone } from './ui/segmented';
 
 const LABEL = 'font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted';
@@ -42,6 +46,7 @@ const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; tone
 
 interface RowProps {
   page: ShowPage;
+  now: number;
   expanded: boolean;
   busy: boolean;
   copied: boolean;
@@ -49,6 +54,7 @@ interface RowProps {
   onOpen: () => void;
   onToggleExpand: () => void;
   onToggleInstall: (next: boolean) => void;
+  onRename: (title: string | null) => Promise<void>;
   onSetVisibility: (visibility: Visibility) => void;
   onRotate: () => void;
   onCopy: () => void;
@@ -57,6 +63,7 @@ interface RowProps {
 
 function ShowPageRow({
   page,
+  now,
   expanded,
   busy,
   copied,
@@ -64,6 +71,7 @@ function ShowPageRow({
   onOpen,
   onToggleExpand,
   onToggleInstall,
+  onRename,
   onSetVisibility,
   onRotate,
   onCopy,
@@ -79,7 +87,7 @@ function ShowPageRow({
   const relative = (iso: string): string => {
     const then = new Date(iso).getTime();
     if (Number.isNaN(then)) return '';
-    const seconds = Math.round((then - Date.now()) / 1000);
+    const seconds = Math.round((then - now) / 1000);
     const rtf = new Intl.RelativeTimeFormat(i18n.language, { numeric: 'auto' });
     const abs = Math.abs(seconds);
     if (abs < 60) return rtf.format(Math.round(seconds), 'second');
@@ -173,6 +181,8 @@ function ShowPageRow({
         <div className="bg-surface-2 px-5 pb-6 pt-2">
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
             <div className="flex flex-col gap-5">
+              <InlineTitleRename page={page} disabled={busy} onRename={onRename} />
+
               <div className="flex flex-col gap-2">
                 <span className={LABEL}>{t('showPages.visibilityLabel')}</span>
                 <div className="max-w-[360px]">
@@ -285,6 +295,93 @@ function ShowPageRow({
   );
 }
 
+const InlineTitleRename: React.FC<{
+  page: ShowPage;
+  disabled: boolean;
+  onRename: (title: string | null) => Promise<void>;
+}> = ({ page, disabled, onRename }) => {
+  const { t } = useTranslation();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(page.title ?? '');
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const editingRef = useRef(false);
+
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+
+  const start = () => {
+    if (disabled || saving) return;
+    setDraft(page.title ?? '');
+    editingRef.current = true;
+    setEditing(true);
+  };
+
+  const cancel = () => {
+    editingRef.current = false;
+    setDraft(page.title ?? '');
+    setEditing(false);
+  };
+
+  const commit = () => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    setEditing(false);
+    const next = draft.trim() || null;
+    if (next === page.title) return;
+    setSaving(true);
+    void onRename(next)
+      .catch(() => undefined)
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <span className={LABEL}>{t('showPages.nameLabel')}</span>
+      {editing ? (
+        <Input
+          ref={inputRef}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              commit();
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              event.stopPropagation();
+              cancel();
+            }
+          }}
+          placeholder={t('chat.titlePlaceholder')}
+          aria-label={t('showPages.nameLabel')}
+          className="h-9 max-w-[360px] px-3 text-[13px]"
+        />
+      ) : (
+        <div className="flex max-w-[360px] items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
+          <span className="min-w-0 flex-1 truncate text-[13px] text-foreground">
+            {page.title?.trim() || t('chat.untitled')}
+          </span>
+          <button
+            type="button"
+            onClick={start}
+            disabled={disabled || saving}
+            title={t('showPages.rename')}
+            aria-label={t('showPages.rename')}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Pencil className="size-3.5" />}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // The full Show Pages inventory view (the "AI" tab): search + visibility filter +
 // rows that OPEN the page as an app window on click, each with a state-aware
 // install toggle (添加到 App ↔ 移出) and an explicit chevron for the share-link
@@ -296,16 +393,24 @@ export function ShowPagesView({
   busyId,
   setVisibility,
   rotate,
+  rename,
   onShareIdSaved,
   reload,
   onOpenApp,
 }: ShowPagesController & { onOpenApp?: (sessionId: string, title?: string) => void }) {
   const { t } = useTranslation();
   const { isPinned, pin, unpin } = useDock();
+  const { windows, setParams, setTitle } = useWindowManager();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<ShowPageFilter>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const copy = async (page: ShowPage) => {
     const href = copyHref(page);
@@ -316,6 +421,27 @@ export function ShowPagesView({
   };
 
   const visible = useMemo(() => filterShowPages(pages, filter, search), [pages, filter, search]);
+
+  const renamePage = async (page: ShowPage, title: string | null) => {
+    const previousTitle = page.title?.trim() || t('chat.untitled');
+    const nextTitle = title?.trim() || t('chat.untitled');
+    const matchingWindows = windows.filter(
+      (win) => win.appId === 'showpage' && win.params?.sessionId === page.session_id,
+    );
+    matchingWindows.forEach((win) => {
+      setTitle(win.id, nextTitle);
+      setParams(win.id, { title: nextTitle });
+    });
+    try {
+      await rename(page, title);
+    } catch (error) {
+      matchingWindows.forEach((win) => {
+        setTitle(win.id, previousTitle);
+        setParams(win.id, { title: previousTitle });
+      });
+      throw error;
+    }
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -361,6 +487,7 @@ export function ShowPagesView({
             <ShowPageRow
               key={page.session_id}
               page={page}
+              now={now}
               expanded={expandedId === page.session_id}
               busy={busyId === page.session_id}
               copied={copiedId === page.session_id}
@@ -368,6 +495,7 @@ export function ShowPagesView({
               onOpen={() => onOpenApp?.(page.session_id, page.title ?? undefined)}
               onToggleExpand={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
               onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
+              onRename={(title) => renamePage(page, title)}
               onSetVisibility={(visibility) => setVisibility(page, visibility)}
               onRotate={() => rotate(page)}
               onCopy={() => copy(page)}
