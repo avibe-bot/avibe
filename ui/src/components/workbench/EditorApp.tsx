@@ -758,7 +758,10 @@ export const EditorApp: React.FC<{
                   tabs.map((tab) => (
                     <div key={tab.id} className={clsx('absolute inset-0', active === tab.id ? 'block' : 'hidden')}>
                       {tab.kind === 'preview' && tab.path ? (
-                        <FilePreview source={{ url: contentUrl(tab.path), name: tab.name }} />
+                        // Preview tabs have no chrome of their own (unlike the chat modal / Files
+                        // Preview window / mobile overlay), so hand the kernel a download action for
+                        // its image control cluster — the one image shell that would otherwise lack it.
+                        <FilePreview source={{ url: contentUrl(tab.path), name: tab.name }} onDownload={() => downloadFile(tab.path!)} />
                       ) : (
                         <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
                           <FileEditorPane
