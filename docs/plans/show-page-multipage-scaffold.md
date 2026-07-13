@@ -12,6 +12,24 @@ This is a **capability/affordance** change, not a content policy. It does not de
 page per topic/feature/conversation/history, is not append-only, and does not touch the
 durability/recovery scope owned by #669 (platform-owned Git checkpoints).
 
+## Refinement (owner feedback, 2026-07-13)
+
+The first cut of the demo over-prescribed: it shipped a content-heavy, bilingual (zh/en)
+landing page with a table-of-contents, cards, and a nested `items` list+detail demo, and
+it **replaced the user-facing "being generated" placeholder** that used to show right
+after "Visualize". That reads as a template the agent must follow, and shows the user a
+fake demo instead of a progress state. The scaffold was slimmed back to the affordance:
+
+- `src/pages/index.tsx` is a clean **English placeholder** ("Your page is being
+  generated…") — what the user sees while the agent builds. It renders one built-in
+  component (`Card`) and leaves `Button`/`Badge` as commented imports to hint the UI kit.
+- `src/pages/second.tsx` is a **one-line** example page — just enough to show "add a file
+  under `src/pages/` = add a route".
+- Removed: the `items` list/detail pages, the bilingual `t()` helper + `activeLocale`, and
+  the nav machinery (`navItems`/`titleCase`) — the app shell no longer renders a nav.
+- The file-based hash router (discovery, nesting, `[param]`, deep-link/refresh) is
+  unchanged; the starter is English-only and minimal.
+
 ## Serving model (verified against current code)
 
 - avibe proxies **both** private `/show/<id>/` and public `/p/<share>/` to the **same**
