@@ -7,7 +7,9 @@ import { AlertCircle, Loader2, Search } from 'lucide-react';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
+import { AppSearchResultSection } from './AppSearchResults';
 import { SearchResultGroup } from './SearchResultGroup';
+import { useAppSearchResults, useOpenSearchApp } from './useAppSearch';
 
 type SearchPaletteProps = {
   open: boolean;
@@ -26,64 +28,59 @@ const FooterHint: React.FC<{ keyLabel: string; label: string }> = ({ keyLabel, l
   </span>
 );
 
-// Desktop ⌘K command palette for message-content search (design.pen sUCZo).
+// Desktop ⌘K command palette for global app + message-content search
+// (design.pen sUCZo).
 // A centered 720px modal: a query row (mint search glyph + text input + an Esc
 // pill), a scrollable results area grouped by session via the shared
-// <SearchResultGroup>, and a footer of keyboard hints. Results are SERVER-driven
-// (useMessageSearch) — there is no client-side filtering. Selecting a hit routes
-// to /chat/<session>?msg=<message> (the ?msg contract is consumed by P5).
+// <SearchResultGroup>, and a footer of keyboard hints. Message hits stay
+// server-driven; the Apps section filters the built-in registry + Show Pages
+// inventory client-side. Selecting a message routes to /chat/<session>?msg=<message>.
 export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const { results, loading, error } = useMessageSearch(query);
+  const { results: appResults, loading: appsLoading } = useAppSearchResults(query, open);
+  const openSearchApp = useOpenSearchApp();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  // A flat, ordered list of (sessionId, messageId) — the navigation order the
-  // arrow keys walk, reading sessions top-to-bottom and matches within each.
-  const flatMatches = useMemo(
-    () =>
-      (results?.sessions ?? []).flatMap((session) =>
-        session.matches.map((match) => ({ sessionId: session.session_id, messageId: match.id })),
+  // One flat navigation order: Apps first, then the existing message groups.
+  const flatTargets = useMemo(
+    () => [
+      ...appResults.map((result) => ({ kind: 'app' as const, key: `app:${result.key}`, result })),
+      ...(results?.sessions ?? []).flatMap((session) =>
+        session.matches.map((match) => ({
+          kind: 'message' as const,
+          key: `message:${session.session_id}:${match.id}`,
+          sessionId: session.session_id,
+          messageId: match.id,
+        })),
       ),
-    [results],
+    ],
+    [appResults, results],
   );
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  // Reset the query (and the in-flight search via the hook) every time the
-  // palette reopens — the parent keeps it mounted, so without this a stale
-  // query/result set would flash on the next open.
-  useEffect(() => {
-    if (open) {
-      setQuery('');
-      setSelectedId(null);
-    }
-  }, [open]);
-
-  // Keep a valid highlight as results change: default to the first hit, and snap
-  // back to it if the previously selected message dropped out of the new set.
-  useEffect(() => {
-    if (flatMatches.length === 0) {
-      setSelectedId(null);
-      return;
-    }
-    setSelectedId((prev) =>
-      prev && flatMatches.some((m) => m.messageId === prev) ? prev : flatMatches[0].messageId,
-    );
-  }, [flatMatches]);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // A changed result set falls back to its first row without a state-sync
+  // effect. Arrow navigation only stores an explicit key while it stays valid.
+  const selectedTarget = flatTargets.find((target) => target.key === selectedKey) ?? flatTargets[0];
 
   const handleSelect = (sessionId: string, messageId: string) => {
     navigate(`/chat/${encodeURIComponent(sessionId)}?msg=${encodeURIComponent(messageId)}`);
     onClose();
   };
 
+  const handleAppSelect = (result: (typeof appResults)[number]) => {
+    openSearchApp(result);
+    onClose();
+  };
+
   const moveSelection = (delta: number) => {
-    if (flatMatches.length === 0) return;
-    const idx = flatMatches.findIndex((m) => m.messageId === selectedId);
-    const next = idx < 0 ? 0 : (idx + delta + flatMatches.length) % flatMatches.length;
-    setSelectedId(flatMatches[next].messageId);
+    if (flatTargets.length === 0) return;
+    const idx = flatTargets.findIndex((target) => target.key === selectedTarget?.key);
+    const next = idx < 0 ? 0 : (idx + delta + flatTargets.length) % flatTargets.length;
+    setSelectedKey(flatTargets[next].key);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -106,8 +103,8 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
       // row activates instead of the (possibly different) arrow-selected one.
       if (document.activeElement !== inputRef.current) return;
       e.preventDefault();
-      const target = flatMatches.find((m) => m.messageId === selectedId);
-      if (target) handleSelect(target.sessionId, target.messageId);
+      if (selectedTarget?.kind === 'app') handleAppSelect(selectedTarget.result);
+      else if (selectedTarget) handleSelect(selectedTarget.sessionId, selectedTarget.messageId);
     }
   };
 
@@ -115,15 +112,16 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   // SearchResultRow marks the active row with aria-current="true"; lean on that
   // rather than threading a new data attribute through the shared P2 component.
   useEffect(() => {
-    if (!selectedId || !listRef.current) return;
+    if (!selectedTarget || !listRef.current) return;
     const el = listRef.current.querySelector<HTMLElement>('[aria-current="true"]');
     el?.scrollIntoView({ block: 'nearest' });
-  }, [selectedId]);
+  }, [selectedTarget]);
 
   const trimmed = query.trim();
-  const hasResults = (results?.sessions.length ?? 0) > 0;
+  const hasMessageResults = (results?.sessions.length ?? 0) > 0;
+  const hasResults = appResults.length > 0 || hasMessageResults;
   const showError = trimmed.length > 0 && !loading && !!error;
-  const showEmpty = trimmed.length > 0 && !loading && results !== null && !hasResults;
+  const showEmpty = trimmed.length > 0 && !loading && !appsLoading && results !== null && !hasResults;
   const showHint = trimmed.length === 0;
 
   return (
@@ -136,6 +134,8 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             // Focus the query field rather than the first row, so typing flows
             // straight into the search input.
             e.preventDefault();
+            setQuery('');
+            setSelectedKey(null);
             inputRef.current?.focus();
           }}
           aria-describedby={undefined}
@@ -150,14 +150,17 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
               ref={inputRef}
               variant="bare"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setSelectedKey(null);
+              }}
               placeholder={t('workbench.search.placeholder')}
               className="min-w-0 flex-1 text-[17px]"
               aria-label={t('workbench.search.placeholder')}
               spellCheck={false}
               autoComplete="off"
             />
-            {loading && <Loader2 className="size-4 shrink-0 animate-spin text-muted" />}
+            {(loading || appsLoading) && <Loader2 className="size-4 shrink-0 animate-spin text-muted" />}
             <kbd className="shrink-0 rounded-md border border-border bg-foreground/[0.06] px-2 py-[3px] font-mono text-[11px] text-muted">
               {t('workbench.search.kbdEsc')}
             </kbd>
@@ -185,11 +188,20 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             )}
             {hasResults && (
               <div className="flex flex-col gap-1.5">
-                {results!.sessions.map((session) => (
+                <AppSearchResultSection
+                  results={appResults}
+                  selectedKey={selectedTarget?.kind === 'app' ? selectedTarget.result.key : undefined}
+                  onSelect={handleAppSelect}
+                />
+                {(results?.sessions ?? []).map((session) => (
                   <SearchResultGroup
                     key={session.session_id}
                     session={session}
-                    selectedId={selectedId ?? undefined}
+                    selectedId={
+                      selectedTarget?.kind === 'message' && selectedTarget.sessionId === session.session_id
+                        ? selectedTarget.messageId
+                        : undefined
+                    }
                     onSelect={(match) => handleSelect(session.session_id, match.id)}
                   />
                 ))}

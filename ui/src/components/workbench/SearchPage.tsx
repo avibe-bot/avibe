@@ -6,9 +6,11 @@ import { AlertCircle, ChevronLeft, Loader2, Search, X } from 'lucide-react';
 import { useMessageSearch } from '../../lib/useMessageSearch';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { AppSearchResultSection } from './search/AppSearchResults';
 import { SearchResultGroup } from './search/SearchResultGroup';
+import { useAppSearchResults, useOpenSearchApp } from './search/useAppSearch';
 
-// Mobile full-screen message-content search (design.pen K7Bytg "M · Search
+// Mobile full-screen app + message-content search (design.pen K7Bytg "M · Search
 // results"). A focused surface with its OWN header (back chevron + an active
 // search field with mint glyph + clear ✕) over the grouped results — reached
 // from the Inbox search field (InboxPage) / the bottom-nav is hidden on
@@ -27,6 +29,8 @@ export const SearchPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState(() => searchParams.get('q') ?? '');
   const { results, loading, error } = useMessageSearch(query);
+  const { results: appResults, loading: appsLoading } = useAppSearchResults(query);
+  const openSearchApp = useOpenSearchApp();
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // Drive the query (state + URL together). ``replace: true`` so each keystroke
@@ -75,10 +79,10 @@ export const SearchPage: React.FC = () => {
 
   const trimmed = query.trim();
   const sessions = results?.sessions ?? [];
-  const hasResults = sessions.length > 0;
+  const hasResults = appResults.length > 0 || sessions.length > 0;
   const showHint = trimmed.length === 0;
   const showError = trimmed.length > 0 && !loading && !!error;
-  const showEmpty = trimmed.length > 0 && !loading && results !== null && !hasResults;
+  const showEmpty = trimmed.length > 0 && !loading && !appsLoading && results !== null && !hasResults;
 
   return (
     // Full-screen focused surface (like ChatPage): fixed over the shell, its own
@@ -112,7 +116,7 @@ export const SearchPage: React.FC = () => {
             autoCorrect="off"
             enterKeyHint="search"
           />
-          {loading && <Loader2 className="size-4 shrink-0 animate-spin text-muted" />}
+          {(loading || appsLoading) && <Loader2 className="size-4 shrink-0 animate-spin text-muted" />}
           <Button
             type="button"
             variant="ghost"
@@ -149,6 +153,7 @@ export const SearchPage: React.FC = () => {
         )}
         {hasResults && (
           <div className="flex flex-col gap-1.5">
+            <AppSearchResultSection results={appResults} onSelect={openSearchApp} />
             {sessions.map((session) => (
               <SearchResultGroup
                 key={session.session_id}

@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
+import { APP_REGISTRY, type AppId } from '../../apps/registry';
+import { dockIndexFromShortcut } from '../../apps/dockShortcuts';
+import { dockIdToSession, useDock } from '../../context/DockContext';
+import { useApi } from '../../context/ApiContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { useShowPageInventory } from '../useShowPages';
 import { AppWindow } from './AppWindow';
 
 // In the TERMINAL, Ctrl is a control-character stream — ^W deletes a word, ^M is
@@ -12,6 +18,15 @@ function inTerminalSurface(el: Element | null): boolean {
   return el instanceof HTMLElement && !!el.closest('.xterm');
 }
 
+function inTextEntrySurface(el: Element | null): boolean {
+  return (
+    el instanceof HTMLElement &&
+    !!el.closest(
+      'input, textarea, select, [contenteditable="true"], [role="textbox"], .monaco-editor, .xterm',
+    )
+  );
+}
+
 // The portal layer that hosts app windows. Covers the workbench main area (right
 // of the 240px sidebar on desktop). The layer itself is pointer-events-none so
 // empty space passes clicks through to the workbench underneath; each AppWindow
@@ -19,9 +34,24 @@ function inTerminalSurface(el: Element | null): boolean {
 // so their terminal/editor state survives a minimize). Desktop-only — mobile opens
 // apps full screen (P5), so no free-floating windows there.
 export const WindowLayer: React.FC = () => {
-  const { windows, close, minimize, confirmClose } = useWindowManager();
+  const { t } = useTranslation();
+  const api = useApi();
+  const { order, pins } = useDock();
+  const { pages } = useShowPageInventory();
+  const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
+    useWindowManager();
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const windowsRef = useRef(windows);
+  const dockRef = useRef({ order, pins, pages });
+
+  useEffect(() => {
+    windowsRef.current = windows;
+  }, [windows]);
+
+  useEffect(() => {
+    dockRef.current = { order, pins, pages };
+  }, [order, pages, pins]);
 
   useEffect(() => {
     const el = ref.current;
@@ -61,6 +91,79 @@ export const WindowLayer: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [close, minimize, confirmClose]);
+
+  // Alt/Option+1..9 focuses or launches the Nth resident tile in the current
+  // server-backed Dock order. Use `code`, not `key`: macOS keyboard layouts can
+  // turn Option+digit into punctuation. Text inputs and terminals keep the chord
+  // for character entry; the Windows layer is desktop-only.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!window.matchMedia?.('(min-width: 768px)').matches) return;
+      const index = dockIndexFromShortcut(e);
+      const target = e.target instanceof Element ? e.target : document.activeElement;
+      if (index === null || inTextEntrySurface(target)) return;
+      const dockId = dockRef.current.order[index];
+      if (!dockId) return;
+
+      const sessionId = dockIdToSession(dockId);
+      const appId: AppId = sessionId === null ? (dockId as AppId) : 'showpage';
+      if (sessionId === null && !APP_REGISTRY[appId]) return;
+
+      e.preventDefault();
+      const own = windowsRef.current.filter((win) =>
+        sessionId === null
+          ? win.appId === appId
+          : win.appId === 'showpage' && win.params?.sessionId === sessionId,
+      );
+      const visible = own.filter((win) => !win.minimized);
+      const focusWindowDom = (id: string) =>
+        document.querySelector<HTMLElement>(`[data-window-id="${id}"]`)?.focus({ preventScroll: true });
+      if (visible.length > 0) {
+        const target = visible.reduce((top, win) => (win.z > top.z ? win : top));
+        focus(target.id);
+        focusWindowDom(target.id);
+        return;
+      }
+      if (own.length > 0) {
+        const target = own.reduce((top, win) => (win.z > top.z ? win : top));
+        restore(target.id);
+        focusWindowDom(target.id);
+        return;
+      }
+      if (sessionId === null) {
+        const id = openApp(appId);
+        window.requestAnimationFrame(() => focusWindowDom(id));
+        return;
+      }
+      const page = dockRef.current.pages.find((candidate) => candidate.session_id === sessionId);
+      const snapshot = dockRef.current.pins.find((pin) => pin.session_id === sessionId)?.title_snapshot?.trim();
+      const title = page ? page.title?.trim() || t('chat.untitled') : snapshot || t('chat.untitled');
+      const id = openApp('showpage', { title, params: { sessionId, title } });
+      window.requestAnimationFrame(() => focusWindowDom(id));
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [focus, openApp, restore, t]);
+
+  // Session PATCHes already broadcast `session.activity`. Keep every open
+  // Show Page window's persisted title/params live when a rename comes from the
+  // Library, chat header, CLI, or another browser tab.
+  useEffect(
+    () =>
+      api.connectWorkbenchEvents({
+        onSessionActivity: (data) => {
+          if (data.event !== 'updated' || !Object.prototype.hasOwnProperty.call(data, 'title')) return;
+          const title = data.title?.trim() || t('chat.untitled');
+          windowsRef.current
+            .filter((win) => win.appId === 'showpage' && win.params?.sessionId === data.session_id)
+            .forEach((win) => {
+              setTitle(win.id, title);
+              setParams(win.id, { title });
+            });
+        },
+      }),
+    [api, setParams, setTitle, t],
+  );
 
   // Render every window — minimized ones stay mounted (hidden + inert via AppWindow)
   // so their app body keeps its state. The layer is only aria-hidden when nothing is
