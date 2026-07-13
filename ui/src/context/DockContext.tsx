@@ -27,6 +27,10 @@ export type DockDoc = {
 
 export const SHOW_DOCK_PREFIX = 'show:';
 
+// Defensive cap on resident tiles, mirroring the backend MAX_DOCK_ITEMS — so a
+// corrupt/oversized server (or optimistic) doc can't render unbounded tiles.
+export const MAX_DOCK_ITEMS = 200;
+
 /** The Dock id for a pinned Show Page session. */
 export function showDockId(sessionId: string): string {
   return `${SHOW_DOCK_PREFIX}${sessionId}`;
@@ -64,7 +68,12 @@ export function reconcileDock(doc: DockDoc | null | undefined, builtinIds: strin
     });
   }
 
-  const pinIds = pins.map((pin) => showDockId(pin.session_id));
+  // Clamp on read (mirrors the backend): built-ins are always kept; excess pins
+  // beyond the cap are dropped so a corrupt/oversized doc stays bounded.
+  const maxPins = Math.max(0, MAX_DOCK_ITEMS - builtinIds.length);
+  const clampedPins = pins.length > maxPins ? pins.slice(0, maxPins) : pins;
+
+  const pinIds = clampedPins.map((pin) => showDockId(pin.session_id));
   const known = new Set<string>([...builtinIds, ...pinIds]);
 
   const order: string[] = [];
@@ -87,7 +96,7 @@ export function reconcileDock(doc: DockDoc | null | undefined, builtinIds: strin
       seen.add(id);
     }
   }
-  return { order, pins };
+  return { order, pins: clampedPins };
 }
 
 export interface DockValue {

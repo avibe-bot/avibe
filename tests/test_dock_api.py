@@ -149,6 +149,25 @@ def test_pin_rejects_when_dock_is_full(monkeypatch, tmp_path):
     assert excinfo.value.code == "dock_full"
 
 
+def test_load_dock_clamps_oversized_corrupt_pins(monkeypatch, tmp_path):
+    # A corrupt / hand-edited stored doc with more pins than the cap must be
+    # bounded on read, not rendered as thousands of tiles.
+    from core.chat_discovery import set_state_meta
+    from core.dock_store import DOCK_STATE_KEY
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    monkeypatch.setattr("core.dock_store.MAX_DOCK_ITEMS", 4)  # 3 built-ins + room for one pin
+    set_state_meta(
+        DOCK_STATE_KEY,
+        {"order": [], "pins": [{"session_id": f"ses_{i}", "title_snapshot": "", "pinned_at": ""} for i in range(10)]},
+    )
+
+    dock = api.get_dock()["dock"]
+    assert len(dock["pins"]) == 1  # clamped to MAX_DOCK_ITEMS - built-ins
+    assert len(dock["order"]) == 4  # 3 built-ins + 1 pin
+
+
 def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

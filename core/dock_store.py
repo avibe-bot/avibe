@@ -117,6 +117,14 @@ def _reconcile(order: list[str], pins: list[dict[str, str]]) -> dict[str, Any]:
         seen_pins.add(sid)
         deduped_pins.append(pin)
 
+    # Clamp on read as well as on write: a corrupt or hand-edited stored doc could
+    # hold more pins than the write paths admit, so bound them here too (built-ins
+    # are always kept; excess pins beyond the cap are dropped) to keep the Dock —
+    # and GET /api/dock — from ballooning.
+    max_pins = max(0, MAX_DOCK_ITEMS - len(BUILTIN_DOCK_IDS))
+    if len(deduped_pins) > max_pins:
+        deduped_pins = deduped_pins[:max_pins]
+
     pin_ids = [_show_id(pin["session_id"]) for pin in deduped_pins]
     known = set(BUILTIN_DOCK_IDS) | set(pin_ids)
 

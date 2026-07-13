@@ -93,6 +93,15 @@ describe('reconcileDock', () => {
     expect(out.order).toEqual(['files', 'terminal', 'editor']);
   });
 
+  it('clamps oversized pins to the cap, always keeping the built-ins', () => {
+    // Far more pins than the 200 cap allows; only the first (cap - built-ins) survive.
+    const pins = Array.from({ length: 250 }, (_, i) => ({ session_id: `ses_${i}`, title_snapshot: '', pinned_at: '' }));
+    const out = reconcileDock({ order: [], pins }, BUILTINS);
+    expect(out.pins).toHaveLength(200 - BUILTINS.length); // 197
+    expect(out.order).toHaveLength(200);
+    expect(out.order.slice(0, BUILTINS.length)).toEqual(BUILTINS);
+  });
+
   it('is idempotent', () => {
     const doc: DockDoc = {
       order: ['show:ses_a', 'files'],

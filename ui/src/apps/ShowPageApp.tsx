@@ -19,7 +19,11 @@ import { showPagePrivatePath } from './showPageAvatar';
 export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const wm = useWindowManager();
+  // Destructure the STABLE window-manager callbacks (useCallback-memoized) rather
+  // than the whole context value: the value object changes identity on every
+  // window focus/minimize/drag tick, and depending on it here would re-run this
+  // "read once" effect and re-hit /api/sessions on every such change (Codex).
+  const { setTitle, close } = useWindowManager();
   const { unpin } = useDock();
 
   const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : '';
@@ -45,7 +49,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
         }
         setState('ready');
         const live = (session.title ?? '').trim();
-        if (live) wm.setTitle(windowId, live);
+        if (live) setTitle(windowId, live);
       })
       .catch(() => {
         if (!cancelled) setState('missing');
@@ -53,7 +57,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
     return () => {
       cancelled = true;
     };
-  }, [sessionId, api, wm, windowId]);
+  }, [sessionId, api, setTitle, windowId]);
 
   if (!sessionId || state === 'missing') {
     return (
@@ -71,7 +75,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
               type="button"
               onClick={() => {
                 void unpin(sessionId);
-                wm.close(windowId);
+                close(windowId);
               }}
               className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[12.5px] font-medium text-foreground transition hover:bg-foreground/[0.05]"
             >
