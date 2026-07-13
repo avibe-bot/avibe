@@ -1420,8 +1420,10 @@ def cmd_up(args: argparse.Namespace) -> int:
         run_prepare_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
         normalize_runtime_config(runner, target, remote=args.remote)
         write_metadata(runner, target, repo_root, fingerprints, remote=args.remote)
-        restart_and_verify(runner, target, remote=args.remote)
+        # Install updated runtime sources while the service is stopped so the
+        # restarted process cannot keep serving code loaded before preparation.
         prepare_show_runtime(runner, target, remote=args.remote)
+        restart_and_verify(runner, target, remote=args.remote)
         if not args.dry_run:
             update_worktree_mapping(repo_root, target)
     print_summary(target)

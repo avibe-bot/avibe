@@ -1549,6 +1549,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     assert calls[:3] == ["ensure_project_and_instance", "stop_service_for_update", "write_runtime_env"]
     assert calls.index("sync_source") < calls.index("update_dependencies_and_build")
     assert calls.index("normalize_runtime_config") < calls.index("restart_and_verify")
+    assert calls.index("prepare_show_runtime") < calls.index("restart_and_verify")
 
 
 def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
