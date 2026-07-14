@@ -10,6 +10,7 @@ import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { useShowPageInventory } from '../useShowPages';
+import { isDragRelease } from './dragClick';
 
 // A resident Dock tile resolved from a persisted Dock id: either a built-in app
 // (files/terminal/editor) or a pinned Show Page (`show:<session_id>`).
@@ -58,6 +59,9 @@ export const Dock: React.FC = () => {
   // it re-syncs whenever the server order changes (load / pin / unpin elsewhere).
   const [dragOrder, setDragOrder] = useState<string[] | null>(null);
   const dragRef = useRef<string[] | null>(null);
+  // Last pointer-press point on a tile, to tell a reorder drag from a click on
+  // release (§7.1e item 4b): the whole tile is BOTH draggable and click-openable.
+  const pressPtRef = useRef<{ x: number; y: number } | null>(null);
   const localOrder = dragOrder ?? order;
   const reorder = (next: string[]) => {
     dragRef.current = next;
@@ -174,7 +178,17 @@ export const Dock: React.FC = () => {
                       index < 9 ? `${label} · ${t('apps.dock.switchShortcut', { number: index + 1 })}` : label
                     }
                     aria-label={label}
-                    onClick={(e) => (e.metaKey || e.ctrlKey || e.altKey ? openNew(item) : activate(item))}
+                    onPointerDown={(e) => {
+                      pressPtRef.current = { x: e.clientX, y: e.clientY };
+                    }}
+                    onClick={(e) => {
+                      // After a reorder drag the browser still fires a click on
+                      // release; swallow it past the drag threshold so the tile
+                      // doesn't spuriously open. A genuine click still opens.
+                      if (isDragRelease(pressPtRef.current, { x: e.clientX, y: e.clientY })) return;
+                      if (e.metaKey || e.ctrlKey || e.altKey) openNew(item);
+                      else activate(item);
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       setMenu({ x: e.clientX, y: e.clientY, item });
