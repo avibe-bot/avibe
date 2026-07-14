@@ -3597,7 +3597,15 @@ def show_page_icon_get(session_id):
         if resolved is None:
             return _show_page_icon_not_found()
         candidate, content_type = resolved
-        response = send_file(candidate, mimetype=content_type)
+        # Materialize the bytes HERE, inside the try, into a plain full-body Response
+        # rather than a lazy FileResponse. This keeps the endpoint a pure
+        # bytes-or-404 chokepoint: (a) a live-edit race — the favicon rebuilt/removed
+        # after resolve() accepted it — surfaces as an OSError caught below (→ 404),
+        # instead of failing while a FileResponse streams AFTER this try; and (b) a
+        # plain Response never honors `Range`, so a client/proxy `Range` header can't
+        # turn a decorative icon into a 206/416. Icons are small, so buffering is cheap.
+        data = candidate.read_bytes()
+        response = Response(data, mimetype=content_type)
         response.headers["X-Content-Type-Options"] = "nosniff"
         # A directly-navigated SVG must not execute scripts in the API origin.
         response.headers["Content-Security-Policy"] = "sandbox"
@@ -3608,8 +3616,8 @@ def show_page_icon_get(session_id):
         response.headers["Cache-Control"] = "private, max-age=604800, immutable"
         return response
     except (ShowPageError, ValueError, OSError):
-        # Enforce the bytes-or-404 contract at the boundary: a bad session id or a
-        # bad page-authored icon must fall back, not 500.
+        # Enforce the bytes-or-404 contract at the boundary: a bad session id, a bad
+        # page-authored icon, or a file that vanished mid-race must fall back, not 500.
         return _show_page_icon_not_found()
 
 

@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -1003,6 +1004,32 @@ def test_show_page_payload_icon_version_follows_the_file(monkeypatch, tmp_path):
     (page_dir / "index.html").write_text('<link rel="icon" href="logo.png">', encoding="utf-8")
     v3 = show_page_payload(_icon_page("sesfresh"))["icon_version"]
     assert v3 and v3 != v2
+
+
+def test_show_page_payload_icon_version_tracks_content_not_just_mtime(monkeypatch, tmp_path):
+    # The token hashes CONTENT, so a regeneration that preserves size AND mtime
+    # (`cp -p`/`rsync`, deterministic build artifacts) STILL changes it — an
+    # mtime+size identity would collide and, under immutable caching, keep serving
+    # the stale icon (Codex). Identical bytes, in contrast, keep the token stable.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    page_dir = ensure_show_page_dir("sesctnt")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    favicon = page_dir / "favicon.svg"
+    favicon.write_text("<svg>AAAA</svg>", encoding="utf-8")
+    stat = favicon.stat()
+    v1 = show_page_payload(_icon_page("sesctnt"))["icon_version"]
+
+    # Same byte length + restored mtime — ONLY the content differs.
+    favicon.write_text("<svg>BBBB</svg>", encoding="utf-8")
+    os.utime(favicon, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert favicon.stat().st_size == stat.st_size
+    assert favicon.stat().st_mtime_ns == stat.st_mtime_ns
+    v2 = show_page_payload(_icon_page("sesctnt"))["icon_version"]
+    assert v1 and v2 and v1 != v2  # content change is caught despite identical mtime+size
+
+    # Restoring the exact bytes restores the token (identical icon → cache hit).
+    favicon.write_text("<svg>AAAA</svg>", encoding="utf-8")
+    assert show_page_payload(_icon_page("sesctnt"))["icon_version"] == v1
 
 
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):

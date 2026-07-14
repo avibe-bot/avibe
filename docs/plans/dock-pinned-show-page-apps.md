@@ -458,9 +458,11 @@ site). Replaced with a **content-versioned URL**, correct-by-construction:
 
 - **Token.** The payload's has-icon signal becomes `icon_version` (was
   `icon_path`): a server-issued opaque token — `show_page_icon_version` digests
-  the resolved icon FILE's identity (path + mtime + size). Non-null iff a
-  servable icon exists; it changes whenever the icon file changes. `icon_path`
-  is removed from the payload (the frontend never needed the path).
+  the resolved icon file's **CONTENT** (a same-size/same-mtime regeneration via
+  `cp -p`/deterministic builds still busts it; identical bytes keep the token
+  stable so an unchanged icon stays a cache hit). Non-null iff a servable icon
+  exists. `icon_path` is removed from the payload (the frontend never needed the
+  path).
 - **URL.** `showPageIconUrl(sid, iconVersion)` →
   `/api/show-pages/<sid>/icon?v=<token>`. Any payload refresh that changed the
   icon changed the token → a new `src` the `<img>` refetches on its own. No
@@ -480,6 +482,12 @@ site). Replaced with a **content-versioned URL**, correct-by-construction:
 - **Freshness invariant (test).** Overwriting the icon, or repointing
   `<link rel=icon>`, changes `icon_version` in the next payload — asserted
   directly, so no update-site enumeration exists anywhere.
+- **Serving is materialized bytes-or-404 (test).** The endpoint reads the icon
+  bytes INSIDE its `try` and returns a plain `Response`, not a lazy
+  `FileResponse`: a live-edit race (favicon rebuilt/removed after `resolve()`
+  accepted it) surfaces as an `OSError` → 404 instead of failing while a response
+  streams, and a `Range` header can never produce a 206/416 (a plain Response
+  ignores Range). Icons are small, so buffering is cheap.
 
 ### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
 
@@ -504,7 +512,11 @@ editor, and the terminal keep Option+W for character entry — macOS emits a
 special char there; ⌥W closes when focus is elsewhere in a window. The
 beforeunload guard arms via the pure `shouldGuardUnload(windows)` predicate and
 is independent of the terminal's `pagehide` keepalive-DELETE, which still runs
-on a confirmed leave._
+on a confirmed leave. Inside a Show Page **iframe** the bridge (`ShowPageApp`)
+listens on the iframe's `contentWindow` in the CAPTURE phase — the earliest point
+in the event path (window → document → element) — so a page's own
+`stopPropagation()` (even a capture-phase one) cannot swallow ⌥W; only the
+`inTextEntrySurface` exemption suppresses it._
 
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 

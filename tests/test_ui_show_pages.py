@@ -404,6 +404,48 @@ def test_show_page_icon_endpoint_ignores_the_query_string(monkeypatch, tmp_path)
         assert response.content == b"<svg/>", query
 
 
+def test_show_page_icon_endpoint_ignores_range_header(monkeypatch, tmp_path):
+    # The icon is a bytes-or-404 chokepoint: a `Range` header must NOT turn it into
+    # a 206/416 partial (the materialized plain Response never honors Range) — it
+    # always serves the full 200 (Codex).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg>abcdefghij</svg>", encoding="utf-8")
+
+    response = app.test_client().get(
+        "/api/show-pages/ses123/icon",
+        base_url="http://127.0.0.1:5123",
+        headers={"Range": "bytes=0-3"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"<svg>abcdefghij</svg>"
+    assert "Content-Range" not in response.headers
+
+
+def test_show_page_icon_endpoint_404s_when_file_vanishes_after_resolve(monkeypatch, tmp_path):
+    # Live-edit race: resolve_show_page_icon accepts the icon, then the file is
+    # rebuilt/removed before the bytes are read. Because the endpoint materializes
+    # the bytes INSIDE its try, the OSError degrades to the 404 letter fallback —
+    # not a 500 raised while a lazy FileResponse streams (Codex).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    vanished = ensure_show_page_dir("ses123") / "vanished.svg"  # never created on disk
+    monkeypatch.setattr(
+        "core.show_pages.resolve_show_page_icon",
+        lambda session_id: (vanished, "image/svg+xml"),
+    )
+
+    response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 404
+    assert response.headers.get("Cache-Control") == "no-store"
+
+
 def test_show_page_icon_endpoint_serves_offline_pages(monkeypatch, tmp_path):
     # An offline page still advertises a token and is listed in the inventory, so its
     # static icon must serve too — gating by visibility would strand offline rows /

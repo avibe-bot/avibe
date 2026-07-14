@@ -688,24 +688,31 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
 def show_page_icon_version(session_id: str) -> str | None:
     """An opaque cache token for a page's servable icon, or None when it has none.
 
-    The token is a short digest of the resolved icon FILE's identity — its path,
-    mtime, and size — so overwriting the favicon or repointing ``<link rel="icon">``
-    to another file changes the token, and therefore the ``?v=`` on the icon URL,
-    with NO update-site enumeration anywhere in the client (the freshness rides the
-    normal payload refresh). Carried in the payload as the has-icon signal; the
-    frontend appends it verbatim as ``?v=<token>``. The icon endpoint NEVER reads
-    it — resolution is derived only from the session id + workspace.
+    The token is a short digest of the resolved icon file's CONTENT, so any byte
+    change — overwriting the favicon, repointing ``<link rel="icon">``, or a
+    same-size/same-mtime regeneration — changes the token, and therefore the ``?v=``
+    on the icon URL, with NO update-site enumeration anywhere in the client (the
+    freshness rides the normal payload refresh). Identical bytes yield an identical
+    token, so an unchanged icon stays a cache hit. Carried in the payload as the
+    has-icon signal; the frontend appends it verbatim as ``?v=<token>``. The icon
+    endpoint NEVER reads it — resolution is derived only from the session id +
+    workspace.
     """
     resolved = resolve_show_page_icon(session_id)
     if resolved is None:
         return None
     candidate, _content_type = resolved
     try:
-        stat = candidate.stat()
+        data = candidate.read_bytes()
     except OSError:
         return None
-    identity = f"{candidate}:{stat.st_mtime_ns}:{stat.st_size}"
-    return hashlib.sha256(identity.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    # Hash the icon's CONTENT so the token changes for ANY byte change — including a
+    # regeneration that preserves path, size, AND mtime (`cp -p`/`rsync`-style copies,
+    # deterministic build artifacts), which an mtime+size identity would miss under
+    # `immutable` caching. Content-addressed: identical bytes → identical token (the
+    # icon is unchanged, so the ?v= URL correctly stays a cache hit); different bytes
+    # → different token → new URL → refetch. Icons are small, so hashing is cheap.
+    return hashlib.sha256(data).hexdigest()[:16]
 
 
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:
