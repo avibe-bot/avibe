@@ -121,7 +121,7 @@ function ShowPageRow({
           type="button"
           onClick={onOpen}
           title={t('showPages.openApp')}
-          className="group flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
+          className="group flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
         >
           <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
           <span className="min-w-0">
