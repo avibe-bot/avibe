@@ -488,6 +488,17 @@ site). Replaced with a **content-versioned URL**, correct-by-construction:
   accepted it) surfaces as an `OSError` → 404 instead of failing while a response
   streams, and a `Range` header can never produce a 206/416 (a plain Response
   ignores Range). Icons are small, so buffering is cheap.
+- **Size cap (test).** Because both the token hash (per inventory row) and the
+  materialized serve read the file in full, `resolve_show_page_icon` drops any icon
+  over `_ICON_MAX_BYTES` (2 MiB) to `None` (letter avatar) — a page can't point
+  `<link rel=icon>` at a screenshot/large asset and make `/api/show-pages` allocate
+  hundreds of MB. An icon renders ~40px, so the cap is generous.
+- **Bounded load-retry (frontend).** `ShowPageAvatarContent` retries a failed
+  `<img>` up to `MAX_ICON_LOAD_ATTEMPTS` (3) — `onError` remounts it via a per-URL
+  attempt-count `key`, latching to the letter only after the budget. In the
+  versioned-URL model a permanently-absent icon is a null `iconUrl` (letter, no
+  `<img>`, no onError), so onError only ever signals a transient/race failure —
+  exactly the case worth retrying; the budget resets when the URL changes.
 
 ### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
 

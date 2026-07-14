@@ -36,6 +36,13 @@ SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
 # at the top). Bounds the per-page read so a huge inline page can't stall
 # /api/show-pages or allocate a large string (§7.1f review).
 _ICON_INDEX_HEAD_LIMIT = 64 * 1024
+# Hard cap on a servable icon's file size. A page could point <link rel="icon"> at a
+# large in-workspace asset (a screenshot, a generated image with a whitelisted
+# extension); resolving/serving it would read the whole file into memory, and the
+# token hash runs for EVERY row of /api/show-pages. Above the cap the icon is treated
+# as "no icon" (letter avatar) so the inventory can't be made to allocate hundreds of
+# MB. An icon is displayed ~40px — 2 MiB is already very generous (§7.1f review).
+_ICON_MAX_BYTES = 2 * 1024 * 1024
 # Whitelisted image extensions -> Content-Type served by the icon endpoint. A page
 # icon MUST be one of these (§7.1f): anything else is treated as "no icon" so a page
 # can't smuggle an executable/HTML asset through the thumbnail. Shared by the
@@ -673,6 +680,10 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
         if candidate != root and root not in candidate.parents:
             return None
         if not candidate.is_file():
+            return None
+        if candidate.stat().st_size > _ICON_MAX_BYTES:
+            # An oversized "icon" (e.g. a screenshot) → letter avatar; never hashed
+            # or served in full, bounding /api/show-pages + endpoint memory.
             return None
     except (ValueError, OSError):
         # A page-authored href can resolve to a filesystem-invalid path (embedded

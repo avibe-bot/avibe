@@ -12,21 +12,28 @@ import { showPageAvatar, showPageIconUrl } from './showPageAvatar';
 //
 // Freshness needs no notifier/remount machinery: `iconUrl` is content-versioned
 // (`?v=<token>` from the icon file's identity), so a changed icon changes the URL,
-// which (a) differs from the failed URL, re-attempting a previously-failed icon,
-// and (b) is a new `src` the browser fetches on its own. A stale icon simply
-// cannot survive a payload refresh that changed the token.
+// which is a new `src` the browser fetches on its own.
+//
+// A load failure is retried a bounded number of times before falling back to the
+// letter: `onError` remounts the <img> (a per-URL attempt count is the `key`, so it
+// re-fetches) and only latches to the letter after MAX_ICON_LOAD_ATTEMPTS. In the
+// versioned-URL model a permanently-absent icon arrives as a null `iconUrl` (letter,
+// no <img>, no onError) — so onError only ever signals a TRANSIENT failure (a brief
+// bytes-or-404 race window, a network blip), exactly the case worth retrying. The
+// count is keyed to the URL, so a new versioned URL retries with a fresh budget.
+const MAX_ICON_LOAD_ATTEMPTS = 3;
 export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: string }> = ({ iconUrl, letter }) => {
-  // Track the URL that failed (not a bare boolean) so a later payload refresh to a
-  // NEW versioned URL retries instead of staying stuck on the letter fallback.
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  if (iconUrl && failedUrl !== iconUrl) {
+  const [failure, setFailure] = useState<{ url: string; attempts: number } | null>(null);
+  const attempts = failure && failure.url === iconUrl ? failure.attempts : 0;
+  if (iconUrl && attempts < MAX_ICON_LOAD_ATTEMPTS) {
     return (
       <img
+        key={`${iconUrl}#${attempts}`}
         src={iconUrl}
         alt=""
         draggable={false}
         className="size-full object-cover"
-        onError={() => setFailedUrl(iconUrl)}
+        onError={() => setFailure({ url: iconUrl, attempts: attempts + 1 })}
       />
     );
   }

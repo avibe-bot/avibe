@@ -1032,6 +1032,25 @@ def test_show_page_payload_icon_version_tracks_content_not_just_mtime(monkeypatc
     assert show_page_payload(_icon_page("sesctnt"))["icon_version"] == v1
 
 
+def test_resolve_show_page_icon_rejects_oversized_icon(monkeypatch, tmp_path):
+    # A page pointing <link rel=icon> at a large in-workspace asset must NOT make
+    # /api/show-pages read it in full per row (or the endpoint materialize it): an
+    # oversized icon is dropped to the letter avatar (None), not hashed/served (Codex).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_pages._ICON_MAX_BYTES", 16)
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesbig")
+    (page_dir / "index.html").write_text('<link rel="icon" href="big.png">', encoding="utf-8")
+    (page_dir / "big.png").write_bytes(b"x" * 64)  # over the (patched) 16-byte cap
+
+    assert resolve_show_page_icon("sesbig") is None
+    assert show_page_payload(_icon_page("sesbig"))["icon_version"] is None
+    # A file at/under the cap is still accepted.
+    (page_dir / "big.png").write_bytes(b"y" * 16)
+    assert resolve_show_page_icon("sesbig") is not None
+
+
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):
     # A brand-new Show Page workspace starts as a clean "being generated"
     # placeholder for the user, plus a minimal file-based router and one extra page
