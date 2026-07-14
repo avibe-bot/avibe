@@ -3559,25 +3559,41 @@ def show_page_set_share_id_post(session_id):
 
 def _show_page_icon_not_found():
     # 404 on any missing page / no icon / policy rejection — the frontend's
-    # onerror -> letter-avatar fallback covers it. No body needed.
-    return Response("", status=404, mimetype="text/plain")
+    # onerror -> letter-avatar fallback covers it. No body needed. `no-store` so a
+    # heuristically-cached 404 can't strand the letter fallback on the stable
+    # sid-only URL after the page later adds the icon.
+    response = Response("", status=404, mimetype="text/plain")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/api/show-pages/<session_id>/icon", methods=["GET", "HEAD"])
 def show_page_icon_get(session_id):
     # The page's own HTML icon, served STATICALLY as the single chokepoint (§7.1f):
     # ALL href resolution + policy (document semantics incl. <base>; reject api /
-    # traversal / absolute / external / non-image / stock) lives server-side in
-    # resolve_show_page_icon, so the frontend URL carries ONLY the session id and
-    # can never compose a path. Auth rides the global /api before_request hooks.
-    from core.show_pages import ShowPageStore, resolve_show_page_icon
+    # traversal / absolute / root-relative / external / non-image / stock) lives
+    # server-side in resolve_show_page_icon, so the frontend URL carries ONLY the
+    # session id and can never compose a path. Auth rides the global /api hooks.
+    #
+    # Contract: bytes-or-404, NEVER a 500 — the icon is decorative. A malformed
+    # session id (validate_session_id -> ShowPageError), a page-authored href that
+    # resolves to a filesystem-invalid path (ValueError/OSError), or any other
+    # such failure degrades to the letter-avatar fallback rather than erroring.
+    from core.show_pages import ShowPageError, ShowPageStore, resolve_show_page_icon
 
-    store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None or page.visibility not in {"private", "public"}:
-            return _show_page_icon_not_found()
-        resolved = resolve_show_page_icon(page.session_id)
+        store = ShowPageStore()
+        try:
+            page = store.get(session_id)
+            # Any of the user's own pages — private, public, OR offline — may serve
+            # its static icon: the payload advertises icon_path for all of them and
+            # the inventory lists them, so gating by visibility would strand offline
+            # rows / pinned offline apps on the letter avatar despite a real icon.
+            if page is None:
+                return _show_page_icon_not_found()
+            resolved = resolve_show_page_icon(page.session_id)
+        finally:
+            store.close()
         if resolved is None:
             return _show_page_icon_not_found()
         candidate, content_type = resolved
@@ -3592,8 +3608,10 @@ def show_page_icon_get(session_id):
         # are honored), and a changed icon always yields fresh bytes — never stale.
         response.headers["Cache-Control"] = "private, no-cache"
         return response
-    finally:
-        store.close()
+    except (ShowPageError, ValueError, OSError):
+        # Enforce the bytes-or-404 contract at the boundary: a bad session id or a
+        # bad page-authored icon must fall back, not 500.
+        return _show_page_icon_not_found()
 
 
 def _dock_error_response(exc):

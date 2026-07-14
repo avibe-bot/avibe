@@ -14,14 +14,27 @@ export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: s
   // Track the URL that failed (not a bare boolean) so a later inventory refresh
   // to a NEW icon path retries instead of staying stuck on the letter fallback.
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  // Also retry after an inventory refresh even when the URL is unchanged: an icon
-  // added AFTER its <link> (or a transient 404) would otherwise show the letter
-  // forever. Clearing the failure lets the <img> re-attempt; a still-cached
-  // successful icon does not re-fetch (same URL).
-  useEffect(() => subscribeShowPageIconRefresh(() => setFailedUrl(null)), []);
+  // Bumped on every inventory refresh and used as the <img> key: remounting forces
+  // an ALREADY-LOADED icon to re-request. The URL is stable (session id only), so a
+  // page that overwrites favicon.svg or repoints <link rel="icon"> keeps the same
+  // src — without a remount the browser never re-fetches and the tile shows the old
+  // icon until a full reload. The remount issues a fresh request that the backend's
+  // `no-cache` revalidates: a 304 (unchanged) reuses the bytes, a change pulls the
+  // new ones. Clearing failedUrl in the same tick lets a previously-failed icon
+  // (added after its <link>, or a transient 404) re-attempt too (§7.1f review).
+  const [refresh, setRefresh] = useState(0);
+  useEffect(
+    () =>
+      subscribeShowPageIconRefresh(() => {
+        setFailedUrl(null);
+        setRefresh((n) => n + 1);
+      }),
+    [],
+  );
   if (iconUrl && failedUrl !== iconUrl) {
     return (
       <img
+        key={refresh}
         src={iconUrl}
         alt=""
         draggable={false}

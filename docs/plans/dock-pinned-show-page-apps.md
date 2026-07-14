@@ -425,6 +425,28 @@ GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404
   `WindowLayer` inventory join), so it inherits the page favicon like every
   other surface.
 
+**Hardening (review round 2, 2026-07-14):**
+- **Bytes-or-404, never 500.** The endpoint wraps its body in `except
+  (ShowPageError, ValueError, OSError)` → 404, so a malformed session id
+  (`/api/show-pages/!/icon`, which `validate_session_id` rejects in
+  `store.get`) or a page-authored href that resolves to a filesystem-invalid
+  path (embedded NUL, overlong filename → `Path.resolve()`/`stat` raises) both
+  degrade to the letter avatar. `resolve_show_page_icon` also catches
+  `(ValueError, OSError)` at its own layer so the helper honors its "None for
+  bad input" contract.
+- **Offline pages serve icons.** The visibility gate is dropped (serve for any
+  of the user's own pages — private/public/**offline**): the payload advertises
+  `icon_path` for offline pages and the inventory lists them, so gating would
+  strand offline rows / pinned offline apps on the letter avatar.
+- **404s are `no-store`.** The not-found response carries `Cache-Control:
+  no-store` so a heuristically-cached negative can't keep the letter fallback on
+  the stable URL after the page later adds the icon.
+- **Already-loaded icons revalidate.** `ShowPageAvatarContent` remounts its
+  `<img>` (a refresh nonce as `key`) on each inventory refresh, forcing an
+  already-loaded, stable-URL icon to re-request; the backend `no-cache` then
+  makes it a 304 (unchanged) or fresh bytes (changed), so an overwritten favicon
+  / repointed `<link rel=icon>` reflects without a full reload.
+
 ### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
 
 Browsers reserve ⌘W (tab close) — not interceptable in a normal tab. Two

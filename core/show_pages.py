@@ -657,13 +657,19 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     relative = _extract_icon_path(page_dir)
     if relative is None:
         return None
-    candidate = (page_dir / relative).resolve()
-    root = page_dir.resolve()
-    # Realpath must stay inside the workspace (defends against an in-workspace
-    # symlink pointing out) and be a regular file of a whitelisted image type.
-    if candidate != root and root not in candidate.parents:
-        return None
-    if not candidate.is_file():
+    try:
+        candidate = (page_dir / relative).resolve()
+        root = page_dir.resolve()
+        # Realpath must stay inside the workspace (defends against an in-workspace
+        # symlink pointing out) and be a regular file of a whitelisted image type.
+        if candidate != root and root not in candidate.parents:
+            return None
+        if not candidate.is_file():
+            return None
+    except (ValueError, OSError):
+        # A page-authored href can resolve to a filesystem-invalid path (embedded
+        # NUL, an overlong filename): that is "no icon" (letter avatar), never an
+        # error to surface — this helper must return None rather than raise.
         return None
     content_type = SHOW_PAGE_ICON_CONTENT_TYPES.get(candidate.suffix.lower().lstrip("."))
     if content_type is None:

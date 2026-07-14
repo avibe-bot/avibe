@@ -400,6 +400,64 @@ def test_show_page_icon_endpoint_revalidates_instead_of_serving_stale(monkeypatc
     assert second.content == b"<svg>v2-longer</svg>"
 
 
+def test_show_page_icon_endpoint_serves_offline_pages(monkeypatch, tmp_path):
+    # An offline page still advertises icon_path and is listed in the inventory, so
+    # its static icon must serve too — gating by visibility would strand offline rows
+    # / pinned offline apps on the letter avatar despite a real icon (Codex).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "offline")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+
+    response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 200
+    assert response.content == b"<svg/>"
+
+
+def test_show_page_icon_endpoint_not_found_is_uncacheable(monkeypatch, tmp_path):
+    # The 404 for a page with no icon carries `no-store` so a heuristically-cached
+    # negative response can't strand the letter fallback once the icon is added (Codex).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")  # default scaffold: no icon link
+
+    response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 404
+    assert response.headers.get("Cache-Control") == "no-store"
+
+
+def test_show_page_icon_endpoint_404s_malformed_session_id(monkeypatch, tmp_path):
+    # A session id that fails validate_session_id raises ShowPageError in store.get;
+    # the endpoint must catch it and 404 (letter fallback), never 500 (Codex).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    response = app.test_client().get("/api/show-pages/!/icon", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 404
+
+
+def test_show_page_icon_endpoint_404s_filesystem_invalid_icon(monkeypatch, tmp_path):
+    # A page-authored href that resolves to a filesystem-invalid path (an overlong
+    # filename) makes Path.resolve()/stat raise OSError; the endpoint must 404, never
+    # 500 (Codex). resolve_show_page_icon contains it; the boundary is belt-and-braces.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "index.html").write_text(
+        f'<link rel="icon" href="{"a" * 300}.png">', encoding="utf-8"
+    )
+
+    response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 404
+
+
 def test_show_page_icon_endpoint_resolves_through_base_href(monkeypatch, tmp_path):
     # The endpoint honors <base href> exactly as the browser would: the icon lives
     # under assets/ and is served, proving the resolver runs server-side (the URL
