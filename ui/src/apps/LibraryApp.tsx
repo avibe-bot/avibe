@@ -271,13 +271,36 @@ const DockedReorderRow: React.FC<{
   onCommit: () => void;
 }> = ({ item, last, onOpen, onDockToggle, onRemove, onCommit }) => {
   const controls = useDragControls();
+  // A handle drag can end with its trailing click landing on the row (the common
+  // ancestor of the grip and the release point), which would open the app right
+  // after a reorder (Codex P2). Set on drag start, consumed by the row click; a
+  // fresh row-body press resets it (a grip press stopPropagations, so it won't).
+  const draggedRef = useRef(false);
   return (
-    <Reorder.Item value={item.row.dockId} as="div" dragListener={false} dragControls={controls} onDragEnd={onCommit}>
+    <Reorder.Item
+      value={item.row.dockId}
+      as="div"
+      dragListener={false}
+      dragControls={controls}
+      onPointerDown={() => {
+        draggedRef.current = false;
+      }}
+      onDragStart={() => {
+        draggedRef.current = true;
+      }}
+      onDragEnd={onCommit}
+    >
       <AppLibraryRow
         item={item}
         last={last}
         leading={<GripHandle controls={controls} />}
-        onOpen={onOpen}
+        onOpen={() => {
+          if (draggedRef.current) {
+            draggedRef.current = false;
+            return;
+          }
+          onOpen();
+        }}
         onDockToggle={onDockToggle}
         onRemove={onRemove}
       />
