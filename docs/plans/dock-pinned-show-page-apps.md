@@ -369,6 +369,31 @@ shows an App Library shortcut hint (never a dead surface).
   it has no `icon_path` without an extra fetch. Both keep the letter/Lucide icon
   for now.
 
+### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
+
+Browsers reserve ⌘W (tab close) — not interceptable in a normal tab. Two
+mitigations ship together (the fullscreen Keyboard-Lock capture was offered
+and NOT taken):
+
+- **⌥W closes the focused in-app window** (desktop): same target resolution
+  and guard flow as the existing window chords in WindowLayer
+  (activeElement→data-window-id, close-guard/confirmClose respected,
+  input/terminal exemptions consistent with existing chord handling; use
+  event.code KeyW).
+- **beforeunload guard**: while at least one NON-minimized app window is
+  open (PM default — minimized-only windows do not arm it; flag if wrong),
+  closing/leaving the tab triggers the browser's native confirm. No custom
+  copy (browsers ignore it). Must not interfere with the terminal's
+  existing pagehide cleanup path — verify.
+
+_Implementation note (matches shipped code): ⌥W reuses the existing
+`inTextEntrySurface` exemption (like the Alt+1-9 chord), so inputs, the Monaco
+editor, and the terminal keep Option+W for character entry — macOS emits a
+special char there; ⌥W closes when focus is elsewhere in a window. The
+beforeunload guard arms via the pure `shouldGuardUnload(windows)` predicate and
+is independent of the terminal's `pagehide` keepalive-DELETE, which still runs
+on a confirmed leave._
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:

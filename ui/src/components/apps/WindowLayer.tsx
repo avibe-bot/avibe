@@ -8,6 +8,7 @@ import { useApi } from '../../context/ApiContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useShowPageInventory } from '../useShowPages';
 import { AppWindow } from './AppWindow';
+import { shouldGuardUnload } from './windowUnload';
 
 // In the TERMINAL, Ctrl is a control-character stream — ^W deletes a word, ^M is
 // carriage return — so the window chord must never hijack Ctrl there (xterm focuses a
@@ -40,6 +41,9 @@ export const WindowLayer: React.FC = () => {
   const { pages } = useShowPageInventory();
   const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
     useWindowManager();
+  // Any window open and NOT minimized — drives the layer's aria-hidden AND the
+  // beforeunload guard (§7.1g).
+  const anyShown = shouldGuardUnload(windows);
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const windowsRef = useRef(windows);
@@ -91,6 +95,43 @@ export const WindowLayer: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [close, minimize, confirmClose]);
+
+  // ⌥W closes the focused in-app window — a browser-safe alternative to ⌘W, which
+  // the browser reserves for tab-close (not interceptable). Uses `code` (macOS
+  // Option+W emits a special char in `key`); same target resolution + confirmClose
+  // guard as the ⌘/Ctrl chord above. Text-entry surfaces (inputs, Monaco, terminal)
+  // keep Option+W for character entry — consistent with the Alt+1-9 chord.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
+      const active = document.activeElement;
+      if (inTextEntrySurface(active)) return;
+      const winEl = active instanceof Element ? active.closest('[data-window-id]') : null;
+      if (!winEl || !ref.current?.contains(winEl)) return;
+      const targetId = winEl.getAttribute('data-window-id');
+      if (!targetId) return;
+      e.preventDefault();
+      if (confirmClose(targetId)) close(targetId);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [close, confirmClose]);
+
+  // While any app window is open and visible (not just minimized), guard tab-close
+  // / navigation-away with the browser's native confirm — the window state
+  // (terminals, unsaved editor buffers, running app iframes) would otherwise vanish
+  // silently. No custom copy (browsers ignore it). This is `beforeunload`, distinct
+  // from the terminal's `pagehide` keepalive-DELETE, so that cleanup still runs when
+  // the user confirms leaving.
+  useEffect(() => {
+    if (!anyShown) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [anyShown]);
 
   // Alt/Option+1..9 focuses or launches the Nth resident tile in the current
   // server-backed Dock order. Use `code`, not `key`: macOS keyboard layouts can
@@ -167,8 +208,7 @@ export const WindowLayer: React.FC = () => {
 
   // Render every window — minimized ones stay mounted (hidden + inert via AppWindow)
   // so their app body keeps its state. The layer is only aria-hidden when nothing is
-  // actually shown.
-  const anyShown = windows.some((w) => !w.minimized);
+  // actually shown (`anyShown`, computed above).
 
   return (
     <div
