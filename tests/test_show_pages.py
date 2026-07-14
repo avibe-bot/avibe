@@ -915,6 +915,15 @@ def test_extract_icon_path_malformed_href_returns_null_not_raises(tmp_path):
     assert _extract_icon_path(tmp_path) is None
 
 
+def test_extract_icon_path_hidden_dot_segments_are_null(tmp_path):
+    # Hidden / dot segments are denied for icons exactly as the Show Page static
+    # server denies them (`_is_show_page_dot_path`); the icon endpoint must not
+    # become a bypass for that policy — even for an image-extension dot-file (Codex).
+    for href in (".env.svg", "assets/.secret.png", ".git/logo.png", ".favicon.svg", "a/.b/c.png"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
 def test_extract_icon_path_runtime_api_hrefs_are_null(tmp_path):
     for href in ("api/health", "api/health.svg", "__show/events.png", "__events"):
         (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")

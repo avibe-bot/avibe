@@ -599,9 +599,17 @@ def _resolve_show_page_icon_href(href: str, base_href: str | None) -> str | None
     relative = resolved.path[len(prefix) :]
     if not relative:
         return None
-    if relative.split("/", 1)[0].lower() in {"api", "__show", "__events"}:
+    segments = [segment for segment in relative.split("/") if segment]
+    if segments[0].lower() in {"api", "__show", "__events"}:
         return None  # runtime API/event paths are not static icons
-    filename = relative.rsplit("/", 1)[-1]
+    if any(segment.startswith(".") for segment in segments):
+        # Hidden / dot segments (.git/x.png, .env.svg, assets/.secret.png) are
+        # denied for icons exactly as the Show Page static server denies them
+        # (_is_show_page_dot_path); the icon endpoint must not become a bypass for
+        # that policy. (Sensitive non-image files are already blocked by the image
+        # extension whitelist below; this closes image-extension dot-files.)
+        return None
+    filename = segments[-1]
     if filename.lower() == "vite.svg":
         return None  # generic scaffold mascot → letter avatar
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""

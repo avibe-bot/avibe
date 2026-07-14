@@ -83,7 +83,12 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
     };
     const attach = () => {
       try {
-        iframe.contentDocument?.addEventListener('keydown', onKeyDown);
+        // Capture phase (`true`): a page that installs its own keydown handler and
+        // calls stopPropagation() (canvas/editor-style Show Pages) would otherwise
+        // swallow ⌥W before this listener runs. Capture fires top-down ahead of the
+        // page's handlers, so only the explicit text-entry exemption above can
+        // suppress the close shortcut (Codex §7.1g review).
+        iframe.contentDocument?.addEventListener('keydown', onKeyDown, true);
       } catch {
         // Cross-origin (should not happen for the same-origin /show/ surface).
       }
@@ -93,7 +98,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
     return () => {
       iframe.removeEventListener('load', attach);
       try {
-        iframe.contentDocument?.removeEventListener('keydown', onKeyDown);
+        iframe.contentDocument?.removeEventListener('keydown', onKeyDown, true);
       } catch {
         // Document already torn down.
       }
