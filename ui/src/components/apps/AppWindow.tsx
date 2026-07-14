@@ -5,6 +5,8 @@ import clsx from 'clsx';
 import { ExternalLink, MessageCircle, Minus, Plus, X, type LucideIcon } from 'lucide-react';
 
 import { APP_REGISTRY } from '../../apps/registry';
+import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
+import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
@@ -21,11 +23,14 @@ const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
   { dir: 'sw', className: 'bottom-0 left-0 size-3 cursor-nesw-resize' },
 ];
 
-export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; layerHeight: number }> = ({
-  win,
-  layerWidth,
-  layerHeight,
-}) => {
+export const AppWindow: React.FC<{
+  win: WindowInstance;
+  layerWidth: number;
+  layerHeight: number;
+  /** The Show Page's own HTML icon (relative path) for a `showpage` window's
+   *  title-bar chip, threaded from the WindowLayer inventory join (§7.1f/g). */
+  iconPath?: string | null;
+}> = ({ win, layerWidth, layerHeight, iconPath }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const navigate = useNavigate();
@@ -111,6 +116,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
 
   const Body = def.Component;
   const Icon = def.icon;
+  // A Show Page window shows the app-avatar chip (favicon when the page has one,
+  // else the letter avatar) as its title-bar icon — the approved design (q4E5yl);
+  // built-in apps keep their registry Lucide icon.
+  const showpageSid = win.appId === 'showpage' ? (win.params?.sessionId as string | undefined) : undefined;
+  const showpageAvatar = showpageSid ? showPageAvatar(showpageSid, win.title ?? '') : null;
   const focused = wm.focusedId === win.id;
   // A standalone-surface app (v1: showpage) exposes an external URL for its own
   // browser tab; the title bar then shows an open-in-new-tab button.
@@ -234,7 +244,21 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
           ))}
         </div>
         <div className="flex flex-1 items-center justify-center gap-1.5 overflow-hidden">
-          <Icon className="size-3.5 shrink-0" style={{ color: `var(${def.accent})` }} />
+          {showpageSid && showpageAvatar ? (
+            <span
+              aria-hidden
+              className="grid size-4 shrink-0 place-items-center overflow-hidden rounded-[4px] border text-[10px] font-bold leading-none"
+              style={{
+                color: `var(${showpageAvatar.accentVar})`,
+                backgroundColor: `color-mix(in srgb, var(${showpageAvatar.accentVar}) 16%, transparent)`,
+                borderColor: `color-mix(in srgb, var(${showpageAvatar.accentVar}) 34%, transparent)`,
+              }}
+            >
+              <ShowPageAvatarContent iconUrl={showPageIconUrl(showpageSid, iconPath)} letter={showpageAvatar.letter} />
+            </span>
+          ) : (
+            <Icon className="size-3.5 shrink-0" style={{ color: `var(${def.accent})` }} />
+          )}
           <span className="truncate text-[13px] font-semibold text-foreground">{win.title ?? t(def.titleKey)}</span>
         </div>
         {/* Right cluster balances the traffic lights so the title stays centered; a

@@ -222,9 +222,13 @@ export const WindowLayer: React.FC = () => {
       // (z-10), so a maximized window covers the whole sidebar, Apps launcher included.
       className="pointer-events-none fixed inset-0 z-20 hidden md:block"
     >
-      {windows.map((w) => (
-        <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} />
-      ))}
+      {windows.map((w) => {
+        // For a showpage window, join the inventory (already loaded above — no new
+        // fetch) to hand its own HTML icon to the title-bar chip (§7.1f/g).
+        const sid = w.appId === 'showpage' ? (w.params?.sessionId as string | undefined) : undefined;
+        const iconPath = sid ? pages.find((p) => p.session_id === sid)?.icon_path ?? null : null;
+        return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconPath={iconPath} />;
+      })}
     </div>
   );
 };
