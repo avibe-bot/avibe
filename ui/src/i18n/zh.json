@@ -183,6 +183,7 @@
     "copy": "复制",
     "copied": "已复制",
     "open": "打开",
+    "openApp": "打开应用",
     "shareLink": "分享链接",
     "rotate": "更换链接",
     "rotateHint": "生成新链接并使当前链接立即失效。",

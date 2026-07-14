@@ -183,6 +183,7 @@
     "copy": "Copy",
     "copied": "Copied",
     "open": "Open",
+    "openApp": "Open app",
     "shareLink": "Share link",
     "rotate": "Rotate link",
     "rotateHint": "Generates a new link and disables the current one.",
