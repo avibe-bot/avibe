@@ -294,6 +294,56 @@ shows an App Library shortcut hint (never a dead surface).
   title everywhere; `title_snapshot` remains a fallback only. Built-ins not
   renamable. (Idea 1 — agent-suggested pinning — deliberately deferred;
   idea 2 — update dots — not scheduled yet.)
+- **Inventory lifecycle closure (review-driven, 2026-07-14)**: the
+  show-pages inventory hook guarantees that any revision-invalidated
+  in-flight fetch schedules an authoritative follow-up (no dangling
+  loading/loaded states — state-based invariant, unit-tested); rename merges
+  are compare-and-set; window titles project from the single inventory
+  source. A **shared inventory context** was evaluated and deferred by the
+  rule of three — revisit when a third consumer of the inventory appears
+  (e.g. update-dots or agent-suggested pinning).
+
+### 7.1e Phase 2.2 polish (owner hands-on feedback, 2026-07-14 13:32)
+
+1. **Tab naming settled**: the Library's second tab is **"ShowPage"** (en+zh,
+   keeps the count) — reverses the 7.1c "AI" tab rename. The **kind badge**
+   on rows is what says **"AI"** now (replaces 展示页面/Show Page badge), and
+   the badge is **right-aligned** in the row.
+2. **Apps view drag-reorder**: rows get a **grip handle at the row front**;
+   dragging reorders and **syncs with the Dock order** (existing
+   `PUT /api/dock/order`, optimistic + stale_order resync). PM default
+   (flag to owner): only DOCKED rows carry handles — installed-but-undocked
+   rows are not part of the Dock order and sort below the docked group; make
+   the pins list ordered later if full-order is wanted.
+3. **移出 icon**: trash → **minus** (trash reads as delete); applied to every
+   移出 affordance in the Library (Apps view + ShowPage view button state).
+4. **(owner 13:35) Dock drag-vs-click**: releasing a tile after a drag that
+   moved beyond a threshold must NOT trigger click-open; genuine clicks
+   still open. Same discrimination anywhere whole-element drag coexists
+   with click-open.
+5. **(owner 13:38) ShowPage-tab open trigger**: click-to-open is limited to
+   the title+icon cluster (with a hover affordance), NOT the whole row —
+   whole-row click conflicts with expand. The Apps tab keeps whole-row
+   open (no expand panel there).
+
+### 7.1f Phase 2.3 — app icons sync from the page's HTML icon (owner 2026-07-14 13:36)
+
+- AI-page app icons (Dock tile, mobile drawer, Library rows, window
+  title-bar, search rows) prefer the **page's own HTML icon** (`<link
+  rel="icon">` in the workspace `index.html`), falling back to the letter
+  avatar when the page has none or only the stock scaffold icon (e.g.
+  vite.svg — a generic default is worse than the letter avatar).
+- Implementation shape: **server extracts, browser fetches** — the
+  show-pages payload gains an `icon_path` field: the server reads ONLY the
+  session workspace's `index.html` and extracts the icon href as a path
+  RELATIVE to `/show/<sid>/` (it never fetches the icon itself; the browser
+  loads it through the existing gated serving path, so all fs-gate/auth
+  rules keep applying). No new endpoints.
+- UI adoption via the single avatar chokepoint (`showPageAvatarTile` /
+  avatar helper): icon URL prop with letter-avatar fallback and onerror
+  fallback — every surface inherits.
+- Freshness: rides the existing inventory refresh cycles; no push channel.
+- Sequenced AFTER Phase 2.2 (file overlap on Dock/Library surfaces).
 
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 

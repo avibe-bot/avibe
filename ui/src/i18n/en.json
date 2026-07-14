@@ -183,6 +183,7 @@
     "copy": "Copy",
     "copied": "Copied",
     "open": "Open",
+    "openApp": "Open app",
     "shareLink": "Share link",
     "rotate": "Rotate link",
     "rotateHint": "Generates a new link and disables the current one.",
@@ -218,19 +219,20 @@
     "desc": "Your apps and Show Pages",
     "tab": {
       "apps": "Apps",
-      "ai": "AI"
+      "ai": "ShowPage"
     },
     "searchApps": "Search apps…",
     "searchPages": "Search pages…",
     "kind": {
       "builtin": "Built-in",
-      "showPage": "Show Page"
+      "showPage": "AI"
     },
     "apps": {
       "system": "system",
       "dock": "Dock",
       "undock": "Undock",
       "remove": "Remove",
+      "reorder": "Reorder",
       "empty": "No apps match your search."
     },
     "ai": {

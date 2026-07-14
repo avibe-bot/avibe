@@ -8,11 +8,11 @@ import {
   ExternalLink,
   Link2,
   Loader2,
+  Minus,
   Pencil,
   Plus,
   RefreshCw,
   RotateCw,
-  Trash2,
   TriangleAlert,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -106,41 +106,48 @@ function ShowPageRow({
 
   return (
     <div className={clsx('border-b border-border last:border-b-0', expanded && 'border-y border-mint/30')}>
-      {/* The row itself opens the page as an app window (not a browser tab) —
-          click the row or its title. Expand (share-link management) is a separate,
-          explicit affordance: the chevron on the right. */}
+      {/* Open-click is limited to the title+icon cluster (§7.1e item 5): the row
+          owns the expand panel, so a whole-row click would fight the chevron. The
+          rest of the row is inert except its explicit controls. */}
       <div
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(e) => {
-          if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
-            e.preventDefault();
-            onOpen();
-          }
-        }}
         className={clsx(
-          'group flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors sm:gap-4 sm:px-5',
-          expanded ? 'bg-surface-2' : 'hover:bg-foreground/[0.02]',
+          'flex w-full items-center gap-3 px-4 py-3 sm:gap-4 sm:px-5',
+          expanded && 'bg-surface-2',
         )}
       >
-        <span className="flex min-w-0 flex-1 items-center gap-3">
-          <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
-          <span className="min-w-0">
-            <span className="flex items-center gap-1.5">
-              <span className={clsx('truncate text-[13px] font-semibold text-foreground', !page.title && 'font-mono')}>
-                {label}
+        {/* flex-1 lives on this inert wrapper; the open button sizes to its
+            content (avatar+title+icon cluster) so the blank space to its right
+            does NOT open the app — only the cluster does (§7.1e item 5). The
+            cluster carries a hover affordance so openability stays discoverable. */}
+        <div className="flex min-w-0 flex-1">
+          <button
+            type="button"
+            onClick={onOpen}
+            title={t('showPages.openApp')}
+            className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
+          >
+            <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={clsx(
+                    'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan',
+                    !page.title && 'font-mono',
+                  )}
+                >
+                  {label}
+                </span>
+                {/* Open affordance beside the title. */}
+                <AppWindowIcon
+                  size={13}
+                  aria-hidden
+                  className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
+                />
               </span>
-              {/* Open affordance beside the title — the row opens the app window. */}
-              <AppWindowIcon
-                size={13}
-                aria-hidden
-                className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
-              />
+              {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
             </span>
-            {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
-          </span>
-        </span>
+          </button>
+        </div>
 
         <Badge variant={status.badge} className="hidden sm:inline-flex">
           <span className={clsx('size-1.5 rounded-full', status.dot)} />
@@ -148,17 +155,15 @@ function ShowPageRow({
         </Badge>
 
         {/* Install toggle — adds the page to the Apps list (and docks it) or
-            removes it from both. Stop propagation so it never opens the app. */}
+            removes it from both. A sibling of the open button now, so no
+            propagation guard is needed. */}
         <Button
           type="button"
           variant={installed ? 'secondary' : 'accent'}
           size="xs"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleInstall(!installed);
-          }}
+          onClick={() => onToggleInstall(!installed)}
         >
-          {installed ? <Trash2 /> : <Plus />}
+          {installed ? <Minus /> : <Plus />}
           <span className="hidden sm:inline">{installed ? t('library.apps.remove') : t('library.ai.add')}</span>
         </Button>
 
@@ -167,10 +172,7 @@ function ShowPageRow({
           type="button"
           aria-label={t('showPages.details')}
           aria-expanded={expanded}
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleExpand();
-          }}
+          onClick={() => onToggleExpand()}
           className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
         >
           {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} />}

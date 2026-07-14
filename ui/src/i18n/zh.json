@@ -183,6 +183,7 @@
     "copy": "复制",
     "copied": "已复制",
     "open": "打开",
+    "openApp": "打开应用",
     "shareLink": "分享链接",
     "rotate": "更换链接",
     "rotateHint": "生成新链接并使当前链接立即失效。",
@@ -218,19 +219,20 @@
     "desc": "你的应用与展示页面",
     "tab": {
       "apps": "应用",
-      "ai": "AI"
+      "ai": "ShowPage"
     },
     "searchApps": "搜索应用…",
     "searchPages": "搜索页面…",
     "kind": {
       "builtin": "内置",
-      "showPage": "展示页面"
+      "showPage": "AI"
     },
     "apps": {
       "system": "系统",
       "dock": "固定到 Dock",
       "undock": "取消固定",
       "remove": "移出",
+      "reorder": "重新排序",
       "empty": "没有匹配的应用。"
     },
     "ai": {
