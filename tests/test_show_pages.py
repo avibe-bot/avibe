@@ -853,6 +853,61 @@ def test_extract_icon_path_reads_only_head_of_large_index(tmp_path):
     assert _extract_icon_path(tmp_path) == "favicon.svg"
 
 
+def test_extract_icon_path_resolves_through_base_href(tmp_path):
+    # A <base href="assets/"> BEFORE the icon link makes the browser resolve the
+    # icon as assets/favicon.svg; the resolver must match that document semantics.
+    (tmp_path / "index.html").write_text(
+        '<head><base href="assets/"><link rel="icon" href="favicon.svg"></head>',
+        encoding="utf-8",
+    )
+    assert _extract_icon_path(tmp_path) == "assets/favicon.svg"
+
+
+def test_extract_icon_path_base_after_icon_does_not_apply(tmp_path):
+    # A <base> AFTER the icon link does not affect it (document order).
+    (tmp_path / "index.html").write_text(
+        '<head><link rel="icon" href="favicon.svg"><base href="assets/"></head>',
+        encoding="utf-8",
+    )
+    assert _extract_icon_path(tmp_path) == "favicon.svg"
+
+
+def test_extract_icon_path_base_escaping_workspace_is_null(tmp_path):
+    for base in ("/other/", "https://cdn.example.com/", "../"):
+        (tmp_path / "index.html").write_text(
+            f'<head><base href="{base}"><link rel="icon" href="favicon.svg"></head>',
+            encoding="utf-8",
+        )
+        assert _extract_icon_path(tmp_path) is None, base
+
+
+def test_extract_icon_path_runtime_api_hrefs_are_null(tmp_path):
+    for href in ("api/health", "api/health.svg", "__show/events.png", "__events"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
+def test_extract_icon_path_non_image_extensions_are_null(tmp_path):
+    for href in ("icon.txt", "icon.js", "icon.html", "favicon", "noext/"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
+def test_extract_icon_path_accepts_whitelisted_image_extensions(tmp_path):
+    cases = {
+        "icon.png": "icon.png",
+        "icon.jpg": "icon.jpg",
+        "icon.jpeg": "icon.jpeg",
+        "icon.webp": "icon.webp",
+        "icon.gif": "icon.gif",
+        "icon.ico": "icon.ico",
+        "logo.SVG": "logo.SVG",  # extension is case-insensitive; the path keeps its case
+    }
+    for href, expected in cases.items():
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) == expected, href
+
+
 def test_show_page_payload_includes_icon_path(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     page_dir = ensure_show_page_dir("sesicon")

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 from sqlalchemy import insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -36,6 +36,19 @@ SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
 # at the top). Bounds the per-page read so a huge inline page can't stall
 # /api/show-pages or allocate a large string (§7.1f review).
 _ICON_INDEX_HEAD_LIMIT = 64 * 1024
+# Whitelisted image extensions -> Content-Type served by the icon endpoint. A page
+# icon MUST be one of these (§7.1f): anything else is treated as "no icon" so a page
+# can't smuggle an executable/HTML asset through the thumbnail. Shared by the
+# resolver (has-icon policy) and the serving endpoint (content-type) — one source.
+SHOW_PAGE_ICON_CONTENT_TYPES: dict[str, str] = {
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "ico": "image/x-icon",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 # A custom public share suffix lands directly in the ``/p/<share_id>/`` URL, so
 # keep it to URL-safe slug characters: start and end alphanumeric, with dash and
@@ -501,39 +514,87 @@ def _page_from_row(row: Any) -> ShowPage:
 
 
 class _IconLinkFinder(HTMLParser):
-    """Capture the href of the first ``<link rel="icon">`` in an HTML document.
+    """Capture the first ``<link rel="icon">`` href — and the ``<base href>`` in
+    effect before it — from an HTML document.
 
     Tolerant, stdlib-only (html.parser, no new deps): a ``<link>`` whose ``rel``
     token set includes ``icon`` matches (so ``icon`` and ``shortcut icon`` do,
-    ``apple-touch-icon`` does not), and its ``href`` is recorded once. Pure string
-    extraction — it never fetches or resolves anything.
+    ``apple-touch-icon`` does not). ``base_href`` holds the first ``<base href>``
+    seen BEFORE the icon link (a base applies only to later URLs); recording stops
+    once the icon link is found. Pure string extraction — never fetches/resolves.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.href: str | None = None
+        self.icon_href: str | None = None
+        self.base_href: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if self.href is not None or tag.lower() != "link":
+        if self.icon_href is not None:
             return
-        values = {name.lower(): (value or "") for name, value in attrs}
-        if "icon" in values.get("rel", "").lower().split():
+        name = tag.lower()
+        values = {attr.lower(): (value or "") for attr, value in attrs}
+        if name == "base":
+            if self.base_href is None:
+                href = values.get("href", "").strip()
+                if href:
+                    self.base_href = href
+        elif name == "link" and "icon" in values.get("rel", "").lower().split():
             href = values.get("href", "").strip()
             if href:
-                self.href = href
+                self.icon_href = href
+
+
+def _resolve_show_page_icon_href(href: str, base_href: str | None) -> str | None:
+    """Resolve a page's icon href to a same-workspace relative path, or None.
+
+    Resolves with DOCUMENT semantics — the browser percent-decodes the href and any
+    ``<base href>``, treats backslashes as slashes, then joins them the way it
+    resolves ``<img src>`` — so ``<base href="assets/">`` + ``favicon.svg`` becomes
+    ``assets/favicon.svg`` and ``%2e%2e/x`` / ``..\\x`` are caught. Returns None
+    unless the result lands inside the page's own workspace AND names a static,
+    whitelisted image: absolute / external / other-scheme hrefs, parent traversal,
+    runtime API/event paths (``api/`` / ``__show/`` / ``__events``), the generic
+    ``vite.svg`` scaffold mascot, and non-whitelisted extensions all yield None (the
+    letter avatar is preferred). Pure — no I/O.
+    """
+
+    def _normalize(value: str) -> str:
+        return unquote(value).replace("\\", "/")
+
+    # Resolve against a synthetic same-origin workspace root; any absolute path or
+    # ``..`` that escapes ``/w/`` is rejected by the prefix check below.
+    doc_base = "http://show.invalid/w/"
+    base_url = urljoin(doc_base, _normalize(base_href)) if base_href else doc_base
+    resolved = urlsplit(urljoin(base_url, _normalize(href)))
+    if resolved.scheme != "http" or resolved.netloc != "show.invalid":
+        return None  # external / protocol-relative / other scheme
+    prefix = "/w/"
+    if not resolved.path.startswith(prefix):
+        return None  # absolute or ../ traversal escaped the workspace
+    relative = resolved.path[len(prefix) :]
+    if not relative:
+        return None
+    if relative.split("/", 1)[0].lower() in {"api", "__show", "__events"}:
+        return None  # runtime API/event paths are not static icons
+    filename = relative.rsplit("/", 1)[-1]
+    if filename.lower() == "vite.svg":
+        return None  # generic scaffold mascot → letter avatar
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if extension not in SHOW_PAGE_ICON_CONTENT_TYPES:
+        return None
+    return relative
 
 
 def _extract_icon_path(page_dir: Path) -> str | None:
-    """The page's own favicon as a path RELATIVE to ``/show/<sid>/``, or None.
+    """The page's own favicon as a same-workspace relative path, or None.
 
-    Reads ONLY ``<page_dir>/index.html`` (a fixed filename inside the validated
-    workspace dir — no traversal, no link-following, no other files) and returns
-    the first ``<link rel="icon">`` href when it is a same-workspace relative
-    path. Returns None for a missing/unreadable file, no icon link, or an href
-    that is absolute, external (any URI scheme / protocol-relative), a parent
-    traversal, or the generic scaffold icon — in each case the letter avatar is
-    preferred over a broken or generic image. The server never fetches the icon;
-    the browser loads the returned path through the existing gated /show/ route.
+    Reads ONLY the head (bounded) of a REGULAR ``<page_dir>/index.html`` — never a
+    symlink/special file, never any other file, never the icon itself — extracts the
+    first ``<link rel="icon">`` href (with any ``<base href>``), and resolves +
+    validates it via :func:`_resolve_show_page_icon_href`. The returned path is served
+    ONLY through ``GET /api/show-pages/<sid>/icon``; callers use its presence as the
+    has-icon signal, never to compose a URL.
     """
     index_path = page_dir / "index.html"
     try:
@@ -552,30 +613,38 @@ def _extract_icon_path(page_dir: Path) -> str | None:
     except Exception:
         # Malformed markup: prefer the letter avatar over guessing.
         return None
-    href = (finder.href or "").strip()
+    href = (finder.icon_href or "").strip()
     if not href:
         return None
-    # The browser percent-decodes the href and treats backslashes as slashes
-    # BEFORE resolving the icon URL, so validate that normalized form too — an
-    # href like ``%2e%2e/x``, ``..\\x``, or ``%2f..`` would otherwise slip past a
-    # literal check and escape the page's own /show/<sid>/ prefix. Same-workspace
-    # relative paths only: reject absolute / protocol-relative (``/…`` covers
-    # both), any URI scheme (http:, data:, …), and parent-dir traversal.
-    normalized_href = unquote(href).replace("\\", "/")
-    for form in (href, normalized_href):
-        if form.startswith("/") or re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*:", form):
-            return None
-        if ".." in form.split("/"):
-            return None
-    result = href[2:] if href.startswith("./") else href
-    if not result:
+    return _resolve_show_page_icon_href(href, finder.base_href)
+
+
+def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
+    """The absolute path + Content-Type of a Show Page's own icon, or None.
+
+    The single serving chokepoint for ``GET /api/show-pages/<sid>/icon``: combines
+    :func:`_extract_icon_path` (document-semantics resolution + policy) with the
+    same-workspace realpath guard, regular-file check, and extension whitelist, so
+    the serving layer just streams the file. Returns None for any missing workspace
+    / no icon / policy rejection — the caller answers 404 and the frontend falls
+    back to the letter avatar.
+    """
+    page_dir = show_page_dir(session_id)
+    relative = _extract_icon_path(page_dir)
+    if relative is None:
         return None
-    # The scaffold ships NO icon link, so an un-customized page already returns
-    # None above; this guards the generic Vite mascot for raw-Vite workspaces
-    # (a generic default reads worse than the letter avatar).
-    if normalized_href.split("/")[-1].lower() == "vite.svg":
+    candidate = (page_dir / relative).resolve()
+    root = page_dir.resolve()
+    # Realpath must stay inside the workspace (defends against an in-workspace
+    # symlink pointing out) and be a regular file of a whitelisted image type.
+    if candidate != root and root not in candidate.parents:
         return None
-    return result
+    if not candidate.is_file():
+        return None
+    content_type = SHOW_PAGE_ICON_CONTENT_TYPES.get(candidate.suffix.lower().lstrip("."))
+    if content_type is None:
+        return None
+    return candidate, content_type
 
 
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:

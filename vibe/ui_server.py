@@ -3557,6 +3557,40 @@ def show_page_set_share_id_post(session_id):
         return _show_page_error_response(exc)
 
 
+def _show_page_icon_not_found():
+    # 404 on any missing page / no icon / policy rejection — the frontend's
+    # onerror -> letter-avatar fallback covers it. No body needed.
+    return Response("", status=404, mimetype="text/plain")
+
+
+@app.route("/api/show-pages/<session_id>/icon", methods=["GET", "HEAD"])
+def show_page_icon_get(session_id):
+    # The page's own HTML icon, served STATICALLY as the single chokepoint (§7.1f):
+    # ALL href resolution + policy (document semantics incl. <base>; reject api /
+    # traversal / absolute / external / non-image / stock) lives server-side in
+    # resolve_show_page_icon, so the frontend URL carries ONLY the session id and
+    # can never compose a path. Auth rides the global /api before_request hooks.
+    from core.show_pages import ShowPageStore, resolve_show_page_icon
+
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None or page.visibility not in {"private", "public"}:
+            return _show_page_icon_not_found()
+        resolved = resolve_show_page_icon(page.session_id)
+        if resolved is None:
+            return _show_page_icon_not_found()
+        candidate, content_type = resolved
+        response = send_file(candidate, mimetype=content_type)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        # A directly-navigated SVG must not execute scripts in the API origin.
+        response.headers["Content-Security-Policy"] = "sandbox"
+        response.headers["Cache-Control"] = "private, max-age=60"
+        return response
+    finally:
+        store.close()
+
+
 def _dock_error_response(exc):
     code = getattr(exc, "code", "invalid_dock_request")
     # A missing Show Page (nothing to pin) is a 404; a malformed id or a bad
@@ -9013,19 +9047,6 @@ async def serve_private_show_page(session_id, asset_path):
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
-        # Thumbnail assets (a Dock / Library / window-title favicon tile, §7.1f)
-        # are served STATICALLY and must NOT boot the Show Runtime: merely listing
-        # apps would otherwise start/install a runtime per icon. The Avibe-namespaced
-        # `__avibe_thumb` marker won't collide with a page's own query params, and it
-        # is NOT applied to page API assets, so a page endpoint that happens to carry
-        # the marker still reaches the runtime. Reuses the same gated static file
-        # server as the runtime fallback below (denied-path check above applies).
-        if (
-            request.method in {"GET", "HEAD"}
-            and request.args.get("__avibe_thumb") == "1"
-            and not _is_show_api_asset(asset_path)
-        ):
-            return _show_page_file_response(page_dir, asset_path)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
             try:

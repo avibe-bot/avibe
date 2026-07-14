@@ -82,32 +82,20 @@ describe('showPagePrivatePath', () => {
 });
 
 describe('showPageIconUrl', () => {
-  it('resolves a relative icon path against the private /show/ surface with the static marker', () => {
-    expect(showPageIconUrl('ses_1', 'favicon.svg')).toBe('/show/ses_1/favicon.svg?__avibe_thumb=1');
-    expect(showPageIconUrl('ses_1', 'assets/logo.png')).toBe('/show/ses_1/assets/logo.png?__avibe_thumb=1');
+  it('points at the dedicated icon endpoint using ONLY the session id', () => {
+    expect(showPageIconUrl('ses_1', 'favicon.svg')).toBe('/api/show-pages/ses_1/icon');
+    // The icon_path VALUE is never composed into the URL — the server resolves it.
+    expect(showPageIconUrl('ses_1', 'assets/logo.png?v=2#frag')).toBe('/api/show-pages/ses_1/icon');
   });
 
-  it('url-encodes the session id in the prefix', () => {
-    expect(showPageIconUrl('a/b', 'icon.svg')).toBe('/show/a%2Fb/icon.svg?__avibe_thumb=1');
+  it('url-encodes the session id', () => {
+    expect(showPageIconUrl('a/b', 'icon.svg')).toBe('/api/show-pages/a%2Fb/icon');
   });
 
-  it('returns null when there is no icon path', () => {
+  it('returns null when the page has no icon (icon_path is the has-icon signal)', () => {
     expect(showPageIconUrl('ses_1', null)).toBeNull();
     expect(showPageIconUrl('ses_1', undefined)).toBeNull();
     expect(showPageIconUrl('ses_1', '   ')).toBeNull();
-  });
-
-  it('defensively strips a stray leading slash so it stays under /show/<sid>/', () => {
-    expect(showPageIconUrl('ses_1', '/favicon.svg')).toBe('/show/ses_1/favicon.svg?__avibe_thumb=1');
-  });
-
-  it('uses & when the icon href already carries a query', () => {
-    expect(showPageIconUrl('ses_1', 'icon.svg?v=2')).toBe('/show/ses_1/icon.svg?v=2&__avibe_thumb=1');
-  });
-
-  it('places the marker in the query BEFORE a #fragment (browsers strip the fragment)', () => {
-    expect(showPageIconUrl('ses_1', 'sprite.svg#icon')).toBe('/show/ses_1/sprite.svg?__avibe_thumb=1#icon');
-    expect(showPageIconUrl('ses_1', 'sprite.svg?v=2#icon')).toBe('/show/ses_1/sprite.svg?v=2&__avibe_thumb=1#icon');
   });
 });
 

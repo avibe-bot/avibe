@@ -128,11 +128,19 @@ PUT    /api/dock/order               { order: string[] }    → { ok, dock }
 
 DockDoc = { order: string[], pins: DockPin[] }
 DockPin = { session_id: string, title_snapshot: string, pinned_at: string }
+
+GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404   # §7.1f
 ```
 
 - `POST pins` appends `show:<sid>` to the end of `order`; captures
   `title_snapshot` from the session's current title server-side.
 - Errors: 404 unknown session / no show page on pin; 400 invalid order.
+- `GET /api/show-pages/{sid}/icon` (§7.1f restructure): serves the page's own
+  HTML icon, resolved server-side with document semantics (`<base href>`),
+  confined to the workspace, whitelisted image extension only. 404 on any
+  policy rejection or missing target — never a redirect or partial serve.
+  Headers: `nosniff` + `Content-Security-Policy: sandbox` +
+  `Cache-Control: private, max-age=60`. Never boots the Show Runtime.
 
 ## 5. Frontend Changes (map to real files)
 
@@ -362,12 +370,49 @@ shows an App Library shortcut hint (never a dead surface).
   (in `showPageAvatarTile.tsx`). It is adopted by: `ShowPageAvatarTile` (Library
   Apps rows, Show Pages rows, ⌘K search) and the two bespoke inline tiles that
   read the same inventory (Dock, mobile drawer). All join the page by session id.
-- **Deferred (follow-up):** the **window title-bar** renders the static registry
-  Lucide icon (`AppWindow` → `def.icon`), not an avatar — adopting the page
-  favicon there needs `AppWindow` plumbing + a design call. The mobile
-  full-screen **ShowPageRoute** header loads the session, not the inventory, so
-  it has no `icon_path` without an extra fetch. Both keep the letter/Lucide icon
-  for now.
+- **Deferred (follow-up):** the mobile full-screen **ShowPageRoute** header
+  loads the session, not the inventory, so it has no `icon_path` without an
+  extra fetch — it keeps the letter/Lucide icon for now.
+
+**Restructure (owner-adjudicated 2026-07-14, dedicated endpoint — supersedes
+the "server extracts, browser fetches a `/show/` path" shape above):** the
+browser no longer composes any file URL from `icon_path`. All href resolution
+and policy live behind ONE server chokepoint:
+
+```
+GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404
+```
+
+- **Single chokepoint.** The server resolves the page's `<link rel="icon">`
+  href with full **document semantics** — including a leading `<base href>` —
+  then serves the resolved file. The frontend URL carries ONLY the session id
+  (`showPageIconUrl` → `/api/show-pages/<sid>/icon`); `icon_path` in the
+  payload is now purely a **has-icon signal** (may later shrink to `has_icon`),
+  never composed into a path.
+- **Policy (all → 404, never a redirect / partial serve), in `core/show_pages`:**
+  resolve `href` (percent-decoded, `\`→`/`) against `<base>` then the doc URL;
+  require it stay within the workspace (`http://show.invalid/w/…`); reject the
+  runtime surfaces (`api/`, `__show/`, `__events` first segment), the `vite.svg`
+  stock basename, absolute/scheme/`//` hrefs, and parent traversal; require a
+  whitelisted image extension `{svg,png,ico,jpg,jpeg,webp,gif}` (case-insensitive);
+  then realpath-confirm the target is a regular file inside the workspace root.
+- **Serving.** `send_file` with `Content-Type` from the extension whitelist +
+  `X-Content-Type-Options: nosniff` + `Content-Security-Policy: sandbox` +
+  `Cache-Control: private, max-age=60`. (The app-wide vault-sandbox hook then
+  composes its `frame-src` onto the CSP, so the wire value is
+  `sandbox; frame-src 'self' https://sandbox.avibe.bot` — the bare `sandbox`
+  directive stays first and effective, rendering a page-authored SVG in an
+  opaque origin with scripts disabled.) Same authed `/api` surface (inherits
+  `enforce_remote_access_cookie`); a remote request without a session is bounced.
+  Resolving/serving an icon **never boots the Show Runtime** (pure static read).
+- **Why.** Three review rounds re-litigated per-rule href policy at the URL
+  layer (traversal, encoded traversal, `api/` exemption, `<base>` semantics);
+  a chokepoint that reasons with document semantics once, and returns bytes-or-404,
+  removes the class instead of patching instances.
+- **Window title-bar** now renders the shared `ShowPageAvatarContent` chip for
+  showpage windows (`AppWindow` gets the window's `icon_path` threaded from the
+  `WindowLayer` inventory join), so it inherits the page favicon like every
+  other surface.
 
 ### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
 

@@ -19,7 +19,11 @@ export function inTerminalSurface(el: Element | null): boolean {
 }
 
 export function inTextEntrySurface(el: Element | null): boolean {
+  // `[contenteditable]:not([contenteditable="false"])` matches every editable form
+  // — `contenteditable`, `="true"`, `="plaintext-only"` — while excluding the
+  // explicitly non-editable `="false"` (Codex): otherwise ⌥W would close the window
+  // while the user types in a `<div contenteditable>` Show Page editor.
   return !!el?.closest?.(
-    'input, textarea, select, [contenteditable="true"], [role="textbox"], .monaco-editor, .xterm',
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], .monaco-editor, .xterm',
   );
 }

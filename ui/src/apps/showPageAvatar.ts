@@ -46,27 +46,15 @@ export function showPagePrivatePath(sessionId: string): string {
   return `/show/${encodeURIComponent(sessionId)}/`;
 }
 
-/** The gated URL for a page's own HTML icon (`icon_path` from the show-pages
- *  inventory, already validated server-side as a same-workspace RELATIVE path),
- *  resolved against the page's private /show/<sid>/ surface so the browser loads
- *  it through the existing auth/fs gate. Null when the page has no usable icon —
- *  the caller falls back to the letter avatar. Pure. */
+/** The URL for a page's own HTML icon, served by the dedicated
+ *  `GET /api/show-pages/<sid>/icon` endpoint (§7.1f). ALL href resolution + policy
+ *  lives server-side, so this URL carries ONLY the session id — it NEVER composes a
+ *  path from `icon_path`, whose presence is used solely as the has-icon signal. Null
+ *  when the page has no icon → the caller falls back to the letter avatar (the
+ *  endpoint also 404s on any rejection, and the tile's onError falls back). Pure. */
 export function showPageIconUrl(sessionId: string, iconPath: string | null | undefined): string | null {
-  const path = (iconPath ?? '').trim();
-  if (!path) return null;
-  // The server guarantees a relative path; defensively strip a leading slash so a
-  // stray absolute value can never escape the page's own /show/<sid>/ prefix.
-  const relative = path.replace(/^\/+/, '');
-  // Serve the asset STATICALLY, never booting the Show Runtime (§7.1f review):
-  // merely listing apps must not start a runtime per icon. Use an Avibe-namespaced
-  // marker so it can't collide with a page's own query params, and place it in the
-  // QUERY BEFORE any #fragment — the browser strips the fragment before the HTTP
-  // request, so a marker after it would never reach the server (Codex review).
-  const hash = relative.indexOf('#');
-  const beforeHash = hash >= 0 ? relative.slice(0, hash) : relative;
-  const fragment = hash >= 0 ? relative.slice(hash) : '';
-  const separator = beforeHash.includes('?') ? '&' : '?';
-  return `${showPagePrivatePath(sessionId)}${beforeHash}${separator}__avibe_thumb=1${fragment}`;
+  if (!(iconPath ?? '').trim()) return null;
+  return `/api/show-pages/${encodeURIComponent(sessionId)}/icon`;
 }
 
 /** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The Show

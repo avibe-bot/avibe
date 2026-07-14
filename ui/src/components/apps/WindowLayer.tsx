@@ -109,6 +109,10 @@ export const WindowLayer: React.FC = () => {
   useEffect(() => {
     if (!anyShown) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      // The window layer is desktop-only (`hidden md:block`); on a narrowed
+      // viewport the windows are hidden, so a stale non-minimized window must not
+      // prompt on tab-close. Gate on the same md breakpoint, checked at unload time.
+      if (!window.matchMedia?.('(min-width: 768px)').matches) return;
       e.preventDefault();
       e.returnValue = '';
     };
