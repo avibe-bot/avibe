@@ -6,6 +6,7 @@ import hmac
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -495,6 +496,70 @@ def _page_from_row(row: Any) -> ShowPage:
     )
 
 
+class _IconLinkFinder(HTMLParser):
+    """Capture the href of the first ``<link rel="icon">`` in an HTML document.
+
+    Tolerant, stdlib-only (html.parser, no new deps): a ``<link>`` whose ``rel``
+    token set includes ``icon`` matches (so ``icon`` and ``shortcut icon`` do,
+    ``apple-touch-icon`` does not), and its ``href`` is recorded once. Pure string
+    extraction — it never fetches or resolves anything.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.href: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.href is not None or tag.lower() != "link":
+            return
+        values = {name.lower(): (value or "") for name, value in attrs}
+        if "icon" in values.get("rel", "").lower().split():
+            href = values.get("href", "").strip()
+            if href:
+                self.href = href
+
+
+def _extract_icon_path(page_dir: Path) -> str | None:
+    """The page's own favicon as a path RELATIVE to ``/show/<sid>/``, or None.
+
+    Reads ONLY ``<page_dir>/index.html`` (a fixed filename inside the validated
+    workspace dir — no traversal, no link-following, no other files) and returns
+    the first ``<link rel="icon">`` href when it is a same-workspace relative
+    path. Returns None for a missing/unreadable file, no icon link, or an href
+    that is absolute, external (any URI scheme / protocol-relative), a parent
+    traversal, or the generic scaffold icon — in each case the letter avatar is
+    preferred over a broken or generic image. The server never fetches the icon;
+    the browser loads the returned path through the existing gated /show/ route.
+    """
+    try:
+        html = (page_dir / "index.html").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    finder = _IconLinkFinder()
+    try:
+        finder.feed(html)
+    except Exception:
+        # Malformed markup: prefer the letter avatar over guessing.
+        return None
+    href = (finder.href or "").strip()
+    if not href:
+        return None
+    # Same-workspace relative paths only. Reject absolute / protocol-relative
+    # (``/…`` covers both) and anything carrying a URI scheme (http:, data:, …) —
+    # each would resolve outside the page's own gated workspace.
+    if href.startswith("/") or re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*:", href):
+        return None
+    normalized = href[2:] if href.startswith("./") else href
+    if not normalized or normalized.startswith("../") or "/../" in normalized:
+        return None
+    # The scaffold ships NO icon link, so an un-customized page already returns
+    # None above; this guards the generic Vite mascot for raw-Vite workspaces
+    # (a generic default reads worse than the letter avatar).
+    if normalized.split("/")[-1].lower() == "vite.svg":
+        return None
+    return normalized
+
+
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:
     path = show_page_dir(page.session_id)
     private = private_url(page.session_id, config=config)
@@ -509,6 +574,7 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
         "session_id": page.session_id,
         "visibility": page.visibility,
         "path": str(path),
+        "icon_path": _extract_icon_path(path),
         "active_url": active_url,
         "private_url": private,
         "public_url": public,

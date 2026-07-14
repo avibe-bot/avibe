@@ -5,7 +5,16 @@ import pytest
 
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
-from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir, show_cli_event_token, show_page_payload
+from core.show_pages import (
+    ShowPage,
+    ShowPageError,
+    ShowPageStore,
+    _default_index_html,
+    _extract_icon_path,
+    ensure_show_page_dir,
+    show_cli_event_token,
+    show_page_payload,
+)
 from storage.pagination import PageRequest
 from vibe import cli
 
@@ -731,6 +740,117 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert 'from "./router"' in app_tsx
     assert "<RouterView" in app_tsx
     assert (page_dir / "api" / "health.ts").exists()
+
+
+def test_extract_icon_path_custom_relative_href(tmp_path):
+    (tmp_path / "index.html").write_text(
+        '<!doctype html><html><head><link rel="icon" href="./favicon.svg"></head></html>',
+        encoding="utf-8",
+    )
+    # A leading "./" is normalized away; the path stays relative to /show/<sid>/.
+    assert _extract_icon_path(tmp_path) == "favicon.svg"
+
+
+def test_extract_icon_path_relative_subdir_href(tmp_path):
+    (tmp_path / "index.html").write_text('<link rel="icon" href="assets/logo.png">', encoding="utf-8")
+    assert _extract_icon_path(tmp_path) == "assets/logo.png"
+
+
+def test_extract_icon_path_shortcut_icon_rel(tmp_path):
+    # rel="shortcut icon" still carries the "icon" token, so it matches.
+    (tmp_path / "index.html").write_text('<link rel="shortcut icon" href="fav.ico">', encoding="utf-8")
+    assert _extract_icon_path(tmp_path) == "fav.ico"
+
+
+def test_extract_icon_path_first_icon_wins(tmp_path):
+    (tmp_path / "index.html").write_text(
+        '<link rel="icon" href="first.svg"><link rel="icon" href="second.svg">',
+        encoding="utf-8",
+    )
+    assert _extract_icon_path(tmp_path) == "first.svg"
+
+
+def test_extract_icon_path_missing_index_is_null(tmp_path):
+    assert _extract_icon_path(tmp_path) is None
+
+
+def test_extract_icon_path_no_link_is_null(tmp_path):
+    (tmp_path / "index.html").write_text("<html><head><title>x</title></head></html>", encoding="utf-8")
+    assert _extract_icon_path(tmp_path) is None
+
+
+def test_extract_icon_path_apple_touch_icon_ignored(tmp_path):
+    # apple-touch-icon is not rel="icon"; prefer the letter avatar over it.
+    (tmp_path / "index.html").write_text('<link rel="apple-touch-icon" href="touch.png">', encoding="utf-8")
+    assert _extract_icon_path(tmp_path) is None
+
+
+def test_extract_icon_path_stock_scaffold_index_is_null(tmp_path):
+    # The real scaffold ships NO icon link, so an un-customized page yields null
+    # and the letter avatar is used. This locks that contract to the scaffold.
+    (tmp_path / "index.html").write_text(_default_index_html("ses123"), encoding="utf-8")
+    assert _extract_icon_path(tmp_path) is None
+
+
+def test_extract_icon_path_stock_vite_icons_are_null(tmp_path):
+    # The Vite default favicon ships as an ABSOLUTE href, and even a relative copy
+    # of the generic mascot is treated as stock — both prefer the letter avatar.
+    for href in ("/vite.svg", "./vite.svg", "assets/vite.svg"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
+def test_extract_icon_path_absolute_href_is_null(tmp_path):
+    # Absolute (root-relative) hrefs resolve to the workbench origin, not the
+    # page workspace — only same-workspace relative paths are allowed.
+    (tmp_path / "index.html").write_text('<link rel="icon" href="/favicon.ico">', encoding="utf-8")
+    assert _extract_icon_path(tmp_path) is None
+
+
+def test_extract_icon_path_external_and_scheme_hrefs_are_null(tmp_path):
+    for href in (
+        "https://cdn.example.com/i.png",
+        "//cdn.example.com/i.png",
+        "data:image/svg+xml,<svg/>",
+    ):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
+def test_extract_icon_path_parent_traversal_is_null(tmp_path):
+    for href in ("../secret.svg", "../../a/b.svg", "a/../../b.svg"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
+def test_show_page_payload_includes_icon_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    page_dir = ensure_show_page_dir("sesicon")
+    # A page that customized its index.html with its own relative favicon.
+    (page_dir / "index.html").write_text('<link rel="icon" href="./brand.svg">', encoding="utf-8")
+    page = ShowPage(
+        session_id="sesicon",
+        visibility="private",
+        share_id=None,
+        offline_at=None,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    assert show_page_payload(page)["icon_path"] == "brand.svg"
+
+
+def test_show_page_payload_icon_path_null_for_default_scaffold(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_show_page_dir("sesdefault")  # writes the stock scaffold index.html
+    page = ShowPage(
+        session_id="sesdefault",
+        visibility="private",
+        share_id=None,
+        offline_at=None,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    assert show_page_payload(page)["icon_path"] is None
 
 
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):
