@@ -881,6 +881,40 @@ def test_extract_icon_path_base_escaping_workspace_is_null(tmp_path):
         assert _extract_icon_path(tmp_path) is None, base
 
 
+def test_extract_icon_path_root_relative_hrefs_are_null(tmp_path):
+    # Root-relative / protocol-relative hrefs root at the ORIGIN, not the workspace,
+    # so they reject — including a literal "/w/…" that would otherwise collide with
+    # the synthetic resolution prefix and be mis-served as workspace-relative (Codex).
+    for href in ("/favicon.svg", "/w/icon.svg", "//cdn.example.com/icon.svg"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
+def test_extract_icon_path_root_relative_base_is_null(tmp_path):
+    # A root-relative <base href="/w/"> likewise escapes the workspace.
+    for base in ("/w/", "/", "//cdn.example.com/"):
+        (tmp_path / "index.html").write_text(
+            f'<head><base href="{base}"><link rel="icon" href="favicon.svg"></head>',
+            encoding="utf-8",
+        )
+        assert _extract_icon_path(tmp_path) is None, base
+
+
+def test_extract_icon_path_malformed_href_returns_null_not_raises(tmp_path):
+    # A malformed absolute URL (urlsplit raises ValueError) must fall back to the
+    # letter avatar, NEVER propagate: _extract_icon_path runs while building
+    # /api/show-pages, so one bad page must not break the whole inventory (Codex).
+    for href in ("http://[bad]/icon.svg", "http://[bad/icon.svg"):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+    # A malformed <base> is equally contained.
+    (tmp_path / "index.html").write_text(
+        '<head><base href="http://[bad]/"><link rel="icon" href="favicon.svg"></head>',
+        encoding="utf-8",
+    )
+    assert _extract_icon_path(tmp_path) is None
+
+
 def test_extract_icon_path_runtime_api_hrefs_are_null(tmp_path):
     for href in ("api/health", "api/health.svg", "__show/events.png", "__events"):
         (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")

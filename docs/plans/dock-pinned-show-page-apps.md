@@ -140,7 +140,8 @@ GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404   # §7.1
   confined to the workspace, whitelisted image extension only. 404 on any
   policy rejection or missing target — never a redirect or partial serve.
   Headers: `nosniff` + `Content-Security-Policy: sandbox` +
-  `Cache-Control: private, max-age=60`. Never boots the Show Runtime.
+  `Cache-Control: private, no-cache` (revalidate, so an updated icon is never
+  stale on the stable URL). Never boots the Show Runtime.
 
 ## 5. Frontend Changes (map to real files)
 
@@ -393,16 +394,26 @@ GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404
   resolve `href` (percent-decoded, `\`→`/`) against `<base>` then the doc URL;
   require it stay within the workspace (`http://show.invalid/w/…`); reject the
   runtime surfaces (`api/`, `__show/`, `__events` first segment), the `vite.svg`
-  stock basename, absolute/scheme/`//` hrefs, and parent traversal; require a
-  whitelisted image extension `{svg,png,ico,jpg,jpeg,webp,gif}` (case-insensitive);
-  then realpath-confirm the target is a regular file inside the workspace root.
+  stock basename, and parent traversal; **reject any non-relative ref up front** —
+  absolute / root-relative (`/w/…`, `/x`) / protocol-relative (`//host`) / scheme
+  hrefs and bases (a literal `/w/…` must not masquerade as workspace-relative);
+  **treat any malformed URL as "no icon", never raised** (the resolver runs while
+  building `/api/show-pages`, so one bad page falls back to the letter avatar
+  instead of 500ing the whole inventory); require a whitelisted image extension
+  `{svg,png,ico,jpg,jpeg,webp,gif}` (case-insensitive); then realpath-confirm the
+  target is a regular file inside the workspace root.
 - **Serving.** `send_file` with `Content-Type` from the extension whitelist +
   `X-Content-Type-Options: nosniff` + `Content-Security-Policy: sandbox` +
-  `Cache-Control: private, max-age=60`. (The app-wide vault-sandbox hook then
-  composes its `frame-src` onto the CSP, so the wire value is
-  `sandbox; frame-src 'self' https://sandbox.avibe.bot` — the bare `sandbox`
-  directive stays first and effective, rendering a page-authored SVG in an
-  opaque origin with scripts disabled.) Same authed `/api` surface (inherits
+  `Cache-Control: private, no-cache`. The URL is stable (session id only), so
+  `no-cache` (revalidate before reuse) rather than a `max-age` fresh window keeps
+  the tile from showing a stale icon after an overwrite / a changed `<link
+  rel=icon>`; `send_file`'s ETag + Last-Modified make an unchanged icon a cheap
+  304 where conditional GETs are honored, and a changed icon always yields fresh
+  bytes. (The app-wide vault-sandbox hook then composes its `frame-src` onto the
+  CSP, so the wire value is `sandbox; frame-src 'self' https://sandbox.avibe.bot`
+  — the bare `sandbox` directive stays first and effective, rendering a
+  page-authored SVG in an opaque origin with scripts disabled.) Same authed
+  `/api` surface (inherits
   `enforce_remote_access_cookie`); a remote request without a session is bounced.
   Resolving/serving an icon **never boots the Show Runtime** (pure static read).
 - **Why.** Three review rounds re-litigated per-rule href policy at the URL

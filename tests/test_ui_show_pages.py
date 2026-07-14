@@ -366,9 +366,38 @@ def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch
     # (a page-authored SVG is rendered in an opaque origin with scripts disabled).
     csp_directives = [d.strip() for d in response.headers["Content-Security-Policy"].split(";")]
     assert "sandbox" in csp_directives
-    assert response.headers["Cache-Control"] == "private, max-age=60"
+    # Stable URL -> must revalidate (no fresh-cache window that would mask an update).
+    assert response.headers["Cache-Control"] == "private, no-cache"
     # Serving the icon never contacted the Show Runtime.
     assert manager.calls == []
+
+
+def test_show_page_icon_endpoint_revalidates_instead_of_serving_stale(monkeypatch, tmp_path):
+    # The icon URL is stable (session id only), so a fresh-cache window would keep a
+    # stale favicon after a page update. The endpoint sends `no-cache` + a validator
+    # (so the browser must revalidate, never reusing stale bytes) and always reflects
+    # the current file on the same URL.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg>v1</svg>", encoding="utf-8")
+    client = app.test_client()
+
+    first = client.get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+    assert first.status_code == 200
+    assert first.content == b"<svg>v1</svg>"
+    # No fresh-cache window: revalidate before reuse, with a validator to revalidate against.
+    assert "no-cache" in first.headers["Cache-Control"]
+    assert first.headers.get("ETag") or first.headers.get("Last-Modified")
+
+    # Overwriting the favicon is reflected immediately on the SAME stable URL —
+    # never the stale v1 bytes.
+    (page_dir / "favicon.svg").write_text("<svg>v2-longer</svg>", encoding="utf-8")
+    second = client.get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+    assert second.status_code == 200
+    assert second.content == b"<svg>v2-longer</svg>"
 
 
 def test_show_page_icon_endpoint_resolves_through_base_href(monkeypatch, tmp_path):

@@ -3585,7 +3585,12 @@ def show_page_icon_get(session_id):
         response.headers["X-Content-Type-Options"] = "nosniff"
         # A directly-navigated SVG must not execute scripts in the API origin.
         response.headers["Content-Security-Policy"] = "sandbox"
-        response.headers["Cache-Control"] = "private, max-age=60"
+        # The icon URL is stable (session id only), so a fresh-cache window would
+        # mask an overwritten favicon / a changed <link rel=icon> for its duration.
+        # `no-cache` forces the browser to revalidate before reuse: with send_file's
+        # ETag/Last-Modified an unchanged icon is a cheap 304 (where conditional GETs
+        # are honored), and a changed icon always yields fresh bytes — never stale.
+        response.headers["Cache-Control"] = "private, no-cache"
         return response
     finally:
         store.close()

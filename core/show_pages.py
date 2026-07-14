@@ -553,22 +553,46 @@ def _resolve_show_page_icon_href(href: str, base_href: str | None) -> str | None
     resolves ``<img src>`` — so ``<base href="assets/">`` + ``favicon.svg`` becomes
     ``assets/favicon.svg`` and ``%2e%2e/x`` / ``..\\x`` are caught. Returns None
     unless the result lands inside the page's own workspace AND names a static,
-    whitelisted image: absolute / external / other-scheme hrefs, parent traversal,
-    runtime API/event paths (``api/`` / ``__show/`` / ``__events``), the generic
-    ``vite.svg`` scaffold mascot, and non-whitelisted extensions all yield None (the
-    letter avatar is preferred). Pure — no I/O.
+    whitelisted image: absolute / root-relative (``/w/…``, ``/icon.svg``) / external /
+    other-scheme / malformed hrefs, parent traversal, runtime API/event paths
+    (``api/`` / ``__show/`` / ``__events``), the generic ``vite.svg`` scaffold mascot,
+    and non-whitelisted extensions all yield None (the letter avatar is preferred).
+    Pure — no I/O.
     """
 
     def _normalize(value: str) -> str:
         return unquote(value).replace("\\", "/")
 
-    # Resolve against a synthetic same-origin workspace root; any absolute path or
-    # ``..`` that escapes ``/w/`` is rejected by the prefix check below.
-    doc_base = "http://show.invalid/w/"
-    base_url = urljoin(doc_base, _normalize(base_href)) if base_href else doc_base
-    resolved = urlsplit(urljoin(base_url, _normalize(href)))
+    def _escapes_workspace(value: str) -> bool:
+        # A ref resolves INSIDE /show/<sid>/ only if it is purely RELATIVE. The
+        # browser roots a leading-"/" ref (``/w/icon.svg``, ``/icon.svg``) or a
+        # ``//host`` ref at the ORIGIN — not the workspace — and a ``..`` segment
+        # climbs out. These must reject up front: otherwise a literal ``/w/…`` would
+        # collide with the synthetic prefix below and be mis-served as if relative.
+        normalized = _normalize(value)
+        if not normalized or normalized.startswith("/"):
+            return True
+        if urlsplit(normalized).scheme:  # http:, data:, javascript:, …
+            return True
+        return ".." in normalized.split("/")
+
+    # Resolve href (and any <base>) with document semantics against a synthetic
+    # same-origin workspace root, rejecting non-relative refs first. ANY malformed
+    # URL is treated as "no icon", never raised: _extract_icon_path runs while
+    # building /api/show-pages, so one bad page must fall back to the letter avatar
+    # rather than break the whole Show Pages / Dock inventory request.
+    try:
+        if _escapes_workspace(href):
+            return None
+        if base_href is not None and _escapes_workspace(base_href):
+            return None
+        doc_base = "http://show.invalid/w/"
+        base_url = urljoin(doc_base, _normalize(base_href)) if base_href else doc_base
+        resolved = urlsplit(urljoin(base_url, _normalize(href)))
+    except ValueError:
+        return None  # malformed href/base → no icon (never break the inventory)
     if resolved.scheme != "http" or resolved.netloc != "show.invalid":
-        return None  # external / protocol-relative / other scheme
+        return None  # external / protocol-relative / other scheme (defense in depth)
     prefix = "/w/"
     if not resolved.path.startswith(prefix):
         return None  # absolute or ../ traversal escaped the workspace
