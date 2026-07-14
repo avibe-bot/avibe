@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { notifyShowPageIconRefresh } from '../apps/showPageIconRefresh';
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import type { ShowPageLinkInfo } from '../lib/showPageLinks';
@@ -15,9 +14,10 @@ export interface ShowPage {
   platform: string | null;
   agent: string | null;
   path: string;
-  /** The page's own HTML icon as a path relative to /show/<sid>/, or null when it
-   *  has none / only the stock scaffold icon (§7.1f). */
-  icon_path: string | null;
+  /** Opaque cache token for the page's own HTML icon (§7.1f): non-null iff a
+   *  servable icon exists, and it changes when the icon file changes. Doubles as
+   *  the has-icon signal and is appended to the icon URL as `?v=<token>`. */
+  icon_version: string | null;
   active_url: string | null;
   private_url: string | null;
   public_url: string | null;
@@ -101,9 +101,6 @@ export function useShowPageInventory(enabled = true) {
       }
       setPages(Array.isArray(res.pages) ? (res.pages as ShowPage[]) : []);
       setLoaded(true);
-      // Let avatar tiles retry a previously-failed favicon now that the inventory
-      // (and any newly-created icon files) has been re-read (§7.1f review).
-      notifyShowPageIconRefresh();
     } catch {
       if (seq === loadSeqRef.current) setLoaded(true);
     } finally {

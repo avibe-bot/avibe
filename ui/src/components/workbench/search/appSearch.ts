@@ -7,8 +7,8 @@ export type AppSearchResult = {
   title: string;
   searchTitle: string;
   sessionId?: string;
-  /** The AI page's own HTML icon (relative path), when it has one (§7.1f). */
-  iconPath?: string | null;
+  /** The AI page icon's opaque cache token, when it has one (§7.1f). */
+  iconVersion?: string | null;
 };
 
 export function filterAppSearchResults(results: AppSearchResult[], query: string): AppSearchResult[] {

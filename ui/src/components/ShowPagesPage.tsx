@@ -126,7 +126,7 @@ function ShowPageRow({
             title={t('showPages.openApp')}
             className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
           >
-            <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconPath={page.icon_path} />
+            <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconVersion={page.icon_version} />
             <span className="min-w-0">
               <span className="flex items-center gap-1.5">
                 <span

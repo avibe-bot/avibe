@@ -135,13 +135,15 @@ GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404   # §7.1
 - `POST pins` appends `show:<sid>` to the end of `order`; captures
   `title_snapshot` from the session's current title server-side.
 - Errors: 404 unknown session / no show page on pin; 400 invalid order.
-- `GET /api/show-pages/{sid}/icon` (§7.1f restructure): serves the page's own
-  HTML icon, resolved server-side with document semantics (`<base href>`),
-  confined to the workspace, whitelisted image extension only. 404 on any
-  policy rejection or missing target — never a redirect or partial serve.
-  Headers: `nosniff` + `Content-Security-Policy: sandbox` +
-  `Cache-Control: private, no-cache` (revalidate, so an updated icon is never
-  stale on the stable URL). Never boots the Show Runtime.
+- `GET /api/show-pages/{sid}/icon?v=<token>` (§7.1f): serves the page's own HTML
+  icon, resolved server-side with document semantics (`<base href>`), confined to
+  the workspace, whitelisted image extension only. The URL carries the **sid in
+  the path + a server-issued opaque cache token as `?v=`**; the server NEVER
+  derives resolution from the query. 404 on any policy rejection / missing target
+  / malformed input — never a redirect, partial serve, or 500. Headers on 200:
+  `nosniff` + `Content-Security-Policy: sandbox` + `Cache-Control: private,
+  max-age=604800, immutable` (safe because the token versions the URL); 404s are
+  `no-store`. Never boots the Show Runtime.
 
 ## 5. Frontend Changes (map to real files)
 
@@ -446,6 +448,38 @@ GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404
   already-loaded, stable-URL icon to re-request; the backend `no-cache` then
   makes it a 304 (unchanged) or fresh bytes (changed), so an overwritten favicon
   / repointed `<link rel=icon>` reflects without a full reload.
+
+**Versioned URL (owner-approved 2026-07-14 — SUPERSEDES the sid-only + `no-cache`
++ notifier/remount freshness design above).** The icon-freshness theme recurred
+across three review rounds (backend cache header → frontend remount-on-load →
+remount-on-mutation): the "notify→remount at every inventory-update site"
+mechanism is leaky by design (each round found another un-enumerated update
+site). Replaced with a **content-versioned URL**, correct-by-construction:
+
+- **Token.** The payload's has-icon signal becomes `icon_version` (was
+  `icon_path`): a server-issued opaque token — `show_page_icon_version` digests
+  the resolved icon FILE's identity (path + mtime + size). Non-null iff a
+  servable icon exists; it changes whenever the icon file changes. `icon_path`
+  is removed from the payload (the frontend never needed the path).
+- **URL.** `showPageIconUrl(sid, iconVersion)` →
+  `/api/show-pages/<sid>/icon?v=<token>`. Any payload refresh that changed the
+  icon changed the token → a new `src` the `<img>` refetches on its own. No
+  notifier, no remount, no update-site enumeration; freshness rides the normal
+  React re-render. Unchanged icon → same URL → cache hit (flicker-free).
+- **Query is inert (HARD invariant + test).** The endpoint derives resolution +
+  policy ONLY from the sid + workspace and NEVER reads `?v=`; arbitrary/hostile
+  `v` (`?v=../../x`, encoded junk, missing) has zero effect. The sid-only
+  security intent is intact — a `v` value can neither traverse nor change which
+  file is served. Wording: **"sid in the path + a server-issued cache token; the
+  server never derives resolution from the query."**
+- **Caching restored.** 200s are `Cache-Control: private, max-age=604800,
+  immutable` (the URL is content-versioned, so long immutable caching is correct
+  and there is no stale window); 404s stay `no-store`.
+- **Deleted.** `showPageIconRefresh` (notifier) and the `<img>` remount nonce are
+  removed entirely — this round is a net simplification (no dead code).
+- **Freshness invariant (test).** Overwriting the icon, or repointing
+  `<link rel=icon>`, changes `icon_version` in the next payload — asserted
+  directly, so no update-site enumeration exists anywhere.
 
 ### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
 

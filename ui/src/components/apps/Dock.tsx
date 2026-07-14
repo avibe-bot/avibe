@@ -17,7 +17,7 @@ import { isDragRelease } from './dragClick';
 // (files/terminal/editor) or a pinned Show Page (`show:<session_id>`).
 type ResidentItem =
   | { kind: 'builtin'; id: string; def: AppDefinition }
-  | { kind: 'showpage'; id: string; sessionId: string; title: string; iconPath: string | null };
+  | { kind: 'showpage'; id: string; sessionId: string; title: string; iconVersion: string | null };
 
 // The unified Dock panel: app launcher + running indicators + minimized windows.
 // Built-in apps and pinned Show Pages share one reorderable row (server-persisted
@@ -49,7 +49,7 @@ export const Dock: React.FC = () => {
         const title = page
           ? page.title?.trim() || t('chat.untitled')
           : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
-        return { kind: 'showpage', id, sessionId, title, iconPath: page?.icon_path ?? null };
+        return { kind: 'showpage', id, sessionId, title, iconVersion: page?.icon_version ?? null };
       }
       const def = APP_REGISTRY[id as AppId];
       return def ? { kind: 'builtin', id, def } : null;
@@ -224,7 +224,7 @@ export const Dock: React.FC = () => {
                       <BuiltinIcon className="size-5" style={{ color: `var(${item.def.accent})` }} />
                     ) : (
                       <ShowPageAvatarContent
-                        iconUrl={item.kind === 'showpage' ? showPageIconUrl(item.sessionId, item.iconPath) : null}
+                        iconUrl={item.kind === 'showpage' ? showPageIconUrl(item.sessionId, item.iconVersion) : null}
                         letter={avatar!.letter}
                       />
                     )}

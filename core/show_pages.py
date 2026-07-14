@@ -685,6 +685,29 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     return candidate, content_type
 
 
+def show_page_icon_version(session_id: str) -> str | None:
+    """An opaque cache token for a page's servable icon, or None when it has none.
+
+    The token is a short digest of the resolved icon FILE's identity — its path,
+    mtime, and size — so overwriting the favicon or repointing ``<link rel="icon">``
+    to another file changes the token, and therefore the ``?v=`` on the icon URL,
+    with NO update-site enumeration anywhere in the client (the freshness rides the
+    normal payload refresh). Carried in the payload as the has-icon signal; the
+    frontend appends it verbatim as ``?v=<token>``. The icon endpoint NEVER reads
+    it — resolution is derived only from the session id + workspace.
+    """
+    resolved = resolve_show_page_icon(session_id)
+    if resolved is None:
+        return None
+    candidate, _content_type = resolved
+    try:
+        stat = candidate.stat()
+    except OSError:
+        return None
+    identity = f"{candidate}:{stat.st_mtime_ns}:{stat.st_size}"
+    return hashlib.sha256(identity.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:
     path = show_page_dir(page.session_id)
     private = private_url(page.session_id, config=config)
@@ -699,7 +722,10 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
         "session_id": page.session_id,
         "visibility": page.visibility,
         "path": str(path),
-        "icon_path": _extract_icon_path(path),
+        # Opaque cache token (not a path): non-null iff a servable icon exists, and
+        # it changes when the icon file changes so the frontend's ?v=<token> busts
+        # the cache with no update-site enumeration (§7.1f versioned-URL).
+        "icon_version": show_page_icon_version(page.session_id),
         "active_url": active_url,
         "private_url": private,
         "public_url": public,

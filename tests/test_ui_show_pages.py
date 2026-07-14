@@ -366,44 +366,48 @@ def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch
     # (a page-authored SVG is rendered in an opaque origin with scripts disabled).
     csp_directives = [d.strip() for d in response.headers["Content-Security-Policy"].split(";")]
     assert "sandbox" in csp_directives
-    # Stable URL -> must revalidate (no fresh-cache window that would mask an update).
-    assert response.headers["Cache-Control"] == "private, no-cache"
+    # Content-versioned URL (?v=<token>) → safe to cache long + immutable; the URL
+    # changes when the icon changes, so there is no stale-icon window to avoid.
+    assert response.headers["Cache-Control"] == "private, max-age=604800, immutable"
     # Serving the icon never contacted the Show Runtime.
     assert manager.calls == []
 
 
-def test_show_page_icon_endpoint_revalidates_instead_of_serving_stale(monkeypatch, tmp_path):
-    # The icon URL is stable (session id only), so a fresh-cache window would keep a
-    # stale favicon after a page update. The endpoint sends `no-cache` + a validator
-    # (so the browser must revalidate, never reusing stale bytes) and always reflects
-    # the current file on the same URL.
+def test_show_page_icon_endpoint_ignores_the_query_string(monkeypatch, tmp_path):
+    # HARD requirement (§7.1f versioned-URL): resolution + policy derive ONLY from the
+    # session id + workspace and NEVER read `?v=`. Arbitrary/hostile/missing tokens
+    # must have ZERO effect — the sid-only security intent is intact and a `v` value
+    # can neither traverse nor change which file is served.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     page_dir = ensure_show_page_dir("ses123")
     (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
-    (page_dir / "favicon.svg").write_text("<svg>v1</svg>", encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    # A file the hostile query would try to reach if the endpoint ever read `?v=`.
+    (page_dir / "secret.svg").write_text("<svg>secret</svg>", encoding="utf-8")
+    (tmp_path / "outside.svg").write_text("<svg>outside</svg>", encoding="utf-8")
     client = app.test_client()
 
-    first = client.get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
-    assert first.status_code == 200
-    assert first.content == b"<svg>v1</svg>"
-    # No fresh-cache window: revalidate before reuse, with a validator to revalidate against.
-    assert "no-cache" in first.headers["Cache-Control"]
-    assert first.headers.get("ETag") or first.headers.get("Last-Modified")
-
-    # Overwriting the favicon is reflected immediately on the SAME stable URL —
-    # never the stale v1 bytes.
-    (page_dir / "favicon.svg").write_text("<svg>v2-longer</svg>", encoding="utf-8")
-    second = client.get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
-    assert second.status_code == 200
-    assert second.content == b"<svg>v2-longer</svg>"
+    for query in (
+        "",  # missing v
+        "?v=abc123",  # a normal token
+        "?v=../../secret.svg",  # traversal attempt
+        "?v=../../../outside.svg",
+        "?v=%2e%2e%2fsecret.svg",  # encoded traversal
+        "?v=secret.svg",
+        "?v=" + "z" * 5000,  # junk
+    ):
+        response = client.get(f"/api/show-pages/ses123/icon{query}", base_url="http://127.0.0.1:5123")
+        assert response.status_code == 200, query
+        # Always the resolved favicon — never the file a `v` value names.
+        assert response.content == b"<svg/>", query
 
 
 def test_show_page_icon_endpoint_serves_offline_pages(monkeypatch, tmp_path):
-    # An offline page still advertises icon_path and is listed in the inventory, so
-    # its static icon must serve too — gating by visibility would strand offline rows
-    # / pinned offline apps on the letter avatar despite a real icon (Codex).
+    # An offline page still advertises a token and is listed in the inventory, so its
+    # static icon must serve too — gating by visibility would strand offline rows /
+    # pinned offline apps on the letter avatar despite a real icon (Codex).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "offline")

@@ -136,8 +136,8 @@ interface ResolvedRow {
   subtitle: string;
   /** The built-in app definition (icon + accent) when this row is a built-in. */
   def?: AppDefinition;
-  /** The AI page's own HTML icon (relative path), when it has one (§7.1f). */
-  iconPath?: string | null;
+  /** The AI page icon's opaque cache token, when it has one (§7.1f). */
+  iconVersion?: string | null;
 }
 
 // A drag handle for a docked row (§7.1e). Handle-only drag: the Reorder.Item is
@@ -183,7 +183,7 @@ interface AppLibraryRowProps {
 // Reorder.Item) and the search path (static).
 const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOpen, onDockToggle, onRemove }) => {
   const { t } = useTranslation();
-  const { row, name, subtitle, def, iconPath } = item;
+  const { row, name, subtitle, def, iconVersion } = item;
   const Icon = def?.icon;
   return (
     <div
@@ -210,7 +210,7 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
           <Icon className="size-[18px]" />
         </span>
       ) : (
-        <ShowPageAvatarTile sessionId={row.sessionId ?? ''} title={name} iconPath={iconPath} />
+        <ShowPageAvatarTile sessionId={row.sessionId ?? ''} title={name} iconVersion={iconVersion} />
       )}
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-[13px] font-semibold text-foreground">{name}</span>
@@ -348,7 +348,7 @@ const AppsView: React.FC<{ pages: ShowPage[]; openApp: ReturnType<typeof useOpen
               .filter(Boolean)
               .join(' · ')
           : '';
-        return { row, name, subtitle, iconPath: page?.icon_path ?? null };
+        return { row, name, subtitle, iconVersion: page?.icon_version ?? null };
       }),
     [rows, pageBySession, pinBySession, t],
   );

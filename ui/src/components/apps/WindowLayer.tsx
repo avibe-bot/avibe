@@ -213,8 +213,8 @@ export const WindowLayer: React.FC = () => {
         // For a showpage window, join the inventory (already loaded above — no new
         // fetch) to hand its own HTML icon to the title-bar chip (§7.1f/g).
         const sid = w.appId === 'showpage' ? (w.params?.sessionId as string | undefined) : undefined;
-        const iconPath = sid ? pages.find((p) => p.session_id === sid)?.icon_path ?? null : null;
-        return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconPath={iconPath} />;
+        const iconVersion = sid ? pages.find((p) => p.session_id === sid)?.icon_version ?? null : null;
+        return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
       })}
     </div>
   );

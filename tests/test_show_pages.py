@@ -951,34 +951,58 @@ def test_extract_icon_path_accepts_whitelisted_image_extensions(tmp_path):
         assert _extract_icon_path(tmp_path) == expected, href
 
 
-def test_show_page_payload_includes_icon_path(monkeypatch, tmp_path):
+def _icon_page(session_id: str) -> ShowPage:
+    return ShowPage(
+        session_id=session_id,
+        visibility="private",
+        share_id=None,
+        offline_at=None,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+
+
+def test_show_page_payload_icon_version_is_a_token_when_icon_exists(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     page_dir = ensure_show_page_dir("sesicon")
     # A page that customized its index.html with its own relative favicon.
     (page_dir / "index.html").write_text('<link rel="icon" href="./brand.svg">', encoding="utf-8")
-    page = ShowPage(
-        session_id="sesicon",
-        visibility="private",
-        share_id=None,
-        offline_at=None,
-        created_at="2026-01-01T00:00:00Z",
-        updated_at="2026-01-01T00:00:00Z",
-    )
-    assert show_page_payload(page)["icon_path"] == "brand.svg"
+    (page_dir / "brand.svg").write_text("<svg>v1</svg>", encoding="utf-8")
+
+    version = show_page_payload(_icon_page("sesicon"))["icon_version"]
+
+    # An opaque, non-empty token — NOT the path (the frontend never composes a path).
+    assert isinstance(version, str) and version
+    assert "brand.svg" not in version
 
 
-def test_show_page_payload_icon_path_null_for_default_scaffold(monkeypatch, tmp_path):
+def test_show_page_payload_icon_version_null_for_default_scaffold(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_show_page_dir("sesdefault")  # writes the stock scaffold index.html
-    page = ShowPage(
-        session_id="sesdefault",
-        visibility="private",
-        share_id=None,
-        offline_at=None,
-        created_at="2026-01-01T00:00:00Z",
-        updated_at="2026-01-01T00:00:00Z",
-    )
-    assert show_page_payload(page)["icon_path"] is None
+    ensure_show_page_dir("sesdefault")  # writes the stock scaffold index.html (no icon)
+    assert show_page_payload(_icon_page("sesdefault"))["icon_version"] is None
+
+
+def test_show_page_payload_icon_version_follows_the_file(monkeypatch, tmp_path):
+    # Freshness invariant (§7.1f versioned-URL): the token follows the resolved icon
+    # FILE, so ANY change to the icon content changes the next payload's token with no
+    # client update-site enumeration. Overwrite → new token; repoint <link> → new token.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    page_dir = ensure_show_page_dir("sesfresh")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg>v1</svg>", encoding="utf-8")
+    v1 = show_page_payload(_icon_page("sesfresh"))["icon_version"]
+    assert v1
+
+    # Overwrite the same file with different bytes → the token changes.
+    (page_dir / "favicon.svg").write_text("<svg>v2-longer</svg>", encoding="utf-8")
+    v2 = show_page_payload(_icon_page("sesfresh"))["icon_version"]
+    assert v2 and v2 != v1
+
+    # Repoint <link rel=icon> to a different file → the token changes again.
+    (page_dir / "logo.png").write_bytes(b"\x89PNG\r\n")
+    (page_dir / "index.html").write_text('<link rel="icon" href="logo.png">', encoding="utf-8")
+    v3 = show_page_payload(_icon_page("sesfresh"))["icon_version"]
+    assert v3 and v3 != v2
 
 
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):

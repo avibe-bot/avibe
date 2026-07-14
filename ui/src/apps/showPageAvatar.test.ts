@@ -82,17 +82,17 @@ describe('showPagePrivatePath', () => {
 });
 
 describe('showPageIconUrl', () => {
-  it('points at the dedicated icon endpoint using ONLY the session id', () => {
-    expect(showPageIconUrl('ses_1', 'favicon.svg')).toBe('/api/show-pages/ses_1/icon');
-    // The icon_path VALUE is never composed into the URL — the server resolves it.
-    expect(showPageIconUrl('ses_1', 'assets/logo.png?v=2#frag')).toBe('/api/show-pages/ses_1/icon');
+  it('puts the session id in the path and the server-issued token as ?v=', () => {
+    // The token is an opaque cache key appended verbatim — the endpoint resolves
+    // the icon from the sid + workspace and never reads the query.
+    expect(showPageIconUrl('ses_1', 'abc123')).toBe('/api/show-pages/ses_1/icon?v=abc123');
   });
 
-  it('url-encodes the session id', () => {
-    expect(showPageIconUrl('a/b', 'icon.svg')).toBe('/api/show-pages/a%2Fb/icon');
+  it('url-encodes both the session id and the token', () => {
+    expect(showPageIconUrl('a/b', 'a b/c')).toBe('/api/show-pages/a%2Fb/icon?v=a%20b%2Fc');
   });
 
-  it('returns null when the page has no icon (icon_path is the has-icon signal)', () => {
+  it('returns null when the page has no icon (the token is the has-icon signal)', () => {
     expect(showPageIconUrl('ses_1', null)).toBeNull();
     expect(showPageIconUrl('ses_1', undefined)).toBeNull();
     expect(showPageIconUrl('ses_1', '   ')).toBeNull();

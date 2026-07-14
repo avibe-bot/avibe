@@ -27,10 +27,10 @@ export const AppWindow: React.FC<{
   win: WindowInstance;
   layerWidth: number;
   layerHeight: number;
-  /** The Show Page's own HTML icon (relative path) for a `showpage` window's
-   *  title-bar chip, threaded from the WindowLayer inventory join (§7.1f/g). */
-  iconPath?: string | null;
-}> = ({ win, layerWidth, layerHeight, iconPath }) => {
+  /** The Show Page icon's opaque cache token for a `showpage` window's title-bar
+   *  chip, threaded from the WindowLayer inventory join (§7.1f/g). */
+  iconVersion?: string | null;
+}> = ({ win, layerWidth, layerHeight, iconVersion }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const navigate = useNavigate();
@@ -254,7 +254,7 @@ export const AppWindow: React.FC<{
                 borderColor: `color-mix(in srgb, var(${showpageAvatar.accentVar}) 34%, transparent)`,
               }}
             >
-              <ShowPageAvatarContent iconUrl={showPageIconUrl(showpageSid, iconPath)} letter={showpageAvatar.letter} />
+              <ShowPageAvatarContent iconUrl={showPageIconUrl(showpageSid, iconVersion)} letter={showpageAvatar.letter} />
             </span>
           ) : (
             <Icon className="size-3.5 shrink-0" style={{ color: `var(${def.accent})` }} />

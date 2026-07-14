@@ -53,7 +53,7 @@ export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
                 <ShowPageAvatarTile
                   sessionId={result.sessionId}
                   title={result.title}
-                  iconPath={result.iconPath}
+                  iconVersion={result.iconVersion}
                   className="size-7 rounded-md"
                 />
               ) : (

@@ -23,7 +23,7 @@ import { mobileRouteForDockId } from './mobileDock';
 
 type ResidentTile =
   | { kind: 'builtin'; id: string; def: AppDefinition }
-  | { kind: 'showpage'; id: string; sessionId: string; title: string; iconPath: string | null };
+  | { kind: 'showpage'; id: string; sessionId: string; title: string; iconVersion: string | null };
 
 type FooterSheet = 'account' | 'appearance' | 'more';
 
@@ -75,7 +75,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
       const title = page
         ? page.title?.trim() || t('chat.untitled')
         : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
-      return { kind: 'showpage', id, sessionId, title, iconPath: page?.icon_path ?? null };
+      return { kind: 'showpage', id, sessionId, title, iconVersion: page?.icon_version ?? null };
     }
     const def = APP_REGISTRY[id as AppId];
     return def ? { kind: 'builtin', id, def } : null;
@@ -183,7 +183,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                       <Icon className="size-6" />
                     ) : (
                       <ShowPageAvatarContent
-                        iconUrl={item.kind === 'showpage' ? showPageIconUrl(item.sessionId, item.iconPath) : null}
+                        iconUrl={item.kind === 'showpage' ? showPageIconUrl(item.sessionId, item.iconVersion) : null}
                         letter={avatar!.letter}
                       />
                     )}
