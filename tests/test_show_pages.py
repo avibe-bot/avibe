@@ -1136,6 +1136,17 @@ def test_resolve_icon_falls_back_when_link_is_unusable(monkeypatch, tmp_path):
     assert resolved[0] == (page_dir / "favicon.png").resolve()
 
 
+def test_resolve_icon_unusable_link_and_no_conventional_is_none(monkeypatch, tmp_path):
+    # Broken explicit link AND no conventional favicon on disk → None (letter avatar)
+    # — the fall-through must not invent an icon (§7.1h Codex, adjudicated case 3).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesbroken2")
+    (page_dir / "index.html").write_text('<link rel="icon" href="missing.svg">', encoding="utf-8")
+    assert resolve_show_page_icon("sesbroken2") is None
+
+
 def test_resolve_icon_none_without_link_or_conventional(monkeypatch, tmp_path):
     # No link and no conventional favicon → None (letter avatar).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
