@@ -32,6 +32,7 @@ export function useAppSearchResults(query: string, enabled = true) {
           title: liveTitle || t('chat.untitled'),
           searchTitle: liveTitle,
           sessionId: page.session_id,
+          iconPath: page.icon_path,
         };
       }),
     ],

@@ -5,7 +5,8 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registry';
-import { showPageAvatar, showPagePrivatePath } from '../../apps/showPageAvatar';
+import { showPageAvatar, showPageIconUrl, showPagePrivatePath } from '../../apps/showPageAvatar';
+import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
@@ -16,7 +17,7 @@ import { isDragRelease } from './dragClick';
 // (files/terminal/editor) or a pinned Show Page (`show:<session_id>`).
 type ResidentItem =
   | { kind: 'builtin'; id: string; def: AppDefinition }
-  | { kind: 'showpage'; id: string; sessionId: string; title: string };
+  | { kind: 'showpage'; id: string; sessionId: string; title: string; iconPath: string | null };
 
 // The unified Dock panel: app launcher + running indicators + minimized windows.
 // Built-in apps and pinned Show Pages share one reorderable row (server-persisted
@@ -48,7 +49,7 @@ export const Dock: React.FC = () => {
         const title = page
           ? page.title?.trim() || t('chat.untitled')
           : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
-        return { kind: 'showpage', id, sessionId, title };
+        return { kind: 'showpage', id, sessionId, title, iconPath: page?.icon_path ?? null };
       }
       const def = APP_REGISTRY[id as AppId];
       return def ? { kind: 'builtin', id, def } : null;
@@ -198,7 +199,7 @@ export const Dock: React.FC = () => {
                       setMenu({ x: e.clientX, y: e.clientY, item });
                     }}
                     className={clsx(
-                      'grid size-10 place-items-center rounded-xl border transition',
+                      'grid size-10 place-items-center overflow-hidden rounded-xl border text-[15px] font-bold leading-none transition',
                       item.kind === 'builtin' &&
                         (active ? 'border-2 bg-foreground/[0.07]' : 'border-border bg-foreground/[0.03] hover:bg-foreground/[0.07]'),
                     )}
@@ -222,7 +223,10 @@ export const Dock: React.FC = () => {
                     {item.kind === 'builtin' && BuiltinIcon ? (
                       <BuiltinIcon className="size-5" style={{ color: `var(${item.def.accent})` }} />
                     ) : (
-                      <span className="text-[15px] font-bold leading-none">{avatar!.letter}</span>
+                      <ShowPageAvatarContent
+                        iconUrl={item.kind === 'showpage' ? showPageIconUrl(item.sessionId, item.iconPath) : null}
+                        letter={avatar!.letter}
+                      />
                     )}
                   </button>
 

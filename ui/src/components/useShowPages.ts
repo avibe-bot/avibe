@@ -14,6 +14,9 @@ export interface ShowPage {
   platform: string | null;
   agent: string | null;
   path: string;
+  /** The page's own HTML icon as a path relative to /show/<sid>/, or null when it
+   *  has none / only the stock scaffold icon (§7.1f). */
+  icon_path: string | null;
   active_url: string | null;
   private_url: string | null;
   public_url: string | null;

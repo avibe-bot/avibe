@@ -46,6 +46,19 @@ export function showPagePrivatePath(sessionId: string): string {
   return `/show/${encodeURIComponent(sessionId)}/`;
 }
 
+/** The gated URL for a page's own HTML icon (`icon_path` from the show-pages
+ *  inventory, already validated server-side as a same-workspace RELATIVE path),
+ *  resolved against the page's private /show/<sid>/ surface so the browser loads
+ *  it through the existing auth/fs gate. Null when the page has no usable icon —
+ *  the caller falls back to the letter avatar. Pure. */
+export function showPageIconUrl(sessionId: string, iconPath: string | null | undefined): string | null {
+  const path = (iconPath ?? '').trim();
+  if (!path) return null;
+  // The server guarantees a relative path; defensively strip a leading slash so a
+  // stray absolute value can never escape the page's own /show/<sid>/ prefix.
+  return showPagePrivatePath(sessionId) + path.replace(/^\/+/, '');
+}
+
 /** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The Show
  *  Page window's chat-bubble navigates here (SPA nav, not a new tab) and minimizes the
  *  window. Pass `{ showChat: true }` to append the `?view=chat` signal that tells

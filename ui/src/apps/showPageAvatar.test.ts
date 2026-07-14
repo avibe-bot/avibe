@@ -6,6 +6,7 @@ import {
   firstGrapheme,
   sessionChatPath,
   showPageAvatar,
+  showPageIconUrl,
   showPagePrivatePath,
 } from './showPageAvatar';
 
@@ -77,6 +78,27 @@ describe('showPagePrivatePath', () => {
   it('always points at the private /show/ surface, url-encoded', () => {
     expect(showPagePrivatePath('ses_1')).toBe('/show/ses_1/');
     expect(showPagePrivatePath('a/b')).toBe('/show/a%2Fb/');
+  });
+});
+
+describe('showPageIconUrl', () => {
+  it('resolves a relative icon path against the private /show/ surface', () => {
+    expect(showPageIconUrl('ses_1', 'favicon.svg')).toBe('/show/ses_1/favicon.svg');
+    expect(showPageIconUrl('ses_1', 'assets/logo.png')).toBe('/show/ses_1/assets/logo.png');
+  });
+
+  it('url-encodes the session id in the prefix', () => {
+    expect(showPageIconUrl('a/b', 'icon.svg')).toBe('/show/a%2Fb/icon.svg');
+  });
+
+  it('returns null when there is no icon path', () => {
+    expect(showPageIconUrl('ses_1', null)).toBeNull();
+    expect(showPageIconUrl('ses_1', undefined)).toBeNull();
+    expect(showPageIconUrl('ses_1', '   ')).toBeNull();
+  });
+
+  it('defensively strips a stray leading slash so it stays under /show/<sid>/', () => {
+    expect(showPageIconUrl('ses_1', '/favicon.svg')).toBe('/show/ses_1/favicon.svg');
   });
 });
 

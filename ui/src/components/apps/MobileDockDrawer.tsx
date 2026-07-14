@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { LayoutGrid, Minus, MoreHorizontal, PinOff, Settings, Sun, UserRound, X } from 'lucide-react';
 
 import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registry';
-import { showPageAvatar } from '../../apps/showPageAvatar';
+import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
+import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { useShowPageInventory } from '../useShowPages';
@@ -22,7 +23,7 @@ import { mobileRouteForDockId } from './mobileDock';
 
 type ResidentTile =
   | { kind: 'builtin'; id: string; def: AppDefinition }
-  | { kind: 'showpage'; id: string; sessionId: string; title: string };
+  | { kind: 'showpage'; id: string; sessionId: string; title: string; iconPath: string | null };
 
 type FooterSheet = 'account' | 'appearance' | 'more';
 
@@ -74,7 +75,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
       const title = page
         ? page.title?.trim() || t('chat.untitled')
         : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
-      return { kind: 'showpage', id, sessionId, title };
+      return { kind: 'showpage', id, sessionId, title, iconPath: page?.icon_path ?? null };
     }
     const def = APP_REGISTRY[id as AppId];
     return def ? { kind: 'builtin', id, def } : null;
@@ -171,14 +172,21 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                   className="flex select-none flex-col items-center gap-1.5"
                 >
                   <span
-                    className="grid size-14 place-items-center rounded-2xl border text-[20px] font-bold leading-none"
+                    className="grid size-14 place-items-center overflow-hidden rounded-2xl border text-[20px] font-bold leading-none"
                     style={{
                       color: `var(${accentVar})`,
                       backgroundColor: `color-mix(in srgb, var(${accentVar}) ${item.kind === 'builtin' ? 14 : 16}%, transparent)`,
                       borderColor: `color-mix(in srgb, var(${accentVar}) ${item.kind === 'builtin' ? 30 : 34}%, transparent)`,
                     }}
                   >
-                    {Icon ? <Icon className="size-6" /> : avatar!.letter}
+                    {Icon ? (
+                      <Icon className="size-6" />
+                    ) : (
+                      <ShowPageAvatarContent
+                        iconUrl={item.kind === 'showpage' ? showPageIconUrl(item.sessionId, item.iconPath) : null}
+                        letter={avatar!.letter}
+                      />
+                    )}
                   </span>
                   <span className="max-w-full truncate text-[11px] font-medium text-muted">{label}</span>
                 </button>
