@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { notifyShowPageIconRefresh } from '../apps/showPageIconRefresh';
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import type { ShowPageLinkInfo } from '../lib/showPageLinks';
@@ -100,6 +101,9 @@ export function useShowPageInventory(enabled = true) {
       }
       setPages(Array.isArray(res.pages) ? (res.pages as ShowPage[]) : []);
       setLoaded(true);
+      // Let avatar tiles retry a previously-failed favicon now that the inventory
+      // (and any newly-created icon files) has been re-read (§7.1f review).
+      notifyShowPageIconRefresh();
     } catch {
       if (seq === loadSeqRef.current) setLoaded(true);
     } finally {

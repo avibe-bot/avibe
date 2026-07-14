@@ -9013,6 +9013,13 @@ async def serve_private_show_page(session_id, asset_path):
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
+        # Thumbnail assets (a Dock / Library / window-title favicon tile, §7.1f)
+        # are served STATICALLY and must NOT boot the Show Runtime: merely listing
+        # apps would otherwise start/install a runtime per icon. This is the same
+        # gated static file server used as the runtime fallback below, and the
+        # denied-path check above already applies.
+        if request.method in {"GET", "HEAD"} and request.args.get("thumb") == "1":
+            return _show_page_file_response(page_dir, asset_path)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
             try:

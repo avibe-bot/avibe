@@ -56,7 +56,12 @@ export function showPageIconUrl(sessionId: string, iconPath: string | null | und
   if (!path) return null;
   // The server guarantees a relative path; defensively strip a leading slash so a
   // stray absolute value can never escape the page's own /show/<sid>/ prefix.
-  return showPagePrivatePath(sessionId) + path.replace(/^\/+/, '');
+  const relative = path.replace(/^\/+/, '');
+  // `thumb=1` makes the server serve the asset STATICALLY, never booting the Show
+  // Runtime (§7.1f review): merely listing apps must not start a runtime per icon.
+  // Append with the right separator in case the icon href already carries a query.
+  const separator = relative.includes('?') ? '&' : '?';
+  return `${showPagePrivatePath(sessionId)}${relative}${separator}thumb=1`;
 }
 
 /** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The Show

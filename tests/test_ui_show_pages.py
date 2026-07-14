@@ -339,6 +339,30 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
 
 
+def test_private_show_page_thumb_serves_statically_without_runtime(monkeypatch, tmp_path):
+    # A favicon THUMBNAIL (§7.1f, ?thumb=1) is served from the static file server
+    # and must NOT boot the Show Runtime — merely listing apps would otherwise
+    # start/install a runtime per icon. Prove the runtime is never contacted.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    manager = _FakeShowRuntimeManager(body=b"<h1>Runtime Page</h1>")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/favicon.svg?thumb=1", base_url="http://127.0.0.1:5123"
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"<svg/>"
+    # The static thumbnail path bypassed the runtime entirely.
+    assert manager.calls == []
+
+
 def test_private_show_page_materializes_workspace_before_runtime_proxy(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

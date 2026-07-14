@@ -82,13 +82,13 @@ describe('showPagePrivatePath', () => {
 });
 
 describe('showPageIconUrl', () => {
-  it('resolves a relative icon path against the private /show/ surface', () => {
-    expect(showPageIconUrl('ses_1', 'favicon.svg')).toBe('/show/ses_1/favicon.svg');
-    expect(showPageIconUrl('ses_1', 'assets/logo.png')).toBe('/show/ses_1/assets/logo.png');
+  it('resolves a relative icon path against the private /show/ surface with thumb=1', () => {
+    expect(showPageIconUrl('ses_1', 'favicon.svg')).toBe('/show/ses_1/favicon.svg?thumb=1');
+    expect(showPageIconUrl('ses_1', 'assets/logo.png')).toBe('/show/ses_1/assets/logo.png?thumb=1');
   });
 
   it('url-encodes the session id in the prefix', () => {
-    expect(showPageIconUrl('a/b', 'icon.svg')).toBe('/show/a%2Fb/icon.svg');
+    expect(showPageIconUrl('a/b', 'icon.svg')).toBe('/show/a%2Fb/icon.svg?thumb=1');
   });
 
   it('returns null when there is no icon path', () => {
@@ -98,7 +98,11 @@ describe('showPageIconUrl', () => {
   });
 
   it('defensively strips a stray leading slash so it stays under /show/<sid>/', () => {
-    expect(showPageIconUrl('ses_1', '/favicon.svg')).toBe('/show/ses_1/favicon.svg');
+    expect(showPageIconUrl('ses_1', '/favicon.svg')).toBe('/show/ses_1/favicon.svg?thumb=1');
+  });
+
+  it('uses & when the icon href already carries a query', () => {
+    expect(showPageIconUrl('ses_1', 'icon.svg?v=2')).toBe('/show/ses_1/icon.svg?v=2&thumb=1');
   });
 });
 

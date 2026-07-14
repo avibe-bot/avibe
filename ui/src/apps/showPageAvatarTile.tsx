@@ -1,19 +1,34 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 
 import { showPageAvatar, showPageIconUrl } from './showPageAvatar';
+import { subscribeShowPageIconRefresh } from './showPageIconRefresh';
 
 // The icon-or-letter CONTENT of a Show Page avatar, WITHOUT any tile wrapper:
 // the page's own HTML icon (§7.1f) rendered as an <img>, falling back to the
 // letter avatar when there is no icon OR the image fails to load (onError).
-// Shared by ShowPageAvatarTile and the Dock / mobile-drawer tiles — each provides
-// its own accent-box wrapper — so the icon + fallback rule lives in one place.
+// Shared by ShowPageAvatarTile and the Dock / mobile-drawer / window-title-bar
+// tiles — each provides its own accent-box wrapper — so the icon + fallback rule
+// lives in one place.
 export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: string }> = ({ iconUrl, letter }) => {
   // Track the URL that failed (not a bare boolean) so a later inventory refresh
   // to a NEW icon path retries instead of staying stuck on the letter fallback.
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  // Also retry after an inventory refresh even when the URL is unchanged: an icon
+  // added AFTER its <link> (or a transient 404) would otherwise show the letter
+  // forever. Clearing the failure lets the <img> re-attempt; a still-cached
+  // successful icon does not re-fetch (same URL).
+  useEffect(() => subscribeShowPageIconRefresh(() => setFailedUrl(null)), []);
   if (iconUrl && failedUrl !== iconUrl) {
-    return <img src={iconUrl} alt="" className="size-full object-cover" onError={() => setFailedUrl(iconUrl)} />;
+    return (
+      <img
+        src={iconUrl}
+        alt=""
+        draggable={false}
+        className="size-full object-cover"
+        onError={() => setFailedUrl(iconUrl)}
+      />
+    );
   }
   return <>{letter}</>;
 };
