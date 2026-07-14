@@ -759,8 +759,11 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     """
     page_dir = show_page_dir(session_id)
     link = _extract_icon_path(page_dir)
-    # Link wins; only when there is no usable link do we consult the conventions.
-    relatives = (link,) if link else _CONVENTIONAL_ICON_RELATIVES
+    # A USABLE link wins (it's first, so it's returned before any convention); but an
+    # explicit link that resolves to nothing (missing file / rejected) must not strand
+    # the page icon-less when a conventional favicon exists — fall through to the
+    # conventions after it, so coverage is maximized (Codex §7.1h).
+    relatives = (link, *_CONVENTIONAL_ICON_RELATIVES) if link else _CONVENTIONAL_ICON_RELATIVES
     for relative in relatives:
         resolved = _resolve_icon_candidate(page_dir, relative)
         if resolved is not None:

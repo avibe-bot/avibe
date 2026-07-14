@@ -1120,6 +1120,22 @@ def test_resolve_icon_link_tag_wins_over_conventional(monkeypatch, tmp_path):
     assert resolved[0] == (page_dir / "brand.svg").resolve()
 
 
+def test_resolve_icon_falls_back_when_link_is_unusable(monkeypatch, tmp_path):
+    # An explicit <link rel=icon> pointing at a MISSING file must not strand the page
+    # icon-less — fall through to a conventional favicon (§7.1h Codex). A usable link
+    # still wins (covered above); this covers the unusable-link case.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesbroken")
+    (page_dir / "index.html").write_text('<link rel="icon" href="missing.svg">', encoding="utf-8")
+    (page_dir / "favicon.png").write_bytes(b"png")  # the conventional fallback
+
+    resolved = resolve_show_page_icon("sesbroken")
+    assert resolved is not None
+    assert resolved[0] == (page_dir / "favicon.png").resolve()
+
+
 def test_resolve_icon_none_without_link_or_conventional(monkeypatch, tmp_path):
     # No link and no conventional favicon → None (letter avatar).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
