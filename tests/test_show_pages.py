@@ -823,6 +823,20 @@ def test_extract_icon_path_parent_traversal_is_null(tmp_path):
         assert _extract_icon_path(tmp_path) is None, href
 
 
+def test_extract_icon_path_encoded_and_backslash_traversal_is_null(tmp_path):
+    # The browser normalizes %2e%2e/, encoded slashes, and backslashes before it
+    # resolves the icon URL, so these must be rejected even without a literal "../".
+    for href in (
+        "%2e%2e/other/icon.svg",
+        "..%2fother%2ficon.svg",
+        "..\\other\\icon.svg",
+        "%2fetc%2fpasswd",
+        "sub/%2e%2e/%2e%2e/secret.svg",
+    ):
+        (tmp_path / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert _extract_icon_path(tmp_path) is None, href
+
+
 def test_show_page_payload_includes_icon_path(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     page_dir = ensure_show_page_dir("sesicon")

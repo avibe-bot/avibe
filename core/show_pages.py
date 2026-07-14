@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin
 
 from sqlalchemy import insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -544,20 +544,27 @@ def _extract_icon_path(page_dir: Path) -> str | None:
     href = (finder.href or "").strip()
     if not href:
         return None
-    # Same-workspace relative paths only. Reject absolute / protocol-relative
-    # (``/…`` covers both) and anything carrying a URI scheme (http:, data:, …) —
-    # each would resolve outside the page's own gated workspace.
-    if href.startswith("/") or re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*:", href):
-        return None
-    normalized = href[2:] if href.startswith("./") else href
-    if not normalized or normalized.startswith("../") or "/../" in normalized:
+    # The browser percent-decodes the href and treats backslashes as slashes
+    # BEFORE resolving the icon URL, so validate that normalized form too — an
+    # href like ``%2e%2e/x``, ``..\\x``, or ``%2f..`` would otherwise slip past a
+    # literal check and escape the page's own /show/<sid>/ prefix. Same-workspace
+    # relative paths only: reject absolute / protocol-relative (``/…`` covers
+    # both), any URI scheme (http:, data:, …), and parent-dir traversal.
+    normalized_href = unquote(href).replace("\\", "/")
+    for form in (href, normalized_href):
+        if form.startswith("/") or re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*:", form):
+            return None
+        if ".." in form.split("/"):
+            return None
+    result = href[2:] if href.startswith("./") else href
+    if not result:
         return None
     # The scaffold ships NO icon link, so an un-customized page already returns
     # None above; this guards the generic Vite mascot for raw-Vite workspaces
     # (a generic default reads worse than the letter avatar).
-    if normalized.split("/")[-1].lower() == "vite.svg":
+    if normalized_href.split("/")[-1].lower() == "vite.svg":
         return None
-    return normalized
+    return result
 
 
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:

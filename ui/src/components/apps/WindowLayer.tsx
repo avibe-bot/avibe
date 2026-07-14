@@ -8,25 +8,8 @@ import { useApi } from '../../context/ApiContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useShowPageInventory } from '../useShowPages';
 import { AppWindow } from './AppWindow';
+import { inTerminalSurface, inTextEntrySurface } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
-
-// In the TERMINAL, Ctrl is a control-character stream — ^W deletes a word, ^M is
-// carriage return — so the window chord must never hijack Ctrl there (xterm focuses a
-// hidden textarea inside its `.xterm` root). The editor is the opposite: Monaco has no
-// useful Ctrl+W, so we WANT Ctrl+W to close its window (guarded for unsaved edits)
-// rather than be swallowed and bypass the prompt — hence the exemption is terminal-only.
-function inTerminalSurface(el: Element | null): boolean {
-  return el instanceof HTMLElement && !!el.closest('.xterm');
-}
-
-function inTextEntrySurface(el: Element | null): boolean {
-  return (
-    el instanceof HTMLElement &&
-    !!el.closest(
-      'input, textarea, select, [contenteditable="true"], [role="textbox"], .monaco-editor, .xterm',
-    )
-  );
-}
 
 // The portal layer that hosts app windows. Covers the workbench main area (right
 // of the 240px sidebar on desktop). The layer itself is pointer-events-none so
