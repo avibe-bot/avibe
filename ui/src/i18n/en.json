@@ -218,19 +218,20 @@
     "desc": "Your apps and Show Pages",
     "tab": {
       "apps": "Apps",
-      "ai": "AI"
+      "ai": "ShowPage"
     },
     "searchApps": "Search apps…",
     "searchPages": "Search pages…",
     "kind": {
       "builtin": "Built-in",
-      "showPage": "Show Page"
+      "showPage": "AI"
     },
     "apps": {
       "system": "system",
       "dock": "Dock",
       "undock": "Undock",
       "remove": "Remove",
+      "reorder": "Reorder",
       "empty": "No apps match your search."
     },
     "ai": {

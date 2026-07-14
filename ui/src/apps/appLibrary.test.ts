@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { deriveAppRows, filterShowPages, type FilterablePage } from './appLibrary';
+import { deriveAppRows, filterShowPages, partitionByDock, type FilterablePage } from './appLibrary';
 
 const BUILTINS = ['files', 'terminal', 'editor', 'library'];
 const pin = (id: string) => ({ session_id: id });
@@ -42,6 +42,38 @@ describe('deriveAppRows (installed set)', () => {
   it('de-duplicates a pin that repeats', () => {
     const rows = deriveAppRows(['files'], [pin('s1'), pin('s1')], []);
     expect(rows.map((r) => r.dockId)).toEqual(['files', 'show:s1']);
+  });
+});
+
+describe('partitionByDock (docked / undocked split for the Apps view)', () => {
+  it('orders docked rows by the Dock order and keeps undocked below in stable order', () => {
+    const order = ['show:s1', 'files', 'library'];
+    const rows = deriveAppRows(BUILTINS, [pin('s1'), pin('s2')], order);
+    const { docked, undocked } = partitionByDock(rows, order);
+    // Docked rows follow the Dock order exactly, regardless of derivation order.
+    expect(docked.map((r) => r.dockId)).toEqual(['show:s1', 'files', 'library']);
+    // Undocked rows keep derivation order: built-ins canonical, then pins.
+    expect(undocked.map((r) => r.dockId)).toEqual(['terminal', 'editor', 'show:s2']);
+  });
+
+  it('produces a docked sequence equal to the Dock order (a reorder maps 1:1 onto it)', () => {
+    const order = ['editor', 'files', 'show:s1'];
+    const rows = deriveAppRows(BUILTINS, [pin('s1')], order);
+    expect(partitionByDock(rows, order).docked.map((r) => r.dockId)).toEqual(order);
+  });
+
+  it('empty order → nothing docked, every row undocked in derivation order', () => {
+    const rows = deriveAppRows(BUILTINS, [pin('s1')], []);
+    const { docked, undocked } = partitionByDock(rows, []);
+    expect(docked).toEqual([]);
+    expect(undocked.map((r) => r.dockId)).toEqual([...BUILTINS, 'show:s1']);
+  });
+
+  it('does not mutate the input rows array', () => {
+    const rows = deriveAppRows(BUILTINS, [], ['library', 'files']);
+    const before = rows.map((r) => r.dockId);
+    partitionByDock(rows, ['library', 'files']);
+    expect(rows.map((r) => r.dockId)).toEqual(before);
   });
 });
 

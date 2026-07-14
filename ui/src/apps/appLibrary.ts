@@ -55,6 +55,34 @@ export function deriveAppRows(
   return rows;
 }
 
+export interface PartitionedAppRows {
+  /** Docked rows, ordered to match the Dock `order`, so this group's dockId
+   *  sequence IS the Dock order — a drag-reorder maps 1:1 onto the existing
+   *  `PUT /api/dock/order`. Carries the drag handles (§7.1e). */
+  docked: AppRow[];
+  /** Installed-but-undocked rows, kept in their incoming (stable) derivation
+   *  order — built-ins canonical, then pins by install order. Rendered below the
+   *  docked group with no handle; not part of the Dock order. */
+  undocked: AppRow[];
+}
+
+/**
+ * Split the Apps-view rows (from deriveAppRows) into the DOCKED group and the
+ * installed-but-undocked group (§7.1e work item 2). Docked rows are sorted by
+ * their index in the Dock `order`, so the group's dockId sequence equals
+ * `order` and a framer-motion reorder of it can persist straight through
+ * `PUT /api/dock/order`. Undocked rows keep their incoming stable order. Pure —
+ * no React/DOM, no input mutation — so the partition is unit-testable.
+ */
+export function partitionByDock(rows: readonly AppRow[], order: readonly string[]): PartitionedAppRows {
+  const rank = new Map(order.map((id, index) => [id, index] as const));
+  const docked = rows
+    .filter((row) => row.docked)
+    .sort((a, b) => (rank.get(a.dockId) ?? 0) - (rank.get(b.dockId) ?? 0));
+  const undocked = rows.filter((row) => !row.docked);
+  return { docked, undocked };
+}
+
 export type ShowPageFilter = 'all' | 'public' | 'private' | 'offline';
 
 export interface FilterablePage {

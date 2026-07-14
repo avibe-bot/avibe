@@ -8,11 +8,11 @@ import {
   ExternalLink,
   Link2,
   Loader2,
+  Minus,
   Pencil,
   Plus,
   RefreshCw,
   RotateCw,
-  Trash2,
   TriangleAlert,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -158,7 +158,7 @@ function ShowPageRow({
             onToggleInstall(!installed);
           }}
         >
-          {installed ? <Trash2 /> : <Plus />}
+          {installed ? <Minus /> : <Plus />}
           <span className="hidden sm:inline">{installed ? t('library.apps.remove') : t('library.ai.add')}</span>
         </Button>
 
