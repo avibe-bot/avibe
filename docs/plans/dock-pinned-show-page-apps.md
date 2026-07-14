@@ -345,6 +345,30 @@ shows an App Library shortcut hint (never a dead surface).
 - Freshness: rides the existing inventory refresh cycles; no push channel.
 - Sequenced AFTER Phase 2.2 (file overlap on Dock/Library surfaces).
 
+**Implementation reality (2026-07-14, matches shipped code):**
+- The show-runtime scaffold ships **NO `<link rel="icon">`** at all (see
+  `_default_index_html` — it deliberately declares no favicon/apple-touch-icon).
+  So an un-customized page yields `icon_path: null` via the plain "no link"
+  path; there is no `vite.svg` stock link to special-case. The Vite default
+  `href="/vite.svg"` is absolute → already null; a relative `vite.svg` basename
+  is guarded defensively for raw-Vite copies.
+- `icon_path` rules (server, `core/show_pages.py._extract_icon_path`): reads
+  ONLY `<workspace>/index.html`; returns the first `<link rel="icon">` href
+  when it is a same-workspace **relative** path (leading `./` normalized off);
+  null for missing file / no link / absolute (`/…`) / any URI scheme (http:,
+  data:, //…) / parent traversal / the `vite.svg` stock basename.
+- The avatar is **not a single component chokepoint**. The icon-or-letter
+  render + onError→letter fallback lives in one shared `ShowPageAvatarContent`
+  (in `showPageAvatarTile.tsx`). It is adopted by: `ShowPageAvatarTile` (Library
+  Apps rows, Show Pages rows, ⌘K search) and the two bespoke inline tiles that
+  read the same inventory (Dock, mobile drawer). All join the page by session id.
+- **Deferred (follow-up):** the **window title-bar** renders the static registry
+  Lucide icon (`AppWindow` → `def.icon`), not an avatar — adopting the page
+  favicon there needs `AppWindow` plumbing + a design call. The mobile
+  full-screen **ShowPageRoute** header loads the session, not the inventory, so
+  it has no `icon_path` without an extra fetch. Both keep the letter/Lucide icon
+  for now.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:
