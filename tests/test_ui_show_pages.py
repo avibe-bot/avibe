@@ -339,6 +339,13 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
 
 
+def _icon_token(session_id: str) -> str:
+    # The correct ?v= token the frontend would send (same source as the payload).
+    from core.show_pages import show_page_icon_version
+
+    return show_page_icon_version(session_id) or ""
+
+
 def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch, tmp_path):
     # §7.1f: the dedicated icon endpoint resolves the page's own <link rel=icon>
     # against document semantics and streams the file — statically, never booting
@@ -352,7 +359,9 @@ def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch
     manager = _FakeShowRuntimeManager(body=b"<h1>Runtime Page</h1>")
     set_show_runtime_manager_for_tests(manager)
     try:
-        response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+        response = app.test_client().get(
+            f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}", base_url="http://127.0.0.1:5123"
+        )
     finally:
         set_show_runtime_manager_for_tests(None)
 
@@ -366,42 +375,46 @@ def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch
     # (a page-authored SVG is rendered in an opaque origin with scripts disabled).
     csp_directives = [d.strip() for d in response.headers["Content-Security-Policy"].split(";")]
     assert "sandbox" in csp_directives
-    # Content-versioned URL (?v=<token>) → safe to cache long + immutable; the URL
-    # changes when the icon changes, so there is no stale-icon window to avoid.
+    # `immutable` is honest because ?v= is enforced against the served bytes.
     assert response.headers["Cache-Control"] == "private, max-age=604800, immutable"
     # Serving the icon never contacted the Show Runtime.
     assert manager.calls == []
 
 
-def test_show_page_icon_endpoint_ignores_the_query_string(monkeypatch, tmp_path):
-    # HARD requirement (§7.1f versioned-URL): resolution + policy derive ONLY from the
-    # session id + workspace and NEVER read `?v=`. Arbitrary/hostile/missing tokens
-    # must have ZERO effect — the sid-only security intent is intact and a `v` value
-    # can neither traverse nor change which file is served.
+def test_show_page_icon_endpoint_enforces_token_without_selecting_the_file(monkeypatch, tmp_path):
+    # §7.1f (token-enforcement): resolution derives ONLY from the sid + workspace —
+    # `?v=` NEVER selects the file. The CORRECT token serves the favicon; a
+    # wrong/missing/path-shaped token is a 404, and NEVER the file a `v` value names
+    # (no traversal, no wrong-file serve). This is the honest-`immutable` guarantee:
+    # a URL maps to exactly one byte-content.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     page_dir = ensure_show_page_dir("ses123")
     (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
     (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
-    # A file the hostile query would try to reach if the endpoint ever read `?v=`.
+    # Files a hostile query would try to reach if the endpoint ever RESOLVED via ?v=.
     (page_dir / "secret.svg").write_text("<svg>secret</svg>", encoding="utf-8")
     (tmp_path / "outside.svg").write_text("<svg>outside</svg>", encoding="utf-8")
     client = app.test_client()
 
+    ok = client.get(f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}", base_url="http://127.0.0.1:5123")
+    assert ok.status_code == 200
+    assert ok.content == b"<svg/>"
+
     for query in (
         "",  # missing v
-        "?v=abc123",  # a normal token
-        "?v=../../secret.svg",  # traversal attempt
+        "?v=abc123",  # a wrong token
+        "?v=../../secret.svg",  # traversal-shaped
         "?v=../../../outside.svg",
-        "?v=%2e%2e%2fsecret.svg",  # encoded traversal
-        "?v=secret.svg",
+        "?v=%2e%2e%2fsecret.svg",  # encoded traversal-shaped
+        "?v=secret.svg",  # names a real in-workspace file
         "?v=" + "z" * 5000,  # junk
     ):
         response = client.get(f"/api/show-pages/ses123/icon{query}", base_url="http://127.0.0.1:5123")
-        assert response.status_code == 200, query
-        # Always the resolved favicon — never the file a `v` value names.
-        assert response.content == b"<svg/>", query
+        assert response.status_code == 404, query  # never resolves a different file
+        assert b"secret" not in response.content, query
+        assert b"outside" not in response.content, query
 
 
 def test_show_page_icon_endpoint_ignores_range_header(monkeypatch, tmp_path):
@@ -416,7 +429,7 @@ def test_show_page_icon_endpoint_ignores_range_header(monkeypatch, tmp_path):
     (page_dir / "favicon.svg").write_text("<svg>abcdefghij</svg>", encoding="utf-8")
 
     response = app.test_client().get(
-        "/api/show-pages/ses123/icon",
+        f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}",
         base_url="http://127.0.0.1:5123",
         headers={"Range": "bytes=0-3"},
     )
@@ -457,7 +470,9 @@ def test_show_page_icon_endpoint_serves_offline_pages(monkeypatch, tmp_path):
     (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
     (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
 
-    response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+    response = app.test_client().get(
+        f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}", base_url="http://127.0.0.1:5123"
+    )
 
     assert response.status_code == 200
     assert response.content == b"<svg/>"
@@ -518,7 +533,9 @@ def test_show_page_icon_endpoint_resolves_through_base_href(monkeypatch, tmp_pat
     (page_dir / "assets").mkdir()
     (page_dir / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n")
 
-    response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
+    response = app.test_client().get(
+        f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}", base_url="http://127.0.0.1:5123"
+    )
 
     assert response.status_code == 200
     assert response.content == b"\x89PNG\r\n"

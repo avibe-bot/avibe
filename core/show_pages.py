@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 import hashlib
 import hmac
+import os
 import secrets
+import stat as stat_module
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -706,8 +708,9 @@ def show_page_icon_version(session_id: str) -> str | None:
     freshness rides the normal payload refresh). Identical bytes yield an identical
     token, so an unchanged icon stays a cache hit. Carried in the payload as the
     has-icon signal; the frontend appends it verbatim as ``?v=<token>``. The icon
-    endpoint NEVER reads it — resolution is derived only from the session id +
-    workspace.
+    endpoint's ``?v=`` NEVER selects the file — resolution is derived only from the
+    session id + workspace — it is validated as a content assertion at read time
+    (see :func:`read_show_page_icon`).
     """
     resolved = resolve_show_page_icon(session_id)
     if resolved is None:
@@ -723,7 +726,64 @@ def show_page_icon_version(session_id: str) -> str | None:
     # `immutable` caching. Content-addressed: identical bytes → identical token (the
     # icon is unchanged, so the ?v= URL correctly stays a cache hit); different bytes
     # → different token → new URL → refetch. Icons are small, so hashing is cheap.
+    return _icon_content_token(data)
+
+
+def _icon_content_token(data: bytes) -> str:
+    """The opaque icon cache token for a byte string — the one algorithm shared by
+    the payload (:func:`show_page_icon_version`) and the read-time enforcement
+    (:func:`read_show_page_icon`), so they can never drift apart."""
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def read_show_page_icon(session_id: str, expected_version: str) -> tuple[bytes, str] | None:
+    """Icon bytes + Content-Type for serving, or None — a race-safe, token-enforced
+    read for ``GET /api/show-pages/<sid>/icon?v=<token>``.
+
+    Resolution is still sid-only (:func:`resolve_show_page_icon`); ``?v=`` NEVER
+    selects the file, it is validated as a CONTENT ASSERTION here so the stable URL's
+    ``immutable`` cache is honest (a given URL maps to exactly one byte-content). The
+    read closes the resolve→read TOCTOU: the resolved candidate is opened
+    ``O_NOFOLLOW`` (a symlink swapped in after resolve fails), re-checked on the
+    DESCRIPTOR via ``fstat`` (regular file, still within the size cap — a huge file
+    swapped in is rejected), and bounded-read. Returns None (→ 404 no-store) for a
+    missing/oversized/non-regular target, a swap, or a token mismatch (the content
+    changed since the payload advertised it, or no token was supplied). No exception
+    escapes.
+    """
+    resolved = resolve_show_page_icon(session_id)
+    if resolved is None:
+        return None
+    candidate, content_type = resolved
+    try:
+        fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None  # vanished, or swapped for a symlink (O_NOFOLLOW → ELOOP)
+    try:
+        info = os.fstat(fd)
+        if not stat_module.S_ISREG(info.st_mode) or info.st_size > _ICON_MAX_BYTES:
+            return None  # swapped for a non-regular / oversized file after resolve
+        data = _read_fd_fully(fd, info.st_size)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if not expected_version or _icon_content_token(data) != expected_version:
+        return None  # ?v= is a content assertion: mismatch/absent → 404 (no poison)
+    return data, content_type
+
+
+def _read_fd_fully(fd: int, size: int) -> bytes:
+    """Read exactly ``size`` bytes from ``fd`` (handling short reads)."""
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:

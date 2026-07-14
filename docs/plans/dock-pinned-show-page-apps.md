@@ -468,15 +468,28 @@ site). Replaced with a **content-versioned URL**, correct-by-construction:
   icon changed the token → a new `src` the `<img>` refetches on its own. No
   notifier, no remount, no update-site enumeration; freshness rides the normal
   React re-render. Unchanged icon → same URL → cache hit (flicker-free).
-- **Query is inert (HARD invariant + test).** The endpoint derives resolution +
-  policy ONLY from the sid + workspace and NEVER reads `?v=`; arbitrary/hostile
-  `v` (`?v=../../x`, encoded junk, missing) has zero effect. The sid-only
-  security intent is intact — a `v` value can neither traverse nor change which
-  file is served. Wording: **"sid in the path + a server-issued cache token; the
-  server never derives resolution from the query."**
+- **The query never selects the file; it is a read-time CONTENT ASSERTION
+  (owner-adjudicated 2026-07-14, supersedes "the server never reads `?v=`").**
+  Resolution is still sid + workspace only — a `v` value can neither traverse nor
+  change which file is resolved. But `read_show_page_icon` now recomputes the
+  content token of the bytes it is about to serve and returns 404/`no-store` if it
+  does not match the requested `?v=`. This makes `immutable` semantically honest (a
+  URL maps to exactly one byte-content — no cache poisoning across a content
+  revert) and closes the resolve→read TOCTOU in the same code region: the resolved
+  candidate is opened `O_NOFOLLOW` (a symlink swapped in after resolve fails), the
+  size cap is re-checked on the DESCRIPTOR via `fstat` (a huge file swapped in is
+  rejected), then bounded-read. Wording: **"sid in the path selects the file; the
+  `?v=` token never selects it, it is validated as a content assertion after
+  sid-only resolution."** Tests: correct token → 200 immutable; wrong/missing/
+  path-shaped token → 404 (never the file a `v` names); symlink-swap and
+  over-cap-swap rejected on the descriptor path.
+  - _Threat-model note (ledger):_ this endpoint is the OWNER's authed `/api`
+    surface (NOT the public `/p/` share); the racing party is the user's own agent,
+    which already has local FS access — so the read-time hardening is
+    defense-in-depth, not a privilege boundary.
 - **Caching restored.** 200s are `Cache-Control: private, max-age=604800,
-  immutable` (the URL is content-versioned, so long immutable caching is correct
-  and there is no stale window); 404s stay `no-store`.
+  immutable` — honest now that `?v=` is enforced against the served bytes; 404s
+  stay `no-store`.
 - **Deleted.** `showPageIconRefresh` (notifier) and the `<img>` remount nonce are
   removed entirely — this round is a net simplification (no dead code).
 - **Freshness invariant (test).** Overwriting the icon, or repointing
@@ -493,12 +506,16 @@ site). Replaced with a **content-versioned URL**, correct-by-construction:
   over `_ICON_MAX_BYTES` (2 MiB) to `None` (letter avatar) — a page can't point
   `<link rel=icon>` at a screenshot/large asset and make `/api/show-pages` allocate
   hundreds of MB. An icon renders ~40px, so the cap is generous.
-- **Bounded load-retry (frontend).** `ShowPageAvatarContent` retries a failed
-  `<img>` up to `MAX_ICON_LOAD_ATTEMPTS` (3) — `onError` remounts it via a per-URL
-  attempt-count `key`, latching to the letter only after the budget. In the
-  versioned-URL model a permanently-absent icon is a null `iconUrl` (letter, no
-  `<img>`, no onError), so onError only ever signals a transient/race failure —
-  exactly the case worth retrying; the budget resets when the URL changes.
+- **Bounded load-retry (frontend; owner-accepted as-is 2026-07-14 — ledger).**
+  `ShowPageAvatarContent` retries a failed `<img>` up to `MAX_ICON_LOAD_ATTEMPTS`
+  (3) — `onError` remounts it via a per-URL attempt-count `key`, latching to the
+  letter only after the budget. In the versioned-URL model a permanently-absent
+  icon is a null `iconUrl` (letter, no `<img>`, no onError), so onError only ever
+  signals a transient/race failure — exactly the case worth retrying; the budget
+  resets when the URL changes. A longer persistent transient (or an exact
+  content-revert whose token is unchanged) falls back to the letter until a natural
+  remount / payload refresh — accepted for a DECORATIVE surface rather than
+  resurrecting the deleted notifier or adding timers.
 
 ### 7.1g Window-close ergonomics (owner approved 2026-07-14 16:03)
 

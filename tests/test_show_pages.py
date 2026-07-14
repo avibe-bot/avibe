@@ -1051,6 +1051,60 @@ def test_resolve_show_page_icon_rejects_oversized_icon(monkeypatch, tmp_path):
     assert resolve_show_page_icon("sesbig") is not None
 
 
+def test_read_show_page_icon_enforces_the_token(monkeypatch, tmp_path):
+    # ?v= is a content assertion: the correct token yields the bytes; a wrong/empty
+    # token is None (→ 404), so `immutable` caching is honest (URL ⇒ one content).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import read_show_page_icon, show_page_icon_version
+
+    page_dir = ensure_show_page_dir("sesread")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg>hi</svg>", encoding="utf-8")
+    token = show_page_icon_version("sesread")
+
+    assert read_show_page_icon("sesread", token) == (b"<svg>hi</svg>", "image/svg+xml")
+    assert read_show_page_icon("sesread", "deadbeefdeadbeef") is None  # wrong token
+    assert read_show_page_icon("sesread", "") is None  # no token
+
+
+def test_read_show_page_icon_rejects_symlink_swap(monkeypatch, tmp_path):
+    # TOCTOU: a regular file accepted by resolve is replaced by a symlink to a file
+    # OUTSIDE the workspace before the read. The result must be None (never the
+    # swapped-in target) — caught by the re-resolution's within-root guard and, for
+    # a swap in the resolve→open window, by the O_NOFOLLOW open. Even the (stale)
+    # correct token must not serve it.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import read_show_page_icon, show_page_icon_version
+
+    page_dir = ensure_show_page_dir("sesswap")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg>ok</svg>", encoding="utf-8")
+    token = show_page_icon_version("sesswap")
+    outside = tmp_path / "outside_secret.svg"
+    outside.write_text("<svg>SECRET</svg>", encoding="utf-8")
+    (page_dir / "favicon.svg").unlink()
+    os.symlink(outside, page_dir / "favicon.svg")
+
+    assert read_show_page_icon("sesswap", token) is None
+
+
+def test_read_show_page_icon_rejects_oversized_at_read_time(monkeypatch, tmp_path):
+    # TOCTOU: the file grows past the cap AFTER resolve's stat accepted it (a swap
+    # race). The descriptor `fstat` re-checks the cap, so the huge file is rejected
+    # on the fd → None, never buffered. Patch resolve to hand back the over-cap file
+    # (simulating "resolve saw it small") so the read-time gate is exercised alone.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_pages._ICON_MAX_BYTES", 16)
+    from core.show_pages import read_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesgrow")
+    big = page_dir / "big.png"
+    big.write_bytes(b"z" * 64)  # over the patched 16-byte cap
+    monkeypatch.setattr("core.show_pages.resolve_show_page_icon", lambda sid: (big, "image/png"))
+
+    assert read_show_page_icon("sesgrow", "anytoken") is None
+
+
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):
     # A brand-new Show Page workspace starts as a clean "being generated"
     # placeholder for the user, plus a minimal file-based router and one extra page

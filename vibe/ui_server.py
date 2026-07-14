@@ -3569,17 +3569,18 @@ def _show_page_icon_not_found():
 
 @app.route("/api/show-pages/<session_id>/icon", methods=["GET", "HEAD"])
 def show_page_icon_get(session_id):
-    # The page's own HTML icon, served STATICALLY as the single chokepoint (§7.1f):
-    # ALL href resolution + policy (document semantics incl. <base>; reject api /
-    # traversal / absolute / root-relative / external / non-image / stock) lives
-    # server-side in resolve_show_page_icon, so the frontend URL carries ONLY the
-    # session id and can never compose a path. Auth rides the global /api hooks.
+    # The page's own HTML icon, served as the single chokepoint (§7.1f): ALL href
+    # resolution + policy (document semantics incl. <base>; reject api / traversal /
+    # absolute / root-relative / external / non-image / stock) lives server-side in
+    # resolve_show_page_icon. The `?v=` token NEVER selects the file — resolution is
+    # sid + workspace only — it is validated as a read-time CONTENT ASSERTION so the
+    # stable URL's `immutable` cache is honest. Auth rides the global /api hooks.
     #
     # Contract: bytes-or-404, NEVER a 500 — the icon is decorative. A malformed
     # session id (validate_session_id -> ShowPageError), a page-authored href that
-    # resolves to a filesystem-invalid path (ValueError/OSError), or any other
-    # such failure degrades to the letter-avatar fallback rather than erroring.
-    from core.show_pages import ShowPageError, ShowPageStore, resolve_show_page_icon
+    # resolves to a filesystem-invalid path (ValueError/OSError), a live-edit swap,
+    # or a token mismatch all degrade to the letter-avatar fallback, never erroring.
+    from core.show_pages import ShowPageError, ShowPageStore, read_show_page_icon
 
     try:
         store = ShowPageStore()
@@ -3591,28 +3592,23 @@ def show_page_icon_get(session_id):
             # offline rows / pinned offline apps on the letter avatar despite an icon.
             if page is None:
                 return _show_page_icon_not_found()
-            resolved = resolve_show_page_icon(page.session_id)
+            # read_show_page_icon does the race-safe read (O_NOFOLLOW + fstat cap on
+            # the descriptor) and enforces `?v=` as a content assertion — resolution
+            # stays sid-only; the query can never pick a different file.
+            result = read_show_page_icon(page.session_id, request.args.get("v", ""))
         finally:
             store.close()
-        if resolved is None:
+        if result is None:
             return _show_page_icon_not_found()
-        candidate, content_type = resolved
-        # Materialize the bytes HERE, inside the try, into a plain full-body Response
-        # rather than a lazy FileResponse. This keeps the endpoint a pure
-        # bytes-or-404 chokepoint: (a) a live-edit race — the favicon rebuilt/removed
-        # after resolve() accepted it — surfaces as an OSError caught below (→ 404),
-        # instead of failing while a FileResponse streams AFTER this try; and (b) a
-        # plain Response never honors `Range`, so a client/proxy `Range` header can't
-        # turn a decorative icon into a 206/416. Icons are small, so buffering is cheap.
-        data = candidate.read_bytes()
+        data, content_type = result
         response = Response(data, mimetype=content_type)
         response.headers["X-Content-Type-Options"] = "nosniff"
         # A directly-navigated SVG must not execute scripts in the API origin.
         response.headers["Content-Security-Policy"] = "sandbox"
-        # The URL is content-versioned (`?v=<token>` from the icon file's identity),
-        # so it changes whenever the icon changes — safe to cache long + immutable.
-        # A page that overwrites its favicon / repoints <link rel=icon> gets a new
-        # token → a new URL → a fresh fetch, with no revalidation churn in between.
+        # `immutable` is honest now: `?v=` is enforced against the served bytes, so a
+        # given URL maps to exactly one byte-content — a changed icon gets a new token
+        # → a new URL → a fresh fetch, and the cache can never be poisoned across a
+        # content revert. A plain Response also never honors `Range` (no 206/416).
         response.headers["Cache-Control"] = "private, max-age=604800, immutable"
         return response
     except (ShowPageError, ValueError, OSError):
