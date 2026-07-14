@@ -32,6 +32,10 @@ SHOW_EVENT_WRITE_TOKEN_COOKIE = "vibe_show_event_token"
 SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
 SHOW_CLI_EVENT_TOKEN_HEADER = "X-Vibe-Show-Cli-Token"
 SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
+# Only the head of index.html is scanned for the icon <link> (it lives in <head>,
+# at the top). Bounds the per-page read so a huge inline page can't stall
+# /api/show-pages or allocate a large string (§7.1f review).
+_ICON_INDEX_HEAD_LIMIT = 64 * 1024
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 # A custom public share suffix lands directly in the ``/p/<share_id>/`` URL, so
 # keep it to URL-safe slug characters: start and end alphanumeric, with dash and
@@ -531,8 +535,15 @@ def _extract_icon_path(page_dir: Path) -> str | None:
     preferred over a broken or generic image. The server never fetches the icon;
     the browser loads the returned path through the existing gated /show/ route.
     """
+    index_path = page_dir / "index.html"
     try:
-        html = (page_dir / "index.html").read_text(encoding="utf-8", errors="replace")
+        # Read ONLY the head of a REGULAR index.html: an oversized inline page — or a
+        # symlink / special file an agent dropped in — must not stall /api/show-pages
+        # or allocate a huge string. The <link rel="icon"> lives in <head>, at the top.
+        if index_path.is_symlink() or not index_path.is_file():
+            return None
+        with index_path.open("r", encoding="utf-8", errors="replace") as handle:
+            html = handle.read(_ICON_INDEX_HEAD_LIMIT)
     except OSError:
         return None
     finder = _IconLinkFinder()

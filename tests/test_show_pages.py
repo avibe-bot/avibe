@@ -837,6 +837,22 @@ def test_extract_icon_path_encoded_and_backslash_traversal_is_null(tmp_path):
         assert _extract_icon_path(tmp_path) is None, href
 
 
+def test_extract_icon_path_skips_symlinked_index(tmp_path):
+    # An agent could point index.html at a large/special file via a symlink; skip it.
+    real = tmp_path / "real.html"
+    real.write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (tmp_path / "index.html").symlink_to(real)
+    assert _extract_icon_path(tmp_path) is None
+
+
+def test_extract_icon_path_reads_only_head_of_large_index(tmp_path):
+    # A huge inline page must not stall the read; the icon <link> in <head> (top) is
+    # still found, and the trailing bulk beyond the head limit is never scanned.
+    head = '<head><link rel="icon" href="favicon.svg"></head>'
+    (tmp_path / "index.html").write_text(head + "<!-- padding -->" * 20000, encoding="utf-8")
+    assert _extract_icon_path(tmp_path) == "favicon.svg"
+
+
 def test_show_page_payload_includes_icon_path(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     page_dir = ensure_show_page_dir("sesicon")

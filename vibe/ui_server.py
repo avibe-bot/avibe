@@ -9015,10 +9015,16 @@ async def serve_private_show_page(session_id, asset_path):
         page_dir = ensure_show_page_dir(page.session_id)
         # Thumbnail assets (a Dock / Library / window-title favicon tile, §7.1f)
         # are served STATICALLY and must NOT boot the Show Runtime: merely listing
-        # apps would otherwise start/install a runtime per icon. This is the same
-        # gated static file server used as the runtime fallback below, and the
-        # denied-path check above already applies.
-        if request.method in {"GET", "HEAD"} and request.args.get("thumb") == "1":
+        # apps would otherwise start/install a runtime per icon. The Avibe-namespaced
+        # `__avibe_thumb` marker won't collide with a page's own query params, and it
+        # is NOT applied to page API assets, so a page endpoint that happens to carry
+        # the marker still reaches the runtime. Reuses the same gated static file
+        # server as the runtime fallback below (denied-path check above applies).
+        if (
+            request.method in {"GET", "HEAD"}
+            and request.args.get("__avibe_thumb") == "1"
+            and not _is_show_api_asset(asset_path)
+        ):
             return _show_page_file_response(page_dir, asset_path)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):

@@ -57,11 +57,16 @@ export function showPageIconUrl(sessionId: string, iconPath: string | null | und
   // The server guarantees a relative path; defensively strip a leading slash so a
   // stray absolute value can never escape the page's own /show/<sid>/ prefix.
   const relative = path.replace(/^\/+/, '');
-  // `thumb=1` makes the server serve the asset STATICALLY, never booting the Show
-  // Runtime (§7.1f review): merely listing apps must not start a runtime per icon.
-  // Append with the right separator in case the icon href already carries a query.
-  const separator = relative.includes('?') ? '&' : '?';
-  return `${showPagePrivatePath(sessionId)}${relative}${separator}thumb=1`;
+  // Serve the asset STATICALLY, never booting the Show Runtime (§7.1f review):
+  // merely listing apps must not start a runtime per icon. Use an Avibe-namespaced
+  // marker so it can't collide with a page's own query params, and place it in the
+  // QUERY BEFORE any #fragment — the browser strips the fragment before the HTTP
+  // request, so a marker after it would never reach the server (Codex review).
+  const hash = relative.indexOf('#');
+  const beforeHash = hash >= 0 ? relative.slice(0, hash) : relative;
+  const fragment = hash >= 0 ? relative.slice(hash) : '';
+  const separator = beforeHash.includes('?') ? '&' : '?';
+  return `${showPagePrivatePath(sessionId)}${beforeHash}${separator}__avibe_thumb=1${fragment}`;
 }
 
 /** The in-app route to the owning session's Chat page (`/chat/:sessionId`). The Show

@@ -352,7 +352,7 @@ def test_private_show_page_thumb_serves_statically_without_runtime(monkeypatch, 
     set_show_runtime_manager_for_tests(manager)
     try:
         response = app.test_client().get(
-            "/show/ses123/favicon.svg?thumb=1", base_url="http://127.0.0.1:5123"
+            "/show/ses123/favicon.svg?__avibe_thumb=1", base_url="http://127.0.0.1:5123"
         )
     finally:
         set_show_runtime_manager_for_tests(None)
