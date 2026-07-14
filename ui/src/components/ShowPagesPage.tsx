@@ -115,35 +115,39 @@ function ShowPageRow({
           expanded && 'bg-surface-2',
         )}
       >
-        {/* The app-open target: avatar + title + open icon, with a hover
-            affordance so openability stays discoverable. */}
-        <button
-          type="button"
-          onClick={onOpen}
-          title={t('showPages.openApp')}
-          className="group flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
-        >
-          <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
-          <span className="min-w-0">
-            <span className="flex items-center gap-1.5">
-              <span
-                className={clsx(
-                  'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan',
-                  !page.title && 'font-mono',
-                )}
-              >
-                {label}
+        {/* flex-1 lives on this inert wrapper; the open button sizes to its
+            content (avatar+title+icon cluster) so the blank space to its right
+            does NOT open the app — only the cluster does (§7.1e item 5). The
+            cluster carries a hover affordance so openability stays discoverable. */}
+        <div className="flex min-w-0 flex-1">
+          <button
+            type="button"
+            onClick={onOpen}
+            title={t('showPages.openApp')}
+            className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
+          >
+            <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={clsx(
+                    'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan',
+                    !page.title && 'font-mono',
+                  )}
+                >
+                  {label}
+                </span>
+                {/* Open affordance beside the title. */}
+                <AppWindowIcon
+                  size={13}
+                  aria-hidden
+                  className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
+                />
               </span>
-              {/* Open affordance beside the title. */}
-              <AppWindowIcon
-                size={13}
-                aria-hidden
-                className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
-              />
+              {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
             </span>
-            {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
-          </span>
-        </button>
+          </button>
+        </div>
 
         <Badge variant={status.badge} className="hidden sm:inline-flex">
           <span className={clsx('size-1.5 rounded-full', status.dot)} />

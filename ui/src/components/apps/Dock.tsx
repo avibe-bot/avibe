@@ -184,8 +184,12 @@ export const Dock: React.FC = () => {
                     onClick={(e) => {
                       // After a reorder drag the browser still fires a click on
                       // release; swallow it past the drag threshold so the tile
-                      // doesn't spuriously open. A genuine click still opens.
-                      if (isDragRelease(pressPtRef.current, { x: e.clientX, y: e.clientY })) return;
+                      // doesn't spuriously open. Read-and-null the press point, and
+                      // skip the check for keyboard/synthetic activation (detail 0,
+                      // clientX/Y 0, no fresh pointerdown) so Enter/Space still opens.
+                      const press = pressPtRef.current;
+                      pressPtRef.current = null;
+                      if (e.detail !== 0 && isDragRelease(press, { x: e.clientX, y: e.clientY })) return;
                       if (e.metaKey || e.ctrlKey || e.altKey) openNew(item);
                       else activate(item);
                     }}
