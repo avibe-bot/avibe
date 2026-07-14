@@ -1105,6 +1105,47 @@ def test_read_show_page_icon_rejects_oversized_at_read_time(monkeypatch, tmp_pat
     assert read_show_page_icon("sesgrow", "anytoken") is None
 
 
+def test_read_workspace_file_safely_regular_head_and_capped(tmp_path):
+    # The shared chokepoint: a regular file reads (head up to `limit`; or full within
+    # `cap`), an over-cap file is refused, a missing file is None.
+    from core.show_pages import _read_workspace_file_safely
+
+    f = tmp_path / "f.txt"
+    f.write_bytes(b"0123456789")
+    assert _read_workspace_file_safely(f, 4) == b"0123"  # cap=False → head up to limit
+    assert _read_workspace_file_safely(f, 100) == b"0123456789"
+    assert _read_workspace_file_safely(f, 100, cap=True) == b"0123456789"  # full within cap
+    assert _read_workspace_file_safely(f, 4, cap=True) is None  # over cap → refused
+    assert _read_workspace_file_safely(tmp_path / "nope.txt", 100) is None  # missing
+
+
+def test_read_workspace_file_safely_refuses_symlink(tmp_path):
+    # O_NOFOLLOW refuses a symlink swapped in for a workspace file. Skip where the
+    # flag is absent (native Windows) so windows-smoke stays green.
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("O_NOFOLLOW not available on this platform")
+    from core.show_pages import _read_workspace_file_safely
+
+    (tmp_path / "outside.txt").write_bytes(b"SECRET")
+    link = tmp_path / "link.txt"
+    os.symlink(tmp_path / "outside.txt", link)
+    assert _read_workspace_file_safely(link, 100) is None
+    assert _read_workspace_file_safely(link, 100, cap=True) is None
+
+
+def test_read_workspace_file_safely_refuses_non_regular_fifo(tmp_path):
+    # A FIFO (special file) swapped in must be refused by the descriptor fstat, so a
+    # read can never block the inventory. Skip where mkfifo is unavailable (Windows).
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("mkfifo not available on this platform")
+    from core.show_pages import _read_workspace_file_safely
+
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    assert _read_workspace_file_safely(fifo, 100) is None
+    assert _read_workspace_file_safely(fifo, 100, cap=True) is None
+
+
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):
     # A brand-new Show Page workspace starts as a clean "being generated"
     # placeholder for the user, plus a minimal file-based router and one extra page

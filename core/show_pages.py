@@ -627,6 +627,54 @@ def _resolve_show_page_icon_href(href: str, base_href: str | None) -> str | None
     return relative
 
 
+def _read_fd_fully(fd: int, size: int) -> bytes:
+    """Read exactly ``size`` bytes from ``fd`` (handling short reads)."""
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _read_workspace_file_safely(path: Path, limit: int, *, cap: bool = False) -> bytes | None:
+    """Race/DoS-safe read of a REGULAR workspace file, or None — the ONE chokepoint
+    for reading agent-authored workspace files (index.html, icons).
+
+    Opens ``path`` with getattr-guarded ``O_NOFOLLOW`` (a symlink swapped in after an
+    earlier check is NOT followed) and ``O_NONBLOCK`` (opening a FIFO/device returns
+    immediately instead of BLOCKING on a writer — the fstat below then refuses it,
+    so a swapped-in special file can never hang an ``/api/show-pages`` request; both
+    flags degrade to a plain open where absent, e.g. native Windows). It re-checks on
+    the DESCRIPTOR via ``fstat`` that the target is a REGULAR file, then bounded-reads.
+
+    ``cap=False`` (default): read up to ``limit`` bytes — a HEAD scan of a
+    possibly-large file (index.html, whose ``<head>`` is at the top). ``cap=True``:
+    a file LARGER than ``limit`` is refused (None) — for a file that must be read in
+    FULL within a cap (an icon: hash + serve). Returns None for missing / symlink /
+    non-regular / (capped) oversized / unreadable; never raises, never blocks.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat_module.S_ISREG(info.st_mode):
+            return None  # symlink target that isn't regular, FIFO/device swapped in
+        if cap and info.st_size > limit:
+            return None  # oversized (e.g. a screenshot advertised as an icon)
+        return _read_fd_fully(fd, info.st_size if cap else min(info.st_size, limit))
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _extract_icon_path(page_dir: Path) -> str | None:
     """The page's own favicon as a same-workspace relative path, or None.
 
@@ -637,17 +685,13 @@ def _extract_icon_path(page_dir: Path) -> str | None:
     ONLY through ``GET /api/show-pages/<sid>/icon``; callers use its presence as the
     has-icon signal, never to compose a URL.
     """
-    index_path = page_dir / "index.html"
-    try:
-        # Read ONLY the head of a REGULAR index.html: an oversized inline page — or a
-        # symlink / special file an agent dropped in — must not stall /api/show-pages
-        # or allocate a huge string. The <link rel="icon"> lives in <head>, at the top.
-        if index_path.is_symlink() or not index_path.is_file():
-            return None
-        with index_path.open("r", encoding="utf-8", errors="replace") as handle:
-            html = handle.read(_ICON_INDEX_HEAD_LIMIT)
-    except OSError:
+    # Head scan of a REGULAR index.html through the safe-read chokepoint: an oversized
+    # inline page — or a symlink / special file an agent dropped in (or swapped in
+    # mid-check) — must not stall /api/show-pages or allocate a huge string.
+    raw = _read_workspace_file_safely(page_dir / "index.html", _ICON_INDEX_HEAD_LIMIT)
+    if raw is None:
         return None
+    html = raw.decode("utf-8", errors="replace")
     finder = _IconLinkFinder()
     try:
         finder.feed(html)
@@ -716,9 +760,12 @@ def show_page_icon_version(session_id: str) -> str | None:
     if resolved is None:
         return None
     candidate, _content_type = resolved
-    try:
-        data = candidate.read_bytes()
-    except OSError:
+    # Read through the safe-read chokepoint (cap=True): bounded to the icon cap and
+    # race-safe (a swap to a symlink / huge file / FIFO after resolve is refused, not
+    # followed / buffered / blocked on) — the token path must be as hardened as the
+    # serving path since it runs for EVERY /api/show-pages + `vibe show list` row.
+    data = _read_workspace_file_safely(candidate, _ICON_MAX_BYTES, cap=True)
+    if data is None:
         return None
     # Hash the icon's CONTENT so the token changes for ANY byte change — including a
     # regeneration that preserves path, size, AND mtime (`cp -p`/`rsync`-style copies,
@@ -755,35 +802,15 @@ def read_show_page_icon(session_id: str, expected_version: str) -> tuple[bytes, 
     if resolved is None:
         return None
     candidate, content_type = resolved
-    try:
-        fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return None  # vanished, or swapped for a symlink (O_NOFOLLOW → ELOOP)
-    try:
-        info = os.fstat(fd)
-        if not stat_module.S_ISREG(info.st_mode) or info.st_size > _ICON_MAX_BYTES:
-            return None  # swapped for a non-regular / oversized file after resolve
-        data = _read_fd_fully(fd, info.st_size)
-    except OSError:
+    # Race-safe read through the shared chokepoint (cap=True): O_NOFOLLOW open +
+    # fstat regular-file/size-cap re-check on the descriptor + bounded read, so a
+    # symlink / huge file / FIFO swapped in after resolve is refused, not served.
+    data = _read_workspace_file_safely(candidate, _ICON_MAX_BYTES, cap=True)
+    if data is None:
         return None
-    finally:
-        os.close(fd)
     if not expected_version or _icon_content_token(data) != expected_version:
         return None  # ?v= is a content assertion: mismatch/absent → 404 (no poison)
     return data, content_type
-
-
-def _read_fd_fully(fd: int, size: int) -> bytes:
-    """Read exactly ``size`` bytes from ``fd`` (handling short reads)."""
-    chunks: list[bytes] = []
-    remaining = size
-    while remaining > 0:
-        chunk = os.read(fd, remaining)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
 
 
 def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict[str, Any]:

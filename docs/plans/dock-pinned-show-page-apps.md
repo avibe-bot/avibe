@@ -506,6 +506,24 @@ site). Replaced with a **content-versioned URL**, correct-by-construction:
   over `_ICON_MAX_BYTES` (2 MiB) to `None` (letter avatar) — a page can't point
   `<link rel=icon>` at a screenshot/large asset and make `/api/show-pages` allocate
   hundreds of MB. An icon renders ~40px, so the cap is generous.
+- **One workspace read chokepoint (owner-adjudicated 2026-07-14, tests).** All
+  three reads of agent-authored workspace files — `index.html` head (@64 KiB),
+  the icon token hash (@2 MiB), and the icon serve (@2 MiB) — go through a single
+  portable helper `_read_workspace_file_safely(path, limit, *, cap)`. It opens with
+  getattr-guarded `O_NOFOLLOW` (a swapped-in symlink is not followed; degrades to a
+  plain open on Windows, where the earlier unguarded `os.O_NOFOLLOW` would have
+  `AttributeError`ed → 500) **and** `O_NONBLOCK` (opening a swapped-in FIFO/device
+  returns immediately instead of BLOCKING on a writer — otherwise a hung
+  `/api/show-pages` request is user-visible), then `fstat`s the DESCRIPTOR to refuse
+  a non-regular target (and, with `cap`, an oversized one) before a bounded read.
+  Net simpler (dedupes three fd sites); no raw `read_bytes`/`open` on workspace
+  paths remains in the module. Helper tests: regular OK · symlink refused ·
+  oversize refused · FIFO refused (symlink/FIFO cases skip where the platform lacks
+  the flag/`mkfifo`, so windows-smoke stays green).
+  - _Threat-model note (ledger):_ owner-authed `/api` surface, racing party is the
+    user's own agent with local FS access → the swap/TOCTOU parts are
+    defense-in-depth; the Windows crash and the FIFO-hang-on-inventory were the
+    substantive bits (a hung inventory request is user-visible, not ledger material).
 - **Bounded load-retry (frontend; owner-accepted as-is 2026-07-14 — ledger).**
   `ShowPageAvatarContent` retries a failed `<img>` up to `MAX_ICON_LOAD_ATTEMPTS`
   (3) — `onError` remounts it via a per-URL attempt-count `key`, latching to the
