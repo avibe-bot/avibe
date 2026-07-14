@@ -294,6 +294,29 @@ shows an App Library shortcut hint (never a dead surface).
   title everywhere; `title_snapshot` remains a fallback only. Built-ins not
   renamable. (Idea 1 — agent-suggested pinning — deliberately deferred;
   idea 2 — update dots — not scheduled yet.)
+- **Inventory lifecycle closure (review-driven, 2026-07-14)**: the
+  show-pages inventory hook guarantees that any revision-invalidated
+  in-flight fetch schedules an authoritative follow-up (no dangling
+  loading/loaded states — state-based invariant, unit-tested); rename merges
+  are compare-and-set; window titles project from the single inventory
+  source. A **shared inventory context** was evaluated and deferred by the
+  rule of three — revisit when a third consumer of the inventory appears
+  (e.g. update-dots or agent-suggested pinning).
+
+### 7.1e Phase 2.2 polish (owner hands-on feedback, 2026-07-14 13:32)
+
+1. **Tab naming settled**: the Library's second tab is **"ShowPage"** (en+zh,
+   keeps the count) — reverses the 7.1c "AI" tab rename. The **kind badge**
+   on rows is what says **"AI"** now (replaces 展示页面/Show Page badge), and
+   the badge is **right-aligned** in the row.
+2. **Apps view drag-reorder**: rows get a **grip handle at the row front**;
+   dragging reorders and **syncs with the Dock order** (existing
+   `PUT /api/dock/order`, optimistic + stale_order resync). PM default
+   (flag to owner): only DOCKED rows carry handles — installed-but-undocked
+   rows are not part of the Dock order and sort below the docked group; make
+   the pins list ordered later if full-order is wanted.
+3. **移出 icon**: trash → **minus** (trash reads as delete); applied to every
+   移出 affordance in the Library (Apps view + ShowPage view button state).
 
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
