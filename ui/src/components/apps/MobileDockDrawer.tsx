@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { LayoutGrid, MoreHorizontal, PinOff, Settings, Sun, Trash2, UserRound, X } from 'lucide-react';
+import { LayoutGrid, Minus, MoreHorizontal, PinOff, Settings, Sun, UserRound, X } from 'lucide-react';
 
 import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registry';
 import { showPageAvatar } from '../../apps/showPageAvatar';
@@ -263,7 +263,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                 }}
                 className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive transition hover:bg-destructive/[0.08]"
               >
-                <Trash2 className="size-[18px] shrink-0" />
+                <Minus className="size-[18px] shrink-0" />
                 {t('library.apps.remove')}
               </button>
             )}
