@@ -104,6 +104,7 @@ Guidance:
 - Design for user understanding, not just for moving text onto a webpage. Choose the visual form that best helps the user inspect, compare, confirm, and continue the discussion.
 - Use diagrams or mind maps for relationships, flowcharts or state machines for processes, timelines for sequences, charts or dashboards for metrics, and side-by-side views for tradeoffs.
 - Make the page visually polished: use clear hierarchy, spacing, typography, contrast, and consistent components. Avoid rough default-looking pages.
+- Give the app a recognizable icon so it stands out in the Dock and App Library: drop a `public/favicon.svg` (or `favicon.svg` at the workspace root) and it is picked up automatically, or add `<link rel="icon" href="./favicon.svg">` to `index.html` (an icon edit to the shell is fine).
 - Make the page work reasonably on mobile because users may open links from an IM app on their phone.
 - Prefer React component implementations. Useful visualization libraries include React Flow, Mermaid, Markmap, Chart.js, and Cytoscape.js.
 - Keep pages private by default. Publish publicly only when the user asks for a shareable or public link.

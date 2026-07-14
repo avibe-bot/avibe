@@ -564,6 +564,44 @@ in the event path (window → document → element) — so a page's own
 `stopPropagation()` (even a capture-phase one) cannot swallow ⌥W; only the
 `inTextEntrySurface` exemption suppresses it._
 
+### 7.1h Phase 2.4 — owner acceptance fixes (owner 2026-07-14)
+
+Four acceptance items from the merged §7.1f/g work, one PR.
+
+1. **AI badge hard right anchor.** The kind/status badge floated after
+   variable-width content, so its x jumped row-to-row (toggle label width,
+   presence of 移出). Fixed by wrapping each row's trailing action controls in a
+   FIXED-width, right-justified zone (`SHARED_ACTION_ZONE` in
+   `ui/src/apps/rowLayout.ts`, `sm:w-36`), used by BOTH the Apps view
+   (`LibraryApp`) and the Show Pages view (`ShowPagesPage`); the badge sits
+   immediately left of that zone, so its right-edge column is identical across
+   every row and both views regardless of button contents.
+2. **Title open icon → `arrow-up-right`.** The ShowPage-row open affordance
+   swapped `AppWindow` → lucide `ArrowUpRight` (same hover affordance).
+3. **BUG: Dock AI-page tiles couldn't drag** (built-ins reordered fine). Root
+   cause (git-bisected to #906): the tile's favicon `<img>` — added by §7.1f —
+   has default `pointer-events: auto`, so it captured the pointerdown and
+   framer-motion's `Reorder.Item` drag never initiated (`draggable={false}`
+   disables only native image DnD, not pointer capture). Letter tiles (bare
+   text) were unaffected. Fix at the shared avatar: `pointer-events-none
+   select-none` on the decorative `<img>` so the press passes through to the
+   tile/row (every surface that shares `ShowPageAvatarContent` inherits it).
+4. **Icon coverage gap** — agent-built pages ship no `<link rel=icon>`, so
+   nothing showed.
+   - **(a) Conventional-file fallback** (`core/show_pages.py`): when index.html
+     has no usable `<link rel=icon>`, `resolve_show_page_icon` tries the
+     workspace-conventional favicons IN ORDER — `favicon.{svg,ico,png}` at root,
+     then `public/favicon.{svg,ico,png}` — via one shared `_resolve_icon_candidate`
+     (same realpath/size/type policy as the link) and read through
+     `_read_workspace_file_safely`; `icon_version` covers them identically. An
+     explicit link WINS. Tests: each fallback, root-before-public + svg>ico>png
+     order, link-wins, none.
+   - **(b) Authoring guidance** (`core/system_prompt_injection.py`, the `##
+     Show Pages` section injected into the agent system prompt): one line telling
+     the agent to give the app an icon (drop `public/favicon.svg` — auto-picked
+     up by 4a — or add a `<link rel=icon>` to index.html; the scaffold head
+     comment already sanctions icon edits to the shell).
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:

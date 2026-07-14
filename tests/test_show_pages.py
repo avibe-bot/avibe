@@ -1051,6 +1051,85 @@ def test_resolve_show_page_icon_rejects_oversized_icon(monkeypatch, tmp_path):
     assert resolve_show_page_icon("sesbig") is not None
 
 
+_CONVENTIONAL_ICONS = (
+    ("favicon.svg", "image/svg+xml"),
+    ("favicon.ico", "image/x-icon"),
+    ("favicon.png", "image/png"),
+    ("public/favicon.svg", "image/svg+xml"),
+    ("public/favicon.ico", "image/x-icon"),
+    ("public/favicon.png", "image/png"),
+)
+
+
+def test_resolve_icon_falls_back_to_each_conventional_file(monkeypatch, tmp_path):
+    # When index.html declares NO <link rel=icon>, each workspace-conventional favicon
+    # location resolves + serves identically (§7.1h item 4a) — most agent-built pages
+    # ship no link, so this is what gives them an icon.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_icon_version
+
+    page_dir = ensure_show_page_dir("sesconv")
+    (page_dir / "index.html").write_text("<title>no icon link</title>", encoding="utf-8")
+    for rel, ctype in _CONVENTIONAL_ICONS:
+        for existing, _ in _CONVENTIONAL_ICONS:  # isolate: only `rel` present this pass
+            existing_path = page_dir / existing
+            if existing_path.exists():
+                existing_path.unlink()
+        target = page_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"<svg/>" if rel.endswith(".svg") else b"\x00icon")
+
+        resolved = resolve_show_page_icon("sesconv")
+        assert resolved is not None, rel
+        assert resolved[0] == (page_dir / rel).resolve(), rel
+        assert resolved[1] == ctype, rel
+        # icon_version covers conventional icons identically (non-null token).
+        assert show_page_icon_version("sesconv"), rel
+
+
+def test_resolve_icon_conventional_order_root_before_public(monkeypatch, tmp_path):
+    # Precedence within the conventions: root wins over public/, and svg > ico > png.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesorder")
+    (page_dir / "index.html").write_text("<title>x</title>", encoding="utf-8")
+    (page_dir / "public").mkdir()
+    (page_dir / "public" / "favicon.svg").write_bytes(b"<svg/>")
+    (page_dir / "favicon.png").write_bytes(b"png")
+    (page_dir / "favicon.ico").write_bytes(b"ico")
+    (page_dir / "favicon.svg").write_bytes(b"<svg/>")
+
+    resolved = resolve_show_page_icon("sesorder")
+    assert resolved is not None
+    assert resolved[0] == (page_dir / "favicon.svg").resolve()  # root svg wins
+
+
+def test_resolve_icon_link_tag_wins_over_conventional(monkeypatch, tmp_path):
+    # An explicit, valid <link rel=icon> beats the conventional favicon files (§7.1h).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("seslink")
+    (page_dir / "index.html").write_text('<link rel="icon" href="brand.svg">', encoding="utf-8")
+    (page_dir / "brand.svg").write_bytes(b"<svg>brand</svg>")
+    (page_dir / "favicon.svg").write_bytes(b"<svg>fallback</svg>")  # NOT chosen
+
+    resolved = resolve_show_page_icon("seslink")
+    assert resolved is not None
+    assert resolved[0] == (page_dir / "brand.svg").resolve()
+
+
+def test_resolve_icon_none_without_link_or_conventional(monkeypatch, tmp_path):
+    # No link and no conventional favicon → None (letter avatar).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesnone")
+    (page_dir / "index.html").write_text("<title>nothing</title>", encoding="utf-8")
+    assert resolve_show_page_icon("sesnone") is None
+
+
 def test_read_show_page_icon_enforces_the_token(monkeypatch, tmp_path):
     # ?v= is a content assertion: the correct token yields the bytes; a wrong/empty
     # token is None (→ 404), so `immutable` caching is honest (URL ⇒ one content).

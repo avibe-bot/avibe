@@ -704,20 +704,23 @@ def _extract_icon_path(page_dir: Path) -> str | None:
     return _resolve_show_page_icon_href(href, finder.base_href)
 
 
-def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
-    """The absolute path + Content-Type of a Show Page's own icon, or None.
+# Workspace-conventional favicon locations, tried IN ORDER when the page declares no
+# usable <link rel="icon"> (§7.1h): most agent-built pages ship no link tag at all, so
+# these give them an icon from the common spots — root first, then Vite's public/.
+_CONVENTIONAL_ICON_RELATIVES: tuple[str, ...] = (
+    "favicon.svg",
+    "favicon.ico",
+    "favicon.png",
+    "public/favicon.svg",
+    "public/favicon.ico",
+    "public/favicon.png",
+)
 
-    The single serving chokepoint for ``GET /api/show-pages/<sid>/icon``: combines
-    :func:`_extract_icon_path` (document-semantics resolution + policy) with the
-    same-workspace realpath guard, regular-file check, and extension whitelist, so
-    the serving layer just streams the file. Returns None for any missing workspace
-    / no icon / policy rejection — the caller answers 404 and the frontend falls
-    back to the letter avatar.
-    """
-    page_dir = show_page_dir(session_id)
-    relative = _extract_icon_path(page_dir)
-    if relative is None:
-        return None
+
+def _resolve_icon_candidate(page_dir: Path, relative: str) -> tuple[Path, str] | None:
+    """Resolve ONE already-policy-safe relative icon path to (abs path, Content-Type),
+    or None when it isn't a servable regular file inside the workspace within the size
+    cap. Shared by the explicit ``<link>`` href and the conventional-file fallback."""
     try:
         candidate = (page_dir / relative).resolve()
         root = page_dir.resolve()
@@ -740,6 +743,29 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     if content_type is None:
         return None
     return candidate, content_type
+
+
+def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
+    """The absolute path + Content-Type of a Show Page's own icon, or None.
+
+    The single serving chokepoint for ``GET /api/show-pages/<sid>/icon``: combines
+    :func:`_extract_icon_path` (document-semantics resolution + policy) with the
+    same-workspace realpath guard, regular-file check, and extension whitelist, so
+    the serving layer just streams the file. An explicit ``<link rel="icon">`` WINS;
+    when the page declares none, it falls back to the workspace-conventional favicon
+    files (root then ``public/``) so agent-built pages — which rarely add a link —
+    still get an icon (§7.1h). Returns None for any missing workspace / no icon /
+    policy rejection — the caller answers 404 and the frontend uses the letter avatar.
+    """
+    page_dir = show_page_dir(session_id)
+    link = _extract_icon_path(page_dir)
+    # Link wins; only when there is no usable link do we consult the conventions.
+    relatives = (link,) if link else _CONVENTIONAL_ICON_RELATIVES
+    for relative in relatives:
+        resolved = _resolve_icon_candidate(page_dir, relative)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def show_page_icon_version(session_id: str) -> str | None:

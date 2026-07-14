@@ -32,7 +32,14 @@ export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: s
         src={iconUrl}
         alt=""
         draggable={false}
-        className="size-full object-cover"
+        // Decorative: `pointer-events-none` lets a press pass THROUGH to the tile
+        // behind it. In the Dock a tile is a framer-motion Reorder.Item; without
+        // this the `<img>` captures the pointerdown and the drag never initiates
+        // (`draggable={false}` only disables native image DnD, not pointer capture),
+        // so AI-page tiles with an icon couldn't be reordered (§7.1h item 3). All
+        // interaction (click-open, drag) belongs to the parent tile/row, so this is
+        // safe on every surface sharing this avatar (Dock, Library, search, chip).
+        className="pointer-events-none size-full select-none object-cover"
         onError={() => setFailure({ url: iconUrl, attempts: attempts + 1 })}
       />
     );

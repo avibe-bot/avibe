@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AppWindow as AppWindowIcon,
+  ArrowUpRight,
   Check,
   ChevronDown,
   ChevronUp,
@@ -25,6 +25,7 @@ import { copyTextToClipboard } from '../lib/utils';
 import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
 import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
+import { SHARED_ACTION_ZONE } from '../apps/rowLayout';
 import { ShowPageAvatarTile } from '../apps/showPageAvatarTile';
 import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
 import { SearchField } from './settings/SettingsPrimitives';
@@ -137,8 +138,8 @@ function ShowPageRow({
                 >
                   {label}
                 </span>
-                {/* Open affordance beside the title. */}
-                <AppWindowIcon
+                {/* Open affordance beside the title — a diagonal ↗ (§7.1h item 2). */}
+                <ArrowUpRight
                   size={13}
                   aria-hidden
                   className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
@@ -149,34 +150,40 @@ function ShowPageRow({
           </button>
         </div>
 
+        {/* Status badge — immediately left of the fixed-width action zone, so its
+            right-edge column matches the Apps view exactly (§7.1h item 1). */}
         <Badge variant={status.badge} className="hidden sm:inline-flex">
           <span className={clsx('size-1.5 rounded-full', status.dot)} />
           {t(`showPages.status.${page.visibility}`)}
         </Badge>
 
-        {/* Install toggle — adds the page to the Apps list (and docks it) or
-            removes it from both. A sibling of the open button now, so no
-            propagation guard is needed. */}
-        <Button
-          type="button"
-          variant={installed ? 'secondary' : 'accent'}
-          size="xs"
-          onClick={() => onToggleInstall(!installed)}
-        >
-          {installed ? <Minus /> : <Plus />}
-          <span className="hidden sm:inline">{installed ? t('library.apps.remove') : t('library.ai.add')}</span>
-        </Button>
+        {/* Fixed-width, right-justified action zone (shared with the Apps view) so
+            the badge column above never shifts with the toggle label width. */}
+        <div className={SHARED_ACTION_ZONE}>
+          {/* Install toggle — adds the page to the Apps list (and docks it) or
+              removes it from both. A sibling of the open button now, so no
+              propagation guard is needed. */}
+          <Button
+            type="button"
+            variant={installed ? 'secondary' : 'accent'}
+            size="xs"
+            onClick={() => onToggleInstall(!installed)}
+          >
+            {installed ? <Minus /> : <Plus />}
+            <span className="hidden sm:inline">{installed ? t('library.apps.remove') : t('library.ai.add')}</span>
+          </Button>
 
-        {/* Explicit expand affordance for the management panel. */}
-        <button
-          type="button"
-          aria-label={t('showPages.details')}
-          aria-expanded={expanded}
-          onClick={() => onToggleExpand()}
-          className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
-        >
-          {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} />}
-        </button>
+          {/* Explicit expand affordance for the management panel. */}
+          <button
+            type="button"
+            aria-label={t('showPages.details')}
+            aria-expanded={expanded}
+            onClick={() => onToggleExpand()}
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+          >
+            {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} />}
+          </button>
+        </div>
       </div>
 
       {expanded ? (

@@ -7,6 +7,7 @@ import clsx from 'clsx';
 
 import { APP_LIST, APP_REGISTRY, type AppDefinition, type AppId } from './registry';
 import { deriveAppRows, partitionByDock, type AppRow } from './appLibrary';
+import { SHARED_ACTION_ZONE } from './rowLayout';
 import { ShowPageAvatarTile } from './showPageAvatarTile';
 import { showAppRoutePath } from '../components/apps/mobileDock';
 import { useDock } from '../context/DockContext';
@@ -216,8 +217,10 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
         <span className="truncate text-[13px] font-semibold text-foreground">{name}</span>
         {subtitle ? <span className="truncate font-mono text-[11px] text-muted">{subtitle}</span> : null}
       </span>
-      {/* Kind badge — right-aligned at the info area's right edge (§7.1e); the AI
-          badge replaces the former Show Page badge. */}
+      {/* Kind badge — sits immediately left of the fixed-width action zone below,
+          so its right-edge column stays put across ALL rows (and matches the
+          ShowPage view) no matter the toggle label width or whether 移出 shows
+          (§7.1h item 1). The AI badge replaces the former Show Page badge. */}
       {row.kind === 'builtin' ? (
         <Badge variant="outline" className="hidden font-mono text-[10px] uppercase tracking-wide sm:inline-flex">
           {t('library.kind.builtin')}
@@ -227,35 +230,41 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
           {t('library.kind.showPage')}
         </Badge>
       )}
-      {/* State-aware Dock toggle — the row stays in the list either way. */}
-      <Button
-        type="button"
-        variant={row.docked ? 'secondary' : 'outline'}
-        size="xs"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDockToggle();
-        }}
-      >
-        {row.docked ? <PinOff /> : <Pin />}
-        <span className="hidden sm:inline">{row.docked ? t('library.apps.undock') : t('library.apps.dock')}</span>
-      </Button>
-      {/* 移出 — uninstall (AI rows only; the page itself is untouched). A minus,
-          not a trash: this removes the app from the list, it is not a delete. */}
-      {row.kind === 'showpage' && onRemove ? (
-        <button
+      {/* Fixed-width, right-justified action zone (§7.1h item 1) — the SHARED_ACTION_ZONE
+          width matches the ShowPage view, so the badge column above is identical in
+          both. Buttons right-align within it, so a longer/shorter label never shifts
+          the badge. */}
+      <div className={SHARED_ACTION_ZONE}>
+        {/* State-aware Dock toggle — the row stays in the list either way. */}
+        <Button
           type="button"
-          title={t('library.apps.remove')}
-          aria-label={t('library.apps.remove')}
+          variant={row.docked ? 'secondary' : 'outline'}
+          size="xs"
           onClick={(e) => {
             e.stopPropagation();
-            onRemove();
+            onDockToggle();
           }}
-          className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-destructive/10 hover:text-destructive"
         >
-          <Minus size={15} />
-        </button>
-      ) : null}
+          {row.docked ? <PinOff /> : <Pin />}
+          <span className="hidden sm:inline">{row.docked ? t('library.apps.undock') : t('library.apps.dock')}</span>
+        </Button>
+        {/* 移出 — uninstall (AI rows only; the page itself is untouched). A minus,
+            not a trash: this removes the app from the list, it is not a delete. */}
+        {row.kind === 'showpage' && onRemove ? (
+          <button
+            type="button"
+            title={t('library.apps.remove')}
+            aria-label={t('library.apps.remove')}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove();
+            }}
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Minus size={15} />
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 };
