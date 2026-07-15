@@ -494,11 +494,16 @@ independently:
 - malformed or oversized quality is discarded while the core heartbeat still
   returns `200` and updates last-seen state;
 - an unsupported future `schema_version` is ignored, not rejected; and
+- a V1 sample more than five minutes ahead of backend time is discarded as
+  unreasonable clock skew;
 - validation failures are rate-limited in logs/Sentry without echoing payloads.
 
 The backend rejects an older quality sample when its `sampled_at` predates the
-stored sample, while still accepting the core heartbeat. This is defense in
-depth behind the sender's serialized reporter.
+stored sample, while still accepting the core heartbeat. The comparison and
+coalesce happen atomically in the database conflict update so overlapping
+heartbeats cannot let an older or missing quality payload overwrite the newest
+valid snapshot. This is defense in depth behind the sender's serialized
+reporter.
 
 Quality freshness is evaluated independently. A fresh heartbeat with a quality
 sample older than 150 seconds displays `quality unknown`, not an old RTT as if it
