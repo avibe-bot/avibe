@@ -649,6 +649,51 @@ def test_install_script_reinstalls_when_existing_uv_is_x86_on_apple_silicon(tmp_
     assert uv_log.read_text(encoding="utf-8") == str(path_dir)
 
 
+def test_install_script_omits_retry_all_errors_for_older_curl(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    curl_log = tmp_path / "curl.log"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    native_uv = home_dir / ".local" / "bin" / "uv"
+    native_uv.parent.mkdir(parents=True)
+    _write_fake_uv(native_uv, uv_log)
+    _write_executable(
+        path_dir / "curl",
+        f"""\
+        #!/usr/bin/env bash
+        printf '%s\\n' "$*" >> "{curl_log}"
+        if [ "${{1:-}}" = "--help" ]; then
+            echo "curl 7.68 help"
+            exit 0
+        fi
+        for arg in "$@"; do
+            if [ "$arg" = "--retry-all-errors" ]; then
+                exit 2
+            fi
+        done
+        cat <<'EOF'
+        #!/usr/bin/env sh
+        exit 0
+        EOF
+        """,
+    )
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+
+    install_result = _install(env, cwd=tmp_path)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    curl_calls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert curl_calls[0] == "--help all"
+    assert "--retry 2" in curl_calls[1]
+    assert "--retry-all-errors" not in curl_calls[1]
+
+
 def test_install_script_accepts_universal_uv_with_arm64e_slice_on_apple_silicon(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

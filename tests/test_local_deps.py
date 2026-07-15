@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import subprocess
 import tarfile
 import urllib.error
 from unittest.mock import Mock
@@ -113,7 +115,42 @@ def test_install_askill_uses_official_curl_installer(monkeypatch):
     assert captured["name"] == "askill"
     assert captured["cmd"][:2] == ["bash", "-c"]
     assert "https://askill.sh | sh" in captured["cmd"][2]
-    assert "--retry 2 --retry-all-errors" in captured["cmd"][2]
+    assert "curl --help all" in captured["cmd"][2]
+    assert "retry_all_errors='--retry-all-errors'" in captured["cmd"][2]
+    assert "--retry 2" in captured["cmd"][2]
+
+
+@pytest.mark.parametrize("supports_retry_all_errors", [False, True])
+def test_curl_installer_command_gates_retry_flag_by_support(tmp_path, supports_retry_all_errors):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl_log = tmp_path / "curl.log"
+    curl = bin_dir / "curl"
+    help_text = "--retry-all-errors" if supports_retry_all_errors else "curl 7.68 help"
+    curl.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" >> {curl_log!s}\n"
+        f"if [ \"${{1:-}}\" = \"--help\" ]; then echo '{help_text}'; exit 0; fi\n"
+        "printf '#!/bin/sh\\nexit 0\\n'\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"])
+
+    result = subprocess.run(
+        api._curl_installer_command("https://example.test/install.sh", "sh"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert calls[0] == "--help all"
+    assert "--retry 2" in calls[1]
+    assert ("--retry-all-errors" in calls[1]) is supports_retry_all_errors
 
 
 def test_avault_download_retries_transient_network_failure(monkeypatch):

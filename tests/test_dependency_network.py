@@ -123,6 +123,40 @@ def test_probe_uses_bounded_retry_and_reports_attempts(monkeypatch) -> None:
     assert result["download_error"]["attempts"] == 2
 
 
+def test_probe_file_url_checks_local_file_without_http_opener(monkeypatch, tmp_path) -> None:
+    archive = tmp_path / "runtime.tgz"
+    archive.write_bytes(b"archive")
+    monkeypatch.setattr(
+        dependency_network.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("file probe must not use urlopen"),
+    )
+
+    result = dependency_network.probe_url(archive.as_uri())
+
+    assert result["ok"] is True
+    assert result["checked"] is True
+    assert result["kind"] == "local_file"
+    assert result["path"] == str(archive)
+
+
+def test_probe_missing_file_url_reports_local_io_failure(monkeypatch, tmp_path) -> None:
+    archive = tmp_path / "missing.tgz"
+    monkeypatch.setattr(
+        dependency_network.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("file probe must not use urlopen"),
+    )
+
+    result = dependency_network.probe_url(archive.as_uri())
+
+    assert result["ok"] is False
+    assert result["checked"] is True
+    assert result["reason"] == "dependency_file_missing"
+    assert result["download_error"]["kind"] == "io"
+    assert result["download_error"]["retryable"] is False
+
+
 def test_retry_after_is_capped_by_policy(monkeypatch) -> None:
     sleeps: list[float] = []
     attempts = 0

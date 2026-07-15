@@ -447,7 +447,11 @@ install_uv() {
     
     case "$os" in
         macos|linux)
-            curl -LsSf --retry 2 --retry-all-errors --retry-delay 1 --connect-timeout 10 --max-time 120 \
+            local curl_retry_all_errors=""
+            if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+                curl_retry_all_errors="--retry-all-errors"
+            fi
+            curl -LsSf --retry 2 $curl_retry_all_errors --retry-delay 1 --connect-timeout 10 --max-time 120 \
                 https://astral.sh/uv/install.sh | sh
             # Add to PATH for current session
             export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"

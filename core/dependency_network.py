@@ -175,6 +175,29 @@ def probe_url(
     opener: Callable[..., Any] | None = None,
     user_agent: str = "avibe-dependency-doctor",
 ) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        path = Path(urllib.request.url2pathname(parsed.path))
+        if path.is_file():
+            return {
+                "ok": True,
+                "checked": True,
+                "kind": "local_file",
+                "url": redact_url(url),
+                "path": str(path),
+                "reason": None,
+            }
+        error = dependency_error_details(FileNotFoundError(errno.ENOENT, "dependency file not found", path), url)
+        return {
+            "ok": False,
+            "checked": True,
+            "kind": "local_file",
+            "url": redact_url(url),
+            "path": str(path),
+            "reason": "dependency_file_missing",
+            "download_error": error,
+        }
+
     request = urllib.request.Request(url, headers={"User-Agent": user_agent}, method="HEAD")
     resolved_opener = opener or urllib.request.urlopen
 

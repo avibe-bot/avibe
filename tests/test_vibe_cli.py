@@ -1181,6 +1181,110 @@ def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monke
     assert "proxy or security gateway" in failure["action"]
 
 
+def test_show_runtime_doctor_reports_unchecked_manifest_download_failure(monkeypatch):
+    archive_url = "https://example.test/runtime.tgz"
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {"name": "runtime.tgz", "url": archive_url},
+        "installed": False,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: {
+            "ok": False,
+            "checked": False,
+            "reason": "runtime_manifest_download_failed",
+            "download_error": {
+                "kind": "timeout",
+                "message": "Connection timed out",
+                "url": "https://example.test/manifest.json",
+                "attempts": 2,
+            },
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=True)
+
+    failure = next(item for item in items if item.get("code") == "show_runtime.manifest_timeout_failed")
+    assert failure["status"] == "fail"
+    assert "after 2 attempts" in failure["message"]
+    assert not any(item.get("code") == "show_runtime.archive_probe_unsupported" for item in items)
+
+
+def test_show_runtime_doctor_reports_unsupported_archive_url(monkeypatch):
+    archive_url = "http://example.test/runtime.tgz"
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {"name": "runtime.tgz", "url": archive_url},
+        "installed": False,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: {
+            "ok": False,
+            "checked": False,
+            "reason": "runtime_archive_url_unsupported",
+            "url": archive_url,
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=True)
+
+    failure = next(item for item in items if item.get("code") == "show_runtime.archive_url_unsupported")
+    assert failure["status"] == "fail"
+    assert "HTTPS or file URL" in failure["action"]
+
+
+def test_show_runtime_doctor_only_treats_explicit_head_failure_as_probe_unsupported(monkeypatch):
+    archive_url = "https://example.test/runtime.tgz"
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {"name": "runtime.tgz", "url": archive_url},
+        "installed": False,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: {
+            "ok": False,
+            "checked": False,
+            "reason": "runtime_archive_probe_unsupported",
+            "download_error": {
+                "kind": "http",
+                "message": "HTTP 405 Method Not Allowed",
+                "url": archive_url,
+                "http_status": 405,
+            },
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=True)
+
+    warning = next(item for item in items if item.get("code") == "show_runtime.archive_probe_unsupported")
+    assert warning["status"] == "warn"
+    assert not any(item.get("code") == "show_runtime.archive_http_error" for item in items)
+
+
 def test_show_runtime_doctor_identifies_legacy_upstream_fallback(monkeypatch):
     status = {
         "provider": "archive",

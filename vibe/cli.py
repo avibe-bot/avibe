@@ -8278,6 +8278,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         return items
 
     probe = manager.probe_archive_reachability()
+    probe_reason = str(probe.get("reason") or "")
     if probe.get("ok"):
         target = probe.get("url") or probe.get("path") or (archive or {}).get("name")
         _add_doctor_item(
@@ -8286,7 +8287,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             f"Show Runtime archive is reachable: {target}",
             code="show_runtime.archive_reachable",
         )
-    elif not probe.get("checked"):
+    elif probe_reason == "runtime_archive_probe_unsupported":
         _add_doctor_item(
             items,
             "warn",
@@ -8295,18 +8296,43 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             code="show_runtime.archive_probe_unsupported",
         )
     elif probe.get("download_error"):
+        is_manifest_failure = probe_reason.startswith("runtime_manifest_")
         _add_dependency_download_failure(
             items,
             probe.get("download_error"),
-            label="Show Runtime archive",
-            code_prefix="show_runtime.archive",
+            label="Show Runtime manifest" if is_manifest_failure else "Show Runtime archive",
+            code_prefix="show_runtime.manifest" if is_manifest_failure else "show_runtime.archive",
             repair_target="show-runtime",
+        )
+    elif probe_reason == "runtime_archive_url_unsupported":
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Show Runtime archive URL scheme is unsupported: {probe.get('url') or (archive or {}).get('url')}",
+            "Use an HTTPS or file URL for the archive, then rerun deep Doctor.",
+            code="show_runtime.archive_url_unsupported",
+        )
+    elif probe_reason.startswith("runtime_manifest_"):
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Show Runtime manifest could not be loaded: {probe_reason}",
+            "Inspect the configured or packaged Runtime manifest, then reinstall the current Avibe release if needed.",
+            code="show_runtime.manifest_unavailable",
+        )
+    elif probe_reason == "runtime_platform_unsupported":
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Show Runtime manifest has no archive for {status.get('platform') or 'this platform'}",
+            "Install an Avibe release that publishes a Runtime archive for this platform.",
+            code="show_runtime.platform_unsupported",
         )
     else:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime archive check failed: {probe.get('reason') or 'unknown error'}",
+            f"Show Runtime archive check failed: {probe_reason or 'unknown error'}",
             "Inspect the selected archive path or URL, then retry the repair.",
             code="show_runtime.archive_check_failed",
         )

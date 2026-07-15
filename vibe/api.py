@@ -78,7 +78,7 @@ from core.dependency_network import DependencyNetworkError, dependency_error_mes
 
 logger = logging.getLogger(__name__)
 
-_CURL_INSTALL_RETRY_FLAGS = "--retry 2 --retry-all-errors --retry-delay 1 --connect-timeout 10 --max-time 120"
+_CURL_INSTALL_RETRY_FLAGS = "--retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120"
 
 # Cache per cwd: { cwd: { "data": ..., "updated_at": ... } }
 _OPENCODE_OPTIONS_CACHE: dict[str, dict] = {}
@@ -5849,7 +5849,12 @@ def _curl_installer_command(url: str, consumer: str) -> list[str]:
     return [
         "bash",
         "-c",
-        f"set -euo pipefail; curl -fsSL {_CURL_INSTALL_RETRY_FLAGS} {url} | {consumer}",
+        "set -euo pipefail; "
+        "retry_all_errors=''; "
+        "if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then "
+        "retry_all_errors='--retry-all-errors'; "
+        "fi; "
+        f"curl -fsSL {_CURL_INSTALL_RETRY_FLAGS} $retry_all_errors {url} | {consumer}",
     ]
 
 
