@@ -1183,6 +1183,32 @@ def set_show_page_share_id(session_id: str, share_id: str) -> dict:
     return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
+def upload_show_page_icon(
+    session_id: str, data: bytes, *, filename: str | None, content_type: str | None
+) -> dict:
+    """Write an uploaded image as the page's workspace-root favicon; return the
+    refreshed page payload so the Web UI merges it like any other show-page mutation
+    (the fresh ``icon_version`` flows through ``show_page_payload``) — §7.1j.
+
+    404 (``show_page_not_found``) when the session has no Show Page; the write itself
+    raises ``ShowPageError`` (→ 4xx) for a malformed id / bad type / empty / oversized
+    payload. Never edits ``index.html``.
+    """
+    from core.show_pages import ShowPageError, ShowPageStore, show_page_payload, write_show_page_icon
+
+    config = V2Config.load()
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        write_show_page_icon(session_id, data, filename=filename, content_type=content_type)
+        payload = show_page_payload(page, config=config)
+    finally:
+        store.close()
+    return {"ok": True, **_apply_session_meta([payload])[0]}
+
+
 def get_dock() -> dict:
     """The workbench Dock document — resident-tile order + pinned Show Pages."""
     from core.dock_store import load_dock

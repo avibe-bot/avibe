@@ -19,6 +19,7 @@ from core.show_pages import (
 )
 from core.show_runtime import ShowRuntimeManager, _runtime_platform_tag, _safe_extract_tar, set_show_runtime_manager_for_tests
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
+from tests.ui_server_test_helpers import csrf_headers
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
 
@@ -582,6 +583,84 @@ def test_show_page_icon_endpoint_404_when_target_missing(monkeypatch, tmp_path):
     response = app.test_client().get("/api/show-pages/ses123/icon", base_url="http://127.0.0.1:5123")
 
     assert response.status_code == 404
+
+
+def test_show_page_icon_upload_happy_path(monkeypatch, tmp_path):
+    # §7.1j: a multipart upload writes the workspace-root favicon and returns the
+    # refreshed payload (fresh icon_version) so the Web UI merges it like any other
+    # show-page mutation. The server chose the on-disk name from the type — the client
+    # only sent bytes + a filename.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")  # index.html has no <link rel=icon>
+    client = app.test_client()
+
+    response = client.post(
+        "/api/show-pages/ses123/icon",
+        files={"file": ("logo.svg", b"<svg>UPLOADED</svg>", "image/svg+xml")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["session_id"] == "ses123"
+    assert isinstance(body["icon_version"], str) and body["icon_version"]
+    # The server chose favicon.svg at the workspace root and wrote the exact bytes.
+    assert (ensure_show_page_dir("ses123") / "favicon.svg").read_bytes() == b"<svg>UPLOADED</svg>"
+
+
+def test_show_page_icon_upload_rejects_bad_type(monkeypatch, tmp_path):
+    # A non-image type is a clean 415 (never a 500); nothing is written.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/show-pages/ses123/icon",
+        files={"file": ("evil.html", b"<html></html>", "text/html")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 415
+    assert response.get_json()["error"]["code"] == "invalid_icon_type"
+    assert not list(ensure_show_page_dir("ses123").glob("favicon.*"))
+
+
+def test_show_page_icon_upload_unknown_page_is_404(monkeypatch, tmp_path):
+    # Uploading to a session with no Show Page is a structured 404, not a 500.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/show-pages/sesnone/icon",
+        files={"file": ("logo.svg", b"<svg/>", "image/svg+xml")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "show_page_not_found"
+
+
+def test_show_page_icon_upload_requires_remote_login(monkeypatch, tmp_path):
+    # Auth parity with the rest of /api: a remote request without a session is bounced
+    # by the same before-request hook (never reaches the handler, so nothing is written).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+
+    response = app.test_client().post(
+        "/api/show-pages/ses123/icon",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        files={"file": ("logo.svg", b"<svg/>", "image/svg+xml")},
+        follow_redirects=False,
+    )
+
+    assert response.status_code != 200
+    assert not (ensure_show_page_dir("ses123") / "favicon.svg").exists()
 
 
 def test_show_page_icon_endpoint_requires_remote_login(monkeypatch, tmp_path):

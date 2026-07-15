@@ -1260,6 +1260,168 @@ def test_read_workspace_file_safely_refuses_non_regular_fifo(tmp_path):
     assert _read_workspace_file_safely(fifo, 100, cap=True) is None
 
 
+# --- Icon self-serve upload (§7.1j) -------------------------------------------------
+
+# (upload filename, content-type) -> the canonical on-disk extension the server writes.
+_ICON_UPLOAD_CASES = (
+    ("icon.svg", "image/svg+xml", "svg"),
+    ("icon.png", "image/png", "png"),
+    ("icon.ico", "image/x-icon", "ico"),
+    ("icon.jpg", "image/jpeg", "jpg"),
+    ("icon.jpeg", "image/jpeg", "jpg"),  # jpeg folds to the single canonical jpg
+    ("icon.webp", "image/webp", "webp"),
+)
+
+
+@pytest.mark.parametrize("filename, content_type, canonical", _ICON_UPLOAD_CASES)
+def test_write_show_page_icon_happy_path_per_extension(monkeypatch, tmp_path, filename, content_type, canonical):
+    # Each whitelisted type writes the SERVER-chosen workspace-root favicon.<ext> (the
+    # client never supplies a path) and becomes the resolved, servable icon (§7.1j).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_dir, write_show_page_icon
+
+    version = write_show_page_icon("sesup", b"<bytes>", filename=filename, content_type=content_type)
+
+    page_dir = show_page_dir("sesup")
+    target = page_dir / f"favicon.{canonical}"
+    assert target.is_file() and target.read_bytes() == b"<bytes>"
+    resolved = resolve_show_page_icon("sesup")
+    assert resolved is not None and resolved[0] == target.resolve()
+    assert isinstance(version, str) and version  # a fresh non-empty token
+
+
+def test_write_show_page_icon_derives_ext_from_filename_when_type_generic(monkeypatch, tmp_path):
+    # Browsers sometimes send a generic/blank content-type for .ico/.svg; the filename
+    # extension is the fallback signal, still whitelisted.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import show_page_dir, write_show_page_icon
+
+    write_show_page_icon("sesgen", b"i", filename="brand.ico", content_type="application/octet-stream")
+    assert (show_page_dir("sesgen") / "favicon.ico").is_file()
+
+
+def test_write_show_page_icon_rejects_non_whitelisted_type(monkeypatch, tmp_path):
+    # A non-image type (or extension) is refused with a clear code and writes NOTHING.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import show_page_dir, write_show_page_icon
+
+    with pytest.raises(ShowPageError) as excinfo:
+        write_show_page_icon("sesbad", b"<html>", filename="evil.html", content_type="text/html")
+    assert excinfo.value.code == "invalid_icon_type"
+    # A content-type that disagrees with a whitelisted extension is also refused.
+    with pytest.raises(ShowPageError):
+        write_show_page_icon("sesbad", b"x", filename="icon.svg", content_type="image/png")
+    assert not any((show_page_dir("sesbad")).glob("favicon.*"))
+
+
+def test_write_show_page_icon_rejects_empty_and_oversized(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.show_pages._ICON_MAX_BYTES", 8)
+    monkeypatch.setattr("core.show_pages.SHOW_PAGE_ICON_MAX_UPLOAD_BYTES", 8)
+    from core.show_pages import write_show_page_icon
+
+    with pytest.raises(ShowPageError) as empty:
+        write_show_page_icon("sescap", b"", filename="i.svg", content_type="image/svg+xml")
+    assert empty.value.code == "icon_required"
+    with pytest.raises(ShowPageError) as big:
+        write_show_page_icon("sescap", b"x" * 9, filename="i.svg", content_type="image/svg+xml")
+    assert big.value.code == "icon_too_large"
+
+
+def test_write_show_page_icon_removes_sibling_root_favicons(monkeypatch, tmp_path):
+    # Exactly ONE conventional source must remain, so a stale root favicon.svg can't
+    # shadow the freshly-uploaded favicon.ico in the resolver's svg>ico>png order.
+    # Sibling root variants go; a public/ copy (tried only after root) is left alone.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_dir, write_show_page_icon
+
+    page_dir = show_page_dir("sessib")
+    (page_dir / "public").mkdir(parents=True)
+    (page_dir / "favicon.svg").write_text("<svg>old</svg>", encoding="utf-8")
+    (page_dir / "favicon.png").write_bytes(b"oldpng")
+    (page_dir / "public" / "favicon.svg").write_text("<svg>pub</svg>", encoding="utf-8")
+
+    write_show_page_icon("sessib", b"NEWICO", filename="new.ico", content_type="image/x-icon")
+
+    assert not (page_dir / "favicon.svg").exists()
+    assert not (page_dir / "favicon.png").exists()
+    assert (page_dir / "favicon.ico").read_bytes() == b"NEWICO"
+    assert (page_dir / "public" / "favicon.svg").exists()  # a non-sibling copy is untouched
+    resolved = resolve_show_page_icon("sessib")
+    assert resolved is not None and resolved[0] == (page_dir / "favicon.ico").resolve()
+
+
+def test_write_show_page_icon_does_not_follow_symlink_at_target(monkeypatch, tmp_path):
+    # A symlink placed at the favicon name must NOT be written through: the write
+    # unlinks it first and lands a fresh regular file, so an outside target is
+    # untouched and the served icon is the uploaded bytes (defense-in-depth, §7.1j).
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("O_NOFOLLOW / symlink semantics not available on this platform")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_dir, write_show_page_icon
+
+    page_dir = show_page_dir("seslnk")
+    page_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.svg"
+    outside.write_text("<svg>SECRET-OUTSIDE</svg>", encoding="utf-8")
+    os.symlink(outside, page_dir / "favicon.svg")
+
+    write_show_page_icon("seslnk", b"<svg>MINE</svg>", filename="i.svg", content_type="image/svg+xml")
+
+    favicon = page_dir / "favicon.svg"
+    assert not favicon.is_symlink()  # the symlink entry was replaced, not followed
+    assert favicon.read_bytes() == b"<svg>MINE</svg>"
+    assert outside.read_text(encoding="utf-8") == "<svg>SECRET-OUTSIDE</svg>"  # never written through
+    resolved = resolve_show_page_icon("seslnk")
+    assert resolved is not None and resolved[0] == favicon.resolve()
+
+
+def test_write_show_page_icon_version_changes_on_replace(monkeypatch, tmp_path):
+    # Re-uploading different bytes changes icon_version (the content-versioned URL busts
+    # the cache); identical bytes keep it stable — the freshness invariant on the write.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import write_show_page_icon
+
+    v1 = write_show_page_icon("sesver", b"<svg>1</svg>", filename="i.svg", content_type="image/svg+xml")
+    v2 = write_show_page_icon("sesver", b"<svg>2-longer</svg>", filename="i.svg", content_type="image/svg+xml")
+    assert v1 and v2 and v1 != v2
+    v3 = write_show_page_icon("sesver", b"<svg>2-longer</svg>", filename="i.svg", content_type="image/svg+xml")
+    assert v3 == v2  # identical bytes → identical token (cache hit)
+
+
+def test_write_show_page_icon_explicit_link_still_wins(monkeypatch, tmp_path):
+    # Ledger (§7.1j): we never edit index.html, so a USABLE explicit <link rel=icon>
+    # keeps winning in resolve order over the uploaded conventional favicon — the
+    # editor only covers the common no-link case.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_dir, write_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesuplink")
+    (page_dir / "index.html").write_text('<link rel="icon" href="brand.svg">', encoding="utf-8")
+    (page_dir / "brand.svg").write_text("<svg>brand</svg>", encoding="utf-8")
+
+    write_show_page_icon("sesuplink", b"<svg>uploaded</svg>", filename="i.svg", content_type="image/svg+xml")
+
+    # The uploaded favicon.svg exists on disk, but the explicit link still resolves.
+    assert (page_dir / "favicon.svg").read_bytes() == b"<svg>uploaded</svg>"
+    resolved = resolve_show_page_icon("sesuplink")
+    assert resolved is not None and resolved[0] == (page_dir / "brand.svg").resolve()
+
+
+def test_canonical_upload_icon_ext_rules():
+    from core.show_pages import _canonical_upload_icon_ext
+
+    # Content-type is authoritative; filename is the fallback; jpeg folds to jpg.
+    assert _canonical_upload_icon_ext("x.png", "image/png") == "png"
+    assert _canonical_upload_icon_ext("x.JPEG", None) == "jpg"
+    assert _canonical_upload_icon_ext(None, "image/webp") == "webp"
+    assert _canonical_upload_icon_ext("x.ico", "image/vnd.microsoft.icon") == "ico"
+    # Not whitelisted, or a recognizable type/extension that disagree → None (415).
+    assert _canonical_upload_icon_ext("x.gif", "image/gif") is None  # gif is servable, not uploadable
+    assert _canonical_upload_icon_ext("x.txt", "text/plain") is None
+    assert _canonical_upload_icon_ext("x.svg", "image/png") is None  # mismatch
+
+
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):
     # A brand-new Show Page workspace starts as a clean "being generated"
     # placeholder for the user, plus a minimal file-based router and one extra page

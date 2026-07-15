@@ -41,6 +41,7 @@ from core.show_pages import (
     SHOW_CLI_EVENT_TOKEN_HEADER,
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
     SHOW_EVENT_WRITE_TOKEN_HEADER,
+    SHOW_PAGE_ICON_MAX_UPLOAD_BYTES,
     show_cli_event_token,
     show_event_write_token,
 )
@@ -6399,6 +6400,77 @@ async def files_upload(starlette_request: FastAPIRequest):
             )
         except Exception as exc:
             return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+def _show_page_icon_upload_error(code: str, message: str):
+    # Structured 4xx for the icon upload (§7.1j) — mirrors _dock_error_response so the
+    # Web UI's shared handler localizes via errors.<code> and falls back to `message`.
+    # Every failure is a client/policy error (bad type/size, missing file, unknown
+    # page), so the endpoint answers a clear 4xx — never a 500.
+    status = {
+        "show_page_not_found": 404,
+        "session_not_found": 404,
+        "icon_too_large": 413,
+        "invalid_icon_type": 415,
+    }.get(code, 400)
+    return (
+        jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}),
+        status,
+    )
+
+
+@app.post("/api/show-pages/{session_id}/icon", include_in_schema=False)
+async def show_page_icon_upload(session_id: str, starlette_request: FastAPIRequest):
+    # Icon self-serve upload (§7.1j): the multipart sibling of the GET icon endpoint
+    # (that one is a compat @app.route; the compat layer parses JSON, not multipart, so
+    # the upload is a native FastAPI route reusing the shared file-upload machinery —
+    # parser cap + Content-Length guard). Auth/CSRF ride the native dispatch hooks.
+    # Contract: a structured 4xx on ANY bad input, never a 500 (the icon is decorative).
+    async def handler():
+        from core.file_browser_service import FileBrowserError
+        from core.show_pages import ShowPageError
+        from vibe import api
+
+        try:
+            _validate_file_upload_content_length(starlette_request.headers, SHOW_PAGE_ICON_MAX_UPLOAD_BYTES)
+            form = await _parse_file_upload_form(
+                starlette_request, max_file_bytes=SHOW_PAGE_ICON_MAX_UPLOAD_BYTES
+            )
+            try:
+                upload = form.get("file")
+                if not isinstance(upload, StarletteUploadFile):
+                    raise ShowPageError("An icon file is required.", code="icon_required")
+                await upload.seek(0)
+                data = await upload.read()
+                return jsonify(
+                    await asyncio.to_thread(
+                        api.upload_show_page_icon,
+                        session_id,
+                        data,
+                        filename=upload.filename,
+                        content_type=upload.content_type,
+                    )
+                )
+            finally:
+                await form.close()
+        except MultiPartException as exc:
+            message = str(exc)
+            code = "icon_too_large" if "too large" in message.lower() else "invalid_icon"
+            return _show_page_icon_upload_error(code, message)
+        except StarletteHTTPException as exc:
+            return _show_page_icon_upload_error("invalid_icon", str(exc.detail))
+        except FileBrowserError as exc:
+            # _parse_file_upload_form raises this when the body is not multipart.
+            return _show_page_icon_upload_error("invalid_icon", exc.message)
+        except ShowPageError as exc:
+            return _show_page_icon_upload_error(getattr(exc, "code", "invalid_icon"), str(exc))
+        except Exception:
+            # A genuine server-side write fault (disk full, permission). The icon is
+            # decorative, so answer a clear 4xx (never 500 per §7.1j) and log the cause.
+            logger.exception("show page icon upload failed")
+            return _show_page_icon_upload_error("icon_write_failed", "Could not save the icon; please try again.")
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
