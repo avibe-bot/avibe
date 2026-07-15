@@ -111,7 +111,7 @@ def _create_show_page_record(session_id: str, visibility: str) -> str | None:
         store.close()
 
 
-def _create_agent_session(session_id: str) -> None:
+def _create_agent_session(session_id: str, *, status: str = "active") -> None:
     from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -131,7 +131,7 @@ def _create_agent_session(session_id: str) -> None:
                 agent_variant="default",
                 session_anchor="anchor_" + session_id,
                 native_session_id="",
-                status="active",
+                status=status,
                 metadata_json="{}",
                 created_at=now,
                 updated_at=now,
@@ -674,6 +674,28 @@ def test_show_page_icon_upload_unknown_page_is_404(monkeypatch, tmp_path):
 
     assert response.status_code == 404
     assert response.get_json()["error"]["code"] == "show_page_not_found"
+
+
+def test_show_page_icon_upload_rejects_archived_session(monkeypatch, tmp_path):
+    # An archived session's page is terminal — the other mutators reject it with
+    # session_archived, so a direct icon upload must too, not write into the workspace
+    # (§7.1j review P2). Create the page first (while no session row exists → not archived),
+    # then insert the archived session row.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("sesarch", "private")
+    _create_agent_session("sesarch", status="archived")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/show-pages/sesarch/icon",
+        files={"file": ("logo.svg", b"<svg/>", "image/svg+xml")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "session_archived"
+    assert not (ensure_show_page_dir("sesarch") / "favicon.svg").exists()
 
 
 def test_show_page_icon_upload_requires_remote_login(monkeypatch, tmp_path):

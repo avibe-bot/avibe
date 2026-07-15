@@ -1354,6 +1354,27 @@ def test_write_show_page_icon_removes_sibling_root_favicons(monkeypatch, tmp_pat
     assert resolved is not None and resolved[0] == (page_dir / "favicon.ico").resolve()
 
 
+def test_write_show_page_icon_preserves_explicitly_linked_root_favicon(monkeypatch, tmp_path):
+    # The sibling cleanup must NOT delete a root favicon the page explicitly links from
+    # index.html when a different extension is uploaded — the explicit link keeps winning
+    # (we never edit index.html), so deleting it would 404 the page's own favicon (P2).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_dir, write_show_page_icon
+
+    page_dir = ensure_show_page_dir("seskeep")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.png">', encoding="utf-8")
+    (page_dir / "favicon.png").write_bytes(b"LINKED-PNG")
+
+    write_show_page_icon("seskeep", b"<svg>UP</svg>", filename="i.svg", content_type="image/svg+xml")
+
+    # The explicitly-linked favicon.png survives; the uploaded favicon.svg is written but
+    # dormant, and the explicit link still resolves.
+    assert (page_dir / "favicon.png").read_bytes() == b"LINKED-PNG"
+    assert (page_dir / "favicon.svg").read_bytes() == b"<svg>UP</svg>"
+    resolved = resolve_show_page_icon("seskeep")
+    assert resolved is not None and resolved[0] == (page_dir / "favicon.png").resolve()
+
+
 def test_write_show_page_icon_does_not_follow_symlink_at_target(monkeypatch, tmp_path):
     # A symlink placed at the favicon name must NOT be written through: the write
     # unlinks it first and lands a fresh regular file, so an outside target is

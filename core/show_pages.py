@@ -351,7 +351,10 @@ class ShowPageStore:
             )
         return _page_from_row(row), created
 
-    def _is_archived(self, session_id: str) -> bool:
+    def is_archived(self, session_id: str) -> bool:
+        """Whether the session is archived (terminal). Archived sessions reject Show Page
+        mutations with ``session_archived`` — see ``ensure_active`` / ``update_visibility``
+        / ``set_share_id`` here and the icon-upload guard in ``vibe.api``."""
         with self.engine.connect() as conn:
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
@@ -366,7 +369,7 @@ class ShowPageStore:
         # default (private) page row for an archived session — that would leave
         # ``/show/<id>/`` enabled for a terminal session. The in-txn check below
         # is the atomic authority for the concurrent-archive race.
-        if visibility != VISIBILITY_OFFLINE and self._is_archived(session_id):
+        if visibility != VISIBILITY_OFFLINE and self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot republish the Show Page of an archived session.",
                 code="session_archived",
@@ -404,7 +407,7 @@ class ShowPageStore:
         # Same guard as update_visibility, before ``ensure`` materializes a page:
         # an archived session is terminal, so its share link can't be rotated /
         # re-enabled (and a stale/direct call must not create a default page).
-        if self._is_archived(session_id):
+        if self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot rotate the share link of an archived session.",
                 code="session_archived",
@@ -443,7 +446,7 @@ class ShowPageStore:
         # default page for an archived (terminal) session. The in-txn re-reads
         # below are the atomic authority for the concurrent-archive / concurrent
         # visibility-flip race.
-        if self._is_archived(session_id):
+        if self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot change the share link of an archived session.",
                 code="session_archived",
@@ -933,10 +936,17 @@ def _write_root_favicon_atomically(page_dir: Path, ext: str, data: bytes) -> Non
         raise
     # The replacement has landed — now drop the OTHER-extension root favicons so exactly
     # one conventional source remains. Done last so a failed write above never orphans the
-    # page icon-less.
+    # page icon-less. EXCEPT a root favicon the page explicitly links from index.html:
+    # deleting it would 404 the page's own <link rel=icon> (which still WINS in the
+    # resolver — we never edit index.html), so preserve that one (§7.1j review P2).
+    linked = _extract_icon_path(page_dir)
     for servable_ext in SHOW_PAGE_ICON_CONTENT_TYPES:
-        if servable_ext != ext:
-            _unlink_quietly(page_dir / f"favicon.{servable_ext}")
+        if servable_ext == ext:
+            continue
+        sibling_rel = f"favicon.{servable_ext}"
+        if sibling_rel == linked:
+            continue
+        _unlink_quietly(page_dir / sibling_rel)
 
 
 def write_show_page_icon(

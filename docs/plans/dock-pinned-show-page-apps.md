@@ -687,6 +687,14 @@ alongside §7.1h item 3), in `AppWindow.tsx` + `WindowManagerContext.tsx`:
   not a whitelisted image is refused even when the filename extension is whitelisted;
   filename fallback is limited to blank / `application/octet-stream` types.
 
+**Hardening (review round 2, 2026-07-16 — #916):** two more P2 findings, fixed:
+- **Preserve an explicitly-linked root favicon (P2):** the sibling cleanup skips a root
+  `favicon.*` that `index.html` links via `<link rel=icon>` — deleting it would 404 the
+  page's own favicon while the explicit link keeps winning in the resolver.
+- **Reject icon uploads for archived sessions (P2):** `upload_show_page_icon` rejects an
+  archived session with `session_archived` (the store's `is_archived` check is promoted to
+  public), matching every other Show Page mutator's archived guard.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:

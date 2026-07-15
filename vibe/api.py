@@ -1190,9 +1190,11 @@ def upload_show_page_icon(
     refreshed page payload so the Web UI merges it like any other show-page mutation
     (the fresh ``icon_version`` flows through ``show_page_payload``) — §7.1j.
 
-    404 (``show_page_not_found``) when the session has no Show Page; the write itself
-    raises ``ShowPageError`` (→ 4xx) for a malformed id / bad type / empty / oversized
-    payload. Never edits ``index.html``.
+    404 (``show_page_not_found``) when the session has no Show Page; ``session_archived``
+    when the session is archived (mirrors the other Show Page mutators — an archived,
+    terminal session's page cannot be changed); the write itself raises ``ShowPageError``
+    (→ 4xx) for a malformed id / bad type / empty / oversized payload. Never edits
+    ``index.html``.
     """
     from core.show_pages import ShowPageError, ShowPageStore, show_page_payload, write_show_page_icon
 
@@ -1202,6 +1204,13 @@ def upload_show_page_icon(
         page = store.get(session_id)
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        if store.is_archived(session_id):
+            # Archiving leaves the page offline and terminal; the other mutators guard it
+            # with session_archived, so a direct icon upload must not slip past that.
+            raise ShowPageError(
+                "This session is archived, so its Show Page can't be changed.",
+                code="session_archived",
+            )
         write_show_page_icon(session_id, data, filename=filename, content_type=content_type)
         payload = show_page_payload(page, config=config)
     finally:
