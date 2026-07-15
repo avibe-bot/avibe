@@ -31,6 +31,7 @@ import { FileViewerProvider } from '../ui/file-viewer';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
 import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
+import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
@@ -1636,20 +1637,36 @@ const ActivityStrip: React.FC<{ state: SessionRuntimeState }> = ({ state }) => {
     active.length > 0 &&
     (state.connection === 'reconnecting' || state.connection === 'disconnected');
   return (
-    <div className="shrink-0 border-t border-border/70 bg-surface-2/60 px-4 py-1.5 md:px-8">
-      <div className="mx-auto flex min-h-7 w-full max-w-[1080px] items-center gap-2 text-[11px] text-muted">
-        <Activity className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
-        <span className="min-w-0 truncate" title={firstDescription ?? undefined}>
-          {active.length > 0
-            ? t('chat.activities.running', { count: active.length })
-            : t('chat.activities.delivering', { count: pendingOutputs })}
-          {firstDescription ? ` · ${firstDescription}` : ''}
-        </span>
-        {connectionVisible ? (
-          <span className="ml-auto shrink-0 text-gold">
-            {t(`chat.activities.connection.${state.connection}`)}
-          </span>
-        ) : null}
+    <div className="shrink-0 px-4 pt-2 md:px-8">
+      <div className="mx-auto flex w-full max-w-[1080px]">
+        <StatusPill
+          tone="running"
+          role="status"
+          aria-live="polite"
+          className="min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5"
+          indicator={
+            active.length > 0 ? (
+              <Activity className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
+            ) : (
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-mint" aria-hidden="true" />
+            )
+          }
+          label={
+            <>
+              <span className="min-w-0 truncate text-muted" title={firstDescription ?? undefined}>
+                {active.length > 0
+                  ? t('chat.activities.running', { count: active.length })
+                  : t('chat.activities.delivering', { count: pendingOutputs })}
+                {firstDescription ? ` · ${firstDescription}` : ''}
+              </span>
+              {connectionVisible ? (
+                <span className="shrink-0 border-l border-border-strong pl-2 text-gold">
+                  {t(`chat.activities.connection.${state.connection}`)}
+                </span>
+              ) : null}
+            </>
+          }
+        />
       </div>
     </div>
   );

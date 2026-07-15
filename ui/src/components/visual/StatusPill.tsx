@@ -5,7 +5,8 @@ type Tone = 'running' | 'stopped' | 'warning' | 'idle';
 
 interface StatusPillProps extends React.HTMLAttributes<HTMLSpanElement> {
   tone?: Tone;
-  label: string;
+  label: React.ReactNode;
+  indicator?: React.ReactNode;
 }
 
 const TONE_CLASSES: Record<Tone, { wrapper: string; dot: string }> = {
@@ -15,7 +16,7 @@ const TONE_CLASSES: Record<Tone, { wrapper: string; dot: string }> = {
   idle: { wrapper: 'border-border bg-surface text-muted', dot: 'bg-muted' },
 };
 
-export const StatusPill: React.FC<StatusPillProps> = ({ tone = 'idle', label, className, ...props }) => {
+export const StatusPill: React.FC<StatusPillProps> = ({ tone = 'idle', label, indicator, className, ...props }) => {
   const tones = TONE_CLASSES[tone];
   return (
     <span
@@ -26,7 +27,7 @@ export const StatusPill: React.FC<StatusPillProps> = ({ tone = 'idle', label, cl
       )}
       {...props}
     >
-      <span className={cn('h-2 w-2 rounded-full', tones.dot)} />
+      {indicator ?? <span className={cn('h-2 w-2 rounded-full', tones.dot)} />}
       {label}
     </span>
   );
