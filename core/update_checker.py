@@ -696,7 +696,7 @@ class UpdateChecker:
         channel_id: Optional[str] = None,
         message_id: Optional[str] = None,
         platform: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Notify admins that an installed update did not become the active runtime."""
         resolved_platform = platform or getattr(self.controller.config, "platform", "slack")
         if channel_id:
@@ -711,30 +711,54 @@ class UpdateChecker:
         try:
             im_client = self._get_im_client_for_platform(resolved_platform)
             if channel_id and message_id and resolved_platform == "slack":
-                await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
-                logger.info("Updated original message with post-update failure notification")
-                return
+                result = await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
+                if self._delivery_succeeded(result):
+                    logger.info("Updated original message with post-update failure notification")
+                    return True
+                return False
             if channel_id and message_id:
                 context = MessageContext(user_id="system", channel_id=channel_id, platform=resolved_platform)
-                await im_client.edit_message(context, message_id, text=failure_text)
-                logger.info("Updated %s message with post-update failure notification", resolved_platform)
-                return
+                result = await im_client.edit_message(context, message_id, text=failure_text)
+                if self._delivery_succeeded(result):
+                    logger.info("Updated %s message with post-update failure notification", resolved_platform)
+                    return True
+                return False
 
             admin_ids = self._get_admin_user_ids()
+            delivered = False
             if admin_ids:
                 for uid in admin_ids:
-                    admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
-                    await admin_client.send_dm(raw_user_id, failure_text)
-                    logger.info("Sent post-update failure notification to admin %s", uid)
+                    try:
+                        admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
+                        result = await admin_client.send_dm(raw_user_id, failure_text)
+                        if self._delivery_succeeded(result):
+                            delivered = True
+                            logger.info("Sent post-update failure notification to admin %s", uid)
+                    except Exception as e:
+                        logger.error("Failed to send post-update failure notification to admin %s: %s", uid, e)
             elif resolved_platform == "slack":
                 owner_id = await self._get_workspace_owner_id()
                 if owner_id:
                     dm_channel = await self._open_dm_channel(owner_id)
                     if dm_channel:
-                        await im_client.web_client.chat_postMessage(channel=dm_channel, text=failure_text)
-                        logger.info("Sent post-update failure notification to %s", owner_id)
+                        result = await im_client.web_client.chat_postMessage(channel=dm_channel, text=failure_text)
+                        delivered = self._delivery_succeeded(result)
+                        if delivered:
+                            logger.info("Sent post-update failure notification to %s", owner_id)
+            return delivered
         except Exception as e:
             logger.error("Failed to send post-update failure notification: %s", e)
+            return False
+
+    @staticmethod
+    def _delivery_succeeded(result: Any) -> bool:
+        if result is None:
+            return False
+        if isinstance(result, bool):
+            return result
+        if isinstance(result, dict) and "ok" in result:
+            return bool(result["ok"])
+        return True
 
     async def _send_notification_to_admins(self, admin_ids: list, current: str, latest: str, platform: str) -> bool:
         """Send update notification DM to each admin user."""
@@ -1034,11 +1058,11 @@ class UpdateChecker:
         except Exception as e:
             logger.warning(f"Failed to remove update marker: {e}")
 
-    async def check_and_send_post_update_notification(self) -> None:
+    async def check_and_send_post_update_notification(self, *, ready_platform: Optional[str] = None) -> bool:
         """Check for pending update notification and send it (called on startup)."""
         marker_path = paths.get_state_dir() / "pending_update_notification.json"
         if not marker_path.exists():
-            return
+            return False
 
         try:
             from vibe import __version__
@@ -1046,6 +1070,11 @@ class UpdateChecker:
             data = json.loads(marker_path.read_text(encoding="utf-8"))
             channel_id = data.get("channel_id")
             message_id = data.get("message_id")
+            platform = data.get("platform") or getattr(self.controller.config, "platform", "slack")
+            if channel_id:
+                platform = data.get("platform") or _infer_channel_platform(channel_id)
+            if ready_platform is not None and ready_platform != platform:
+                return False
             # Use the target version from marker (more reliable than __version__ in edge cases)
             target_version = data.get("version", "unknown")
             running_version = str(__version__ or "").strip()
@@ -1060,23 +1089,23 @@ class UpdateChecker:
                     "post_update_version_mismatch",
                     current_version=running_version or None,
                 )
-                await self._send_post_update_failure_notification(
+                delivered = await self._send_post_update_failure_notification(
                     target_version=str(target_version),
                     running_version=running_version or "unknown",
                     channel_id=channel_id,
                     message_id=message_id,
-                    platform=data.get("platform"),
+                    platform=platform,
                 )
-                return
+                if delivered:
+                    marker_path.unlink(missing_ok=True)
+                return delivered
 
-            platform = data.get("platform") or getattr(self.controller.config, "platform", "slack")
-            if channel_id:
-                platform = data.get("platform") or _infer_channel_platform(channel_id)
             if self.state.blocked_auto_update_version == target_version:
                 self._clear_blocked_auto_update()
             if data.get("suppress_success_notification"):
                 logger.info("Post-update success notification suppressed for %s", target_version)
-                return
+                marker_path.unlink(missing_ok=True)
+                return True
             im_client = self._get_im_client_for_platform(platform)
             success_text = self._t("update.updated", version=target_version)
             success_blocks = [
@@ -1090,19 +1119,24 @@ class UpdateChecker:
             ]
 
             # If we have original message coordinates, update that message
+            delivered = False
             if channel_id and message_id and platform == "slack":
-                await im_client.web_client.chat_update(
+                result = await im_client.web_client.chat_update(
                     channel=channel_id,
                     ts=message_id,
                     text=success_text,
                     blocks=success_blocks,
                 )
-                logger.info("Updated original message with post-update notification")
+                delivered = self._delivery_succeeded(result)
+                if delivered:
+                    logger.info("Updated original message with post-update notification")
             elif channel_id and message_id:
                 try:
                     context = MessageContext(user_id="system", channel_id=channel_id, platform=platform)
-                    await im_client.edit_message(context, message_id, text=success_text)
-                    logger.info("Updated %s message with post-update notification", platform)
+                    result = await im_client.edit_message(context, message_id, text=success_text)
+                    delivered = self._delivery_succeeded(result)
+                    if delivered:
+                        logger.info("Updated %s message with post-update notification", platform)
                 except Exception as e:
                     logger.error("Failed to edit %s update message: %s", platform, e)
             else:
@@ -1112,8 +1146,10 @@ class UpdateChecker:
                     for uid in admin_ids:
                         try:
                             admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
-                            await admin_client.send_dm(raw_user_id, success_text)
-                            logger.info(f"Sent post-update notification to admin {uid}")
+                            result = await admin_client.send_dm(raw_user_id, success_text)
+                            if self._delivery_succeeded(result):
+                                delivered = True
+                                logger.info(f"Sent post-update notification to admin {uid}")
                         except Exception as e:
                             logger.error(f"Failed to send post-update notification to admin {uid}: {e}")
                 elif platform == "slack":
@@ -1122,16 +1158,22 @@ class UpdateChecker:
                     if owner_id:
                         dm_channel = await self._open_dm_channel(owner_id)
                         if dm_channel:
-                            await im_client.web_client.chat_postMessage(
+                            result = await im_client.web_client.chat_postMessage(
                                 channel=dm_channel,
                                 text=success_text,
                                 blocks=success_blocks,
                             )
-                            logger.info(f"Sent post-update notification to {owner_id}")
+                            delivered = self._delivery_succeeded(result)
+                            if delivered:
+                                logger.info(f"Sent post-update notification to {owner_id}")
+            if delivered:
+                marker_path.unlink(missing_ok=True)
+            else:
+                logger.warning("Post-update notification for %s was not delivered; retaining marker", target_version)
+            return delivered
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}")
-        finally:
-            marker_path.unlink(missing_ok=True)
+            return False
 
 
 async def handle_update_button_click(controller: "Controller", payload: Dict[str, Any]) -> None:

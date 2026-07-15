@@ -37,8 +37,9 @@ class _StubController:
 
 
 class _FakeIMClient:
-    def __init__(self, message_id="msg-1"):
+    def __init__(self, message_id="msg-1", edit_result=True):
         self.message_id = message_id
+        self.edit_result = edit_result
         self.dm_calls = []
         self.edit_calls = []
 
@@ -48,7 +49,7 @@ class _FakeIMClient:
 
     async def edit_message(self, context, message_id: str, text: str, **kwargs):
         self.edit_calls.append((context, message_id, text, kwargs))
-        return True
+        return self.edit_result
 
 
 def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path):
@@ -343,6 +344,48 @@ def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, 
     _, _, text, _ = telegram_client.edit_calls[0]
     assert text == "✅ Avibe has been updated to `1.0.1`"
     assert ":white_check_mark:" not in text
+
+
+def test_post_update_marker_waits_for_its_transport(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    telegram_client = _FakeIMClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker("1.0.1", channel_id="123456", message_id="42", platform="telegram")
+    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
+
+    delivered = asyncio.run(checker.check_and_send_post_update_notification(ready_platform="discord"))
+
+    assert delivered is False
+    assert telegram_client.edit_calls == []
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert marker.exists()
+
+    delivered = asyncio.run(checker.check_and_send_post_update_notification(ready_platform="telegram"))
+
+    assert delivered is True
+    assert telegram_client.edit_calls
+    assert not marker.exists()
+
+
+def test_post_update_marker_is_retained_when_delivery_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    telegram_client = _FakeIMClient(edit_result=None)
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker("1.0.1", channel_id="123456", message_id="42", platform="telegram")
+    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
+
+    delivered = asyncio.run(checker.check_and_send_post_update_notification(ready_platform="telegram"))
+
+    assert delivered is False
+    assert telegram_client.edit_calls
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert marker.exists()
 
 
 def test_suppressed_post_update_marker_verifies_without_success_message(monkeypatch, tmp_path):

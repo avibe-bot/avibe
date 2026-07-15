@@ -74,6 +74,12 @@ class MultiIMClient(BaseIMClient):
         with self._clients_lock:
             self._auxiliary_clients[platform] = client
 
+    def is_transport_ready(self, platform: str) -> bool:
+        if platform == "avibe":
+            return self._run_started.is_set() and not self._stop_requested.is_set()
+        with self._ready_lock:
+            return platform in self._ready_platforms
+
     def _primary_client(self) -> BaseIMClient:
         with self._clients_lock:
             client = self.clients.get(self.primary_platform)
@@ -180,8 +186,12 @@ class MultiIMClient(BaseIMClient):
         if self._registered_callbacks is None:
             return
         on_message, on_command, on_callback_query, kwargs = self._registered_callbacks
-        wrapped_kwargs = {key: self._wrap_additional_callback(platform, value) for key, value in kwargs.items()}
-        wrapped_kwargs["on_ready"] = self._wrap_on_ready(platform, kwargs.get("on_ready"))
+        wrapped_kwargs = {
+            key: self._wrap_additional_callback(platform, value)
+            for key, value in kwargs.items()
+            if key not in {"on_ready", "on_transport_ready"}
+        }
+        wrapped_kwargs["on_ready"] = self._wrap_on_ready(platform, kwargs.get("on_transport_ready"))
         wrapped_commands: Optional[Dict[str, Callable]] = None
         if on_command is not None:
             wrapped_commands = {}
@@ -235,18 +245,14 @@ class MultiIMClient(BaseIMClient):
 
         return _wrapped
 
-    def _wrap_on_ready(self, platform: str, callback: Optional[Callable]) -> Optional[Callable]:
-        if callback is None:
-            return None
-
+    def _wrap_on_ready(self, platform: str, callback: Optional[Callable]) -> Callable:
         async def _wrapped(*args: Any, **kwargs: Any):
             with self._ready_lock:
+                should_emit = platform not in self._ready_platforms
                 self._ready_platforms.add(platform)
-                should_emit = not self._ready_emitted
-                self._ready_emitted = True
             logger.info("IM transport ready: %s", platform)
-            if should_emit:
-                await callback(*args, **kwargs)
+            if should_emit and callback is not None:
+                await callback(platform=platform)
 
         return _wrapped
 

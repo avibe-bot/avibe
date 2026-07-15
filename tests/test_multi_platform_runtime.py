@@ -247,7 +247,7 @@ def test_multi_im_client_remove_last_client_restores_workbench_formatter():
     assert "Warning" in client.formatter.format_warning("heads up")
 
 
-def test_multi_im_client_first_connected_transport_completes_ready_once():
+def test_multi_im_client_connected_transport_does_not_emit_runtime_ready():
     slack = _StubClient("slack")
     discord = _StubClient("discord")
     client = MultiIMClient({"slack": slack, "discord": discord}, primary_platform="slack")
@@ -260,12 +260,15 @@ def test_multi_im_client_first_connected_transport_completes_ready_once():
 
     assert slack.on_ready_callback is not None
     asyncio.run(slack.on_ready_callback())
-    assert ready_calls == [True]
+    assert ready_calls == []
+    assert client._ready_platforms == {"slack"}
+    assert client.is_transport_ready("slack") is True
+    assert client.is_transport_ready("discord") is False
 
     removed = client.remove_client("discord")
 
     assert removed is discord
-    assert ready_calls == [True]
+    assert ready_calls == []
 
 
 def test_multi_im_client_remove_before_runtime_start_does_not_emit_ready():
@@ -1951,24 +1954,35 @@ def test_multi_im_client_transport_ready_callbacks_do_not_repeat_runtime_ready()
     client = MultiIMClient({"slack": slack, "wechat": wechat}, primary_platform="slack")
 
     ready_calls: list[bool] = []
+    transport_ready_calls: list[str] = []
 
     async def _on_ready():
         ready_calls.append(True)
 
-    client.register_callbacks(on_message=None, on_ready=_on_ready)
+    async def _on_transport_ready(*, platform: str):
+        transport_ready_calls.append(platform)
 
-    # The first connected transport can win the race with run() and emit runtime
-    # readiness. Later transport callbacks only update connectivity state.
+    client.register_callbacks(
+        on_message=None,
+        on_ready=_on_ready,
+        on_transport_ready=_on_transport_ready,
+    )
+
     slack_on_ready = slack.on_ready_callback
     assert slack_on_ready is not None
     asyncio.run(slack_on_ready())
-    assert ready_calls == [True]
+    assert ready_calls == []
+    assert transport_ready_calls == ["slack"]
 
     wechat_on_ready = wechat.on_ready_callback
     assert wechat_on_ready is not None
     asyncio.run(wechat_on_ready())
-    assert ready_calls == [True]
+    assert ready_calls == []
+    assert transport_ready_calls == ["slack", "wechat"]
     assert client._ready_platforms == {"slack", "wechat"}
 
     asyncio.run(wechat_on_ready())
-    assert len(ready_calls) == 1
+    assert transport_ready_calls == ["slack", "wechat"]
+
+    client._emit_runtime_ready_once()
+    assert ready_calls == [True]

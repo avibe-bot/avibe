@@ -835,6 +835,33 @@ def test_run_task_records_scheduled_handler_error(tmp_path: Path) -> None:
     assert updated.enabled is False
 
 
+def test_run_task_stays_queued_until_target_transport_is_ready(tmp_path: Path) -> None:
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="discord::channel::C123",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        is_im_transport_ready=lambda _platform: False,
+    )
+    service = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
+
+    asyncio.run(service._run_task(task.id))
+
+    pending = request_store.list_pending()
+    assert len(pending) == 1
+    assert pending[0].task_id == task.id
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.last_run_at is None
+    assert updated.enabled is True
+
+
 def test_reconcile_jobs_skips_invalid_tasks_and_keeps_valid_jobs(tmp_path: Path) -> None:
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     valid = store.add_task(
@@ -3945,6 +3972,47 @@ def test_drain_does_not_block_on_hung_execution(tmp_path: Path) -> None:
         hung_task = service._inflight_executions.get(hung.id)
         if hung_task is not None:
             await hung_task
+
+    asyncio.run(_exercise())
+
+
+def test_drain_defers_im_runs_until_transport_ready_without_blocking_workbench(tmp_path: Path) -> None:
+    async def _exercise() -> None:
+        store = TaskExecutionStore(tmp_path / "reqs")
+        workbench = store.enqueue_hook_send(session_key="avibe::project::proj_test", prompt="local")
+        discord = store.enqueue_hook_send(session_key="discord::channel::C123", prompt="remote")
+        ready_platforms = {"avibe"}
+        controller = SimpleNamespace(
+            platform_settings_managers={},
+            is_im_transport_ready=lambda platform: platform in ready_platforms,
+        )
+        service = ScheduledTaskService(
+            controller=controller,
+            store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+            request_store=store,
+        )
+        started: list[str] = []
+
+        async def fake_execute(request):
+            started.append(request.id)
+            service.request_store.complete(request, ok=True)
+
+        service._execute_claimed_request = fake_execute  # type: ignore[assignment]
+
+        await service._drain_requests()
+        await asyncio.sleep(0)
+
+        assert started == [workbench.id]
+        assert [item.id for item in store.list_pending()] == [discord.id]
+
+        ready_platforms.add("discord")
+        service.notify_transport_ready("discord")
+        assert service._drain_dirty is True
+        await service._drain_requests()
+        await asyncio.sleep(0)
+
+        assert started == [workbench.id, discord.id]
+        assert store.list_pending() == []
 
     asyncio.run(_exercise())
 

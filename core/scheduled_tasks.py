@@ -1956,6 +1956,9 @@ class ScheduledTaskService:
         if not task or not task.enabled:
             return
         queued = self.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+        if not self._transport_ready_for_request(queued):
+            self._drain_dirty = True
+            return
         request = self.request_store.claim(queued.id)
         if request is None:
             return
@@ -1986,6 +1989,8 @@ class ScheduledTaskService:
                 # Crucially we never await here, so the loop can't be stalled.
                 break
             if pending.id in self._inflight_executions:
+                continue
+            if not self._transport_ready_for_request(pending):
                 continue
             lock_key = self._execution_lock_key(pending)
             if lock_key is not None and lock_key in self._inflight_sessions:
@@ -2255,6 +2260,52 @@ class ScheduledTaskService:
         if task_id:
             return f"task:{task_id}"
         return None
+
+    def _request_target_platform(self, request: TaskExecutionRequest) -> Optional[str]:
+        session_key = request.session_key
+        session_id = request.session_id
+        deliver_key = request.deliver_key
+        metadata = request.metadata or {}
+        if request.request_type in {"task_run", "scheduled"} and request.task_id:
+            task = self.store.get_task(request.task_id)
+            if task is not None:
+                session_key = task.session_key or session_key
+                session_id = task.session_id or session_id
+                deliver_key = task.deliver_key or deliver_key
+                metadata = task.metadata or metadata
+
+        if session_id:
+            return resolve_session_id_target(session_id).session_key.platform
+        if session_key:
+            try:
+                return parse_session_key(session_key).platform
+            except ValueError:
+                return parse_scope_id(session_key).platform
+
+        scope_id = str(metadata.get("session_scope_id") or "").strip()
+        if scope_id:
+            return parse_scope_id(scope_id).platform
+        if deliver_key:
+            try:
+                return parse_session_key(deliver_key).platform
+            except ValueError:
+                return parse_scope_id(deliver_key).platform
+        return None
+
+    def _transport_ready_for_request(self, request: TaskExecutionRequest) -> bool:
+        try:
+            platform = self._request_target_platform(request)
+        except Exception:
+            logger.debug("Could not resolve Run %s platform for readiness gating", request.id, exc_info=True)
+            return True
+        if not platform:
+            return True
+        is_ready = getattr(self.controller, "is_im_transport_ready", None)
+        return bool(is_ready(platform)) if callable(is_ready) else True
+
+    def notify_transport_ready(self, platform: str) -> None:
+        logger.info("Transport %s ready; scheduled Run queue will be drained", platform)
+        self._drain_dirty = True
 
     def _canonical_session_lock(self, session_id: str, session_key: Optional[str]) -> str:
         cached = self._session_lock_cache.get(session_id)

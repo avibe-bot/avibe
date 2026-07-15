@@ -705,7 +705,8 @@ class Controller:
                 self.settings_handler.handle_routing_modal_update
             ),
             on_resume_session=self._dispatch_to_controller_loop(self.session_handler.handle_resume_session_submission),
-            on_ready=self._dispatch_to_controller_loop(self._on_im_ready),
+            on_ready=self._dispatch_to_controller_loop(self._on_runtime_ready),
+            on_transport_ready=self._dispatch_to_controller_loop(self._on_im_ready),
         )
 
     def _dispatch_to_controller_loop(self, callback):
@@ -823,26 +824,41 @@ class Controller:
             if loop and loop.is_running():
                 loop.call_soon_threadsafe(loop.stop)
 
-    async def _on_im_ready(self):
-        """Called once when the aggregate IM/workbench runtime has started.
-
-        External transports may still be connecting or retrying. Core services
-        must remain available in that degraded state.
-        """
-        logger.info("IM runtime ready, checking for active polls to restore...")
+    async def _restore_active_polls(self, platforms: set[str]) -> None:
         opencode_agent = self.agent_service.agents.get("opencode")
         if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
             try:
-                restored = await opencode_agent.restore_active_polls()  # type: ignore[attr-defined]
+                restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
                 if restored > 0:
                     logger.info(f"Restored {restored} active OpenCode poll(s)")
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
-        # Notification delivery may fail while an external transport is still
-        # connecting. That must not prevent the checker itself from starting.
+    async def _on_im_ready(self, *, platform: str) -> None:
+        """Restore transport-owned state only after that transport can deliver."""
+        logger.info("IM transport ready, restoring state for %s", platform)
+        self.scheduled_task_service.notify_transport_ready(platform)
+        platforms = {platform}
+        if platform == self.primary_platform:
+            platforms.add("")
+        await self._restore_active_polls(platforms)
         try:
-            await self.update_checker.check_and_send_post_update_notification()
+            await self.update_checker.check_and_send_post_update_notification(ready_platform=platform)
+        except Exception as e:
+            logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
+
+    def is_im_transport_ready(self, platform: str) -> bool:
+        return self.im_client.is_transport_ready(platform)
+
+    async def _on_runtime_ready(self) -> None:
+        """Start aggregate services without waiting for external connectivity."""
+        logger.info("IM runtime ready, starting core services")
+        workbench_platforms = {"avibe"}
+        if self.primary_platform == "avibe":
+            workbench_platforms.add("")
+        await self._restore_active_polls(workbench_platforms)
+        try:
+            await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
         try:

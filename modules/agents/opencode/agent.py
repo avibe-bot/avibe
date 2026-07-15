@@ -596,7 +596,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         base_session_id = poll_info.base_session_id or ""
         return base_session_id or None
 
-    async def restore_active_polls(self) -> int:
+    async def restore_active_polls(self, platforms: set[str] | None = None) -> int:
         """Restore active poll loops that were interrupted by vibe-remote restart."""
 
         active_polls = self.sessions.get_all_active_polls()
@@ -608,6 +608,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         stale_poll_ids = []
 
         for session_id, poll_info in active_polls.items():
+            snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
+            poll_platform = str(snapshot.get("platform") or poll_info.platform or "")
+            if platforms is not None and poll_platform not in platforms:
+                continue
+            existing_task = self._active_requests.get(poll_info.base_session_id)
+            if existing_task is not None and not existing_task.done():
+                continue
             try:
                 server = await self._get_server()
                 messages = await server.list_messages(

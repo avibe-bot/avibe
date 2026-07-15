@@ -143,6 +143,33 @@ def test_restored_im_poll_does_not_touch_agent_status():
     assert status_writes == []
 
 
+def test_restore_active_polls_filters_for_ready_platform() -> None:
+    avibe_poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-avibe")
+    discord_poll = _make_poll(
+        platform="slack",
+        base_session_id="discord:thread",
+        opencode_session_id="oc-discord",
+    )
+    discord_poll.processing_indicator = {"platform": "discord"}
+    agent, status_writes, _, request_sessions = _build_agent(
+        {"oc-avibe": avibe_poll, "oc-discord": discord_poll}
+    )
+
+    async def _run():
+        restored = await agent.restore_active_polls({"discord"})
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert status_writes == []
+    assert [entry[1] for entry in request_sessions] == ["oc-discord"]
+
+
 def test_restored_telegram_dm_poll_keeps_typed_user_session_key():
     poll = ActivePollInfo(
         opencode_session_id="oc-telegram",
