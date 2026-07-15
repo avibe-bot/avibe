@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -87,6 +88,7 @@ DOCTOR_REPAIR_TARGETS = (
     "tmux",
 )
 DOCTOR_DEFAULT_REPAIR_TARGETS = DOCTOR_REPAIR_TARGETS[:4]
+DOCTOR_DEPENDENCY_REPAIR_TARGETS = frozenset(DOCTOR_REPAIR_TARGETS[4:])
 DOCTOR_REPAIR_DRY_RUN_MESSAGES = {
     "home-migration": "Would migrate ~/.vibe_remote to ~/.avibe when safe, or recreate the legacy compatibility symlink.",
     "stale-install-runtime": "Would stop a running legacy vibe-remote service and start the current Avibe service.",
@@ -7951,7 +7953,8 @@ def _add_dependency_download_failure(
     *,
     label: str,
     code_prefix: str,
-    repair_target: str,
+    repair_target: str | None,
+    retry_action: str | None = None,
     failure_status: str = "fail",
 ) -> None:
     error = error or {}
@@ -7959,6 +7962,7 @@ def _add_dependency_download_failure(
     url = str(error.get("url") or "the selected dependency URL")
     attempts = int(error.get("attempts") or 1)
     attempt_text = f" after {attempts} attempts" if attempts > 1 else ""
+    retry_action = retry_action or f"Run `vibe doctor repair {repair_target}`."
     if kind == "http" and error.get("http_status") == 404:
         _add_doctor_item(
             items,
@@ -7974,7 +7978,7 @@ def _add_dependency_download_failure(
             items,
             failure_status,
             f"{label} request returned HTTP {status}{attempt_text}: {url}",
-            f"Check the exact release asset and any proxy response, then run `vibe doctor repair {repair_target}`.",
+            f"Check the exact release asset and any proxy response. {retry_action}",
             code=f"{code_prefix}_http_error",
         )
     elif kind == "dns":
@@ -7982,7 +7986,7 @@ def _add_dependency_download_failure(
             items,
             failure_status,
             f"{label} host DNS lookup failed{attempt_text}: {error.get('host') or url}",
-            f"Fix DNS access to the dependency host, then run `vibe doctor repair {repair_target}`.",
+            f"Fix DNS access to the dependency host. {retry_action}",
             code=f"{code_prefix}_dns_failed",
         )
     elif kind == "tls":
@@ -7998,7 +8002,7 @@ def _add_dependency_download_failure(
             items,
             failure_status,
             f"{label} network request failed{attempt_text}: {url}",
-            f"Allow HTTPS access to the dependency host, then run `vibe doctor repair {repair_target}`.",
+            f"Allow HTTPS access to the dependency host. {retry_action}",
             code=f"{code_prefix}_{kind}_failed",
         )
     elif kind in {"permission", "disk", "io"}:
@@ -8115,7 +8119,14 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             )
             continue
 
-        repair_target = repair_targets[dependency_id]
+        repair_target: str | None = repair_targets[dependency_id]
+        if dependency_id == "askill" and not api.askill_auto_install_supported():
+            repair_target = None
+        retry_action = (
+            f"Run `vibe doctor repair {repair_target}`."
+            if repair_target
+            else "Install askill manually from https://askill.sh."
+        )
         probe = None
         if deep and dependency_id == "tmux":
             from core.tmux_runtime import TmuxRuntimeManager
@@ -8141,7 +8152,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             severity,
             f"{label} is not ready ({status})",
-            f"Run `vibe doctor repair {repair_target}`.",
+            retry_action,
             code=f"dependencies.{dependency_id}.not_ready",
             repair_target=repair_target,
             repair_risk="low",
@@ -8177,7 +8188,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 items,
                 "warn",
                 f"{label} server does not support a body-free probe",
-                f"Run `vibe doctor repair {repair_target}` to perform the verified install attempt.",
+                retry_action,
                 code=f"dependencies.{dependency_id}.probe_unsupported",
             )
         elif probe.get("download_error"):
@@ -8187,6 +8198,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 label=label,
                 code_prefix=f"dependencies.{dependency_id}.download",
                 repair_target=repair_target,
+                retry_action=retry_action,
                 failure_status=severity,
             )
         elif not probe.get("checked"):
@@ -8238,6 +8250,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     manifest = status.get("manifest") if isinstance(status.get("manifest"), dict) else None
     archive = status.get("archive") if isinstance(status.get("archive"), dict) else None
     archive_url = str((archive or {}).get("url") or "")
+    archive_scheme = urllib.parse.urlparse(archive_url).scheme
+    archive_scheme_supported = not archive_url or archive_scheme in {"https", "file"}
     legacy_archive = "github.com/avibe-bot/vibe-show-runtime/releases/latest/download/" in archive_url
     provider_repairable = True
 
@@ -8313,13 +8327,23 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         )
         return items
 
+    show_runtime_repairable = provider_repairable and node_available and node_supported and archive_scheme_supported
+    show_runtime_retry_action = (
+        "Run `vibe doctor repair show-runtime`."
+        if show_runtime_repairable
+        else "Resolve the provider, platform, Node.js, or archive URL issue above, then rerun Doctor."
+    )
     _add_doctor_item(
         items,
         "fail",
         f"Show Runtime is not ready for {status.get('platform') or 'this platform'}",
-        "Run `vibe doctor repair show-runtime`; use `vibe doctor --deep` first when download access is uncertain.",
+        (
+            "Run `vibe doctor repair show-runtime`; use `vibe doctor --deep` first when download access is uncertain."
+            if show_runtime_repairable
+            else show_runtime_retry_action
+        ),
         code="show_runtime.not_ready",
-        repair_target="show-runtime" if provider_repairable and node_available and node_supported else None,
+        repair_target="show-runtime" if show_runtime_repairable else None,
         repair_risk="low",
     )
 
@@ -8350,7 +8374,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             "warn",
             "Show Runtime archive server does not support a body-free reachability probe",
-            "Run `vibe doctor repair show-runtime` to perform the verified download attempt.",
+            show_runtime_retry_action,
             code="show_runtime.archive_probe_unsupported",
         )
     elif probe.get("download_error"):
@@ -8360,7 +8384,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             probe.get("download_error"),
             label="Show Runtime manifest" if is_manifest_failure else "Show Runtime archive",
             code_prefix="show_runtime.manifest" if is_manifest_failure else "show_runtime.archive",
-            repair_target="show-runtime",
+            repair_target="show-runtime" if show_runtime_repairable else None,
+            retry_action=show_runtime_retry_action,
         )
     elif probe_reason == "runtime_archive_url_unsupported":
         _add_doctor_item(
@@ -8391,7 +8416,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             "fail",
             f"Show Runtime archive check failed: {probe_reason or 'unknown error'}",
-            "Inspect the selected archive path or URL, then retry the repair.",
+            f"Inspect the selected archive path or URL. {show_runtime_retry_action}",
             code="show_runtime.archive_check_failed",
         )
     return items
@@ -9426,7 +9451,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     )
 
 
-def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False) -> dict:
+def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: bool = False) -> dict:
     requested_targets = targets or list(DOCTOR_DEFAULT_REPAIR_TARGETS)
     unknown = [target for target in requested_targets if target not in DOCTOR_REPAIR_TARGETS]
     if unknown:
@@ -9478,7 +9503,8 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False) -> dict
         "results": results,
     }
     if not dry_run and any(result["status"] != "skipped" for result in results):
-        payload["doctor"] = _doctor(deep=True)
+        refresh_deep = deep or bool(set(targets) & DOCTOR_DEPENDENCY_REPAIR_TARGETS)
+        payload["doctor"] = _doctor(deep=refresh_deep)
     return payload
 
 
@@ -10605,7 +10631,11 @@ def cmd_doctor(args=None):
         if not dry_run and not getattr(args, "yes", False) and not _confirm_doctor_repair(targets):
             print("Doctor repair was not run. Pass --yes to confirm non-interactively.", file=sys.stderr)
             return 2
-        result = _repair_doctor_targets(targets, dry_run=dry_run)
+        result = _repair_doctor_targets(
+            targets,
+            dry_run=dry_run,
+            deep=bool(getattr(args, "doctor_deep", False)),
+        )
         _print_doctor_repair_result(result)
         return 0 if result.get("ok") else 1
 

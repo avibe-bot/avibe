@@ -5849,12 +5849,7 @@ def _curl_installer_command(url: str, consumer: str) -> list[str]:
     return [
         "bash",
         "-c",
-        "set -euo pipefail; "
-        "retry_all_errors=''; "
-        "if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then "
-        "retry_all_errors='--retry-all-errors'; "
-        "fi; "
-        f"curl -fsSL {_CURL_INSTALL_RETRY_FLAGS} $retry_all_errors {url} | {consumer}",
+        f"set -euo pipefail; curl -fsSL {_CURL_INSTALL_RETRY_FLAGS} {url} | {consumer}",
     ]
 
 
@@ -6058,6 +6053,17 @@ def _reset_avault_agent_after_binary_change(*, reason: str) -> None:
         logger.warning("%s: failed to quarantine resident avault agent socket after binary change", reason, exc_info=True)
 
 
+def askill_auto_install_supported() -> bool:
+    """Return whether this host can run askill's official installer."""
+    import platform
+
+    return (
+        platform.system().lower() != "windows"
+        and resolve_cli_path("curl") is not None
+        and resolve_cli_path("bash") is not None
+    )
+
+
 def install_askill() -> dict:
     """Install (or refresh) the askill CLI — a required local dependency for Skills.
 
@@ -6066,10 +6072,7 @@ def install_askill() -> dict:
     V2Config cli_path bookkeeping is limited to real Agent backends, so it is
     safe for a standalone local dependency.
     """
-    import platform
-
-    system = platform.system().lower()
-    if system != "windows" and resolve_cli_path("curl") and resolve_cli_path("bash"):
+    if askill_auto_install_supported():
         cmd = _curl_installer_command("https://askill.sh", "sh")
         return _run_install_command("askill", cmd, _truncate_install_output, mode="install")
     # No npm fallback: askill is distributed via the askill.sh installer, not a

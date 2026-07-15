@@ -1082,6 +1082,7 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
         }
 
     monkeypatch.setattr(cli.api, "dependencies_status", status)
+    monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: True)
 
     items = cli._managed_dependencies_doctor_items(deep=False)
 
@@ -1091,6 +1092,26 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
+
+
+def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {"id": "askill", "required": True, "installed": False, "status": "missing"},
+                {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
+            ]
+        },
+    )
+    monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: False)
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    missing = next(item for item in items if item.get("code") == "dependencies.askill.not_ready")
+    assert "repair" not in missing
+    assert "askill.sh" in missing["action"]
 
 
 def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(monkeypatch):
@@ -1359,6 +1380,9 @@ def test_show_runtime_doctor_reports_unsupported_archive_url(monkeypatch):
     failure = next(item for item in items if item.get("code") == "show_runtime.archive_url_unsupported")
     assert failure["status"] == "fail"
     assert "HTTPS or file URL" in failure["action"]
+    not_ready = next(item for item in items if item.get("code") == "show_runtime.not_ready")
+    assert "repair" not in not_ready
+    assert "doctor repair" not in not_ready["action"]
 
 
 def test_show_runtime_doctor_only_treats_explicit_head_failure_as_probe_unsupported(monkeypatch):
@@ -1497,8 +1521,59 @@ def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
     assert result["ok"] is True
     assert result["results"][0]["status"] == "repaired"
     assert refreshed == [True]
-    assert doctor_calls == [True]
+    assert doctor_calls == [False]
     assert result["doctor"] == {"ok": True, "groups": []}
+
+
+def test_bare_doctor_repair_keeps_post_repair_refresh_local(monkeypatch):
+    handlers = {
+        "_repair_home_migration": "repaired",
+        "_repair_stale_install_runtime": "skipped",
+        "_repair_duplicate_service_processes": "skipped",
+        "_repair_stale_restart_state": "skipped",
+    }
+    for name, status in handlers.items():
+        target = name.removeprefix("_repair_").replace("_", "-")
+        monkeypatch.setattr(
+            cli,
+            name,
+            lambda *, dry_run=False, target=target, status=status: {
+                "target": target,
+                "status": status,
+                "message": status,
+            },
+        )
+    doctor_calls = []
+    monkeypatch.setattr(cli, "_doctor", lambda *, deep=False: doctor_calls.append(deep) or {"ok": True})
+
+    result = cli._repair_doctor_targets([], dry_run=False)
+
+    assert result["ok"] is True
+    assert doctor_calls == [False]
+
+
+def test_dependency_or_deep_repair_requests_deep_post_repair_refresh(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "_repair_askill",
+        lambda *, dry_run=False: {"target": "askill", "status": "repaired", "message": "done"},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_repair_stale_restart_state",
+        lambda *, dry_run=False: {
+            "target": "stale-restart-state",
+            "status": "repaired",
+            "message": "done",
+        },
+    )
+    doctor_calls = []
+    monkeypatch.setattr(cli, "_doctor", lambda *, deep=False: doctor_calls.append(deep) or {"ok": True})
+
+    cli._repair_doctor_targets(["askill"], dry_run=False)
+    cli._repair_doctor_targets(["stale-restart-state"], dry_run=False, deep=True)
+
+    assert doctor_calls == [True, True]
 
 
 def test_restart_parser_accepts_delay_seconds():
