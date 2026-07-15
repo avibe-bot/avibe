@@ -7999,6 +7999,78 @@ def _doctor(*, deep: bool = False):
 
     groups.append({"name": "Configuration", "items": config_items})
 
+    remote_access_items = []
+    if config is None:
+        _add_doctor_item(remote_access_items, "warn", "Cannot check Remote Access: configuration not loaded")
+    elif not config.remote_access.vibe_cloud.enabled:
+        _add_doctor_item(remote_access_items, "pass", "Remote Access is disabled")
+    else:
+        from vibe import remote_access
+
+        remote_status = remote_access.status(config)
+        if not remote_status.get("running"):
+            _add_doctor_item(
+                remote_access_items,
+                "fail",
+                "Remote Access connector is not running",
+                "Start Remote Access from Settings or run `vibe remote start`.",
+            )
+        else:
+            _add_doctor_item(remote_access_items, "pass", "Remote Access connector is running")
+
+        quality = remote_status.get("tunnel_quality")
+        if not isinstance(quality, dict):
+            _add_doctor_item(
+                remote_access_items,
+                "warn",
+                "Tunnel quality is not available yet",
+                "Wait up to 45 seconds for the first metrics samples.",
+            )
+        else:
+            state = str(quality.get("state") or "unknown")
+            grade = str(quality.get("grade") or "unknown")
+            try:
+                sampled_at = datetime.fromisoformat(str(quality.get("sampled_at") or "").replace("Z", "+00:00"))
+                quality_stale = time.time() - sampled_at.timestamp() > 150
+            except (TypeError, ValueError):
+                quality_stale = True
+            if quality_stale:
+                _add_doctor_item(
+                    remote_access_items,
+                    "warn",
+                    "Tunnel quality sample is stale",
+                    "Wait up to 45 seconds for fresh metrics or inspect the Remote Access logs.",
+                )
+            else:
+                rtt = quality.get("rtt_ms") if isinstance(quality.get("rtt_ms"), dict) else None
+                if rtt is None:
+                    quality_message = (
+                        f"Tunnel quality: {state}; edge RTT unavailable for "
+                        f"{quality.get('protocol') or 'unknown'} transport"
+                    )
+                else:
+                    quality_message = (
+                        f"Tunnel quality: {state}/{grade}; edge RTT median {rtt.get('median')} ms, "
+                        f"maximum {rtt.get('max')} ms"
+                    )
+                quality_status = "pass" if state == "healthy" and grade in {"good", "fair", "unknown"} else "warn"
+                if state == "degraded" and int(quality.get("ha_connections") or 0) == 0:
+                    quality_status = "fail"
+                _add_doctor_item(
+                    remote_access_items,
+                    quality_status,
+                    quality_message,
+                    "Avibe will evaluate a second Connector automatically when degradation persists."
+                    if quality_status == "warn"
+                    else None,
+                )
+
+    for item in remote_access_items:
+        item_status = item.get("status")
+        if item_status in summary:
+            summary[item_status] += 1
+    groups.append({"name": "Remote Access", "items": remote_access_items})
+
     # Slack Group
     slack_items = []
     if config:

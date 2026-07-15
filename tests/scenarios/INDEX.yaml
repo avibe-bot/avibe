@@ -27,3 +27,13 @@ capabilities:
       - tests/scenarios/message_delivery/test_message_delivery_scenarios.py
     unit_or_contract_tests:
       - tests/test_message_dispatcher_scheduled.py
+  - id: tunnel_quality
+    name: remote-access tunnel quality and smooth route recovery
+    status: active
+    catalog: tests/scenarios/tunnel_quality/catalog.yaml
+    observations: tests/scenarios/tunnel_quality/observations.yaml
+    scenario_tests:
+      - tests/test_tunnel_quality.py
+      - tests/test_tunnel_recovery.py
+    unit_or_contract_tests:
+      - tests/test_remote_access_vibe_cloud.py

@@ -620,7 +620,18 @@
     "flowStep3": "Paste it here to finish pairing — then reach Avibe from anywhere.",
     "actionNeeded": "Action needed",
     "ready": "Ready",
-    "stateNeedsAttention": "Needs attention"
+    "stateNeedsAttention": "Needs attention",
+    "quality": "Connection quality",
+    "qualityGood": "Good",
+    "qualityFair": "Fair",
+    "qualityPoor": "Slow",
+    "qualityCritical": "Very slow",
+    "qualityUnknown": "Measuring",
+    "qualityRecovering": "Optimizing",
+    "qualityDegraded": "Degraded",
+    "optimizeRoute": "Optimize route",
+    "optimizingRoute": "Optimizing...",
+    "optimizeStarted": "A second Connector is evaluating a better route"
   },
   "accessBlocked": {
     "title": "Can't open the control panel here",
@@ -658,6 +669,9 @@
     "cloudflared_exited": "The connector exited immediately after startup. This usually means the Tunnel credential is invalid or the Cloudflare config is not ready. Pair again and retry.",
     "cloudflared_stop_failed": "The connector could not be stopped. Try again later, or manually stop the cloudflared process.",
     "cloudflared_process_unknown": "Avibe found a connector-like process but could not verify ownership. To avoid killing the wrong process, it did not change it. Check the cloudflared process manually and retry.",
+    "remote_access_not_running": "Start Remote Access before optimizing its route.",
+    "route_optimization_unavailable": "A route optimization is already running or cooling down.",
+    "route_optimization_start_failed": "Avibe could not start route optimization. Check the remote access runtime logs.",
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another."
   },
   "apps": {

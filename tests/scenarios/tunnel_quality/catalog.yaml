@@ -1,0 +1,67 @@
+version: 1
+capability:
+  id: tunnel_quality
+  name: remote-access tunnel quality and smooth route recovery
+  canonical_tests:
+    - tests/test_tunnel_quality.py
+    - tests/test_tunnel_recovery.py
+status_legend:
+  covered: automated scenario or contract coverage exists
+  partial: focused coverage exists but a live network dependency remains
+  manual: validated through local browser or Incus regression
+  gap: not covered yet
+scenarios:
+  - id: RA-TQ-001
+    name: Cloudflared metrics produce a bounded quality aggregate
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_001_parse_cloudflared_metrics_extracts_quality_inputs
+  - id: RA-TQ-002
+    name: High RTT persists for three minutes before recovery eligibility
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_quality.py::test_ra_tq_002_high_rtt_requires_three_minutes_before_recovery
+  - id: RA-TQ-003
+    name: Missing metrics become unknown without causing route churn
+    status: covered
+    kind: resilience
+    layer: scenario
+    test: tests/test_tunnel_quality.py::test_ra_tq_003_metrics_failure_becomes_unknown_after_45_seconds
+  - id: RA-TQ-004
+    name: Better candidate is promoted before the active Connector drains
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_004_candidate_promotes_before_active_drains
+  - id: RA-TQ-005
+    name: Non-improving candidate is removed without changing the active Connector
+    status: covered
+    kind: rollback
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_005_non_improving_candidate_keeps_active
+  - id: RA-TQ-006
+    name: Local Web status remains usable at desktop and mobile widths
+    status: manual
+    kind: user_experience
+    layer: browser
+    test: null
+  - id: RA-TQ-007
+    name: Doctor and avibe.bot consume the same V1 aggregate
+    status: partial
+    kind: cross_repo_contract
+    layer: contract
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_007_runtime_status_payload_includes_tunnel_quality
+  - id: RA-TQ-008
+    name: Restart removes an orphan candidate while retaining a healthy active Connector
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_008_restart_removes_orphan_candidate
+  - id: RA-TQ-009
+    name: Restart promotes a ready candidate when the previous active Connector is gone
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_009_restart_promotes_ready_candidate

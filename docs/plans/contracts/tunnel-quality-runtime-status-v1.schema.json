@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avibe.bot/contracts/tunnel-quality-runtime-status-v1.schema.json",
+  "title": "Avibe Tunnel Quality Runtime Status v1",
+  "description": "The tunnel_quality object reported by a paired Avibe runtime to avibe.bot.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "grade",
+    "sampled_at",
+    "protocol",
+    "connector_count",
+    "ha_connections",
+    "rtt_ms",
+    "baseline_median_rtt_ms",
+    "edge_locations",
+    "window_seconds",
+    "request_errors_per_minute",
+    "packet_loss_per_minute",
+    "recovery"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "state": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "recovering", "unknown"]
+    },
+    "grade": {
+      "description": "Absolute user-experience grade for the active connector RTT, independent of recovery eligibility.",
+      "type": "string",
+      "enum": ["good", "fair", "poor", "critical", "unknown"]
+    },
+    "sampled_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "protocol": {
+      "type": "string",
+      "enum": ["quic", "http2", "unknown"]
+    },
+    "connector_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 25
+    },
+    "ha_connections": {
+      "description": "Ready HA connections for the active connector only.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "rtt_ms": {
+      "description": "QUIC edge RTT for the active connector. Null when the transport does not expose RTT.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "median", "max"],
+          "properties": {
+            "min": {
+              "type": "number",
+              "minimum": 0
+            },
+            "median": {
+              "type": "number",
+              "minimum": 0
+            },
+            "max": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "baseline_median_rtt_ms": {
+      "description": "Rolling healthy-route baseline. Null until enough healthy samples exist.",
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "edge_locations": {
+      "description": "Cloudflare location codes for the active connector, without edge IPs or connector IDs.",
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]{2,32}$"
+      }
+    },
+    "window_seconds": {
+      "type": "integer",
+      "minimum": 15,
+      "maximum": 600
+    },
+    "request_errors_per_minute": {
+      "type": "number",
+      "minimum": 0
+    },
+    "packet_loss_per_minute": {
+      "type": "number",
+      "minimum": 0
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "last_attempt_at",
+        "last_trigger",
+        "last_result",
+        "previous_median_rtt_ms",
+        "result_median_rtt_ms",
+        "next_attempt_at",
+        "attempt_count_window"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["idle", "evaluating", "draining", "cooldown"]
+        },
+        "last_attempt_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "last_trigger": {
+          "type": ["string", "null"],
+          "enum": ["availability", "latency", "errors", "manual", null]
+        },
+        "last_result": {
+          "type": ["string", "null"],
+          "enum": ["improved", "no_improvement", "failed", null]
+        },
+        "previous_median_rtt_ms": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "result_median_rtt_ms": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "next_attempt_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "attempt_count_window": {
+          "description": "Attempts made in the current continuous degradation episode.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

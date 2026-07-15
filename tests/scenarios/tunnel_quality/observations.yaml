@@ -1,0 +1,11 @@
+version: 1
+capability: tunnel_quality
+observations:
+  - date: 2026-07-15
+    scenario_ids: [RA-TQ-001, RA-TQ-002]
+    source: live_local_diagnosis
+    note: Four LAX paths reported 172-418 ms QUIC RTT while the local UI remained near 2 ms; reconnecting selected SIN paths at 68-96 ms.
+  - date: 2026-07-15
+    scenario_ids: [RA-TQ-004, RA-TQ-005]
+    source: cloudflare_replica_contract
+    note: Candidate evaluation uses a supported same-tunnel replica; hostname and tunnel identity remain unchanged during overlap and drain.

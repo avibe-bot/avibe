@@ -3989,6 +3989,17 @@ def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, b
         return config, should_reconcile_remote_access, should_reconcile_platforms
 
 
+_UI_RUNTIME_ACTIVE = False
+
+
+def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
+    if not _UI_RUNTIME_ACTIVE:
+        return
+    from vibe import remote_access
+
+    remote_access.start_runtime_monitoring(config)
+
+
 @app.route("/api/control", methods=["POST"])
 def control():
     from vibe import runtime
@@ -4060,6 +4071,7 @@ async def config_post():
         return jsonify({"ok": False, "error": message, "message": message}), 400
     if should_reconcile_remote_access:
         remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
+    await asyncio.to_thread(_ensure_remote_access_monitoring, config)
     platform_runtime = None
     if should_reconcile_platforms:
         try:
@@ -4104,6 +4116,8 @@ def remote_access_vibe_cloud_pair():
         payload.get("backend_url", "https://avibe.bot"),
         payload.get("device_name", "avibe"),
     )
+    if result.get("ok"):
+        _ensure_remote_access_monitoring()
     return jsonify(result), 200 if result.get("ok") else 400
 
 
@@ -4112,6 +4126,8 @@ def remote_access_start():
     from vibe import remote_access
 
     result = remote_access.start()
+    if result.get("ok"):
+        _ensure_remote_access_monitoring()
     return jsonify(result), 200 if result.get("ok") else 400
 
 
@@ -4121,6 +4137,14 @@ def remote_access_stop():
 
     result = remote_access.stop()
     return jsonify(result), 200 if result.get("ok") else 400
+
+
+@app.route("/api/remote-access/optimize-route", methods=["POST"])
+def remote_access_optimize_route():
+    from vibe import remote_access
+
+    result = remote_access.optimize_route()
+    return jsonify(result), 202 if result.get("ok") else 409
 
 
 @app.route("/auth/callback", methods=["GET"])
@@ -9424,7 +9448,7 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
-    global _server
+    global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn
 
@@ -9443,7 +9467,7 @@ def run_ui_server(host: str, port: int) -> None:
         try:
             from vibe import remote_access
 
-            remote_access.start_status_heartbeat(config)
+            remote_access.start_runtime_monitoring(config)
         except Exception:
             logger.warning("Failed to start remote access status heartbeat", exc_info=True)
     print(f"UI Server running at http://{host}:{port}")
@@ -9473,7 +9497,11 @@ def run_ui_server(host: str, port: int) -> None:
                 daemon=True,
                 name="remote-access-reconcile-on-start",
             ).start()
-            _server.run(sockets=[bound_socket])
+            _UI_RUNTIME_ACTIVE = True
+            try:
+                _server.run(sockets=[bound_socket])
+            finally:
+                _UI_RUNTIME_ACTIVE = False
             break
         except OSError as e:
             if bound_socket is not None:

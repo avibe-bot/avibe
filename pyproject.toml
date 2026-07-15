@@ -73,6 +73,7 @@ dependencies = [
     # keccak256 + ripemd160 for vault signing-key address derivation
     # (storage/vault_addresses.py); cryptography ships neither.
     "pycryptodome>=3.20",
+    "prometheus-client>=0.20.0",
 ]
 
 [project.urls]
