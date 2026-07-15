@@ -62,6 +62,95 @@ def test_activity_lifecycle_keeps_state_axes_orthogonal():
     assert registry.has_completed_output("claude", "runtime-1") is False
 
 
+def test_activity_batch_claim_leaves_interleaved_output_in_place():
+    registry = SessionActivityRegistry()
+    for activity_id, turn_id in (
+        ("task-old", "older-turn"),
+        ("task-current-a", "current-turn"),
+        ("task-other", "other-turn"),
+        ("task-current-b", "current-turn"),
+    ):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id=turn_id,
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    claimed = registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        turn_ids={"current-turn"},
+    )
+
+    assert [activity.id for activity in claimed] == [
+        "task-current-a",
+        "task-current-b",
+    ]
+    older = registry.claim_completed_output_batch("claude", "runtime-1")
+    other = registry.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in older] == ["task-old"]
+    assert [activity.id for activity in other] == ["task-other"]
+    for activity in [*claimed, *older, *other]:
+        registry.ack_completed_output(activity)
+
+
+def test_activity_batch_requeue_restores_global_fifo_position():
+    registry = SessionActivityRegistry()
+
+    def _complete(activity_id: str, turn_id: str) -> None:
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id=turn_id,
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    _complete("task-old", "older-turn")
+    _complete("task-current-a", "current-turn")
+    _complete("task-other", "other-turn")
+    _complete("task-current-b", "current-turn")
+    claimed = registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        turn_ids={"current-turn"},
+    )
+    _complete("task-new", "newer-turn")
+
+    assert registry.requeue_completed_outputs(claimed) == 2
+
+    restored = []
+    while activity := registry.claim_completed_output("claude", "runtime-1"):
+        restored.append(activity)
+    assert [activity.id for activity in restored] == [
+        "task-old",
+        "task-current-a",
+        "task-other",
+        "task-current-b",
+        "task-new",
+    ]
+    for activity in restored:
+        registry.ack_completed_output(activity)
+
+
 def test_activity_output_native_id_is_stable_across_recovery_contexts():
     activity = SessionActivity(
         id="task-1",

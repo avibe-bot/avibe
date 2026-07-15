@@ -62,7 +62,7 @@ class ClaudeAgent(BaseAgent):
         # the list shape remains for defensive cleanup of older queued state.
         self._pending_reactions: dict[str, list[tuple[str, str]]] = {}
         self._pending_requests: dict[str, list[AgentRequest]] = {}
-        self._detached_activity_outputs: dict[str, SessionActivity] = {}
+        self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
         self._detached_assistant_text: dict[str, str] = {}
         self._detached_unsolicited_outputs: set[str] = set()
         self._detached_unsolicited_text: dict[str, str] = {}
@@ -806,8 +806,12 @@ class ClaudeAgent(BaseAgent):
 
                     if message_type == "result":
                         result_text = getattr(message, "result", None)
-                        detached_activity = self._detached_activity_outputs.pop(composite_key, None)
-                        if detached_activity is not None:
+                        detached_activities = self._detached_activity_outputs.pop(
+                            composite_key,
+                            None,
+                        )
+                        if detached_activities:
+                            detached_activity = detached_activities[-1]
                             if not result_text:
                                 result_text = self._detached_assistant_text.get(composite_key)
                             self._detached_assistant_text.pop(composite_key, None)
@@ -823,11 +827,15 @@ class ClaudeAgent(BaseAgent):
                                 )
                                 registry = self._activity_registry()
                                 if registry is not None:
-                                    registry.ack_completed_output(detached_activity)
+                                    for activity in detached_activities:
+                                        registry.ack_completed_output(activity)
                             except Exception:
                                 registry = self._activity_registry()
                                 if registry is not None:
-                                    registry.requeue_completed_output(detached_activity)
+                                    self._requeue_activities(
+                                        registry,
+                                        detached_activities,
+                                    )
                                 raise
                             # The detached Activity output has no authority over
                             # a newer pending request. Its Turn stays owned by its
@@ -878,7 +886,8 @@ class ClaudeAgent(BaseAgent):
                         # so sending both would duplicate the content.
 
                         pending_request = self._pop_pending_request(composite_key)
-                        output_activity = getattr(pending_request, "output_activity", None)
+                        output_activities = self._request_activities(pending_request)
+                        output_activity = output_activities[-1] if output_activities else None
 
                         # The receiver is long-lived and reused across a session's
                         # turns, so ``context`` still carries the FIRST turn's
@@ -907,7 +916,7 @@ class ClaudeAgent(BaseAgent):
                                 )
                                 registry = self._activity_registry()
                                 if registry is not None:
-                                    registry.ack_completed_output(output_activity)
+                                    self._ack_request_activities(pending_request)
                             else:
                                 await self.emit_result_message(
                                     context,
@@ -920,9 +929,7 @@ class ClaudeAgent(BaseAgent):
                         except Exception:
                             emit_failed = True
                             if output_activity is not None:
-                                registry = self._activity_registry()
-                                if registry is not None:
-                                    registry.requeue_completed_output(output_activity)
+                                self._requeue_request_activity(pending_request)
                                 await self._settle_activity_turn_after_delivery_failure(
                                     context
                                 )
@@ -1074,11 +1081,11 @@ class ClaudeAgent(BaseAgent):
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
             self._suppressed_synthetic_error_text.pop(composite_key, None)
-            detached_activity = self._detached_activity_outputs.pop(composite_key, None)
-            if detached_activity is not None:
+            detached_activities = self._detached_activity_outputs.pop(composite_key, None)
+            if detached_activities:
                 registry = self._activity_registry()
                 if registry is not None:
-                    registry.requeue_completed_output(detached_activity)
+                    self._requeue_activities(registry, detached_activities)
                     self._schedule_completed_activity_flush(composite_key, context)
             self._detached_assistant_text.pop(composite_key, None)
             self._detached_unsolicited_outputs.discard(composite_key)
@@ -1359,14 +1366,96 @@ class ClaudeAgent(BaseAgent):
         service = getattr(self.controller, "agent_service", None)
         return getattr(service, "activities", None)
 
+    @staticmethod
+    def _request_activities(request: AgentRequest | None) -> list[SessionActivity]:
+        if request is None:
+            return []
+        return list(getattr(request, "output_activities", None) or [])
+
+    def _attach_request_activity(
+        self,
+        request: AgentRequest,
+        activity: SessionActivity,
+    ) -> None:
+        retained = list(getattr(request, "output_activities", None) or [])
+        if all(item is not activity for item in retained):
+            retained.append(activity)
+        request.output_activities = retained
+        request.output = self._activity_message_output(
+            activity,
+            detached=False,
+            completes_turn=True,
+        )
+
+    @staticmethod
+    def _requeue_activities(
+        registry,
+        activities: list[SessionActivity],
+    ) -> None:
+        """Restore a claimed batch to its Registry-owned queue positions."""
+
+        registry.requeue_completed_outputs(activities)
+
+    def _claim_activity_batch_for_turns(
+        self,
+        registry,
+        composite_key: str,
+        turn_ids: set[str],
+    ) -> list[SessionActivity]:
+        """Claim one causal batch through the shared Registry transaction."""
+
+        return registry.claim_completed_output_batch(
+            self.name,
+            composite_key,
+            turn_ids=turn_ids,
+        )
+
+    def _attach_request_activities(
+        self,
+        request: AgentRequest,
+        activities: list[SessionActivity],
+    ) -> None:
+        for activity in activities:
+            self._attach_request_activity(request, activity)
+
+    @staticmethod
+    def _request_activity_turn_ids(request: AgentRequest | None) -> set[str]:
+        activities = ClaudeAgent._request_activities(request)
+        turn_ids = {
+            str(activity.turn_id or "").strip()
+            for activity in activities
+        }
+        context = getattr(request, "context", None) if request is not None else None
+        request_turn_id = str(
+            ((getattr(context, "platform_specific", None) or {}).get(AGENT_TURN_TOKEN))
+            or ""
+        ).strip()
+        if request_turn_id:
+            turn_ids.add(request_turn_id)
+        turn_ids.discard("")
+        return turn_ids
+
+    def _clear_request_activities(self, request: AgentRequest | None) -> None:
+        if request is None:
+            return
+        request.output_activities = []
+
+    def _ack_request_activities(self, request: AgentRequest | None) -> None:
+        activities = self._request_activities(request)
+        registry = self._activity_registry()
+        if registry is not None:
+            for activity in activities:
+                registry.ack_completed_output(activity)
+        self._clear_request_activities(request)
+
     def _requeue_request_activity(self, request: AgentRequest | None) -> None:
-        activity = getattr(request, "output_activity", None)
-        if activity is None or request is None:
+        activities = self._request_activities(request)
+        if not activities or request is None:
             return
         registry = self._activity_registry()
         if registry is not None:
-            registry.requeue_completed_output(activity)
-        request.output_activity = None
+            self._requeue_activities(registry, activities)
+        self._clear_request_activities(request)
         request.output = terminal_turn_output()
 
     def _activity_output_pending(self, composite_key: str) -> bool:
@@ -1759,9 +1848,10 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         context: MessageContext,
     ) -> None:
-        activity = self._detached_activity_outputs.pop(composite_key, None)
-        if activity is None:
+        activities = self._detached_activity_outputs.pop(composite_key, None)
+        if not activities:
             return
+        activity = activities[-1]
         text = self._detached_assistant_text.pop(composite_key, "").strip()
         if not text:
             text = str(activity.metadata.get("summary") or "").strip()
@@ -1775,11 +1865,12 @@ class ClaudeAgent(BaseAgent):
             )
             registry = self._activity_registry()
             if registry is not None:
-                registry.ack_completed_output(activity)
+                for item in activities:
+                    registry.ack_completed_output(item)
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
-                registry.requeue_completed_output(activity)
+                self._requeue_activities(registry, activities)
             raise
         self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
@@ -1795,38 +1886,24 @@ class ClaudeAgent(BaseAgent):
         if registry is None:
             return False
         while True:
-            activity = registry.claim_completed_output(self.name, composite_key)
-            if activity is None:
-                return False
             pending = self._pending_requests.get(composite_key) or []
             pending_request = pending[0] if pending else None
-            pending_turn_id = str(
-                (
-                    getattr(
-                        getattr(pending_request, "context", None),
-                        "platform_specific",
-                        None,
-                    )
-                    or {}
-                ).get(AGENT_TURN_TOKEN)
-                or ""
-            ).strip()
-            same_turn = bool(
-                pending_request is not None
-                and activity.turn_id
-                and activity.turn_id == pending_turn_id
-            )
-            if pending_request is not None and not same_turn:
-                # A timed summary flush cannot consume the only correlation for
-                # an Activity whose real assistant/result sequence may still be
-                # in flight. Leave it for the receiver so that later output is
-                # detached from, and cannot complete, this newer Turn.
-                registry.requeue_completed_output(activity)
-                return True
-            result_text = str(activity.metadata.get("summary") or "").strip()
-            if same_turn:
+            if pending_request is not None:
+                pending_turn_ids = self._request_activity_turn_ids(pending_request)
+                activities = self._claim_activity_batch_for_turns(
+                    registry,
+                    composite_key,
+                    pending_turn_ids,
+                )
+                if not activities:
+                    return registry.has_completed_output(self.name, composite_key)
+
+                self._attach_request_activities(pending_request, activities)
                 matched_request = self._pop_pending_request(composite_key)
                 self._adopt_pending_turn_token(context, matched_request)
+                retained = self._request_activities(matched_request)
+                activity = retained[-1]
+                result_text = str(activity.metadata.get("summary") or "").strip()
                 try:
                     await self._emit_activity_result(
                         context,
@@ -1836,9 +1913,9 @@ class ClaudeAgent(BaseAgent):
                         completes_turn=True,
                         request=matched_request,
                     )
-                    registry.ack_completed_output(activity)
+                    self._ack_request_activities(matched_request)
                 except Exception:
-                    registry.requeue_completed_output(activity)
+                    self._requeue_request_activity(matched_request)
                     await self._settle_activity_turn_after_delivery_failure(context)
                     raise
                 finally:
@@ -1853,6 +1930,14 @@ class ClaudeAgent(BaseAgent):
                     self._signal_activity_output_settled(composite_key)
                 continue
 
+            activities = registry.claim_completed_output_batch(
+                self.name,
+                composite_key,
+            )
+            if not activities:
+                return False
+            activity = activities[-1]
+            result_text = str(activity.metadata.get("summary") or "").strip()
             try:
                 await self._emit_activity_result(
                     context,
@@ -1861,9 +1946,10 @@ class ClaudeAgent(BaseAgent):
                     detached=True,
                     completes_turn=False,
                 )
-                registry.ack_completed_output(activity)
+                for item in activities:
+                    registry.ack_completed_output(item)
             except Exception:
-                registry.requeue_completed_output(activity)
+                self._requeue_activities(registry, activities)
                 raise
             self._mark_session_idle_if_runtime_free(composite_key)
             self._signal_activity_output_settled(composite_key)
@@ -1927,7 +2013,21 @@ class ClaudeAgent(BaseAgent):
         agent-initiated Turn and synthesize a pending ``AgentRequest`` so the
         existing result path retains its normal lifecycle behavior.
         """
-        if composite_key in self._detached_activity_outputs:
+        registry = self._activity_registry()
+        detached_activities = self._detached_activity_outputs.get(composite_key)
+        if detached_activities:
+            turn_ids = {
+                str(activity.turn_id or "").strip()
+                for activity in detached_activities
+            }
+            if registry is not None and any(turn_ids):
+                detached_activities.extend(
+                    self._claim_activity_batch_for_turns(
+                        registry,
+                        composite_key,
+                        turn_ids,
+                    )
+                )
             return "activity"
         if composite_key in self._detached_unsolicited_outputs:
             return "detached"
@@ -1938,45 +2038,64 @@ class ClaudeAgent(BaseAgent):
         # when the paired result is consumed or the receiver exits.
         if composite_key in self._suppressed_synthetic_results:
             return None
-        registry = self._activity_registry()
-        completed_activity = (
-            registry.claim_completed_output(self.name, composite_key)
-            if registry is not None
-            else None
-        )
-        if completed_activity is not None and self._has_pending_requests(composite_key):
-            pending_request = self._pending_requests[composite_key][0]
-            pending_turn_id = str(
-                (
-                    getattr(
-                        getattr(pending_request, "context", None),
-                        "platform_specific",
-                        None,
+        pending = self._pending_requests.get(composite_key) or []
+        if pending:
+            pending_request = pending[0]
+            retained = self._request_activities(pending_request)
+            retained_turn_ids = self._request_activity_turn_ids(pending_request)
+            if retained:
+                if registry is not None and retained_turn_ids:
+                    self._attach_request_activities(
+                        pending_request,
+                        self._claim_activity_batch_for_turns(
+                            registry,
+                            composite_key,
+                            retained_turn_ids,
+                        ),
                     )
-                    or {}
-                ).get(AGENT_TURN_TOKEN)
-                or ""
-            ).strip()
-            if completed_activity.turn_id and completed_activity.turn_id == pending_turn_id:
-                pending_request.output = self._activity_message_output(
-                    completed_activity,
-                    detached=False,
-                    completes_turn=True,
-                )
-                pending_request.output_activity = completed_activity
                 return None
-            self._detached_activity_outputs[composite_key] = completed_activity
+
+            pending_turn_ids = self._request_activity_turn_ids(pending_request)
+            activities = (
+                self._claim_activity_batch_for_turns(
+                    registry,
+                    composite_key,
+                    pending_turn_ids,
+                )
+                if registry is not None
+                else []
+            )
+            if activities:
+                self._attach_request_activities(
+                    pending_request,
+                    activities,
+                )
+                return None
+            activities = (
+                registry.claim_completed_output_batch(self.name, composite_key)
+                if registry is not None
+                else []
+            )
+            if not activities:
+                return None
+            self._detached_activity_outputs[composite_key] = activities
             logger.info(
-                "Claude Activity %s output detached from the current user turn in %s",
-                completed_activity.id,
+                "Claude Activity batch %s output detached from the current user turn in %s",
+                ",".join(activity.id for activity in activities),
                 composite_key,
             )
             return "activity"
-        if self._has_pending_requests(composite_key):
-            return None
+
+        completed_activities = (
+            registry.claim_completed_output_batch(self.name, composite_key)
+            if registry is not None
+            else []
+        )
         service = getattr(self.controller, "agent_service", None)
         begin = getattr(service, "begin_agent_initiated_turn", None)
         if not callable(begin):
+            if registry is not None:
+                self._requeue_activities(registry, completed_activities)
             return None
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or composite_key
@@ -1992,8 +2111,8 @@ class ClaudeAgent(BaseAgent):
                 "(a user turn holds or is queued on it)",
                 composite_key,
             )
-            if completed_activity is not None:
-                self._detached_activity_outputs[composite_key] = completed_activity
+            if completed_activities:
+                self._detached_activity_outputs[composite_key] = completed_activities
                 return "activity"
             if message_type in {"assistant", "result"}:
                 self._detached_unsolicited_outputs.add(composite_key)
@@ -2012,6 +2131,7 @@ class ClaudeAgent(BaseAgent):
         mark_active = getattr(self.session_handler, "mark_session_active", None)
         if callable(mark_active):
             mark_active(composite_key)
+        latest_activity = completed_activities[-1] if completed_activities else None
         request = AgentRequest(
             context=context,
             message="",
@@ -2021,14 +2141,14 @@ class ClaudeAgent(BaseAgent):
             session_key=session_key,
             output=(
                 self._activity_message_output(
-                    completed_activity,
+                    latest_activity,
                     detached=False,
                     completes_turn=True,
                 )
-                if completed_activity is not None
+                if latest_activity is not None
                 else None
             ),
-            output_activity=completed_activity,
+            output_activities=completed_activities,
         )
         self._pending_requests.setdefault(composite_key, []).append(request)
         logger.info(

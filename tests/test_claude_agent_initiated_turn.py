@@ -351,6 +351,287 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.activities.ack_completed_output(claimed))
         await asyncio.wait_for(waiter, timeout=1)
 
+    async def test_multiple_same_turn_activities_settle_as_one_delivery_batch(self):
+        agent, service = _build_agent()
+        composite_key = "session-multi-activity:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "sess-multi-activity",
+                "turn_token": "origin-turn",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "origin-turn"},
+            ),
+            output=None,
+            output_activities=[],
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        def _complete(activity_id: str, summary: str) -> None:
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-multi-activity",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id="origin-turn",
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": summary},
+                expects_output=True,
+            )
+
+        _complete("task-build", "Build finished")
+        await agent._maybe_begin_agent_initiated_turn(
+            context,
+            composite_key,
+            "sess-multi-activity",
+            "/tmp/work",
+            "session-key",
+            message_type="assistant",
+        )
+        self.assertEqual(
+            [activity.id for activity in pending_request.output_activities],
+            ["task-build"],
+        )
+
+        _complete("task-rebuild", "Rebuild finished")
+        await agent._maybe_begin_agent_initiated_turn(
+            context,
+            composite_key,
+            "sess-multi-activity",
+            "/tmp/work",
+            "session-key",
+            message_type="result",
+        )
+        self.assertEqual(
+            [activity.id for activity in pending_request.output_activities],
+            ["task-build", "task-rebuild"],
+        )
+
+        await agent._receive_messages(
+            _one_result_client(),
+            "sess-multi-activity",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertEqual(output.activity_id, "task-rebuild")
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertEqual(pending_request.output_activities, [])
+        await asyncio.wait_for(agent._wait_for_activity_output(composite_key), timeout=1)
+
+    async def test_prequeued_same_turn_activities_are_drained_before_result(self):
+        agent, service = _build_agent()
+        composite_key = "session-prequeued-activities:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "sess-prequeued-activities",
+                "turn_token": "origin-turn",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "origin-turn"},
+            ),
+            output=None,
+            output_activities=[],
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        for activity_id in ("task-build", "task-rebuild"):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-prequeued-activities",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id="origin-turn",
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": f"{activity_id} finished"},
+                expects_output=True,
+            )
+
+        await agent._receive_messages(
+            _one_result_client(),
+            "sess-prequeued-activities",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertEqual(output.activity_id, "task-rebuild")
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertEqual(pending_request.output_activities, [])
+        await asyncio.wait_for(agent._wait_for_activity_output(composite_key), timeout=1)
+
+    async def test_agent_initiated_turn_retains_prequeued_activity_batch(self):
+        agent, service = _build_agent()
+        composite_key = "session-synthetic-batch:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "OLD-TURN",
+                "turn_token": "origin-turn",
+                "agent_session_id": "sess-synthetic-batch",
+            },
+        )
+        for activity_id in ("task-build", "task-rebuild"):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-synthetic-batch",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id="origin-turn",
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": f"{activity_id} finished"},
+                expects_output=True,
+            )
+
+        mode = await agent._maybe_begin_agent_initiated_turn(
+            context,
+            composite_key,
+            "sess-synthetic-batch",
+            "/tmp/work",
+            "session-key",
+            message_type="assistant",
+        )
+
+        self.assertIsNone(mode)
+        pending_request = agent._pending_requests[composite_key][0]
+        self.assertEqual(
+            [activity.id for activity in pending_request.output_activities],
+            ["task-build", "task-rebuild"],
+        )
+        gate = service._get_turn_gate(composite_key)
+        self.assertTrue(gate.lock.locked())
+
+        synthetic_turn = context.platform_specific["turn_token"]
+        self.assertNotEqual(synthetic_turn, "origin-turn")
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-synthetic-batch",
+            activity_id="task-followup",
+            kind="local_bash",
+            turn_id=synthetic_turn,
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-followup",
+            status="completed",
+            metadata={"summary": "task-followup finished"},
+            expects_output=True,
+        )
+
+        async def _emit_result(ctx, *_args, **_kwargs):
+            service.release_runtime_turn(ctx)
+            return "message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
+        await agent._receive_messages(
+            _one_result_client(),
+            "sess-synthetic-batch",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertEqual(output.activity_id, "task-followup")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertFalse(gate.lock.locked())
+
+    async def test_pending_activity_batch_scans_past_older_queue_head(self):
+        agent, service = _build_agent()
+        composite_key = "session-interleaved-batch:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={
+                "agent_session_id": "sess-interleaved-batch",
+                "turn_token": "current-turn",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "current-turn"},
+            ),
+            output_activities=[],
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+
+        for activity_id, turn_id in (
+            ("task-detached", "older-turn"),
+            ("task-current-a", "current-turn"),
+            ("task-current-b", "current-turn"),
+        ):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-interleaved-batch",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id=turn_id,
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                expects_output=True,
+            )
+
+        await agent._maybe_begin_agent_initiated_turn(
+            context,
+            composite_key,
+            "sess-interleaved-batch",
+            "/tmp/work",
+            "session-key",
+            message_type="result",
+        )
+
+        self.assertEqual(
+            [activity.id for activity in pending_request.output_activities],
+            ["task-current-a", "task-current-b"],
+        )
+        detached = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(detached)
+        self.assertEqual(detached.id, "task-detached")
+        service.activities.ack_completed_output(detached)
+        agent._ack_request_activities(pending_request)
+
     async def test_terminal_only_task_event_keeps_current_turn_origin(self):
         agent, service = _build_agent()
         composite_key = "session-terminal-only:/tmp/work"
@@ -653,6 +934,51 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed.turn_id, "origin-turn")
 
+    async def test_timed_flush_drains_prequeued_same_turn_batch(self):
+        agent, service = _build_agent()
+        composite_key = "session-batched-flush:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "origin-turn"},
+            ),
+            output_activities=[],
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-batched-flush"},
+        )
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        for activity_id in ("task-build", "task-rebuild"):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-batched-flush",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id="origin-turn",
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": f"{activity_id} finished"},
+                expects_output=True,
+            )
+
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
+
+        self.assertFalse(should_retry)
+        agent.emit_result_message.assert_awaited_once()
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertEqual(output.activity_id, "task-rebuild")
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertEqual(pending_request.output_activities, [])
+
     async def test_detached_activity_output_requeues_when_delivery_returns_none(self):
         agent, service = _build_agent()
         composite_key = "session-delivery-failed:/tmp/work"
@@ -677,7 +1003,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         activity = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(activity)
-        agent._detached_activity_outputs[composite_key] = activity
+        agent._detached_activity_outputs[composite_key] = [activity]
         agent._detached_assistant_text[composite_key] = "Full background result"
         agent.emit_result_message = AsyncMock(return_value=None)
 
@@ -709,7 +1035,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         activity = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(activity)
         request = SimpleNamespace(
-            output_activity=activity,
+            output_activities=[activity],
             output=agent._activity_message_output(
                 activity,
                 detached=False,
@@ -719,7 +1045,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         agent._requeue_request_activity(request)
 
-        self.assertIsNone(request.output_activity)
+        self.assertEqual(request.output_activities, [])
         restored = terminal_output_for(request)
         self.assertTrue(restored.completes_turn)
         self.assertTrue(restored.settles_run)
@@ -728,7 +1054,105 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             service.activities.claim_completed_output("claude", composite_key)
         )
 
-    async def test_requeued_terminal_only_activity_flushes_after_pending_turn(self):
+    async def test_requeued_activity_batch_preserves_fifo_order(self):
+        agent, service = _build_agent()
+        composite_key = "session-requeued-batch-order:/tmp/work"
+        claimed = []
+        for activity_id in ("task-build", "task-rebuild"):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-requeued-batch-order",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id="origin-turn",
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                expects_output=True,
+            )
+            activity = service.activities.claim_completed_output("claude", composite_key)
+            self.assertIsNotNone(activity)
+            claimed.append(activity)
+        request = SimpleNamespace(
+            output_activities=claimed,
+            output=agent._activity_message_output(
+                claimed[-1],
+                detached=False,
+                completes_turn=True,
+            ),
+        )
+
+        agent._requeue_request_activity(request)
+
+        retried = [
+            service.activities.claim_completed_output("claude", composite_key),
+            service.activities.claim_completed_output("claude", composite_key),
+        ]
+        self.assertEqual(
+            [activity.id for activity in retried if activity is not None],
+            ["task-build", "task-rebuild"],
+        )
+        for activity in retried:
+            self.assertIsNotNone(activity)
+            service.activities.ack_completed_output(activity)
+
+    async def test_failed_pending_batch_restores_older_global_output_order(self):
+        agent, service = _build_agent()
+        composite_key = "session-global-requeue-order:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "current-turn"},
+            ),
+            output_activities=[],
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-global-requeue-order"},
+        )
+        for activity_id, turn_id in (
+            ("task-old", "older-turn"),
+            ("task-current-a", "current-turn"),
+            ("task-current-b", "current-turn"),
+        ):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-global-requeue-order",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id=turn_id,
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": f"{activity_id} finished"},
+                expects_output=True,
+            )
+        agent.emit_result_message = AsyncMock(return_value=None)
+
+        with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
+            await agent._flush_completed_activity_outputs(composite_key, context)
+
+        restored = []
+        while activity := service.activities.claim_completed_output(
+            "claude",
+            composite_key,
+        ):
+            restored.append(activity)
+        self.assertEqual(
+            [activity.id for activity in restored],
+            ["task-old", "task-current-a", "task-current-b"],
+        )
+        for activity in restored:
+            service.activities.ack_completed_output(activity)
+
+    async def test_terminal_only_activity_waits_queued_until_pending_turn_finishes(self):
         agent, service = _build_agent()
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
         composite_key = "session-retry-flush:/tmp/work"
@@ -754,26 +1178,24 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        requeued = asyncio.Event()
-        original_requeue = service.activities.requeue_completed_output
+        agent.emit_result_message = AsyncMock(return_value="message-id")
 
-        def _requeue(activity, *, front=True):
-            original_requeue(activity, front=front)
-            requeued.set()
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
 
-        service.activities.requeue_completed_output = _requeue
-        emitted = asyncio.Event()
-        async def _emit(*_args, **_kwargs):
-            emitted.set()
-            return "message-id"
-
-        agent.emit_result_message = AsyncMock(side_effect=_emit)
-
-        agent._schedule_completed_activity_flush(composite_key, context)
-        await asyncio.wait_for(requeued.wait(), timeout=1)
+        self.assertTrue(should_retry)
+        agent.emit_result_message.assert_not_awaited()
+        self.assertTrue(service.activities.has_completed_output("claude", composite_key))
         agent._pending_requests.pop(composite_key)
-        await asyncio.wait_for(emitted.wait(), timeout=1)
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
 
+        self.assertFalse(should_retry)
+        agent.emit_result_message.assert_awaited_once()
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
         self.assertFalse(agent._activity_output_pending(composite_key))
 
@@ -869,7 +1291,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(activity)
         pending_request = SimpleNamespace(
             context=pending_context,
-            output_activity=activity,
+            output_activities=[activity],
         )
         agent._pending_requests[composite_key] = [pending_request]
         agent.emit_result_message = AsyncMock(

@@ -60,9 +60,11 @@ class AgentRequest:
     # Explicit output semantics for the Turn. Backend-initiated/multi-output
     # paths override this instead of relying on the visible Message role.
     output: Optional[MessageOutput] = field(default_factory=terminal_turn_output)
-    # Producer-owned lifecycle object retained until durable output delivery is
-    # acknowledged. The shared dispatcher sees only ``output`` provenance.
-    output_activity: Optional[Any] = None
+    # Producer-owned lifecycle objects retained until durable output delivery is
+    # acknowledged. Claude can complete several background tools before one
+    # Result; the latest supplies ``output`` provenance and the whole batch is
+    # settled after delivery. The shared dispatcher sees only ``output``.
+    output_activities: List[Any] = field(default_factory=list)
 
 
 @dataclass
