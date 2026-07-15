@@ -145,6 +145,24 @@ class _CrashingClient(_StubClient):
         raise self.exc
 
 
+class _RestartOnceClient(_StubClient):
+    def __init__(self, name: str, *, crash_first: bool):
+        super().__init__(name, run_until_stopped=True)
+        self.crash_first = crash_first
+        self.run_calls = 0
+        self.restarted = threading.Event()
+
+    def run(self):
+        self.run_calls += 1
+        self.started.set()
+        if self.run_calls == 1:
+            if self.crash_first:
+                raise RuntimeError(f"{self.name} failed")
+            return
+        self.restarted.set()
+        self._stop_event.wait()
+
+
 def test_multi_settings_manager_routes_scoped_keys(tmp_path):
     manager = MultiSettingsManager(
         ["slack", "wechat"], settings_file=str(tmp_path / "settings.json"), primary_platform="slack"
@@ -378,6 +396,25 @@ def test_multi_im_client_isolates_single_platform_runtime_crash():
 
     assert thread.is_alive() is False
     assert returned == [True]
+
+
+def test_multi_im_client_restarts_exited_and_crashed_platform_runtimes(monkeypatch):
+    monkeypatch.setattr("modules.im.multi._RUNTIME_RETRY_INITIAL_SECONDS", 0.01)
+    for crash_first in (False, True):
+        restarting = _RestartOnceClient("slack", crash_first=crash_first)
+        client = MultiIMClient({"slack": restarting}, primary_platform="slack")
+        thread = threading.Thread(target=client.run, daemon=True)
+        thread.start()
+
+        assert restarting.started.wait(timeout=2)
+        assert restarting.restarted.wait(timeout=2)
+        assert restarting.run_calls == 2
+        assert client._threads["slack"].is_alive() is True
+
+        client.stop()
+        thread.join(timeout=2)
+
+        assert thread.is_alive() is False
 
 
 def test_multi_im_client_isolates_crash_when_all_platform_threads_exit():

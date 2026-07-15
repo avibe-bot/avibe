@@ -316,6 +316,45 @@ def test_stale_admin_transport_does_not_block_auto_update(monkeypatch, tmp_path)
     assert performed == [("1.0.1", {})]
 
 
+def test_no_admin_discord_without_fallback_does_not_block_auto_update(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    controller.config.platform = "discord"
+    controller.ready_platforms = set()
+    controller.im_clients = {"discord": _FakeIMClient()}
+    checker = UpdateChecker(
+        controller,
+        UpdateConfig(check_interval_minutes=1, notify_admins=True, auto_update=True),
+    )
+    checker.state.last_activity_at = time.time() - 3600
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_pypi_version_sync",
+        lambda: {"current": "1.0.0", "latest": "1.0.1", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
+    )
+    monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/vibe")
+    performed = []
+
+    async def fake_perform_update(target_version, **kwargs):
+        performed.append((target_version, kwargs))
+        return {"ok": True, "restarting": False, "message": "ok"}
+
+    monkeypatch.setattr(checker, "_perform_update", fake_perform_update)
+
+    asyncio.run(checker._do_check())
+
+    assert checker.state.notified_at is None
+    assert performed == [("1.0.1", {})]
+
+
 def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
@@ -408,6 +447,43 @@ def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkey
     asyncio.run(checker._do_check())
 
     assert reconciled == [True]
+
+
+def test_update_check_loop_catches_python_310_asyncio_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(
+        _StubController(SettingsStore.get_instance()),
+        UpdateConfig(check_interval_minutes=1),
+    )
+    checker._running = True
+    checks = []
+
+    class LegacyAsyncioTimeout(Exception):
+        pass
+
+    async def fake_sleep(_delay):
+        return None
+
+    async def fake_do_check():
+        checks.append(True)
+        if len(checks) == 2:
+            checker._running = False
+
+    async def fake_wait_for(awaitable, *, timeout):
+        del timeout
+        awaitable.close()
+        raise LegacyAsyncioTimeout
+
+    monkeypatch.setattr(asyncio, "TimeoutError", LegacyAsyncioTimeout)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(checker, "_do_check", fake_do_check)
+    monkeypatch.setattr(checker, "_reload_config", lambda: None)
+
+    asyncio.run(checker._check_loop())
+
+    assert checks == [True, True]
 
 
 def test_suppressed_post_update_notification_writes_verification_marker(monkeypatch, tmp_path):

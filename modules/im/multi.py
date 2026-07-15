@@ -6,12 +6,16 @@ import asyncio
 import inspect
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, Optional, cast
 
 from config.v2_settings import _infer_channel_platform, _infer_user_platform, _split_scoped_key
 from .base import BaseIMClient, InlineKeyboard, MessageContext
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_RETRY_INITIAL_SECONDS = 1.0
+_RUNTIME_RETRY_MAX_SECONDS = 30.0
 
 
 class IMClientRemovalError(RuntimeError):
@@ -468,13 +472,40 @@ class MultiIMClient(BaseIMClient):
                 thread.join(timeout=1.0)
             self._run_started.clear()
 
+    def _client_should_run(self, platform: str, client: BaseIMClient) -> bool:
+        if self._stop_requested.is_set():
+            return False
+        with self._clients_lock:
+            return self.clients.get(platform) is client and platform not in self._removing_platforms
+
+    def _wait_for_client_retry(self, platform: str, client: BaseIMClient, delay: float) -> bool:
+        deadline = time.monotonic() + delay
+        while self._client_should_run(platform, client):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if self._stop_requested.wait(min(remaining, 0.1)):
+                return False
+        return False
+
     def _run_client(self, platform: str, client: BaseIMClient) -> None:
-        try:
-            client.run()
-        except Exception:
-            logger.exception("IM runtime for %s crashed", platform)
-        finally:
-            self._mark_transport_unready(platform)
+        retry_delay = _RUNTIME_RETRY_INITIAL_SECONDS
+        while self._client_should_run(platform, client):
+            try:
+                client.run()
+            except Exception:
+                logger.exception("IM runtime for %s crashed; retrying in %.1f seconds", platform, retry_delay)
+            else:
+                if self._client_should_run(platform, client):
+                    logger.warning("IM runtime for %s exited unexpectedly; retrying in %.1f seconds", platform, retry_delay)
+            finally:
+                self._mark_transport_unready(platform)
+
+            if not self._client_should_run(platform, client):
+                return
+            if not self._wait_for_client_retry(platform, client, retry_delay):
+                return
+            retry_delay = min(retry_delay * 2, _RUNTIME_RETRY_MAX_SECONDS)
 
     def add_client(self, platform: str, client: BaseIMClient) -> None:
         """Start one platform's client (+ its runtime thread) at runtime.

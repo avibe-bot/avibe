@@ -373,7 +373,7 @@ class UpdateChecker:
             # minimum so hot-reload can re-enable product checks too.
             try:
                 await asyncio.wait_for(self._transport_ready_event.wait(), timeout=interval * 60)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 pass
 
     async def _do_check(self) -> None:
@@ -654,6 +654,8 @@ class UpdateChecker:
     def _notification_targets_waiting_for_transport(self, admin_ids: list, platform: str) -> bool:
         if admin_ids:
             return any(not self._is_transport_ready(self._user_platform(uid)) for uid in admin_ids)
+        if platform == "discord" and not self._get_default_notification_channel_id("discord"):
+            return False
         if platform in {"slack", "discord"}:
             return not self._is_transport_ready(platform)
         return False
