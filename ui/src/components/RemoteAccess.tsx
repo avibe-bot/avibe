@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
-import { CheckCircle2, Cloud, ExternalLink, Link2, RefreshCcw } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { CheckCircle2, Cloud, ExternalLink, Link2, RefreshCcw, Route } from 'lucide-react';
 import { Trans, useTranslation } from 'react-i18next';
-import { useApi } from '../context/ApiContext';
+import { type RemoteAccessStatus, useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
@@ -16,32 +16,52 @@ export const RemoteAccess: React.FC = () => {
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [pairing, setPairing] = useState(false);
-  const [status, setStatus] = useState<any>(null);
+  const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
+  const [optimizing, setOptimizing] = useState(false);
   const [pairingKey, setPairingKey] = useState('');
   const [reconfiguring, setReconfiguring] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const describeError = (payload: any) => {
-    const code = typeof payload?.error === 'string' ? payload.error : '';
+  const describeError = (payload: unknown) => {
+    const code = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+      ? payload.error
+      : '';
     if (!code) {
       return t('errors.remote_access_unknown');
     }
     return t(`errors.${code}`, { defaultValue: t('errors.remote_access_unknown') });
   };
 
-  const refresh = async () => {
-    setLoading(true);
+  const refresh = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const remoteStatus = await api.remoteAccessStatus();
       setStatus(remoteStatus);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
+  }, [api]);
 
   useEffect(() => {
     refresh().catch(() => setLoading(false));
-  }, []);
+    const disconnect = api.connectWorkbenchEvents({
+      onRemoteAccessQuality: (quality) => {
+        setStatus((current) => current ? { ...current, tunnel_quality: quality } : current);
+      },
+    });
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') refresh(true).catch(() => undefined);
+    };
+    const interval = window.setInterval(refreshVisible, 30_000);
+    document.addEventListener('visibilitychange', refreshVisible);
+    window.addEventListener('focus', refreshVisible);
+    return () => {
+      disconnect();
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshVisible);
+      window.removeEventListener('focus', refreshVisible);
+    };
+  }, [api, refresh]);
 
   const pair = async () => {
     setPairing(true);
@@ -113,6 +133,23 @@ export const RemoteAccess: React.FC = () => {
     }
   };
 
+  const optimizeRoute = async () => {
+    setOptimizing(true);
+    setActionMessage(null);
+    try {
+      const result = await api.optimizeRemoteAccessRoute();
+      setStatus(result);
+      const message = t('remoteAccess.optimizeStarted');
+      setActionMessage({ type: 'success', text: message });
+      showToast(message, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
+      setActionMessage({ type: 'error', text: message });
+    } finally {
+      setOptimizing(false);
+    }
+  };
+
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
@@ -122,6 +159,25 @@ export const RemoteAccess: React.FC = () => {
     : running
       ? t('common.running')
       : t('common.stopped');
+  const quality = status?.tunnel_quality;
+  const qualityFresh = quality
+    ? Date.now() - Date.parse(quality.sampled_at) <= 150_000
+    : false;
+  const qualityGrade = qualityFresh && quality?.state === 'recovering'
+    ? 'recovering'
+    : qualityFresh
+      ? quality?.grade || 'unknown'
+      : 'unknown';
+  const qualityVariant = qualityGrade === 'good'
+    ? 'success'
+    : qualityGrade === 'fair'
+      ? 'info'
+      : qualityGrade === 'poor' || qualityGrade === 'recovering'
+        ? 'warning'
+        : qualityGrade === 'critical'
+          ? 'destructive'
+          : 'secondary';
+  const qualityLabel = t(`remoteAccess.quality${qualityGrade.charAt(0).toUpperCase()}${qualityGrade.slice(1)}`);
 
   return (
     <section
@@ -161,7 +217,7 @@ export const RemoteAccess: React.FC = () => {
           variant="secondary"
           size="xs"
           className="shrink-0"
-          onClick={refresh}
+          onClick={() => refresh()}
           type="button"
         >
           <RefreshCcw className="size-3.5" />
@@ -169,8 +225,8 @@ export const RemoteAccess: React.FC = () => {
         </Button>
       </div>
 
-      <div className="grid border-b border-border md:grid-cols-3">
-        <div className="border-b border-border px-5 py-3.5 md:border-b-0 md:border-r">
+      <div className="grid border-b border-border sm:grid-cols-2 lg:grid-cols-4">
+        <div className="border-b border-border px-5 py-3.5 sm:border-r lg:border-b-0">
           <div className="text-[12px] text-muted">{t('remoteAccess.paired')}</div>
           <div className="mt-1">
             {paired ? (
@@ -180,16 +236,32 @@ export const RemoteAccess: React.FC = () => {
             )}
           </div>
         </div>
-        <div className="border-b border-border px-5 py-3.5 md:border-b-0 md:border-r">
+        <div className="border-b border-border px-5 py-3.5 lg:border-b-0 lg:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.connector')}</div>
           <div className="mt-1 text-[13px] font-medium text-foreground">{loading ? t('common.loading') : connectorState}</div>
         </div>
-        <div className="px-5 py-3.5">
+        <div className="border-b border-border px-5 py-3.5 sm:border-b-0 sm:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.vibeCloudService')}</div>
           <a className="mt-1 inline-flex text-[13px] font-medium text-cyan" href={VIBE_CLOUD_URL} target="_blank" rel="noreferrer">
             avibe.bot
             <ExternalLink className="ml-1 size-3.5" />
           </a>
+        </div>
+        <div className="px-5 py-3.5">
+          <div className="text-[12px] text-muted">{t('remoteAccess.quality')}</div>
+          <div className="mt-1 flex min-h-5 items-center gap-2">
+            <Badge variant={qualityVariant}>{qualityLabel}</Badge>
+            {qualityFresh && quality?.rtt_ms && (
+              <span className="font-mono text-[11px] text-foreground">
+                {Math.round(quality.rtt_ms.median)} ms
+              </span>
+            )}
+          </div>
+          {qualityFresh && quality?.edge_locations?.length ? (
+            <div className="mt-1 truncate font-mono text-[10px] uppercase text-muted" title={quality.edge_locations.join(', ')}>
+              {quality.edge_locations.join(' · ')}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -205,7 +277,7 @@ export const RemoteAccess: React.FC = () => {
             />
             <span className="block text-[10px] text-muted">{t('remoteAccess.pairingKeyHelp')}</span>
           </label>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button
               type="button"
               variant="default"
@@ -252,7 +324,20 @@ export const RemoteAccess: React.FC = () => {
               </a>
             )}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              disabled={!running || optimizing || (qualityFresh && quality?.state === 'recovering')}
+              onClick={optimizeRoute}
+              title={t('remoteAccess.optimizeRoute')}
+            >
+              <Route className="size-3.5" />
+              {optimizing || (qualityFresh && quality?.state === 'recovering')
+                ? t('remoteAccess.optimizingRoute')
+                : t('remoteAccess.optimizeRoute')}
+            </Button>
             <Button
               type="button"
               variant="secondary"

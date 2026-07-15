@@ -4123,6 +4123,14 @@ def remote_access_stop():
     return jsonify(result), 200 if result.get("ok") else 400
 
 
+@app.route("/api/remote-access/optimize-route", methods=["POST"])
+def remote_access_optimize_route():
+    from vibe import remote_access
+
+    result = remote_access.optimize_route()
+    return jsonify(result), 202 if result.get("ok") else 409
+
+
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
     from vibe import remote_access
@@ -9444,6 +9452,7 @@ def run_ui_server(host: str, port: int) -> None:
             from vibe import remote_access
 
             remote_access.start_status_heartbeat(config)
+            remote_access.start_tunnel_quality_monitor()
         except Exception:
             logger.warning("Failed to start remote access status heartbeat", exc_info=True)
     print(f"UI Server running at http://{host}:{port}")

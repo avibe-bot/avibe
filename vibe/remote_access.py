@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import base64
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import hmac
 import http.client
@@ -37,6 +38,7 @@ from jwt import PyJWKClient
 from config import paths
 from config.v2_config import V2Config
 from vibe import api, runtime
+from vibe import tunnel_quality
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +51,29 @@ _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
 _STATUS_REPORT_LOCK = threading.Lock()
 _STATUS_REPORT_THREADS: set[threading.Thread] = set()
+_STATUS_REPORT_PENDING: tuple[V2Config | None, str, str | None] | None = None
 _STATUS_REPORT_ATEXIT_REGISTERED = False
 STATUS_HEARTBEAT_SECONDS = 5 * 60
+QUALITY_REPORT_SECONDS = 60
+QUALITY_SAMPLE_SECONDS = tunnel_quality.SAMPLE_INTERVAL_SECONDS
 STATUS_LOG_TAIL_BYTES = 64 * 1024
 STATUS_REPORT_DRAIN_SECONDS = 1.0
+RECOVERY_READY_TIMEOUT_SECONDS = 30.0
+RECOVERY_EVALUATION_SECONDS = 45.0
+RECOVERY_DRAIN_SECONDS = 35.0
+_QUALITY_MONITOR_LOCK = threading.Lock()
+_QUALITY_MONITOR_STARTED = False
+_QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
+_QUALITY_SNAPSHOT_LOCK = threading.Lock()
+_QUALITY_SNAPSHOT: dict[str, Any] | None = None
+_QUALITY_SNAPSHOT_PATH: Path | None = None
+_RECOVERY_LOCK = threading.Lock()
+_RECOVERY_THREAD: threading.Thread | None = None
+_RECOVERY_STATE = tunnel_quality.empty_recovery()
+_RECOVERY_ATTEMPTS: list[float] = []
+_RECOVERY_CANCEL_EVENT = threading.Event()
+_RECOVERY_MANUAL_BYPASS_USED = False
+_RECOVERY_EMERGENCY_BYPASS_USED = False
 _BLOCKED_PAIRING_BACKEND_HOSTS = {
     "localhost",
     "localhost.localdomain",
@@ -108,12 +129,32 @@ def _state_path() -> Path:
     return paths.get_runtime_dir() / "remote-access-cloudflared.json"
 
 
+def _quality_state_path() -> Path:
+    return paths.get_runtime_dir() / "remote-access-tunnel-quality.json"
+
+
+def _quality_history_path() -> Path:
+    return paths.get_runtime_dir() / "remote-access-tunnel-quality-history.json"
+
+
+def _candidate_pid_path() -> Path:
+    return paths.get_runtime_dir() / "remote-access-cloudflared-candidate.pid"
+
+
 def _cloudflared_stderr_path() -> Path:
     return paths.get_runtime_dir() / "remote_access_cloudflared_stderr.log"
 
 
 def _cloudflared_stdout_path() -> Path:
     return paths.get_runtime_dir() / "remote_access_cloudflared_stdout.log"
+
+
+def _candidate_cloudflared_stderr_path() -> Path:
+    return paths.get_runtime_dir() / "remote_access_cloudflared_candidate_stderr.log"
+
+
+def _candidate_cloudflared_stdout_path() -> Path:
+    return paths.get_runtime_dir() / "remote_access_cloudflared_candidate_stdout.log"
 
 
 def _clear_cloudflared_logs() -> None:
@@ -273,8 +314,54 @@ def _cloudflared_pid_state(pid: int | None) -> str:
     return "other"
 
 
-def _write_state(pid: int, config: V2Config, binary: str) -> None:
-    _state_path().write_text(json.dumps({"pid": pid, **_runtime_signature(config, binary)}, indent=2), encoding="utf-8")
+def _allocate_metrics_url() -> str:
+    host = "127.0.0.1"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((host, 0))
+        port = int(probe.getsockname()[1])
+    return f"http://{host}:{port}"
+
+
+def _connector_command(binary: str, metrics_url: str) -> list[str]:
+    parsed = urllib.parse.urlsplit(metrics_url)
+    host = parsed.hostname or "127.0.0.1"
+    display_host = f"[{host}]" if ":" in host else host
+    return [binary, "tunnel", "--metrics", f"{display_host}:{parsed.port}", "--no-autoupdate", "run"]
+
+
+def _connector_record(
+    pid: int,
+    metrics_url: str,
+    *,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> dict[str, Any]:
+    return {
+        "pid": pid,
+        "started_at": time.time(),
+        "metrics_url": metrics_url,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+    }
+
+
+def _write_state(pid: int, config: V2Config, binary: str, metrics_url: str) -> None:
+    signature = _runtime_signature(config, binary)
+    runtime.write_json(
+        _state_path(),
+        {
+            "schema_version": 2,
+            "pid": pid,
+            **signature,
+            "active": _connector_record(
+                pid,
+                metrics_url,
+                stdout_path=_cloudflared_stdout_path(),
+                stderr_path=_cloudflared_stderr_path(),
+            ),
+            "candidate": None,
+        },
+    )
 
 
 def _runtime_signature(config: V2Config, binary: str) -> dict[str, str]:
@@ -295,6 +382,27 @@ def _read_state() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _state_connector(name: str) -> dict[str, Any] | None:
+    state = _read_state()
+    if not state:
+        return None
+    record = state.get(name)
+    if isinstance(record, dict):
+        return record
+    if name == "active" and isinstance(state.get("pid"), int):
+        return {"pid": state["pid"], "metrics_url": state.get("metrics_url")}
+    return None
+
+
+def _replace_state_connector(name: str, record: dict[str, Any] | None) -> None:
+    state = _read_state() or {}
+    state["schema_version"] = 2
+    state[name] = record
+    if name == "active" and record:
+        state["pid"] = record.get("pid")
+    runtime.write_json(_state_path(), state)
+
+
 def _read_text_tail(path: Path, byte_limit: int) -> str | None:
     try:
         with path.open("rb") as handle:
@@ -307,7 +415,9 @@ def _read_text_tail(path: Path, byte_limit: int) -> str | None:
 
 
 def _observed_cloudflared_origin_service() -> str | None:
-    content = _read_text_tail(_cloudflared_stderr_path(), STATUS_LOG_TAIL_BYTES)
+    active = _state_connector("active") or {}
+    stderr_path = Path(str(active.get("stderr_path") or _cloudflared_stderr_path()))
+    content = _read_text_tail(stderr_path, STATUS_LOG_TAIL_BYTES)
     if content is None:
         return None
     pattern = re.compile(
@@ -335,6 +445,16 @@ def _running_signature(pid: int | None) -> dict[str, str] | None:
     }
 
 
+def tunnel_quality_snapshot() -> dict[str, Any] | None:
+    with _QUALITY_SNAPSHOT_LOCK:
+        if _QUALITY_SNAPSHOT is not None and _QUALITY_SNAPSHOT_PATH == _quality_state_path():
+            return json.loads(json.dumps(_QUALITY_SNAPSHOT))
+    payload = runtime.read_json(_quality_state_path())
+    if isinstance(payload, dict) and payload.get("schema_version") == 1:
+        return payload
+    return None
+
+
 def status(config: V2Config | None = None) -> dict[str, Any]:
     try:
         config = config or V2Config.load()
@@ -345,10 +465,13 @@ def status(config: V2Config | None = None) -> dict[str, Any]:
     running = pid_state == "cloudflared"
     if pid and pid_state in {"dead", "other"}:
         _pid_path().unlink(missing_ok=True)
-        _state_path().unlink(missing_ok=True)
+        candidate = _state_connector("candidate") or {}
+        candidate_state = _cloudflared_pid_state(candidate.get("pid"))
+        if candidate_state not in {"cloudflared", "unknown"}:
+            _state_path().unlink(missing_ok=True)
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None) if config else None
     binary = _resolve_binary(config)
-    return {
+    result = {
         "ok": True,
         "provider": "vibe_cloud",
         "enabled": bool(getattr(cloud, "enabled", False)),
@@ -361,6 +484,10 @@ def status(config: V2Config | None = None) -> dict[str, Any]:
         "binary_path": binary,
         "binary_version": _version(binary) if binary else None,
     }
+    quality = tunnel_quality_snapshot()
+    if quality is not None:
+        result["tunnel_quality"] = quality
+    return result
 
 
 def _local_ui_healthy(config: V2Config) -> bool:
@@ -383,6 +510,9 @@ def runtime_status_payload(config: V2Config | None = None, event: str = "heartbe
         "expected_origin_service": origin_service_for_pairing(config),
         "observed_origin_service": _observed_cloudflared_origin_service(),
     }
+    quality = current.get("tunnel_quality")
+    if isinstance(quality, dict) and quality.get("schema_version") == 1:
+        payload["tunnel_quality"] = quality
     error = last_error or current.get("error")
     if error:
         payload["last_error"] = str(error)
@@ -487,45 +617,54 @@ def drain_runtime_status_reports(timeout_seconds: float = STATUS_REPORT_DRAIN_SE
             thread.join(remaining)
 
 
-def _register_status_report_thread(thread: threading.Thread) -> None:
-    global _STATUS_REPORT_ATEXIT_REGISTERED
+def _report_runtime_status_async(config: V2Config | None = None, event: str = "heartbeat", last_error: str | None = None) -> None:
+    global _STATUS_REPORT_ATEXIT_REGISTERED, _STATUS_REPORT_PENDING
+    holder: dict[str, threading.Thread] = {}
+
+    def worker() -> None:
+        global _STATUS_REPORT_PENDING
+        while True:
+            with _STATUS_REPORT_LOCK:
+                pending = _STATUS_REPORT_PENDING
+                if pending is None:
+                    thread = holder.get("thread")
+                    if thread is not None:
+                        _STATUS_REPORT_THREADS.discard(thread)
+                    return
+                _STATUS_REPORT_PENDING = None
+            pending_config, pending_event, pending_error = pending
+            try:
+                report_runtime_status(pending_config, event=pending_event, last_error=pending_error)
+            except Exception:
+                logger.debug("Tunnel runtime status report failed", exc_info=True)
+
     with _STATUS_REPORT_LOCK:
+        _STATUS_REPORT_PENDING = (config, event, last_error)
+        if any(thread.is_alive() for thread in _STATUS_REPORT_THREADS):
+            return
+        try:
+            thread = threading.Thread(target=worker, name="vibe-remote-status-report", daemon=True)
+        except Exception:
+            _STATUS_REPORT_PENDING = None
+            return
+        holder["thread"] = thread
         _STATUS_REPORT_THREADS.add(thread)
         if not _STATUS_REPORT_ATEXIT_REGISTERED:
             atexit.register(drain_runtime_status_reports)
             _STATUS_REPORT_ATEXIT_REGISTERED = True
-
-
-def _report_runtime_status_async(config: V2Config | None = None, event: str = "heartbeat", last_error: str | None = None) -> None:
-    holder: dict[str, threading.Thread] = {}
-
-    def worker() -> None:
         try:
-            report_runtime_status(config, event=event, last_error=last_error)
-        finally:
-            thread = holder.get("thread")
-            if thread is not None:
-                with _STATUS_REPORT_LOCK:
-                    _STATUS_REPORT_THREADS.discard(thread)
-
-    try:
-        thread = threading.Thread(target=worker, name="vibe-remote-status-report", daemon=True)
-    except Exception:
-        return
-    holder["thread"] = thread
-    try:
-        _register_status_report_thread(thread)
-        thread.start()
-    except Exception:
-        with _STATUS_REPORT_LOCK:
+            thread.start()
+        except Exception:
+            _STATUS_REPORT_PENDING = None
             _STATUS_REPORT_THREADS.discard(thread)
+            return
 
 
 def start_status_heartbeat(config: V2Config | None = None, interval_seconds: int = STATUS_HEARTBEAT_SECONDS) -> None:
     global _STATUS_HEARTBEAT_STARTED
     def loop() -> None:
         while True:
-            report_runtime_status(None, event="heartbeat")
+            _report_runtime_status_async(None, event="heartbeat")
             time.sleep(interval_seconds)
 
     with _STATUS_HEARTBEAT_LOCK:
@@ -539,12 +678,469 @@ def start_status_heartbeat(config: V2Config | None = None, interval_seconds: int
         _STATUS_HEARTBEAT_STARTED = True
 
 
+def _snapshot_change_key(snapshot: dict[str, Any] | None) -> tuple[Any, ...]:
+    if not snapshot:
+        return ()
+    rtt = snapshot.get("rtt_ms") if isinstance(snapshot.get("rtt_ms"), dict) else {}
+    recovery = snapshot.get("recovery") if isinstance(snapshot.get("recovery"), dict) else {}
+    return (
+        snapshot.get("state"),
+        snapshot.get("grade"),
+        snapshot.get("ha_connections"),
+        rtt.get("median"),
+        rtt.get("max"),
+        tuple(snapshot.get("edge_locations") or []),
+        recovery.get("state"),
+        recovery.get("last_result"),
+    )
+
+
+def _persist_quality_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    publish: bool = True,
+    expected_path: Path | None = None,
+) -> bool:
+    global _QUALITY_SNAPSHOT, _QUALITY_SNAPSHOT_PATH
+    quality_path = _quality_state_path()
+    if expected_path is not None and quality_path != expected_path:
+        return False
+    with _QUALITY_SNAPSHOT_LOCK:
+        previous = _QUALITY_SNAPSHOT if _QUALITY_SNAPSHOT_PATH == quality_path else None
+        _QUALITY_SNAPSHOT = json.loads(json.dumps(snapshot))
+        _QUALITY_SNAPSHOT_PATH = quality_path
+    runtime.write_json(quality_path, snapshot)
+    with _RECOVERY_LOCK:
+        monitor_state = {
+            "schema_version": 1,
+            "evaluator": _QUALITY_EVALUATOR.export_state(),
+            "recovery": json.loads(json.dumps(_RECOVERY_STATE)),
+            "attempts": list(_RECOVERY_ATTEMPTS[-100:]),
+            "manual_bypass_used": _RECOVERY_MANUAL_BYPASS_USED,
+            "emergency_bypass_used": _RECOVERY_EMERGENCY_BYPASS_USED,
+        }
+    runtime.write_json(quality_path.with_name(_quality_history_path().name), monitor_state)
+    if publish and _snapshot_change_key(previous) != _snapshot_change_key(snapshot):
+        try:
+            from vibe.sse_broker import broker
+
+            broker.publish("remote_access.quality.changed", snapshot)
+        except Exception:
+            logger.debug("Failed to publish Tunnel quality change", exc_info=True)
+    return True
+
+
+def _recovery_payload() -> dict[str, Any]:
+    with _RECOVERY_LOCK:
+        return json.loads(json.dumps(_RECOVERY_STATE))
+
+
+def _set_recovery_state(**changes: Any) -> dict[str, Any]:
+    with _RECOVERY_LOCK:
+        _RECOVERY_STATE.update(changes)
+        payload = json.loads(json.dumps(_RECOVERY_STATE))
+    snapshot = tunnel_quality_snapshot()
+    if snapshot is not None:
+        snapshot["recovery"] = payload
+        if payload["state"] in {"evaluating", "draining"}:
+            snapshot["state"] = "recovering"
+        _persist_quality_snapshot(snapshot)
+    return payload
+
+
+def _parse_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _recovery_allowed(trigger: str, *, manual: bool, now: float) -> bool:
+    global _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+    with _RECOVERY_LOCK:
+        if _RECOVERY_THREAD is not None:
+            return False
+        next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
+        cooling_down = next_attempt is not None and now < next_attempt
+        if manual:
+            if cooling_down:
+                if _RECOVERY_MANUAL_BYPASS_USED:
+                    return False
+                _RECOVERY_MANUAL_BYPASS_USED = True
+            return True
+        if cooling_down:
+            if trigger != "availability" or _RECOVERY_EMERGENCY_BYPASS_USED:
+                return False
+            _RECOVERY_EMERGENCY_BYPASS_USED = True
+        recent = [attempt for attempt in _RECOVERY_ATTEMPTS if attempt >= now - 30 * 60]
+        return len(recent) < 2
+
+
+def _recovery_backoff_seconds(attempt_count: int) -> int:
+    schedule = [15 * 60, 30 * 60, 60 * 60, 120 * 60]
+    if attempt_count <= len(schedule):
+        return schedule[attempt_count - 1]
+    return 6 * 60 * 60
+
+
+def _automatic_recovery_enabled() -> bool:
+    return os.environ.get("AVIBE_TUNNEL_AUTO_RECOVERY", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -> dict[str, Any]:
+    """Start one non-blocking make-before-break recovery attempt."""
+
+    global _RECOVERY_THREAD
+    now = time.time()
+    manual = trigger == "manual"
+    current = status(config)
+    if not current.get("running"):
+        return {**current, "ok": False, "error": "remote_access_not_running"}
+    if not _recovery_allowed(trigger, manual=manual, now=now):
+        return {**current, "ok": False, "error": "route_optimization_unavailable"}
+    try:
+        _RECOVERY_CANCEL_EVENT.clear()
+        thread = threading.Thread(
+            target=_run_route_optimization,
+            args=(config, trigger),
+            name="vibe-tunnel-route-optimization",
+            daemon=True,
+        )
+        with _RECOVERY_LOCK:
+            _RECOVERY_THREAD = thread
+        _set_recovery_state(state="evaluating", last_trigger=trigger)
+        thread.start()
+    except Exception as exc:
+        with _RECOVERY_LOCK:
+            _RECOVERY_THREAD = None
+        _set_recovery_state(state="idle", last_result="failed")
+        return {**current, "ok": False, "error": "route_optimization_start_failed", "detail": str(exc)}
+    return {**status(config), "ok": True, "optimization_started": True}
+
+
+def _candidate_average_snapshot(metrics_url: str) -> dict[str, Any] | None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    deadline = time.monotonic() + RECOVERY_EVALUATION_SECONDS
+    snapshots: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        try:
+            sample = tunnel_quality.scrape_metrics(metrics_url)
+        except Exception:
+            time.sleep(1.0)
+            continue
+        snapshots.append(evaluator.update(sample, connector_count=2))
+        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+    return tunnel_quality.summarize_candidate_snapshots(snapshots)
+
+
+def _wait_candidate_ready(pid: int, metrics_url: str) -> bool:
+    deadline = time.monotonic() + RECOVERY_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if not _is_cloudflared_pid(pid):
+            return False
+        try:
+            response = requests.get(f"{metrics_url.rstrip('/')}/ready", timeout=0.5)
+            if response.ok:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(1.0)
+    return False
+
+
+def _finish_recovery(
+    *,
+    trigger: str,
+    result: str,
+    previous_median: float | None,
+    result_median: float | None,
+) -> None:
+    now = time.time()
+    with _RECOVERY_LOCK:
+        _RECOVERY_ATTEMPTS.append(now)
+        del _RECOVERY_ATTEMPTS[:-100]
+        attempt_count = int(_RECOVERY_STATE.get("attempt_count_window") or 0) + 1
+    next_attempt = now + _recovery_backoff_seconds(attempt_count)
+    _set_recovery_state(
+        state="cooldown",
+        last_attempt_at=tunnel_quality.utc_timestamp(now),
+        last_trigger=trigger,
+        last_result=result,
+        previous_median_rtt_ms=previous_median,
+        result_median_rtt_ms=result_median,
+        next_attempt_at=tunnel_quality.utc_timestamp(next_attempt),
+        attempt_count_window=attempt_count,
+    )
+    _report_runtime_status_async(event="route_optimization")
+
+
+def _run_route_optimization(config: V2Config | None, trigger: str) -> None:
+    global _RECOVERY_THREAD
+    candidate_pid: int | None = None
+    promoted = False
+    previous = tunnel_quality_snapshot() or {}
+    previous_rtt = previous.get("rtt_ms") if isinstance(previous.get("rtt_ms"), dict) else {}
+    previous_median = float(previous_rtt["median"]) if previous_rtt.get("median") is not None else None
+    _report_runtime_status_async(event="route_optimization_started")
+    try:
+        with _CONNECTOR_LOCK:
+            if _RECOVERY_CANCEL_EVENT.is_set():
+                raise RuntimeError("route_optimization_cancelled")
+            loaded = config or V2Config.load()
+            cloud = loaded.remote_access.vibe_cloud
+            binary = _resolve_binary(loaded)
+            active = _state_connector("active")
+            active_pid = int(active.get("pid")) if active and isinstance(active.get("pid"), int) else _read_pid()
+            if not binary or not cloud.tunnel_token or not _is_cloudflared_pid(active_pid):
+                raise RuntimeError("active_connector_unavailable")
+            metrics_url = _allocate_metrics_url()
+            candidate_pid = runtime.spawn_background(
+                _connector_command(binary, metrics_url),
+                _candidate_pid_path(),
+                _candidate_cloudflared_stdout_path().name,
+                _candidate_cloudflared_stderr_path().name,
+                env={**os.environ, "TUNNEL_TOKEN": cloud.tunnel_token},
+            )
+            candidate = _connector_record(
+                candidate_pid,
+                metrics_url,
+                stdout_path=_candidate_cloudflared_stdout_path(),
+                stderr_path=_candidate_cloudflared_stderr_path(),
+            )
+            _replace_state_connector("candidate", candidate)
+
+        if not _wait_candidate_ready(candidate_pid, metrics_url):
+            raise RuntimeError("candidate_not_ready")
+        candidate_snapshot = _candidate_average_snapshot(metrics_url)
+        if _RECOVERY_CANCEL_EVENT.is_set():
+            raise RuntimeError("route_optimization_cancelled")
+        if candidate_snapshot is None or not tunnel_quality.candidate_is_better(previous, candidate_snapshot, trigger=trigger):
+            result_rtt = (candidate_snapshot or {}).get("rtt_ms")
+            result_median = float(result_rtt["median"]) if isinstance(result_rtt, dict) and result_rtt.get("median") is not None else None
+            _finish_recovery(
+                trigger=trigger,
+                result="no_improvement",
+                previous_median=previous_median,
+                result_median=result_median,
+            )
+            return
+
+        result_rtt = candidate_snapshot.get("rtt_ms")
+        result_median = float(result_rtt["median"]) if isinstance(result_rtt, dict) and result_rtt.get("median") is not None else None
+        _set_recovery_state(state="draining")
+        with _CONNECTOR_LOCK:
+            state = _read_state() or {}
+            active = state.get("active") if isinstance(state.get("active"), dict) else {"pid": _read_pid()}
+            old_pid = active.get("pid") if isinstance(active, dict) else None
+            candidate = state.get("candidate")
+            if not isinstance(candidate, dict) or candidate.get("pid") != candidate_pid:
+                raise RuntimeError("candidate_state_changed")
+            state["active"] = candidate
+            state["candidate"] = None
+            state["pid"] = candidate_pid
+            runtime.write_json(_state_path(), state)
+            _pid_path().write_text(str(candidate_pid), encoding="utf-8")
+            _candidate_pid_path().unlink(missing_ok=True)
+            promoted = True
+        if isinstance(old_pid, int) and old_pid != candidate_pid and _is_cloudflared_pid(old_pid):
+            runtime.stop_pid(old_pid, timeout=RECOVERY_DRAIN_SECONDS)
+        _finish_recovery(
+            trigger=trigger,
+            result="improved",
+            previous_median=previous_median,
+            result_median=result_median,
+        )
+    except Exception:
+        logger.warning("Tunnel route optimization failed", exc_info=True)
+        _finish_recovery(
+            trigger=trigger,
+            result="failed",
+            previous_median=previous_median,
+            result_median=None,
+        )
+    finally:
+        if candidate_pid is not None and not promoted and _is_cloudflared_pid(candidate_pid):
+            runtime.stop_pid(candidate_pid, timeout=8)
+        if not promoted:
+            _candidate_pid_path().unlink(missing_ok=True)
+            with _CONNECTOR_LOCK:
+                if _state_path().exists():
+                    _replace_state_connector("candidate", None)
+        with _RECOVERY_LOCK:
+            _RECOVERY_THREAD = None
+
+
+def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
+    global _QUALITY_MONITOR_STARTED, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+    last_report_at = 0.0
+    try:
+        while quality_path == _quality_state_path() and quality_path.parent.exists():
+            started_at = time.monotonic()
+            active_pid = _read_pid()
+            running = _is_cloudflared_pid(active_pid)
+            active = _state_connector("active") or {}
+            metrics_url = active.get("metrics_url")
+            candidate = _state_connector("candidate") or {}
+            connector_count = 1 + int(_is_cloudflared_pid(candidate.get("pid"))) if running else 0
+            sample = None
+            if running and isinstance(metrics_url, str) and metrics_url:
+                try:
+                    sample = tunnel_quality.scrape_metrics(metrics_url)
+                except Exception:
+                    logger.debug("Tunnel metrics scrape failed", exc_info=True)
+            previous_snapshot = tunnel_quality_snapshot()
+            snapshot = _QUALITY_EVALUATOR.update(
+                sample,
+                connector_count=connector_count,
+                recovery=_recovery_payload(),
+            )
+            try:
+                if not _persist_quality_snapshot(snapshot, expected_path=quality_path):
+                    return
+            except OSError:
+                logger.debug("Tunnel quality state path disappeared; stopping monitor", exc_info=True)
+                return
+            if (
+                previous_snapshot is not None
+                and (previous_snapshot.get("state"), previous_snapshot.get("grade"))
+                != (snapshot.get("state"), snapshot.get("grade"))
+            ):
+                _report_runtime_status_async(event="tunnel_quality_changed")
+            if snapshot.get("state") == "healthy" and _QUALITY_EVALUATOR.healthy_samples >= 120:
+                recovery = _recovery_payload()
+                if recovery.get("state") != "idle" or int(recovery.get("attempt_count_window") or 0) > 0:
+                    with _RECOVERY_LOCK:
+                        _RECOVERY_ATTEMPTS.clear()
+                        _RECOVERY_MANUAL_BYPASS_USED = False
+                        _RECOVERY_EMERGENCY_BYPASS_USED = False
+                    _set_recovery_state(state="idle", next_attempt_at=None, attempt_count_window=0)
+            trigger = _QUALITY_EVALUATOR.recovery_trigger(snapshot)
+            if running and not metrics_url:
+                trigger = "availability"
+            if trigger and _automatic_recovery_enabled():
+                optimize_route(trigger=trigger)
+            now = time.monotonic()
+            if now - last_report_at >= QUALITY_REPORT_SECONDS:
+                _report_runtime_status_async(event="tunnel_quality")
+                last_report_at = now
+            time.sleep(max(0.1, interval_seconds - (time.monotonic() - started_at)))
+    finally:
+        with _QUALITY_MONITOR_LOCK:
+            _QUALITY_MONITOR_STARTED = False
+
+
+def _reconcile_orphan_candidate() -> None:
+    """Resolve a candidate left by a previous service process without risking the active route."""
+
+    candidate = _state_connector("candidate")
+    if not candidate or not isinstance(candidate.get("pid"), int):
+        return
+    candidate_pid = int(candidate["pid"])
+    candidate_state = _cloudflared_pid_state(candidate_pid)
+    active = _state_connector("active") or {}
+    active_pid = active.get("pid") if isinstance(active.get("pid"), int) else _read_pid()
+    active_state = _cloudflared_pid_state(active_pid)
+
+    if candidate_state == "cloudflared" and active_state != "cloudflared":
+        if active_state == "unknown":
+            logger.warning("Preserving orphan Tunnel candidate because active process identity is unknown")
+            return
+        metrics_url = candidate.get("metrics_url")
+        try:
+            ready = isinstance(metrics_url, str) and requests.get(
+                f"{metrics_url.rstrip('/')}/ready",
+                timeout=0.5,
+            ).ok
+        except requests.RequestException:
+            ready = False
+        if ready:
+            with _CONNECTOR_LOCK:
+                state = _read_state() or {}
+                state["active"] = candidate
+                state["candidate"] = None
+                state["pid"] = candidate_pid
+                runtime.write_json(_state_path(), state)
+                _pid_path().write_text(str(candidate_pid), encoding="utf-8")
+                _candidate_pid_path().unlink(missing_ok=True)
+            _set_recovery_state(state="cooldown", last_result="improved")
+            return
+        if not runtime.stop_pid(candidate_pid, timeout=8):
+            logger.warning("Could not stop unready orphan Tunnel candidate pid=%s", candidate_pid)
+            return
+
+    if candidate_state == "cloudflared" and active_state == "cloudflared":
+        if not runtime.stop_pid(candidate_pid, timeout=8):
+            logger.warning("Could not stop orphan Tunnel candidate pid=%s", candidate_pid)
+            return
+    elif candidate_state == "unknown":
+        logger.warning("Preserving orphan Tunnel candidate with unknown process identity pid=%s", candidate_pid)
+        return
+
+    with _CONNECTOR_LOCK:
+        if _state_path().exists():
+            _replace_state_connector("candidate", None)
+        _candidate_pid_path().unlink(missing_ok=True)
+    _set_recovery_state(state="cooldown", last_result="failed")
+
+
+def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECONDS) -> None:
+    global _QUALITY_EVALUATOR, _QUALITY_MONITOR_STARTED, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+    with _QUALITY_MONITOR_LOCK:
+        if _QUALITY_MONITOR_STARTED:
+            return
+        _QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
+        with _RECOVERY_LOCK:
+            _RECOVERY_STATE.clear()
+            _RECOVERY_STATE.update(tunnel_quality.empty_recovery())
+            _RECOVERY_ATTEMPTS.clear()
+            _RECOVERY_MANUAL_BYPASS_USED = False
+            _RECOVERY_EMERGENCY_BYPASS_USED = False
+        persisted = runtime.read_json(_quality_history_path())
+        if isinstance(persisted, dict) and persisted.get("schema_version") == 1:
+            evaluator_state = persisted.get("evaluator")
+            if isinstance(evaluator_state, dict):
+                _QUALITY_EVALUATOR.load_state(evaluator_state)
+            with _RECOVERY_LOCK:
+                recovery_state = persisted.get("recovery")
+                if isinstance(recovery_state, dict):
+                    _RECOVERY_STATE.update(
+                        {key: recovery_state[key] for key in _RECOVERY_STATE if key in recovery_state}
+                    )
+                attempts = persisted.get("attempts")
+                if isinstance(attempts, list):
+                    _RECOVERY_ATTEMPTS[:] = [float(item) for item in attempts if isinstance(item, (int, float))][-100:]
+                _RECOVERY_MANUAL_BYPASS_USED = bool(persisted.get("manual_bypass_used"))
+                _RECOVERY_EMERGENCY_BYPASS_USED = bool(persisted.get("emergency_bypass_used"))
+        _reconcile_orphan_candidate()
+        quality_path = _quality_state_path()
+        try:
+            thread = threading.Thread(
+                target=_quality_monitor_loop,
+                args=(interval_seconds, quality_path),
+                name="vibe-tunnel-quality-monitor",
+                daemon=True,
+            )
+            _QUALITY_MONITOR_STARTED = True
+            thread.start()
+        except Exception:
+            _QUALITY_MONITOR_STARTED = False
+            return
+
+
 def stop(config: V2Config | None = None) -> dict[str, Any]:
     try:
         config = config or V2Config.load()
     except Exception:
         config = None
     with _CONNECTOR_LOCK:
+        _RECOVERY_CANCEL_EVENT.set()
+        candidate = _state_connector("candidate") or {}
+        candidate_pid = candidate.get("pid")
+        if isinstance(candidate_pid, int) and _is_cloudflared_pid(candidate_pid):
+            runtime.stop_pid(candidate_pid, timeout=8)
+        _candidate_pid_path().unlink(missing_ok=True)
         pid = _read_pid()
         pid_state = _cloudflared_pid_state(pid)
         if pid is not None and pid_state == "unknown":
@@ -626,14 +1222,15 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         env = {**os.environ, "TUNNEL_TOKEN": cloud.tunnel_token}
         try:
             _clear_cloudflared_logs()
+            metrics_url = _allocate_metrics_url()
             pid = runtime.spawn_background(
-                [binary, "tunnel", "--no-autoupdate", "run"],
+                _connector_command(binary, metrics_url),
                 _pid_path(),
                 "remote_access_cloudflared_stdout.log",
                 "remote_access_cloudflared_stderr.log",
                 env=env,
             )
-            _write_state(pid, config, binary)
+            _write_state(pid, config, binary, metrics_url)
         except Exception as exc:
             _report_runtime_status_async(config, event="start_failed", last_error="cloudflared_spawn_failed")
             return {**status(config), "ok": False, "error": "cloudflared_spawn_failed", "detail": str(exc)}

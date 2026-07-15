@@ -769,7 +769,7 @@ def test_pair_origin_service_uses_ipv6_loopback_for_ipv6_wildcard(monkeypatch, t
     assert remote_access.origin_service_for_pairing() == "http://[::1]:15130"
 
 
-def test_runtime_status_payload_reports_local_origin_and_tunnel_state(monkeypatch, tmp_path) -> None:
+def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "100.97.103.112"
@@ -783,6 +783,12 @@ def test_runtime_status_payload_reports_local_origin_and_tunnel_state(monkeypatc
             "ok": True,
             "running": True,
             "binary_found": True,
+            "tunnel_quality": {
+                "schema_version": 1,
+                "state": "healthy",
+                "grade": "good",
+                "sampled_at": "2026-07-15T03:22:00Z",
+            },
         },
     )
 
@@ -794,6 +800,7 @@ def test_runtime_status_payload_reports_local_origin_and_tunnel_state(monkeypatc
     assert payload["cloudflared_found"] is True
     assert payload["expected_origin_service"] == "http://127.0.0.1:5123"
     assert payload["observed_origin_service"] == "http://100.97.103.112:5123"
+    assert payload["tunnel_quality"]["grade"] == "good"
 
 
 def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tmp_path) -> None:
@@ -1084,6 +1091,33 @@ def test_lifecycle_status_report_does_not_block_stop(monkeypatch, tmp_path) -> N
     remote_access.drain_runtime_status_reports(timeout_seconds=1.0)
 
 
+def test_async_runtime_status_reporter_serializes_and_coalesces(monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    events = []
+
+    def blocking_report(config=None, event="heartbeat", last_error=None):
+        events.append(event)
+        if len(events) == 1:
+            started.set()
+            release.wait(timeout=2)
+        return {"ok": True}
+
+    with remote_access._STATUS_REPORT_LOCK:
+        remote_access._STATUS_REPORT_THREADS.clear()
+        remote_access._STATUS_REPORT_PENDING = None
+    monkeypatch.setattr(remote_access, "report_runtime_status", blocking_report)
+
+    remote_access._report_runtime_status_async(event="heartbeat")
+    assert started.wait(timeout=1)
+    remote_access._report_runtime_status_async(event="quality-old")
+    remote_access._report_runtime_status_async(event="quality-new")
+    release.set()
+    remote_access.drain_runtime_status_reports(timeout_seconds=1.0)
+
+    assert events == ["heartbeat", "quality-new"]
+
+
 def test_lifecycle_status_thread_start_failure_is_best_effort(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -1259,6 +1293,7 @@ def test_stop_preserves_pid_file_when_stop_reports_success_but_process_survives(
     )
 
     result = remote_access.stop()
+    remote_access.drain_runtime_status_reports(timeout_seconds=1.0)
 
     assert result["ok"] is False
     assert result["error"] == "cloudflared_stop_failed"
@@ -1476,12 +1511,15 @@ def test_start_clears_previous_cloudflared_logs_before_spawn(monkeypatch, tmp_pa
 
     monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: binary)
     monkeypatch.setattr(remote_access, "_version", lambda path: "cloudflared test")
+    monkeypatch.setattr(remote_access, "_allocate_metrics_url", lambda: "http://127.0.0.1:29999")
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == new_pid)
     monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"{binary} tunnel run")
+    spawn_args = []
 
     def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
         assert not remote_access._cloudflared_stdout_path().exists()
         assert not remote_access._cloudflared_stderr_path().exists()
+        spawn_args.append(args)
         pid_path.write_text(str(new_pid), encoding="utf-8")
         return new_pid
 
@@ -1491,6 +1529,7 @@ def test_start_clears_previous_cloudflared_logs_before_spawn(monkeypatch, tmp_pa
 
     assert result["ok"] is True
     assert result["started"] is True
+    assert spawn_args == [[binary, "tunnel", "--metrics", "127.0.0.1:29999", "--no-autoupdate", "run"]]
 
 
 def test_effective_ui_bind_host_uses_setup_host_when_tunnel_disabled() -> None:

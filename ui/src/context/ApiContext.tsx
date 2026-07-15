@@ -342,6 +342,44 @@ export type VaultMetadataUpdatePayload = {
   policy?: Record<string, unknown>;
 };
 
+export type TunnelQualitySnapshot = {
+  schema_version: 1;
+  state: 'healthy' | 'degraded' | 'recovering' | 'unknown';
+  grade: 'good' | 'fair' | 'poor' | 'critical' | 'unknown';
+  sampled_at: string;
+  protocol: 'quic' | 'http2' | 'unknown';
+  connector_count: number;
+  ha_connections: number;
+  rtt_ms: { min: number; median: number; max: number } | null;
+  baseline_median_rtt_ms: number | null;
+  edge_locations: string[];
+  window_seconds: number;
+  request_errors_per_minute: number;
+  packet_loss_per_minute: number;
+  recovery: {
+    state: 'idle' | 'evaluating' | 'draining' | 'cooldown';
+    last_attempt_at: string | null;
+    last_trigger: 'availability' | 'latency' | 'errors' | 'manual' | null;
+    last_result: 'improved' | 'no_improvement' | 'failed' | null;
+    previous_median_rtt_ms: number | null;
+    result_median_rtt_ms: number | null;
+    next_attempt_at: string | null;
+    attempt_count_window: number;
+  };
+};
+
+export type RemoteAccessStatus = {
+  ok: boolean;
+  enabled: boolean;
+  paired: boolean;
+  running: boolean;
+  public_url?: string;
+  pid_state?: string;
+  tunnel_quality?: TunnelQualitySnapshot;
+  error?: string;
+  optimization_started?: boolean;
+};
+
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
@@ -624,10 +662,11 @@ export type ApiContextType = {
     base_session_id?: string | null;
     pid?: number | null;
   }) => Promise<{ ok: boolean; unreachable?: boolean; error?: string; action?: string }>;
-  remoteAccessStatus: () => Promise<any>;
+  remoteAccessStatus: () => Promise<RemoteAccessStatus>;
   pairVibeCloudRemoteAccess: (payload: { backend_url: string; pairing_key: string; device_name?: string }) => Promise<any>;
-  startRemoteAccess: () => Promise<any>;
-  stopRemoteAccess: () => Promise<any>;
+  startRemoteAccess: () => Promise<RemoteAccessStatus>;
+  stopRemoteAccess: () => Promise<RemoteAccessStatus>;
+  optimizeRemoteAccessRoute: () => Promise<RemoteAccessStatus>;
   getAuthSession: () => Promise<SessionInfo>;
   signOut: () => Promise<{ ok: boolean }>;
 };
@@ -899,6 +938,7 @@ export type WorkbenchEventHandlers = {
     grant_status?: string;
     secret_name?: string;
   }) => void;
+  onRemoteAccessQuality?: (data: TunnelQualitySnapshot) => void;
   onAny?: (event: WorkbenchEventEnvelope) => void;
   onError?: (err: Event) => void;
 };
@@ -1937,6 +1977,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onVaultsUpdated?.(envelope.data);
       });
     });
+    source.addEventListener('remote_access.quality.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<TunnelQualitySnapshot>(e.data);
+      if (!envelope) return;
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onRemoteAccessQuality?.(envelope.data);
+      });
+    });
     source.addEventListener('workbench.events.bridge.status', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
@@ -2634,6 +2682,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     pairVibeCloudRemoteAccess: (payload) => postJson('/api/remote-access/vibe-cloud/pair', payload),
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
+    optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
     getAuthSession: () => getJson('/api/session'),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
