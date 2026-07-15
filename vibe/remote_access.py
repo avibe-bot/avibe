@@ -776,27 +776,27 @@ def _parse_timestamp(value: Any) -> float | None:
         return None
 
 
-def _reserve_recovery(thread: threading.Thread, trigger: str, *, manual: bool, now: float) -> bool:
+def _reserve_recovery(thread: threading.Thread, *, manual: bool, emergency: bool, now: float) -> bool:
     global _RECOVERY_THREAD, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
     with _RECOVERY_LOCK:
         if _RECOVERY_THREAD is not None or _state_connector("draining") is not None:
             return False
         next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
         cooling_down = next_attempt is not None and now < next_attempt
+        recent = [attempt for attempt in _RECOVERY_ATTEMPTS if attempt >= now - 30 * 60]
         if manual:
+            if len(recent) >= 2:
+                return False
             if cooling_down:
                 if _RECOVERY_MANUAL_BYPASS_USED:
                     return False
                 _RECOVERY_MANUAL_BYPASS_USED = True
             _RECOVERY_THREAD = thread
             return True
-        if cooling_down:
-            if trigger != "availability" or _RECOVERY_EMERGENCY_BYPASS_USED:
+        if cooling_down or len(recent) >= 2:
+            if not emergency or _RECOVERY_EMERGENCY_BYPASS_USED:
                 return False
             _RECOVERY_EMERGENCY_BYPASS_USED = True
-        recent = [attempt for attempt in _RECOVERY_ATTEMPTS if attempt >= now - 30 * 60]
-        if len(recent) >= 2:
-            return False
         _RECOVERY_THREAD = thread
         return True
 
@@ -873,7 +873,8 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
             name="vibe-tunnel-route-optimization",
             daemon=True,
         )
-        if not _reserve_recovery(thread, effective_trigger, manual=manual, now=now):
+        emergency = effective_trigger == "availability" and int(previous.get("ha_connections") or 0) == 0
+        if not _reserve_recovery(thread, manual=manual, emergency=emergency, now=now):
             return {**current, "ok": False, "error": "route_optimization_unavailable"}
         _RECOVERY_CANCEL_EVENT.clear()
         _set_recovery_state(state="evaluating", last_trigger=effective_trigger)
@@ -924,12 +925,13 @@ def _connector_ready_now(pid: int, metrics_url: str) -> bool:
 
 def _finish_recovery(
     *,
-    trigger: str,
+    trigger: str | None,
     result: str,
     previous_median: float | None,
     result_median: float | None,
 ) -> None:
     now = time.time()
+    _QUALITY_EVALUATOR.reset_healthy_samples()
     with _RECOVERY_LOCK:
         _RECOVERY_ATTEMPTS.append(now)
         del _RECOVERY_ATTEMPTS[:-100]
@@ -1169,8 +1171,11 @@ def _reconcile_draining_connector() -> None:
 def _finish_reconciled_recovery(result: str) -> None:
     recovery = _recovery_payload()
     previous_median = recovery.get("previous_median_rtt_ms")
+    trigger = recovery.get("last_trigger")
+    if trigger not in {"availability", "latency", "errors", "manual"}:
+        trigger = None
     _finish_recovery(
-        trigger=str(recovery.get("last_trigger") or "startup"),
+        trigger=trigger,
         result=result,
         previous_median=float(previous_median) if isinstance(previous_median, (int, float)) else None,
         result_median=None,
@@ -1302,6 +1307,13 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
         except Exception:
             _QUALITY_MONITOR_STARTED = False
             return
+
+
+def start_runtime_monitoring(config: V2Config | None = None) -> None:
+    """Ensure the UI-owned heartbeat and quality workers are running."""
+
+    start_status_heartbeat(config)
+    start_tunnel_quality_monitor()
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:

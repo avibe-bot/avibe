@@ -3,7 +3,13 @@ from __future__ import annotations
 from vibe import tunnel_quality
 
 
-def _sample(now: float, rtts: tuple[float, ...], *, connections: int = 4) -> tunnel_quality.MetricsSample:
+def _sample(
+    now: float,
+    rtts: tuple[float, ...],
+    *,
+    connections: int = 4,
+    timeout_losses: tuple[tuple[str, float], ...] = (),
+) -> tunnel_quality.MetricsSample:
     return tunnel_quality.MetricsSample(
         sampled_at=now,
         ready=connections > 0,
@@ -11,8 +17,9 @@ def _sample(now: float, rtts: tuple[float, ...], *, connections: int = 4) -> tun
         edge_locations=("sin01", "sin02"),
         smoothed_rtt_ms=rtts,
         request_errors_total=0,
-        packet_loss_total=0,
+        packet_loss_total=sum(value for _, value in timeout_losses),
         closed_connections_total=0,
+        timeout_packet_loss_by_connection=timeout_losses,
     )
 
 
@@ -29,6 +36,8 @@ quic_client_smoothed_rtt{conn_index="0"} 67
 quic_client_smoothed_rtt{conn_index="1"} 82
 # TYPE quic_client_lost_packets counter
 quic_client_lost_packets{conn_index="0",reason="timeout"} 3
+quic_client_lost_packets{conn_index="1",reason="timeout"} 5
+quic_client_lost_packets{conn_index="2",reason="reordering"} 100
 # TYPE quic_client_closed_connections counter
 quic_client_closed_connections 2
 """,
@@ -39,7 +48,8 @@ quic_client_closed_connections 2
     assert sample.edge_locations == ("sin12", "sin20")
     assert sample.smoothed_rtt_ms == (67, 82)
     assert sample.request_errors_total == 42
-    assert sample.packet_loss_total == 3
+    assert sample.packet_loss_total == 8
+    assert sample.timeout_packet_loss_by_connection == (("0", 3), ("1", 5))
     assert sample.closed_connections_total == 2
 
 
@@ -49,6 +59,23 @@ def test_latency_grade_uses_median_and_worst_active_path() -> None:
     assert tunnel_quality.latency_grade({"min": 60, "median": 190, "max": 400}) == "poor"
     assert tunnel_quality.latency_grade({"min": 60, "median": 349, "max": 700}) == "critical"
     assert tunnel_quality.latency_grade(None) == "unknown"
+
+
+def test_packet_loss_rate_requires_timeout_growth_on_two_connections() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    evaluator.update(_sample(100, (70, 75, 80, 85), timeout_losses=(("0", 0), ("1", 0))))
+
+    isolated = evaluator.update(_sample(160, (70, 75, 80, 85), timeout_losses=(("0", 12), ("1", 0))))
+
+    assert isolated["packet_loss_per_minute"] == 0
+
+    evaluator = tunnel_quality.QualityEvaluator()
+    evaluator.update(_sample(200, (70, 75, 80, 85), timeout_losses=(("0", 0), ("1", 0))))
+    distributed = evaluator.update(
+        _sample(260, (70, 75, 80, 85), timeout_losses=(("0", 6), ("1", 5)))
+    )
+
+    assert distributed["packet_loss_per_minute"] == 11
 
 
 def test_ra_tq_002_high_rtt_requires_three_minutes_before_recovery() -> None:
@@ -138,10 +165,12 @@ def test_error_candidate_requires_error_or_loss_improvement_not_rtt_improvement(
     }
     packet_loss_active = {**request_error_active, "request_errors_per_minute": 0, "packet_loss_per_minute": 10}
     reduced_loss_candidate = {**healthy_candidate, "packet_loss_per_minute": 4}
+    worse_tail_candidate = {**healthy_candidate, "rtt_ms": {"median": 150, "max": 300}}
 
     assert tunnel_quality.candidate_is_better(request_error_active, healthy_candidate, trigger="errors") is True
     assert tunnel_quality.candidate_is_better(packet_loss_active, reduced_loss_candidate, trigger="errors") is True
     assert tunnel_quality.candidate_is_better(packet_loss_active, packet_loss_active, trigger="errors") is False
+    assert tunnel_quality.candidate_is_better(request_error_active, worse_tail_candidate, trigger="errors") is False
 
 
 def test_availability_candidate_restores_partial_connection_set_without_rtt() -> None:

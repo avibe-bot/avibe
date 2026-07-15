@@ -14,7 +14,7 @@ from vibe.ui_compat import (
 )
 from starlette.websockets import WebSocketDisconnect
 
-from vibe import ui_server
+from vibe import remote_access, ui_server
 from vibe.ui_server import app
 from tests.test_api_save_config_merge import _full_config_payload
 from tests.ui_server_test_helpers import csrf_headers
@@ -327,6 +327,24 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
     assert data["setup_completed"] is False
     assert data["setup_state"]["needs_setup"] is True
     assert not paths.get_config_path().exists(), "GET must not persist a config file"
+
+
+def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", True)
+    monitoring = []
+    monkeypatch.setattr(remote_access, "start_runtime_monitoring", lambda config=None: monitoring.append(config))
+    client = app.test_client()
+
+    response = client.post(
+        "/api/config",
+        json=_full_config_payload(),
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert len(monitoring) == 1
+    assert monitoring[0].version == "v2"
 
 
 def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path):

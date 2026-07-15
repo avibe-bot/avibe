@@ -35,6 +35,7 @@ class MetricsSample:
     request_errors_total: float
     packet_loss_total: float
     closed_connections_total: float
+    timeout_packet_loss_by_connection: tuple[tuple[str, float], ...] = ()
 
 
 def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) -> MetricsSample:
@@ -63,6 +64,15 @@ def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) ->
             if float(sample.value) > 0 and sample.labels.get("edge_location")
         }
     )
+    timeout_losses: dict[str, float] = {}
+    loss_samples = values.get("quic_client_lost_packets_total") or values.get("quic_client_lost_packets") or []
+    for sample in loss_samples:
+        connection = sample.labels.get("conn_index")
+        reason = str(sample.labels.get("reason") or "").lower()
+        if connection is None or reason != "timeout":
+            continue
+        connection_key = str(connection)
+        timeout_losses[connection_key] = timeout_losses.get(connection_key, 0.0) + float(sample.value)
     return MetricsSample(
         sampled_at=now if now is not None else time.time(),
         ready=ready,
@@ -73,11 +83,12 @@ def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) ->
             0.0,
             scalar("cloudflared_tunnel_request_errors_total", "cloudflared_tunnel_request_errors"),
         ),
-        packet_loss_total=max(0.0, scalar("quic_client_lost_packets_total", "quic_client_lost_packets")),
+        packet_loss_total=max(0.0, sum(timeout_losses.values())),
         closed_connections_total=max(
             0.0,
             scalar("quic_client_closed_connections_total", "quic_client_closed_connections"),
         ),
+        timeout_packet_loss_by_connection=tuple(sorted(timeout_losses.items())),
     )
 
 
@@ -144,6 +155,9 @@ class QualityEvaluator:
     def healthy_samples(self) -> int:
         return self._healthy_samples
 
+    def reset_healthy_samples(self) -> None:
+        self._healthy_samples = 0
+
     def export_state(self) -> dict[str, Any]:
         return {
             "baseline_samples": [[timestamp, value] for timestamp, value in self._baseline_samples],
@@ -187,7 +201,13 @@ class QualityEvaluator:
             return 0.0, 0.0
         scale = 60.0 / elapsed
         errors = max(0.0, sample.request_errors_total - base.request_errors_total) * scale
-        losses = max(0.0, sample.packet_loss_total - base.packet_loss_total) * scale
+        current_losses = dict(sample.timeout_packet_loss_by_connection)
+        base_losses = dict(base.timeout_packet_loss_by_connection)
+        connection_losses = [
+            max(0.0, current_losses[connection] - base_losses[connection]) * scale
+            for connection in current_losses.keys() & base_losses.keys()
+        ]
+        losses = sum(connection_losses) if sum(loss > 0 for loss in connection_losses) >= 2 else 0.0
         return round(errors, 2), round(losses, 2)
 
     def update(
@@ -344,15 +364,21 @@ def candidate_is_better(active: dict[str, Any], candidate: dict[str, Any], *, tr
         return False
     if trigger == "availability" and int(active.get("ha_connections") or 0) < 4:
         return True
+    active_rtt = active.get("rtt_ms")
+    candidate_rtt = candidate.get("rtt_ms")
     if trigger == "errors":
+        if (
+            isinstance(active_rtt, dict)
+            and isinstance(candidate_rtt, dict)
+            and float(candidate_rtt.get("max") or 0) > float(active_rtt.get("max") or 0)
+        ):
+            return False
         return (
             float(candidate.get("request_errors_per_minute") or 0)
             < float(active.get("request_errors_per_minute") or 0)
             or float(candidate.get("packet_loss_per_minute") or 0)
             < float(active.get("packet_loss_per_minute") or 0)
         )
-    active_rtt = active.get("rtt_ms")
-    candidate_rtt = candidate.get("rtt_ms")
     if not isinstance(active_rtt, dict) or not isinstance(candidate_rtt, dict):
         return False
     active_median = float(active_rtt.get("median") or 0)

@@ -134,6 +134,32 @@ def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_pa
     assert len(started) == 1
 
 
+def test_zero_connection_recovery_bypasses_attempt_budget_once(monkeypatch) -> None:
+    now = time.time()
+    first_thread = object()
+    second_thread = object()
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+        remote_access._RECOVERY_ATTEMPTS[:] = [now - 10, now - 5]
+        remote_access._RECOVERY_STATE["next_attempt_at"] = remote_access.tunnel_quality.utc_timestamp(now + 900)
+        remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+
+    try:
+        first = remote_access._reserve_recovery(first_thread, manual=False, emergency=True, now=now)
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+        second = remote_access._reserve_recovery(second_thread, manual=False, emergency=True, now=now)
+    finally:
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+            remote_access._RECOVERY_ATTEMPTS.clear()
+            remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
+            remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+
+    assert first is True
+    assert second is False
+
+
 def test_optimize_route_does_not_start_without_fresh_active_sample(monkeypatch) -> None:
     monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": True})
     monkeypatch.setattr(remote_access, "_fresh_active_comparison_snapshot", lambda *args, **kwargs: None)
@@ -390,6 +416,47 @@ def test_startup_resets_inflight_recovery_without_connector(monkeypatch, tmp_pat
     assert recovery["last_result"] == "failed"
     assert recovery["last_trigger"] == "errors"
     assert recovery["next_attempt_at"] is not None
+
+
+def test_recovery_completion_restarts_healthy_reset_window(monkeypatch) -> None:
+    evaluator = remote_access.tunnel_quality.QualityEvaluator()
+    for index in range(120):
+        evaluator.update(
+            remote_access.tunnel_quality.MetricsSample(
+                sampled_at=100 + index * 15,
+                ready=True,
+                ha_connections=4,
+                edge_locations=("sin01", "sin02"),
+                smoothed_rtt_ms=(70, 75, 80, 85),
+                request_errors_total=0,
+                packet_loss_total=0,
+                closed_connections_total=0,
+            )
+        )
+    monkeypatch.setattr(remote_access, "_QUALITY_EVALUATOR", evaluator)
+    monkeypatch.setattr(remote_access, "_set_recovery_state", lambda **changes: changes)
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+
+    remote_access._finish_recovery(
+        trigger="manual",
+        result="no_improvement",
+        previous_median=77.5,
+        result_median=77.5,
+    )
+
+    assert evaluator.healthy_samples == 0
+
+
+def test_reconciled_recovery_uses_only_contract_trigger_values(monkeypatch) -> None:
+    captured = []
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_STATE.clear()
+        remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: captured.append(result))
+
+    remote_access._finish_reconciled_recovery("failed")
+
+    assert captured[0]["trigger"] is None
 
 
 def test_ra_tq_009_restart_promotes_ready_candidate(monkeypatch, tmp_path) -> None:

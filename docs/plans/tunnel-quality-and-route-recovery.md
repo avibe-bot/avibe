@@ -139,7 +139,8 @@ The active connector quality evaluator consumes:
 - `cloudflared_tunnel_request_errors` counter delta;
 - `quic_client_smoothed_rtt` per connection;
 - `quic_client_latest_rtt` per connection;
-- `quic_client_lost_packets` counter delta, grouped by connection and reason;
+- `quic_client_lost_packets` timeout counter delta, requiring positive deltas
+  on at least two connections in the same rate window;
 - `quic_client_closed_connections` counter delta; and
 - `/ready` as a startup/readiness gate.
 
@@ -274,7 +275,8 @@ Additional rules:
   cannot create a second concurrent candidate. Its promotion criteria follow
   the active degradation signal (availability, errors/loss, or latency), while
   `manual` remains only the cooldown-bypass reason.
-- Thirty healthy minutes reset the episode and attempt count.
+- Thirty healthy minutes after the latest attempt reset the episode and attempt
+  count.
 - Service restart resumes persisted cooldown instead of immediately retrying.
 - When the active connector has zero ready connections, availability restoration
   takes priority over cooldown; one emergency candidate attempt is allowed.
