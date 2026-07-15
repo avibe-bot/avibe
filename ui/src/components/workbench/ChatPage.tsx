@@ -1637,7 +1637,7 @@ const ActivityStrip: React.FC<{ state: SessionRuntimeState }> = ({ state }) => {
     active.length > 0 &&
     (state.connection === 'reconnecting' || state.connection === 'disconnected');
   return (
-    <div className="shrink-0 px-4 pt-2 md:px-8">
+    <div className="shrink-0 px-4 py-2 md:px-8">
       <div className="mx-auto flex w-full max-w-[1080px]">
         <StatusPill
           tone="running"
