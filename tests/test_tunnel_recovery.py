@@ -149,6 +149,62 @@ def test_optimize_route_does_not_start_without_fresh_active_sample(monkeypatch) 
     assert result["error"] == "route_optimization_unavailable"
 
 
+def test_manual_optimization_uses_active_availability_trigger(monkeypatch) -> None:
+    now = time.time()
+    quality = {
+        **_quality(250),
+        "state": "degraded",
+        "ha_connections": 3,
+        "sampled_at": remote_access.tunnel_quality.utc_timestamp(now),
+        "rtt_ms": None,
+    }
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": True, "tunnel_quality": quality})
+    monkeypatch.setattr(remote_access, "_set_recovery_state", lambda **changes: changes)
+    monkeypatch.setattr(remote_access.threading, "Thread", FakeThread)
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+        remote_access._RECOVERY_STATE.clear()
+        remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
+
+    try:
+        result = remote_access.optimize_route(trigger="manual")
+    finally:
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+
+    assert result["ok"] is True
+    assert len(started) == 1
+    assert started[0].kwargs["args"][1] == "availability"
+
+
+def test_error_recovery_accepts_fresh_http2_snapshot_without_rtt() -> None:
+    now = time.time()
+    quality = {
+        **_quality(250),
+        "state": "degraded",
+        "sampled_at": remote_access.tunnel_quality.utc_timestamp(now),
+        "rtt_ms": None,
+        "request_errors_per_minute": 3,
+    }
+
+    refreshed = remote_access._fresh_active_comparison_snapshot(
+        {"tunnel_quality": quality},
+        trigger="errors",
+        now=now,
+    )
+
+    assert refreshed == quality
+
+
 def test_stale_active_snapshot_is_refreshed_before_comparison(monkeypatch, tmp_path) -> None:
     _setup_recovery(monkeypatch, tmp_path, _quality(180))
     now = time.time()
@@ -296,6 +352,44 @@ def test_restart_removes_candidate_recorded_only_in_pid_file(monkeypatch, tmp_pa
     assert reconciled["candidate"] is None
     assert not remote_access._candidate_pid_path().exists()
     assert stopped == [candidate_pid]
+
+
+def test_restart_clears_candidate_pid_when_it_is_already_active(monkeypatch, tmp_path) -> None:
+    _, active_pid, _, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    remote_access._candidate_pid_path().write_text(str(active_pid), encoding="utf-8")
+    stopped = []
+    recovery_results = []
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=8: stopped.append(pid) or True)
+    monkeypatch.setattr(remote_access, "_finish_reconciled_recovery", lambda result: recovery_results.append(result))
+
+    remote_access._reconcile_orphan_candidate()
+
+    assert active_pid in alive
+    assert stopped == []
+    assert not remote_access._candidate_pid_path().exists()
+    assert recovery_results == ["improved"]
+
+
+def test_startup_resets_inflight_recovery_without_connector(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_STATE.clear()
+        remote_access._RECOVERY_STATE.update(
+            {
+                **remote_access.tunnel_quality.empty_recovery(),
+                "state": "evaluating",
+                "last_trigger": "errors",
+            }
+        )
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+
+    remote_access._normalize_orphaned_recovery_state()
+
+    recovery = remote_access._recovery_payload()
+    assert recovery["state"] == "cooldown"
+    assert recovery["last_result"] == "failed"
+    assert recovery["last_trigger"] == "errors"
+    assert recovery["next_attempt_at"] is not None
 
 
 def test_ra_tq_009_restart_promotes_ready_candidate(monkeypatch, tmp_path) -> None:

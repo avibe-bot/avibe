@@ -451,6 +451,19 @@ def _running_signature(pid: int | None) -> dict[str, str] | None:
     }
 
 
+def _running_connector_has_metrics(pid: int | None) -> bool:
+    active = _state_connector("active") or {}
+    metrics_url = active.get("metrics_url")
+    if active.get("pid") != pid or not isinstance(metrics_url, str) or not metrics_url:
+        return False
+    try:
+        command = runtime.get_process_command(pid)
+        arguments = shlex.split(command, posix=os.name != "nt") if command else []
+    except (OSError, ValueError):
+        return False
+    return any(argument == "--metrics" or argument.startswith("--metrics=") for argument in arguments)
+
+
 def tunnel_quality_snapshot() -> dict[str, Any] | None:
     with _QUALITY_SNAPSHOT_LOCK:
         if _QUALITY_SNAPSHOT is not None and _QUALITY_SNAPSHOT_PATH == _quality_state_path():
@@ -813,7 +826,7 @@ def _fresh_active_comparison_snapshot(
         if (
             age is not None
             and -5 <= age <= QUALITY_COMPARISON_MAX_AGE_SECONDS
-            and (trigger == "availability" or isinstance(rtt, dict))
+            and (trigger in {"availability", "errors", "manual"} or isinstance(rtt, dict))
         ):
             return json.loads(json.dumps(quality))
 
@@ -831,7 +844,7 @@ def _fresh_active_comparison_snapshot(
         connector_count=1,
         recovery=_recovery_payload(),
     )
-    if trigger != "availability" and not isinstance(snapshot.get("rtt_ms"), dict):
+    if trigger not in {"availability", "errors", "manual"} and not isinstance(snapshot.get("rtt_ms"), dict):
         return None
     return snapshot
 
@@ -848,17 +861,22 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
     previous = _fresh_active_comparison_snapshot(current, trigger=trigger, now=now)
     if previous is None:
         return {**current, "ok": False, "error": "route_optimization_unavailable"}
+    effective_trigger = trigger
+    if manual:
+        effective_trigger = _QUALITY_EVALUATOR.recovery_trigger(previous) or "manual"
+        if effective_trigger == "manual" and not isinstance(previous.get("rtt_ms"), dict):
+            return {**current, "ok": False, "error": "route_optimization_unavailable"}
     try:
         thread = threading.Thread(
             target=_run_route_optimization,
-            args=(config, trigger, previous),
+            args=(config, effective_trigger, previous),
             name="vibe-tunnel-route-optimization",
             daemon=True,
         )
-        if not _reserve_recovery(thread, trigger, manual=manual, now=now):
+        if not _reserve_recovery(thread, effective_trigger, manual=manual, now=now):
             return {**current, "ok": False, "error": "route_optimization_unavailable"}
         _RECOVERY_CANCEL_EVENT.clear()
-        _set_recovery_state(state="evaluating", last_trigger=trigger)
+        _set_recovery_state(state="evaluating", last_trigger=effective_trigger)
         thread.start()
     except Exception as exc:
         with _RECOVERY_LOCK:
@@ -1148,6 +1166,17 @@ def _reconcile_draining_connector() -> None:
     _replace_state_connector("draining", None)
 
 
+def _finish_reconciled_recovery(result: str) -> None:
+    recovery = _recovery_payload()
+    previous_median = recovery.get("previous_median_rtt_ms")
+    _finish_recovery(
+        trigger=str(recovery.get("last_trigger") or "startup"),
+        result=result,
+        previous_median=float(previous_median) if isinstance(previous_median, (int, float)) else None,
+        result_median=None,
+    )
+
+
 def _reconcile_orphan_candidate() -> None:
     """Resolve a candidate left by a previous service process without risking the active route."""
 
@@ -1163,6 +1192,16 @@ def _reconcile_orphan_candidate() -> None:
     active = _state_connector("active") or {}
     active_pid = active.get("pid") if isinstance(active.get("pid"), int) else _read_pid()
     active_state = _cloudflared_pid_state(active_pid)
+
+    if candidate_pid == active_pid:
+        with _CONNECTOR_LOCK:
+            state = _read_state() or {}
+            if isinstance(state.get("candidate"), dict) and state["candidate"].get("pid") == candidate_pid:
+                state["candidate"] = None
+                runtime.write_json(_state_path(), state)
+            _candidate_pid_path().unlink(missing_ok=True)
+        _finish_reconciled_recovery("improved")
+        return
 
     if candidate_state == "cloudflared" and active_state != "cloudflared":
         if active_state == "unknown":
@@ -1185,7 +1224,7 @@ def _reconcile_orphan_candidate() -> None:
                 runtime.write_json(_state_path(), state)
                 _pid_path().write_text(str(candidate_pid), encoding="utf-8")
                 _candidate_pid_path().unlink(missing_ok=True)
-            _set_recovery_state(state="cooldown", last_result="improved")
+            _finish_reconciled_recovery("improved")
             return
         if not runtime.stop_pid(candidate_pid, timeout=8):
             logger.warning("Could not stop unready orphan Tunnel candidate pid=%s", candidate_pid)
@@ -1203,7 +1242,20 @@ def _reconcile_orphan_candidate() -> None:
         if _state_path().exists():
             _replace_state_connector("candidate", None)
         _candidate_pid_path().unlink(missing_ok=True)
-    _set_recovery_state(state="cooldown", last_result="failed")
+    _finish_reconciled_recovery("failed")
+
+
+def _normalize_orphaned_recovery_state() -> None:
+    recovery = _recovery_payload()
+    if recovery.get("state") not in {"evaluating", "draining"}:
+        return
+    if (
+        _state_connector("candidate") is not None
+        or _state_connector("draining") is not None
+        or _read_pid_file(_candidate_pid_path()) is not None
+    ):
+        return
+    _finish_reconciled_recovery("failed")
 
 
 def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECONDS) -> None:
@@ -1236,6 +1288,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                 _RECOVERY_EMERGENCY_BYPASS_USED = bool(persisted.get("emergency_bypass_used"))
         _reconcile_draining_connector()
         _reconcile_orphan_candidate()
+        _normalize_orphaned_recovery_state()
         quality_path = _quality_state_path()
         try:
             thread = threading.Thread(
@@ -1341,7 +1394,7 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         if current.get("running"):
             running_sig = _running_signature(current.get("pid"))
             desired_sig = _runtime_signature(config, binary)
-            if running_sig == desired_sig:
+            if running_sig == desired_sig and _running_connector_has_metrics(current.get("pid")):
                 _report_runtime_status_async(config, event="start")
                 return {**current, "ok": True, "started": False}
             stop_result = stop(config)

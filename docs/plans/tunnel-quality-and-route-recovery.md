@@ -115,7 +115,8 @@ cloudflared tunnel --metrics 127.0.0.1:<allocated-port> --no-autoupdate run
 The selected port is persisted with that connector. Avibe must not guess that
 the endpoint is always `20241`, because cloudflared can select `20242-20245` or
 a random port. Active and candidate connectors must use distinct ports and log
-files.
+files. On upgrade, a running managed connector without both a persisted metrics
+address and the `--metrics` argument is restarted once to enter this model.
 
 Use a Prometheus text-format parser rather than regular expressions. Scrape
 timeouts are 500 ms and failures never block API or Doctor requests.
@@ -270,7 +271,9 @@ Additional rules:
 - Never run more than one candidate.
 - Never run more than two attempts in a rolling 30-minute window.
 - A manual Optimize Route action may bypass the current cooldown once, but it
-  cannot create a second concurrent candidate.
+  cannot create a second concurrent candidate. Its promotion criteria follow
+  the active degradation signal (availability, errors/loss, or latency), while
+  `manual` remains only the cooldown-bypass reason.
 - Thirty healthy minutes reset the episode and attempt count.
 - Service restart resumes persisted cooldown instead of immediately retrying.
 - When the active connector has zero ready connections, availability restoration
@@ -340,9 +343,12 @@ Connector state writes are atomic. On startup:
 - discard dead/stale records without signalling unrelated processes;
 - if active and candidate both remain, retain the active connector and stop the
   orphan candidate;
-- if only the candidate remains and is ready, promote it; and
+- if only the candidate remains and is ready, promote it;
 - retry cleanup of a recorded draining connector without losing its PID when
-  termination cannot be verified; and
+  termination cannot be verified;
+- reset persisted `evaluating` or `draining` recovery state to a failed
+  cooldown when no matching candidate or draining connector survives startup;
+  and
 - never clear shared logs or state belonging to the surviving connector.
 
 ## Doctor Integration
