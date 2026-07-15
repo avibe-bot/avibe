@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -13,11 +14,12 @@ from modules.im.discord import DiscordBot
 def test_discord_runtime_retries_startup_failure_with_backoff(monkeypatch) -> None:
     bot = DiscordBot(DiscordConfig(bot_token="test-token"))
     waits: list[float] = []
+    attempts: list[FakeDiscordClient] = []
+    clients: list[FakeDiscordClient] = []
 
     class FakeDiscordClient:
         def __init__(self) -> None:
-            self.attempts = 0
-            self.clear = Mock()
+            self.http = SimpleNamespace(connector=None)
 
         async def __aenter__(self):
             return self
@@ -26,27 +28,32 @@ def test_discord_runtime_retries_startup_failure_with_backoff(monkeypatch) -> No
             return None
 
         async def start(self, _token: str) -> None:
-            self.attempts += 1
-            if self.attempts < 3:
+            attempts.append(self)
+            if len(attempts) < 3:
                 raise ConnectionResetError("discord unavailable")
             bot._stop_event.set()
 
-    client = FakeDiscordClient()
-    bot.client = client
+    def new_client() -> FakeDiscordClient:
+        client = FakeDiscordClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(bot, "_new_client", new_client)
+    bot.client = new_client()
 
     monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda _configured: None)
     monkeypatch.setattr(bot._stop_event, "wait", lambda delay: waits.append(delay) or False)
 
     bot.run()
 
-    assert client.attempts == 3
+    assert len(attempts) == 3
+    assert attempts == clients
     assert waits == [1.0, 2.0]
-    assert client.clear.call_count == 2
 
 
 def test_discord_runtime_stop_interrupts_retry_wait(monkeypatch) -> None:
     bot = DiscordBot(DiscordConfig(bot_token="test-token"))
-    clear = Mock()
+    new_client = Mock()
 
     def fake_asyncio_run(coro) -> None:
         coro.close()
@@ -58,8 +65,59 @@ def test_discord_runtime_stop_interrupts_retry_wait(monkeypatch) -> None:
 
     monkeypatch.setattr("modules.im.discord.asyncio.run", fake_asyncio_run)
     monkeypatch.setattr(bot._stop_event, "wait", stop_during_wait)
-    monkeypatch.setattr(bot.client, "clear", clear)
+    monkeypatch.setattr(bot, "_new_client", new_client)
 
     bot.run()
 
-    clear.assert_not_called()
+    new_client.assert_not_called()
+
+
+def test_discord_runtime_preserves_stop_requested_before_thread_start(monkeypatch) -> None:
+    bot = DiscordBot(DiscordConfig(bot_token="test-token"))
+    asyncio_run = Mock(side_effect=AssertionError("stopped runtime must not start"))
+    monkeypatch.setattr("modules.im.discord.asyncio.run", asyncio_run)
+
+    bot.stop()
+    bot.run()
+
+    asyncio_run.assert_not_called()
+
+
+def test_discord_runtime_replaces_client_after_proxy_setup_failure(monkeypatch) -> None:
+    bot = DiscordBot(DiscordConfig(bot_token="test-token"))
+    clients: list[FakeDiscordClient] = []
+    starts: list[FakeDiscordClient] = []
+    proxy_urls = iter(["socks5://bad proxy", None])
+
+    class FakeDiscordClient:
+        def __init__(self) -> None:
+            self.http = SimpleNamespace(connector=None)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def start(self, _token: str) -> None:
+            starts.append(self)
+            bot._stop_event.set()
+
+    def new_client() -> FakeDiscordClient:
+        client = FakeDiscordClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(bot, "_new_client", new_client)
+    bot.client = new_client()
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda _configured: next(proxy_urls))
+    monkeypatch.setattr(
+        "aiohttp_socks.ProxyConnector.from_url",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid proxy URL")),
+    )
+    monkeypatch.setattr(bot._stop_event, "wait", lambda _delay: False)
+
+    bot.run()
+
+    assert len(clients) == 2
+    assert starts == [clients[1]]

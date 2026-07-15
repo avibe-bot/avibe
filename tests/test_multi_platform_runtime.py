@@ -247,7 +247,7 @@ def test_multi_im_client_remove_last_client_restores_workbench_formatter():
     assert "Warning" in client.formatter.format_warning("heads up")
 
 
-def test_multi_im_client_remove_pending_platform_completes_ready():
+def test_multi_im_client_first_connected_transport_completes_ready_once():
     slack = _StubClient("slack")
     discord = _StubClient("discord")
     client = MultiIMClient({"slack": slack, "discord": discord}, primary_platform="slack")
@@ -260,7 +260,7 @@ def test_multi_im_client_remove_pending_platform_completes_ready():
 
     assert slack.on_ready_callback is not None
     asyncio.run(slack.on_ready_callback())
-    assert ready_calls == []
+    assert ready_calls == [True]
 
     removed = client.remove_client("discord")
 
@@ -268,7 +268,7 @@ def test_multi_im_client_remove_pending_platform_completes_ready():
     assert ready_calls == [True]
 
 
-def test_multi_im_client_remove_last_pending_platform_completes_empty_ready():
+def test_multi_im_client_remove_before_runtime_start_does_not_emit_ready():
     slack = _StubClient("slack")
     client = MultiIMClient({"slack": slack}, primary_platform="slack")
     ready_calls: list[bool] = []
@@ -281,7 +281,31 @@ def test_multi_im_client_remove_last_pending_platform_completes_empty_ready():
     removed = client.remove_client("slack")
 
     assert removed is slack
+    assert ready_calls == []
+
+
+def test_multi_im_client_run_emits_ready_while_transports_are_unavailable():
+    slack = _StubClient("slack", run_until_stopped=True)
+    discord = _StubClient("discord", run_until_stopped=True)
+    client = MultiIMClient({"slack": slack, "discord": discord}, primary_platform="slack")
+    ready = threading.Event()
+    ready_calls: list[bool] = []
+
+    async def on_ready():
+        ready_calls.append(True)
+        ready.set()
+
+    client.register_callbacks(on_ready=on_ready)
+    thread = threading.Thread(target=client.run, daemon=True)
+    thread.start()
+
+    assert ready.wait(timeout=2)
+    assert client._ready_platforms == set()
     assert ready_calls == [True]
+
+    client.stop()
+    thread.join(timeout=2)
+    assert thread.is_alive() is False
 
 
 def test_multi_im_client_run_stays_alive_when_all_enabled_threads_exit():
@@ -1921,8 +1945,7 @@ def test_multi_im_client_routes_dismiss_form_message_by_context_platform():
     assert lark.dismissed == [("lark", "om_456")]
 
 
-def test_multi_im_client_on_ready_fires_only_after_all_platforms():
-    """on_ready callback must wait for all platform clients to be ready."""
+def test_multi_im_client_transport_ready_callbacks_do_not_repeat_runtime_ready():
     slack = _StubClient("slack")
     wechat = _StubClient("wechat")
     client = MultiIMClient({"slack": slack, "wechat": wechat}, primary_platform="slack")
@@ -1934,18 +1957,18 @@ def test_multi_im_client_on_ready_fires_only_after_all_platforms():
 
     client.register_callbacks(on_message=None, on_ready=_on_ready)
 
-    # Simulate only Slack becoming ready — on_ready should NOT fire yet
+    # The first connected transport can win the race with run() and emit runtime
+    # readiness. Later transport callbacks only update connectivity state.
     slack_on_ready = slack.on_ready_callback
     assert slack_on_ready is not None
     asyncio.run(slack_on_ready())
-    assert ready_calls == [], "on_ready fired before all platforms were ready"
+    assert ready_calls == [True]
 
-    # Now simulate WeChat becoming ready — on_ready should fire exactly once
     wechat_on_ready = wechat.on_ready_callback
     assert wechat_on_ready is not None
     asyncio.run(wechat_on_ready())
-    assert ready_calls == [True], "on_ready should fire exactly once after all platforms are ready"
+    assert ready_calls == [True]
+    assert client._ready_platforms == {"slack", "wechat"}
 
-    # Calling again should not fire a second time
     asyncio.run(wechat_on_ready())
-    assert len(ready_calls) == 1, "on_ready should not fire more than once"
+    assert len(ready_calls) == 1

@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+from core.controller import Controller
+
+
+def test_runtime_services_start_when_post_update_notification_fails() -> None:
+    controller = Controller.__new__(Controller)
+    controller.agent_service = SimpleNamespace(agents={})
+    controller.update_checker = SimpleNamespace(
+        check_and_send_post_update_notification=AsyncMock(side_effect=ConnectionError("transport unavailable")),
+        start=Mock(),
+    )
+    controller.scheduled_task_service = SimpleNamespace(start=Mock())
+    controller.watch_service = SimpleNamespace(start=Mock())
+    controller.runtime_command_watcher = SimpleNamespace(start=AsyncMock())
+    controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
+    controller.cleanup_task = None
+
+    asyncio.run(controller._on_im_ready())
+
+    controller.update_checker.start.assert_called_once_with()
+    controller.scheduled_task_service.start.assert_called_once_with()
+    controller.watch_service.start.assert_called_once_with()
+    controller.runtime_command_watcher.start.assert_awaited_once_with()

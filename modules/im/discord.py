@@ -74,7 +74,8 @@ class DiscordBot(BaseIMClient):
         intents.dm_messages = True
         intents.reactions = True
 
-        self.client = discord.Client(intents=intents)
+        self._intents = intents
+        self.client = self._new_client()
         self.formatter = DiscordFormatter()
 
         self.settings_manager = None
@@ -87,8 +88,11 @@ class DiscordBot(BaseIMClient):
         self._callback_dedupe_ttl_seconds = 3.0
         self._stop_event = threading.Event()
 
-        self.client.on_ready = self._on_ready_event
-        self.client.on_message = self._on_message_event
+    def _new_client(self) -> discord.Client:
+        client = discord.Client(intents=self._intents)
+        client.on_ready = self._on_ready_event
+        client.on_message = self._on_message_event
+        return client
 
     def set_settings_manager(self, settings_manager):
         self.settings_manager = settings_manager
@@ -329,8 +333,6 @@ class DiscordBot(BaseIMClient):
         if not self.config.bot_token:
             raise ValueError("Discord bot token is required")
 
-        self._stop_event.clear()
-
         async def _run():
             self._loop = asyncio.get_running_loop()
             # Inject proxy connector inside the event loop (required by
@@ -373,7 +375,9 @@ class DiscordBot(BaseIMClient):
 
             if self._stop_event.wait(retry_delay):
                 return
-            self.client.clear()
+            if self._stop_event.is_set():
+                return
+            self.client = self._new_client()
             retry_delay = min(retry_delay * 2, _RUNTIME_RETRY_MAX_SECONDS)
 
     def stop(self) -> None:
@@ -381,8 +385,9 @@ class DiscordBot(BaseIMClient):
         loop = getattr(self, "_loop", None)
         if loop is None or loop.is_closed():
             return
+        client = self.client
         try:
-            loop.call_soon_threadsafe(lambda: loop.create_task(self.client.close()))
+            loop.call_soon_threadsafe(lambda: loop.create_task(client.close()))
         except Exception:
             logger.exception("Failed to stop Discord client")
 

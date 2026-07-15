@@ -242,31 +242,15 @@ class MultiIMClient(BaseIMClient):
         async def _wrapped(*args: Any, **kwargs: Any):
             with self._ready_lock:
                 self._ready_platforms.add(platform)
-            if self._mark_ready_if_complete():
+                should_emit = not self._ready_emitted
+                self._ready_emitted = True
+            logger.info("IM transport ready: %s", platform)
+            if should_emit:
                 await callback(*args, **kwargs)
 
         return _wrapped
 
-    def _mark_ready_if_complete(self) -> bool:
-        """Return True once when all currently registered clients are ready."""
-        with self._ready_lock:
-            client_count = len(self._client_snapshot())
-            logger.info(
-                "IM runtime ready progress (%d/%d)",
-                len(self._ready_platforms),
-                client_count,
-            )
-            if client_count > 0 and not self._ready_emitted and len(self._ready_platforms) >= client_count:
-                self._ready_emitted = True
-                return True
-        return False
-
-    def _aggregate_ready_callback(self) -> Optional[Callable]:
-        if self._registered_callbacks is None:
-            return None
-        return self._registered_callbacks[3].get("on_ready")
-
-    def _fire_aggregate_ready_from_thread(self, callback: Callable) -> None:
+    def _fire_runtime_ready_from_thread(self, callback: Callable) -> None:
         async def _call_ready() -> None:
             result = callback()
             if inspect.isawaitable(result):
@@ -275,26 +259,17 @@ class MultiIMClient(BaseIMClient):
         try:
             asyncio.run(_call_ready())
         except Exception:
-            logger.exception("MultiIMClient aggregate on_ready callback failed")
+            logger.exception("MultiIMClient runtime on_ready callback failed")
 
-    def _emit_empty_ready_once(self) -> None:
+    def _emit_runtime_ready_once(self) -> None:
         callback = getattr(self, "on_ready_callback", None)
         if callback is None:
             return
         with self._ready_lock:
-            if self._ready_emitted or self.clients:
+            if self._ready_emitted:
                 return
             self._ready_emitted = True
-
-        async def _call_ready() -> None:
-            result = callback()
-            if inspect.isawaitable(result):
-                await result
-
-        try:
-            asyncio.run(_call_ready())
-        except Exception:
-            logger.exception("MultiIMClient empty-runtime on_ready callback failed")
+        self._fire_runtime_ready_from_thread(callback)
 
     @staticmethod
     def _annotate_context(platform: str, context: MessageContext) -> None:
@@ -445,8 +420,10 @@ class MultiIMClient(BaseIMClient):
                 thread = threading.Thread(target=self._run_client, args=(platform, client), daemon=True)
                 thread.start()
                 self._threads[platform] = thread
-            if not self.clients:
-                self._emit_empty_ready_once()
+        # Core services belong to the aggregate Avibe runtime, not to the
+        # connectivity state of every external transport. Individual clients
+        # may still be connecting or retrying after this callback fires.
+        self._emit_runtime_ready_once()
 
         try:
             # Platform runtimes are failure-isolated from the service lifecycle.
@@ -534,8 +511,6 @@ class MultiIMClient(BaseIMClient):
                 logger.error("%s; hot-remove failed", message)
                 raise IMClientRemovalError(message)
 
-            ready_callback = None
-            emit_empty_ready = False
             with self._clients_lock:
                 self.clients.pop(platform, None)
                 self._threads.pop(platform, None)
@@ -548,19 +523,12 @@ class MultiIMClient(BaseIMClient):
                         self.formatter = next_client.formatter
                 else:
                     self._use_workbench_fallback_runtime()
-                    emit_empty_ready = True
         except Exception:
             with self._clients_lock:
                 self._removing_platforms.discard(platform)
             raise
         with self._ready_lock:
             self._ready_platforms.discard(platform)
-        if emit_empty_ready:
-            self._emit_empty_ready_once()
-        elif self._mark_ready_if_complete():
-            ready_callback = self._aggregate_ready_callback()
-        if ready_callback is not None:
-            self._fire_aggregate_ready_from_thread(ready_callback)
         logger.info("Hot-removed IM platform %s", platform)
         return client
 

@@ -824,11 +824,12 @@ class Controller:
                 loop.call_soon_threadsafe(loop.stop)
 
     async def _on_im_ready(self):
-        """Called when IM client is connected and ready.
+        """Called once when the aggregate IM/workbench runtime has started.
 
-        Used to restore active poll loops that were interrupted by restart.
+        External transports may still be connecting or retrying. Core services
+        must remain available in that degraded state.
         """
-        logger.info("IM client ready, checking for active polls to restore...")
+        logger.info("IM runtime ready, checking for active polls to restore...")
         opencode_agent = self.agent_service.agents.get("opencode")
         if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
             try:
@@ -838,9 +839,13 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
-        # Start update checker and send any pending post-update notification
+        # Notification delivery may fail while an external transport is still
+        # connecting. That must not prevent the checker itself from starting.
         try:
             await self.update_checker.check_and_send_post_update_notification()
+        except Exception as e:
+            logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
+        try:
             self.update_checker.start()
         except Exception as e:
             logger.error(f"Failed to start update checker: {e}", exc_info=True)
