@@ -578,14 +578,26 @@ Four acceptance items from the merged §7.1f/g work, one PR.
    every row and both views regardless of button contents.
 2. **Title open icon → `arrow-up-right`.** The ShowPage-row open affordance
    swapped `AppWindow` → lucide `ArrowUpRight` (same hover affordance).
-3. **BUG: Dock AI-page tiles couldn't drag** (built-ins reordered fine). Root
-   cause (git-bisected to #906): the tile's favicon `<img>` — added by §7.1f —
-   has default `pointer-events: auto`, so it captured the pointerdown and
-   framer-motion's `Reorder.Item` drag never initiated (`draggable={false}`
-   disables only native image DnD, not pointer capture). Letter tiles (bare
-   text) were unaffected. Fix at the shared avatar: `pointer-events-none
-   select-none` on the decorative `<img>` so the press passes through to the
-   tile/row (every surface that shares `ShowPageAvatarContent` inherits it).
+3. **BUG: Dock AI-page tiles couldn't drag** (built-ins reordered fine).
+   **CORRECTED root cause (2026-07-15, proven by live CDP real-input on the
+   regression env — the earlier `<img>` pointer-events theory was WRONG and its
+   fix made things worse):** framer-motion `Reorder.Item` pan does NOT start when
+   the real press target is the interactive `<button>` itself; it starts only when
+   the press lands on a non-interactive CHILD. Evidence: (a) a builtin press hit-
+   tests to the `<svg>` child and drags; a pinned press hit-tests to the button
+   itself and never starts a drag (no move, no `onReorder`, no PUT); (b) the letter
+   rendered as a BARE TEXT NODE (`ShowPageAvatarContent` returned a string), so
+   there was no child to land on; (c) injecting an `<svg>` child into a pinned
+   tile's button made the same gesture work instantly (order changed + `PUT
+   /api/dock/order` 200). The §7.1h(#907) `pointer-events-none` on the `<img>` was
+   counter-productive — it pushed the press back onto the button, re-breaking drag
+   for icon tiles. **Fix (§7.1h follow-up):** in `ShowPageAvatarContent`, wrap the
+   letter in a FILLING `<span aria-hidden>` (never a bare text node) and REVERT the
+   `<img>` `pointer-events-none` (keep `draggable={false}` — that alone stops native
+   image DnD, #906's concern — + `select-none`). Invariant: the tile button must
+   never be the direct press target; the avatar content must be a filling child
+   element, with no `pointer-events-none` anywhere in the chain. Verified live by
+   the owner via the same CDP method post-merge (residual manual check).
 4. **Icon coverage gap** — agent-built pages ship no `<link rel=icon>`, so
    nothing showed.
    - **(a) Conventional-file fallback** (`core/show_pages.py`): when index.html

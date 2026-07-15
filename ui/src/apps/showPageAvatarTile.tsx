@@ -22,6 +22,14 @@ import { showPageAvatar, showPageIconUrl } from './showPageAvatar';
 // bytes-or-404 race window, a network blip), exactly the case worth retrying. The
 // count is keyed to the URL, so a new versioned URL retries with a fresh budget.
 const MAX_ICON_LOAD_ATTEMPTS = 3;
+// INVARIANT (proven by live CDP real-input on the regression env, §7.1h item 3): in
+// the Dock a tile is a framer-motion Reorder.Item, and its drag pan does NOT start
+// when the real press target is the interactive <button> itself — only when the press
+// lands on a non-interactive CHILD element. So the tile button must never be the
+// direct press target: the avatar content MUST render as a FILLING child element —
+// never a bare text node, and never `pointer-events-none` (which pushes the press
+// back through to the button and re-breaks drag). Built-in tiles already render an
+// <svg> child; here both the icon <img> and the letter fill the tile as real children.
 export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: string }> = ({ iconUrl, letter }) => {
   const [failure, setFailure] = useState<{ url: string; attempts: number } | null>(null);
   const attempts = failure && failure.url === iconUrl ? failure.attempts : 0;
@@ -31,20 +39,22 @@ export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: s
         key={`${iconUrl}#${attempts}`}
         src={iconUrl}
         alt=""
+        // `draggable={false}` disables native image DnD (#906's real concern). NO
+        // `pointer-events-none`: the filling <img> must itself BE the press target,
+        // or the Dock Reorder pan can't start (see invariant above).
         draggable={false}
-        // Decorative: `pointer-events-none` lets a press pass THROUGH to the tile
-        // behind it. In the Dock a tile is a framer-motion Reorder.Item; without
-        // this the `<img>` captures the pointerdown and the drag never initiates
-        // (`draggable={false}` only disables native image DnD, not pointer capture),
-        // so AI-page tiles with an icon couldn't be reordered (§7.1h item 3). All
-        // interaction (click-open, drag) belongs to the parent tile/row, so this is
-        // safe on every surface sharing this avatar (Dock, Library, search, chip).
-        className="pointer-events-none size-full select-none object-cover"
+        className="size-full select-none object-cover"
         onError={() => setFailure({ url: iconUrl, attempts: attempts + 1 })}
       />
     );
   }
-  return <>{letter}</>;
+  // A FILLING element, never a bare text node: a raw string leaves the <button>
+  // itself as the press target and the Dock drag won't start (see invariant above).
+  return (
+    <span aria-hidden className="grid size-full place-items-center select-none">
+      {letter}
+    </span>
+  );
 };
 
 // The avatar tile for a Show Page: an accent-tinted rounded box (first grapheme
