@@ -265,11 +265,15 @@ def _resolve_binary(config: V2Config | None = None) -> str | None:
     return shutil.which("cloudflared")
 
 
-def _read_pid() -> int | None:
+def _read_pid_file(path: Path) -> int | None:
     try:
-        return int(_pid_path().read_text(encoding="utf-8").strip())
+        return int(path.read_text(encoding="utf-8").strip())
     except Exception:
         return None
+
+
+def _read_pid() -> int | None:
+    return _read_pid_file(_pid_path())
 
 
 def _is_cloudflared_pid(pid: int | None) -> bool:
@@ -1149,8 +1153,12 @@ def _reconcile_orphan_candidate() -> None:
 
     candidate = _state_connector("candidate")
     if not candidate or not isinstance(candidate.get("pid"), int):
-        return
-    candidate_pid = int(candidate["pid"])
+        candidate_pid = _read_pid_file(_candidate_pid_path())
+        if candidate_pid is None:
+            return
+        candidate = {"pid": candidate_pid}
+    else:
+        candidate_pid = int(candidate["pid"])
     candidate_state = _cloudflared_pid_state(candidate_pid)
     active = _state_connector("active") or {}
     active_pid = active.get("pid") if isinstance(active.get("pid"), int) else _read_pid()

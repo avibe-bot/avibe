@@ -78,6 +78,19 @@ def test_zero_ready_connections_degrades_immediately() -> None:
     assert evaluator.recovery_trigger(snapshot) == "availability"
 
 
+def test_partial_availability_triggers_recovery_after_four_samples() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+
+    for index in range(3):
+        snapshot = evaluator.update(_sample(100 + index * 15, (70, 75, 80), connections=3))
+        assert snapshot["state"] == "healthy"
+
+    snapshot = evaluator.update(_sample(145, (70, 75, 80), connections=3))
+
+    assert snapshot["state"] == "degraded"
+    assert evaluator.recovery_trigger(snapshot) == "availability"
+
+
 def test_ra_tq_003_metrics_failure_becomes_unknown_after_45_seconds() -> None:
     evaluator = tunnel_quality.QualityEvaluator()
     evaluator.update(_sample(100, (70, 75, 80, 85)))
@@ -108,6 +121,39 @@ def test_candidate_requires_material_absolute_and_relative_improvement() -> None
     assert tunnel_quality.candidate_is_better(active, marginal, trigger="latency") is False
     assert tunnel_quality.candidate_is_better(active, worse_tail, trigger="latency") is False
     assert tunnel_quality.candidate_is_better(active, with_errors, trigger="latency") is False
+
+
+def test_error_candidate_requires_error_or_loss_improvement_not_rtt_improvement() -> None:
+    request_error_active = {
+        "ha_connections": 4,
+        "rtt_ms": {"median": 150, "max": 240},
+        "request_errors_per_minute": 3,
+        "packet_loss_per_minute": 0,
+    }
+    healthy_candidate = {
+        "ha_connections": 4,
+        "rtt_ms": {"median": 150, "max": 240},
+        "request_errors_per_minute": 0,
+        "packet_loss_per_minute": 0,
+    }
+    packet_loss_active = {**request_error_active, "request_errors_per_minute": 0, "packet_loss_per_minute": 10}
+    reduced_loss_candidate = {**healthy_candidate, "packet_loss_per_minute": 4}
+
+    assert tunnel_quality.candidate_is_better(request_error_active, healthy_candidate, trigger="errors") is True
+    assert tunnel_quality.candidate_is_better(packet_loss_active, reduced_loss_candidate, trigger="errors") is True
+    assert tunnel_quality.candidate_is_better(packet_loss_active, packet_loss_active, trigger="errors") is False
+
+
+def test_availability_candidate_restores_partial_connection_set_without_rtt() -> None:
+    active = {
+        "ha_connections": 3,
+        "rtt_ms": None,
+        "request_errors_per_minute": 0,
+        "packet_loss_per_minute": 0,
+    }
+    candidate = {**active, "ha_connections": 4}
+
+    assert tunnel_quality.candidate_is_better(active, candidate, trigger="availability") is True
 
 
 def test_candidate_summary_requires_four_samples_and_keeps_worst_tail() -> None:

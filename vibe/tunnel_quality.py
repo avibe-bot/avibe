@@ -302,7 +302,7 @@ class QualityEvaluator:
         current = snapshot or self._last_snapshot
         if not current or current.get("state") != "degraded":
             return None
-        if int(current.get("ha_connections") or 0) == 0:
+        if int(current.get("ha_connections") or 0) < 4:
             return "availability"
         if float(current.get("request_errors_per_minute") or 0) >= 3 or float(current.get("packet_loss_per_minute") or 0) >= 10:
             return "errors"
@@ -342,8 +342,15 @@ def candidate_is_better(active: dict[str, Any], candidate: dict[str, Any], *, tr
         return False
     if float(candidate.get("packet_loss_per_minute") or 0) > float(active.get("packet_loss_per_minute") or 0):
         return False
-    if trigger == "availability" and int(active.get("ha_connections") or 0) == 0:
+    if trigger == "availability" and int(active.get("ha_connections") or 0) < 4:
         return True
+    if trigger == "errors":
+        return (
+            float(candidate.get("request_errors_per_minute") or 0)
+            < float(active.get("request_errors_per_minute") or 0)
+            or float(candidate.get("packet_loss_per_minute") or 0)
+            < float(active.get("packet_loss_per_minute") or 0)
+        )
     active_rtt = active.get("rtt_ms")
     candidate_rtt = candidate.get("rtt_ms")
     if not isinstance(active_rtt, dict) or not isinstance(candidate_rtt, dict):

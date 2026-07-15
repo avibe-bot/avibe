@@ -275,6 +275,29 @@ def test_ra_tq_008_restart_removes_orphan_candidate(monkeypatch, tmp_path) -> No
     assert stopped == [candidate_pid]
 
 
+def test_restart_removes_candidate_recorded_only_in_pid_file(monkeypatch, tmp_path) -> None:
+    _, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    remote_access._candidate_pid_path().write_text(str(candidate_pid), encoding="utf-8")
+    stopped = []
+
+    def stop_pid(pid, timeout=8):
+        stopped.append(pid)
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(remote_access, "_set_recovery_state", lambda **changes: changes)
+
+    remote_access._reconcile_orphan_candidate()
+
+    reconciled = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert remote_access._read_pid() == active_pid
+    assert reconciled["active"]["pid"] == active_pid
+    assert reconciled["candidate"] is None
+    assert not remote_access._candidate_pid_path().exists()
+    assert stopped == [candidate_pid]
+
+
 def test_ra_tq_009_restart_promotes_ready_candidate(monkeypatch, tmp_path) -> None:
     _, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))

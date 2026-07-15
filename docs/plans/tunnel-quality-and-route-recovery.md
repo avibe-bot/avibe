@@ -289,9 +289,12 @@ Additional rules:
 5. For a latency episode, promote only when candidate median RTT is both:
    - at least 25 percent lower; and
    - at least 30 ms lower.
-6. For an availability episode where the active connector has zero ready
-   connections, promote a stable candidate after it reaches four ready
+6. For an availability episode where the active connector has fewer than four
+   ready connections, promote a stable candidate after it reaches four ready
    connections.
+7. For an error/loss episode, promote when the candidate strictly improves
+   request errors or packet loss without worsening either signal. RTT
+   improvement is not required for this trigger.
 
 Edge location is recorded but is never a promotion criterion.
 
@@ -332,6 +335,8 @@ failed attempt must never make an already-available tunnel unavailable.
 Connector state writes are atomic. On startup:
 
 - validate every recorded PID by executable identity and token fingerprint;
+- reconcile the candidate PID file even when a crash precedes its aggregate
+  state write;
 - discard dead/stale records without signalling unrelated processes;
 - if active and candidate both remain, retain the active connector and stop the
   orphan candidate;
