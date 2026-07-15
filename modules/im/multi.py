@@ -189,9 +189,10 @@ class MultiIMClient(BaseIMClient):
         wrapped_kwargs = {
             key: self._wrap_additional_callback(platform, value)
             for key, value in kwargs.items()
-            if key not in {"on_ready", "on_transport_ready"}
+            if key not in {"on_ready", "on_transport_ready", "on_transport_unready"}
         }
         wrapped_kwargs["on_ready"] = self._wrap_on_ready(platform, kwargs.get("on_transport_ready"))
+        wrapped_kwargs["on_transport_unready"] = self._wrap_on_unready(platform, kwargs.get("on_transport_unready"))
         wrapped_commands: Optional[Dict[str, Callable]] = None
         if on_command is not None:
             wrapped_commands = {}
@@ -252,6 +253,22 @@ class MultiIMClient(BaseIMClient):
                 self._ready_platforms.add(platform)
             logger.info("IM transport ready: %s", platform)
             if should_emit and callback is not None:
+                await callback(platform=platform)
+
+        return _wrapped
+
+    def _mark_transport_unready(self, platform: str) -> bool:
+        with self._ready_lock:
+            was_ready = platform in self._ready_platforms
+            self._ready_platforms.discard(platform)
+        if was_ready:
+            logger.info("IM transport unavailable: %s", platform)
+        return was_ready
+
+    def _wrap_on_unready(self, platform: str, callback: Optional[Callable]) -> Callable:
+        async def _wrapped(*args: Any, **kwargs: Any):
+            was_ready = self._mark_transport_unready(platform)
+            if was_ready and callback is not None:
                 await callback(platform=platform)
 
         return _wrapped
@@ -456,6 +473,8 @@ class MultiIMClient(BaseIMClient):
             client.run()
         except Exception:
             logger.exception("IM runtime for %s crashed", platform)
+        finally:
+            self._mark_transport_unready(platform)
 
     def add_client(self, platform: str, client: BaseIMClient) -> None:
         """Start one platform's client (+ its runtime thread) at runtime.

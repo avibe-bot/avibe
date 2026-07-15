@@ -838,6 +838,9 @@ class Controller:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
         self.scheduled_task_service.notify_transport_ready(platform)
+        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
+        if callable(notify_update_checker):
+            notify_update_checker(platform)
         platforms = {platform}
         if platform == self.primary_platform:
             platforms.add("")

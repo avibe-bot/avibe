@@ -271,6 +271,27 @@ def test_multi_im_client_connected_transport_does_not_emit_runtime_ready():
     assert ready_calls == []
 
 
+def test_multi_im_client_clears_transport_readiness_on_disconnect():
+    discord = _StubClient("discord")
+    client = MultiIMClient({"discord": discord}, primary_platform="discord")
+    unavailable_calls: list[str] = []
+
+    async def on_transport_unready(*, platform: str):
+        unavailable_calls.append(platform)
+
+    client.register_callbacks(on_transport_unready=on_transport_unready)
+
+    asyncio.run(discord.on_ready_callback())
+    assert client.is_transport_ready("discord") is True
+
+    asyncio.run(discord.on_transport_unready_callback())
+    assert client.is_transport_ready("discord") is False
+    assert unavailable_calls == ["discord"]
+
+    asyncio.run(discord.on_transport_unready_callback())
+    assert unavailable_calls == ["discord"]
+
+
 def test_multi_im_client_remove_before_runtime_start_does_not_emit_ready():
     slack = _StubClient("slack")
     client = MultiIMClient({"slack": slack}, primary_platform="slack")

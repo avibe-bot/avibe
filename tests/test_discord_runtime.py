@@ -121,3 +121,82 @@ def test_discord_runtime_replaces_client_after_proxy_setup_failure(monkeypatch) 
 
     assert len(clients) == 2
     assert starts == [clients[1]]
+
+
+def test_discord_runtime_rechecks_stop_before_client_start(monkeypatch) -> None:
+    bot = DiscordBot(DiscordConfig(bot_token="test-token"))
+    starts: list[bool] = []
+
+    class FakeDiscordClient:
+        def __init__(self) -> None:
+            self.http = SimpleNamespace(connector=None)
+
+        async def __aenter__(self):
+            bot.stop()
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def start(self, _token: str) -> None:
+            starts.append(True)
+
+        async def close(self) -> None:
+            return None
+
+    bot.client = FakeDiscordClient()
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda _configured: None)
+
+    bot.run()
+
+    assert starts == []
+
+
+def test_discord_runtime_reports_unready_before_replacing_client(monkeypatch) -> None:
+    bot = DiscordBot(DiscordConfig(bot_token="test-token"))
+    events: list[str] = []
+    attempts = 0
+
+    class FakeDiscordClient:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.http = SimpleNamespace(connector=None)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def start(self, _token: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            events.append(f"start:{self.name}")
+            if attempts == 1:
+                raise ConnectionResetError("discord unavailable")
+            bot._stop_event.set()
+
+    async def on_transport_unready() -> None:
+        events.append("unready")
+
+    def new_client() -> FakeDiscordClient:
+        client = FakeDiscordClient(f"client-{attempts + 1}")
+        events.append(f"new:{client.name}")
+        return client
+
+    bot.register_callbacks(on_transport_unready=on_transport_unready)
+    monkeypatch.setattr(bot, "_new_client", new_client)
+    bot.client = new_client()
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda _configured: None)
+    monkeypatch.setattr(bot._stop_event, "wait", lambda _delay: False)
+
+    bot.run()
+
+    assert events == [
+        "new:client-1",
+        "start:client-1",
+        "unready",
+        "new:client-2",
+        "start:client-2",
+        "unready",
+    ]

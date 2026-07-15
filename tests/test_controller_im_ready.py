@@ -41,6 +41,7 @@ def test_transport_ready_restores_only_its_state() -> None:
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
         check_and_send_post_update_notification=AsyncMock(return_value=True),
+        notify_transport_ready=Mock(),
         start=Mock(),
     )
     controller.scheduled_task_service = SimpleNamespace(start=Mock(), notify_transport_ready=Mock())
@@ -51,6 +52,7 @@ def test_transport_ready_restores_only_its_state() -> None:
 
     opencode_agent.restore_active_polls.assert_awaited_once_with({"discord", ""})
     controller.scheduled_task_service.notify_transport_ready.assert_called_once_with("discord")
+    controller.update_checker.notify_transport_ready.assert_called_once_with("discord")
     controller.update_checker.check_and_send_post_update_notification.assert_awaited_once_with(
         ready_platform="discord"
     )

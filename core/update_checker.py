@@ -213,6 +213,8 @@ class UpdateChecker:
         self._check_task: Optional[asyncio.Task] = None
         self._running = False
         self._upgrade_lock = asyncio.Lock()  # Prevent concurrent upgrades
+        self._post_update_lock = asyncio.Lock()
+        self._transport_ready_event = asyncio.Event()
         self._cached_owner_dm_channel: Optional[str] = None  # Cache DM channel ID (legacy fallback)
 
     def _lang(self) -> str:
@@ -264,6 +266,11 @@ class UpdateChecker:
         """Record user activity (called when a Slack message is received)."""
         self.state.last_activity_at = time.time()
         self.state.save()  # save() has its own try/except, won't raise
+
+    def notify_transport_ready(self, _platform: str) -> None:
+        """Wake a deferred check when an IM transport becomes available."""
+        if self._running:
+            self._transport_ready_event.set()
 
     def _reload_config(self) -> None:
         """Reload UpdateConfig from config file (for hot-reload support)."""
@@ -344,6 +351,7 @@ class UpdateChecker:
         await asyncio.sleep(30)
 
         while self._running:
+            self._transport_ready_event.clear()
             try:
                 await self._do_check()
             except asyncio.CancelledError:
@@ -363,7 +371,10 @@ class UpdateChecker:
             # Even when product self-update checks are disabled, the loop stays
             # alive for managed local dependencies such as askill. Clamp to the
             # minimum so hot-reload can re-enable product checks too.
-            await asyncio.sleep(interval * 60)
+            try:
+                await asyncio.wait_for(self._transport_ready_event.wait(), timeout=interval * 60)
+            except TimeoutError:
+                pass
 
     async def _do_check(self) -> None:
         """Perform a single update check."""
@@ -408,6 +419,14 @@ class UpdateChecker:
                     cached=release_notifications_enabled,
                 )
                 if release_notifications_enabled:
+                    admin_ids = self._get_admin_user_ids()
+                    platform = getattr(self.controller.config, "platform", "slack")
+                    if self._notification_targets_waiting_for_transport(admin_ids, platform):
+                        logger.info(
+                            "Deferring update notification and auto-update for %s until an admin transport is ready",
+                            latest,
+                        )
+                        return
                     delivered = False
                     try:
                         delivered = await self._send_update_notification(current, latest)
@@ -595,6 +614,34 @@ class UpdateChecker:
         platform = scoped_platform or _infer_user_platform(raw_user_id)
         return self._get_im_client_for_platform(platform), raw_user_id, platform
 
+    @staticmethod
+    def _user_platform(user_id: str) -> str:
+        scoped_platform, raw_user_id = _split_scoped_key(str(user_id))
+        return scoped_platform or _infer_user_platform(raw_user_id)
+
+    def _is_transport_ready(self, platform: str) -> bool:
+        checker = getattr(self.controller, "is_im_transport_ready", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(platform))
+        except Exception as e:
+            logger.warning("Failed to read %s transport readiness: %s", platform, e)
+            return False
+
+    def _admin_ids_for_platform(self, admin_ids: list, platform: str) -> list:
+        return [uid for uid in admin_ids if self._user_platform(uid) == platform]
+
+    def _ready_admin_ids(self, admin_ids: list) -> list:
+        return [uid for uid in admin_ids if self._is_transport_ready(self._user_platform(uid))]
+
+    def _notification_targets_waiting_for_transport(self, admin_ids: list, platform: str) -> bool:
+        if admin_ids:
+            return not self._ready_admin_ids(admin_ids)
+        if platform in {"slack", "discord"}:
+            return not self._is_transport_ready(platform)
+        return False
+
     async def _get_workspace_owner_id(self) -> Optional[str]:
         """Get the Slack workspace primary owner's user ID.
 
@@ -673,10 +720,13 @@ class UpdateChecker:
     async def _send_update_notification(self, current: str, latest: str) -> bool:
         """Send update notification to admin users, with platform-specific fallbacks."""
         platform = getattr(self.controller.config, "platform", "slack")
-        admin_ids = self._get_admin_user_ids()
+        all_admin_ids = self._get_admin_user_ids()
+        admin_ids = self._ready_admin_ids(all_admin_ids)
 
-        if admin_ids:
+        if all_admin_ids:
             # Send DM to each admin via the platform-agnostic send_dm method
+            if not admin_ids:
+                return False
             return await self._send_notification_to_admins(admin_ids, current, latest, platform)
         else:
             # Legacy fallback: no admins configured
@@ -696,6 +746,7 @@ class UpdateChecker:
         channel_id: Optional[str] = None,
         message_id: Optional[str] = None,
         platform: Optional[str] = None,
+        admin_platform: Optional[str] = None,
     ) -> bool:
         """Notify admins that an installed update did not become the active runtime."""
         resolved_platform = platform or getattr(self.controller.config, "platform", "slack")
@@ -724,7 +775,8 @@ class UpdateChecker:
                     return True
                 return False
 
-            admin_ids = self._get_admin_user_ids()
+            all_admin_ids = self._get_admin_user_ids()
+            admin_ids = self._admin_ids_for_platform(all_admin_ids, admin_platform) if admin_platform else all_admin_ids
             delivered = False
             if admin_ids:
                 for uid in admin_ids:
@@ -736,7 +788,7 @@ class UpdateChecker:
                             logger.info("Sent post-update failure notification to admin %s", uid)
                     except Exception as e:
                         logger.error("Failed to send post-update failure notification to admin %s: %s", uid, e)
-            elif resolved_platform == "slack":
+            elif not all_admin_ids and resolved_platform == "slack":
                 owner_id = await self._get_workspace_owner_id()
                 if owner_id:
                     dm_channel = await self._open_dm_channel(owner_id)
@@ -1060,6 +1112,10 @@ class UpdateChecker:
 
     async def check_and_send_post_update_notification(self, *, ready_platform: Optional[str] = None) -> bool:
         """Check for pending update notification and send it (called on startup)."""
+        async with self._post_update_lock:
+            return await self._check_and_send_post_update_notification(ready_platform=ready_platform)
+
+    async def _check_and_send_post_update_notification(self, *, ready_platform: Optional[str] = None) -> bool:
         marker_path = paths.get_state_dir() / "pending_update_notification.json"
         if not marker_path.exists():
             return False
@@ -1073,7 +1129,9 @@ class UpdateChecker:
             platform = data.get("platform") or getattr(self.controller.config, "platform", "slack")
             if channel_id:
                 platform = data.get("platform") or _infer_channel_platform(channel_id)
-            if ready_platform is not None and ready_platform != platform:
+            elif ready_platform is not None:
+                platform = ready_platform
+            if channel_id and ready_platform is not None and ready_platform != platform:
                 return False
             # Use the target version from marker (more reliable than __version__ in edge cases)
             target_version = data.get("version", "unknown")
@@ -1095,6 +1153,7 @@ class UpdateChecker:
                     channel_id=channel_id,
                     message_id=message_id,
                     platform=platform,
+                    admin_platform=ready_platform if not channel_id else None,
                 )
                 if delivered:
                     marker_path.unlink(missing_ok=True)
@@ -1141,7 +1200,12 @@ class UpdateChecker:
                     logger.error("Failed to edit %s update message: %s", platform, e)
             else:
                 # Fallback: send a new message to admins, or workspace owner
-                admin_ids = self._get_admin_user_ids()
+                all_admin_ids = self._get_admin_user_ids()
+                admin_ids = (
+                    self._admin_ids_for_platform(all_admin_ids, ready_platform)
+                    if ready_platform is not None
+                    else all_admin_ids
+                )
                 if admin_ids:
                     for uid in admin_ids:
                         try:
@@ -1152,7 +1216,7 @@ class UpdateChecker:
                                 logger.info(f"Sent post-update notification to admin {uid}")
                         except Exception as e:
                             logger.error(f"Failed to send post-update notification to admin {uid}: {e}")
-                elif platform == "slack":
+                elif not all_admin_ids and platform == "slack":
                     # Legacy fallback: try workspace owner
                     owner_id = await self._get_workspace_owner_id()
                     if owner_id:

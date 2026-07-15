@@ -335,22 +335,37 @@ class DiscordBot(BaseIMClient):
 
         async def _run():
             self._loop = asyncio.get_running_loop()
-            # Inject proxy connector inside the event loop (required by
-            # aiohttp). Must happen before login() creates the session.
-            from vibe.proxy import redact_proxy_url, resolve_proxy
+            try:
+                if self._stop_event.is_set():
+                    return
 
-            proxy_url = resolve_proxy(self.config.proxy_url)
-            if proxy_url:
-                try:
-                    from aiohttp_socks import ProxyConnector
+                # Inject proxy connector inside the event loop (required by
+                # aiohttp). Must happen before login() creates the session.
+                from vibe.proxy import redact_proxy_url, resolve_proxy
 
-                    self.client.http.connector = ProxyConnector.from_url(proxy_url, rdns=True)
-                    logger.info("Discord using proxy: %s", redact_proxy_url(proxy_url))
-                except ImportError:
-                    logger.warning("Proxy configured but aiohttp_socks not installed")
+                proxy_url = resolve_proxy(self.config.proxy_url)
+                if proxy_url:
+                    try:
+                        from aiohttp_socks import ProxyConnector
 
-            async with self.client:
-                await self.client.start(self.config.bot_token)
+                        self.client.http.connector = ProxyConnector.from_url(proxy_url, rdns=True)
+                        logger.info("Discord using proxy: %s", redact_proxy_url(proxy_url))
+                    except ImportError:
+                        logger.warning("Proxy configured but aiohttp_socks not installed")
+
+                async with self.client:
+                    # stop() may race with startup before _loop is installed.
+                    if self._stop_event.is_set():
+                        return
+                    await self.client.start(self.config.bot_token)
+            finally:
+                callback = getattr(self, "on_transport_unready_callback", None)
+                if callback is not None:
+                    try:
+                        await callback()
+                    except Exception:
+                        logger.exception("Discord transport-unready callback failed")
+                self._loop = None
 
         retry_delay = _RUNTIME_RETRY_INITIAL_SECONDS
         while not self._stop_event.is_set():
