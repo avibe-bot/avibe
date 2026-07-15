@@ -10,6 +10,7 @@ import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
+import { WindowBodyGestureShield, shouldShieldWindowBody } from './windowGesture';
 import { ErrorBoundary } from '../ui/error-boundary';
 
 const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
@@ -77,9 +78,17 @@ export const AppWindow: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wm.focusedId, win.minimized]);
 
-  // One pointer gesture (move or resize): attach window-level listeners on down,
-  // tear them down on up. Capturing `win.bounds` at gesture start keeps the math
-  // stable even as state updates re-render mid-drag.
+  // One pointer gesture (move or resize). Capturing `win.bounds` at gesture start
+  // keeps the math stable even as state updates re-render mid-drag.
+  //
+  // §7.1i: the gesture element captures the pointer (setPointerCapture) so the browser
+  // retargets ALL subsequent pointer events to it — even when the pointer crosses (or
+  // outruns the window into) a showpage window's IFRAME. Without capture the iframe's
+  // document steals the moves and the drag/resize FREEZES. Window-level listeners still
+  // fire because captured events dispatch to the element and bubble to `window`. We also
+  // arm a global shield flag (per-window iframe overlays, belt-and-braces + no cursor
+  // flicker). Cleanup is idempotent + runs on BOTH pointerup and lostpointercapture, so
+  // a missed/stolen release can never leave the shield or listeners stuck.
   const startGesture = (e: React.PointerEvent, kind: 'move' | ResizeDir) => {
     if (win.maximized) return;
     e.preventDefault();
@@ -90,6 +99,15 @@ export const AppWindow: React.FC<{
     rootRef.current?.focus({ preventScroll: true });
     draggingRef.current = true;
     setDragging(true);
+    const el = e.currentTarget;
+    const pointerId = e.pointerId;
+    try {
+      el.setPointerCapture(pointerId);
+    } catch {
+      // Rare: the pointer is already gone. The window listeners below still drive
+      // the gesture as a fallback.
+    }
+    wm.setGestureActive(true);
     const startX = e.clientX;
     const startY = e.clientY;
     const start = { ...win.bounds };
@@ -104,14 +122,25 @@ export const AppWindow: React.FC<{
         wm.setBounds(win.id, clampToLayer(resizeBounds(start, kind, dx, dy), layerWidth, layerHeight));
       }
     };
-    const onUp = () => {
+    let ended = false;
+    const end = () => {
+      if (ended) return; // idempotent: pointerup AND lostpointercapture both call this
+      ended = true;
       draggingRef.current = false;
       setDragging(false);
+      wm.setGestureActive(false);
       window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointerup', end);
+      el.removeEventListener('lostpointercapture', end);
+      try {
+        el.releasePointerCapture(pointerId);
+      } catch {
+        // Already released (pointerup releases implicitly) — fine.
+      }
     };
     window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointerup', end);
+    el.addEventListener('lostpointercapture', end);
   };
 
   const Body = def.Component;
@@ -307,12 +336,16 @@ export const AppWindow: React.FC<{
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         {/* A crashing app only takes down its own window — the shell + other windows stay usable, and
             "Retry" remounts just this app. */}
         <ErrorBoundary variant="inline">
           <Body windowId={win.id} params={win.params} />
         </ErrorBoundary>
+        {/* §7.1i: while ANY window is mid drag/resize, cover this body (its iframe) with a
+            transparent overlay so a gesture's pointer can't be stolen by the iframe and the
+            cursor doesn't flicker over it — belt-and-braces with the gesture's pointer capture. */}
+        <WindowBodyGestureShield active={shouldShieldWindowBody(wm.gestureActive, win.minimized)} />
       </div>
 
       {!win.maximized &&

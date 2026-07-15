@@ -77,6 +77,14 @@ export interface WindowManagerValue {
   markClosing: (id: string) => void;
   /** Run a window's close guard (confirm if it has a message); true = may close. */
   confirmClose: (id: string) => boolean;
+  /**
+   * True while ANY window is mid drag/resize gesture. Windows shield their body
+   * (iframe) with a transparent overlay while it's set, so a gesture whose pointer
+   * crosses an iframe can't have its events stolen by the iframe document (§7.1i).
+   * Set true at gesture start, false on gesture end (unconditional cleanup).
+   */
+  gestureActive: boolean;
+  setGestureActive: (active: boolean) => void;
 }
 
 const WindowManagerContext = createContext<WindowManagerValue | null>(null);
@@ -336,6 +344,10 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
     return visible.reduce((top, w) => (w.z > top.z ? w : top)).id;
   }, [windows]);
 
+  // True while ANY window is mid drag/resize. A transient shared flag (not persisted)
+  // that arms the per-window iframe shield during a gesture (§7.1i).
+  const [gestureActive, setGestureActive] = useState(false);
+
   const value = useMemo<WindowManagerValue>(
     () => ({
       windows,
@@ -353,8 +365,10 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       setStateProvider,
       markClosing,
       confirmClose,
+      gestureActive,
+      setGestureActive,
     }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose],
+    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose, gestureActive],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;

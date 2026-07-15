@@ -614,6 +614,33 @@ Four acceptance items from the merged §7.1f/g work, one PR.
      up by 4a — or add a `<link rel=icon>` to index.html; the scaffold head
      comment already sanctions icon edits to the shell).
 
+### 7.1i Window drag/resize over an iframe freezes (owner 2026-07-15)
+
+Windows whose body is an iframe (showpage windows) dragged jankily and FROZE
+mid-drag; built-in windows were fine. **Mechanism (adjudicated):** during a
+title-bar drag or 8-dir resize, once the pointer crosses over the iframe (or
+outruns the window), pointer events start targeting the IFRAME's document — the
+parent's gesture `pointermove`/`pointerup` handlers stop receiving them and the
+drag freezes. Two-part fix (both shipped in the "Dock & window drag fixes" PR
+alongside §7.1h item 3), in `AppWindow.tsx` + `WindowManagerContext.tsx`:
+
+1. **Pointer capture (primary).** `startGesture` calls `setPointerCapture` on the
+   gesture element (title bar / resize handle) at gesture start. The browser then
+   retargets ALL pointer events for that pointer to the capturing element — even
+   over iframes — so the existing `window`-level listeners keep firing (captured
+   events dispatch to the element and bubble to `window`). Cleanup is idempotent
+   and runs on BOTH `pointerup` AND `lostpointercapture` (releasing the capture),
+   so a missed/stolen release can't leave the gesture stuck.
+2. **Iframe shield (belt-and-braces).** A shared `gestureActive` flag on
+   `WindowManagerContext` is set for the duration of ANY window gesture; while set,
+   each window renders `WindowBodyGestureShield` — a transparent `absolute inset-0`
+   overlay (below the z-30 resize grips) over its body — so a stray pointer event
+   can't reach an iframe and the cursor can't flicker over it on edge cases
+   (capture unsupported/lost). `shouldShieldWindowBody(gestureActive, minimized)`
+   is a pure predicate (skips minimized windows); both it and the shield have
+   vitest DOM-structure coverage. The real gesture FEEL is verified by the owner
+   via CDP on the regression env post-merge (residual manual check).
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:
