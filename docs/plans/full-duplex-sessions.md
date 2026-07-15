@@ -122,6 +122,14 @@ before handling its Result. A later completion must never overwrite and strand
 an earlier claim, because an unreachable claimed output would block native-query
 admission forever.
 
+Batch membership follows the Activity origin IDs already retained by the pending
+request plus that request's own `turn_id`, not queue adjacency. This lets a
+synthetic agent-initiated Turn settle both the completion that opened it and any
+Activity it completes itself. Batch selection may scan past unrelated completions,
+which are restored in their original FIFO order. Likewise, a failed delivery
+requeues the claimed batch without reversing it even though the registry's
+single-item requeue operation inserts at the queue front.
+
 ## Claude mapping
 
 Claude task frames map into the shared Activity registry:
