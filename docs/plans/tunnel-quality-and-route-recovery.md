@@ -88,6 +88,7 @@ It replaces the current single-PID assumption with an explicit aggregate:
 TunnelSupervisor
   active connector       required during normal operation
   candidate connector    optional, only while evaluating
+  draining connector     optional, retained until old-process exit is verified
   quality snapshot       current active-connector health
   healthy baseline       rolling route baseline
   recovery episode       state, attempts, backoff, last result
@@ -335,6 +336,8 @@ Connector state writes are atomic. On startup:
 - if active and candidate both remain, retain the active connector and stop the
   orphan candidate;
 - if only the candidate remains and is ready, promote it; and
+- retry cleanup of a recorded draining connector without losing its PID when
+  termination cannot be verified; and
 - never clear shared logs or state belonging to the surviving connector.
 
 ## Doctor Integration

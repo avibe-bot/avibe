@@ -21,12 +21,16 @@ def test_ra_tq_001_parse_cloudflared_metrics_extracts_quality_inputs() -> None:
         """
 # TYPE cloudflared_tunnel_ha_connections gauge
 cloudflared_tunnel_ha_connections 4
+# TYPE cloudflared_tunnel_request_errors counter
 cloudflared_tunnel_request_errors 42
 cloudflared_tunnel_server_locations{connection_id="0",edge_location="sin12"} 1
 cloudflared_tunnel_server_locations{connection_id="1",edge_location="sin20"} 1
 quic_client_smoothed_rtt{conn_index="0"} 67
 quic_client_smoothed_rtt{conn_index="1"} 82
+# TYPE quic_client_lost_packets counter
 quic_client_lost_packets{conn_index="0",reason="timeout"} 3
+# TYPE quic_client_closed_connections counter
+quic_client_closed_connections 2
 """,
         now=100,
     )
@@ -36,6 +40,7 @@ quic_client_lost_packets{conn_index="0",reason="timeout"} 3
     assert sample.smoothed_rtt_ms == (67, 82)
     assert sample.request_errors_total == 42
     assert sample.packet_loss_total == 3
+    assert sample.closed_connections_total == 2
 
 
 def test_latency_grade_uses_median_and_worst_active_path() -> None:

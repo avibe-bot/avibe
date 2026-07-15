@@ -45,8 +45,11 @@ def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) ->
         for sample in family.samples:
             values.setdefault(sample.name, []).append(sample)
 
-    def scalar(name: str) -> float:
-        return sum(float(sample.value) for sample in values.get(name, []))
+    def scalar(*names: str) -> float:
+        for name in names:
+            if name in values:
+                return sum(float(sample.value) for sample in values[name])
+        return 0.0
 
     rtt_values = sorted(
         float(sample.value)
@@ -66,9 +69,15 @@ def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) ->
         ha_connections=max(0, int(round(scalar("cloudflared_tunnel_ha_connections")))),
         edge_locations=tuple(locations[:4]),
         smoothed_rtt_ms=tuple(rtt_values[:4]),
-        request_errors_total=max(0.0, scalar("cloudflared_tunnel_request_errors")),
-        packet_loss_total=max(0.0, scalar("quic_client_lost_packets")),
-        closed_connections_total=max(0.0, scalar("quic_client_closed_connections")),
+        request_errors_total=max(
+            0.0,
+            scalar("cloudflared_tunnel_request_errors_total", "cloudflared_tunnel_request_errors"),
+        ),
+        packet_loss_total=max(0.0, scalar("quic_client_lost_packets_total", "quic_client_lost_packets")),
+        closed_connections_total=max(
+            0.0,
+            scalar("quic_client_closed_connections_total", "quic_client_closed_connections"),
+        ),
     )
 
 

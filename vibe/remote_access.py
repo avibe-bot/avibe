@@ -61,6 +61,7 @@ STATUS_REPORT_DRAIN_SECONDS = 1.0
 RECOVERY_READY_TIMEOUT_SECONDS = 30.0
 RECOVERY_EVALUATION_SECONDS = 45.0
 RECOVERY_DRAIN_SECONDS = 35.0
+QUALITY_COMPARISON_MAX_AGE_SECONDS = 2 * QUALITY_SAMPLE_SECONDS
 _QUALITY_MONITOR_LOCK = threading.Lock()
 _QUALITY_MONITOR_STARTED = False
 _QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
@@ -360,6 +361,7 @@ def _write_state(pid: int, config: V2Config, binary: str, metrics_url: str) -> N
                 stderr_path=_cloudflared_stderr_path(),
             ),
             "candidate": None,
+            "draining": None,
         },
     )
 
@@ -757,10 +759,10 @@ def _parse_timestamp(value: Any) -> float | None:
         return None
 
 
-def _recovery_allowed(trigger: str, *, manual: bool, now: float) -> bool:
-    global _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+def _reserve_recovery(thread: threading.Thread, trigger: str, *, manual: bool, now: float) -> bool:
+    global _RECOVERY_THREAD, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
     with _RECOVERY_LOCK:
-        if _RECOVERY_THREAD is not None:
+        if _RECOVERY_THREAD is not None or _state_connector("draining") is not None:
             return False
         next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
         cooling_down = next_attempt is not None and now < next_attempt
@@ -769,13 +771,17 @@ def _recovery_allowed(trigger: str, *, manual: bool, now: float) -> bool:
                 if _RECOVERY_MANUAL_BYPASS_USED:
                     return False
                 _RECOVERY_MANUAL_BYPASS_USED = True
+            _RECOVERY_THREAD = thread
             return True
         if cooling_down:
             if trigger != "availability" or _RECOVERY_EMERGENCY_BYPASS_USED:
                 return False
             _RECOVERY_EMERGENCY_BYPASS_USED = True
         recent = [attempt for attempt in _RECOVERY_ATTEMPTS if attempt >= now - 30 * 60]
-        return len(recent) < 2
+        if len(recent) >= 2:
+            return False
+        _RECOVERY_THREAD = thread
+        return True
 
 
 def _recovery_backoff_seconds(attempt_count: int) -> int:
@@ -789,6 +795,43 @@ def _automatic_recovery_enabled() -> bool:
     return os.environ.get("AVIBE_TUNNEL_AUTO_RECOVERY", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _fresh_active_comparison_snapshot(
+    current: dict[str, Any],
+    *,
+    trigger: str,
+    now: float,
+) -> dict[str, Any] | None:
+    quality = current.get("tunnel_quality")
+    if isinstance(quality, dict):
+        sampled_at = _parse_timestamp(quality.get("sampled_at"))
+        age = now - sampled_at if sampled_at is not None else None
+        rtt = quality.get("rtt_ms")
+        if (
+            age is not None
+            and -5 <= age <= QUALITY_COMPARISON_MAX_AGE_SECONDS
+            and (trigger == "availability" or isinstance(rtt, dict))
+        ):
+            return json.loads(json.dumps(quality))
+
+    active = _state_connector("active") or {}
+    metrics_url = active.get("metrics_url")
+    if not isinstance(metrics_url, str) or not metrics_url:
+        return None
+    try:
+        sample = tunnel_quality.scrape_metrics(metrics_url)
+    except Exception:
+        logger.debug("Could not obtain a fresh active Tunnel sample for route optimization", exc_info=True)
+        return None
+    snapshot = tunnel_quality.QualityEvaluator().update(
+        sample,
+        connector_count=1,
+        recovery=_recovery_payload(),
+    )
+    if trigger != "availability" and not isinstance(snapshot.get("rtt_ms"), dict):
+        return None
+    return snapshot
+
+
 def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -> dict[str, Any]:
     """Start one non-blocking make-before-break recovery attempt."""
 
@@ -798,23 +841,25 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
     current = status(config)
     if not current.get("running"):
         return {**current, "ok": False, "error": "remote_access_not_running"}
-    if not _recovery_allowed(trigger, manual=manual, now=now):
+    previous = _fresh_active_comparison_snapshot(current, trigger=trigger, now=now)
+    if previous is None:
         return {**current, "ok": False, "error": "route_optimization_unavailable"}
     try:
-        _RECOVERY_CANCEL_EVENT.clear()
         thread = threading.Thread(
             target=_run_route_optimization,
-            args=(config, trigger),
+            args=(config, trigger, previous),
             name="vibe-tunnel-route-optimization",
             daemon=True,
         )
-        with _RECOVERY_LOCK:
-            _RECOVERY_THREAD = thread
+        if not _reserve_recovery(thread, trigger, manual=manual, now=now):
+            return {**current, "ok": False, "error": "route_optimization_unavailable"}
+        _RECOVERY_CANCEL_EVENT.clear()
         _set_recovery_state(state="evaluating", last_trigger=trigger)
         thread.start()
     except Exception as exc:
         with _RECOVERY_LOCK:
-            _RECOVERY_THREAD = None
+            if _RECOVERY_THREAD is locals().get("thread"):
+                _RECOVERY_THREAD = None
         _set_recovery_state(state="idle", last_result="failed")
         return {**current, "ok": False, "error": "route_optimization_start_failed", "detail": str(exc)}
     return {**status(config), "ok": True, "optimization_started": True}
@@ -838,16 +883,21 @@ def _candidate_average_snapshot(metrics_url: str) -> dict[str, Any] | None:
 def _wait_candidate_ready(pid: int, metrics_url: str) -> bool:
     deadline = time.monotonic() + RECOVERY_READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if _connector_ready_now(pid, metrics_url):
+            return True
         if not _is_cloudflared_pid(pid):
             return False
-        try:
-            response = requests.get(f"{metrics_url.rstrip('/')}/ready", timeout=0.5)
-            if response.ok:
-                return True
-        except requests.RequestException:
-            pass
         time.sleep(1.0)
     return False
+
+
+def _connector_ready_now(pid: int, metrics_url: str) -> bool:
+    if not _is_cloudflared_pid(pid):
+        return False
+    try:
+        return requests.get(f"{metrics_url.rstrip('/')}/ready", timeout=0.5).ok
+    except requests.RequestException:
+        return False
 
 
 def _finish_recovery(
@@ -876,11 +926,17 @@ def _finish_recovery(
     _report_runtime_status_async(event="route_optimization")
 
 
-def _run_route_optimization(config: V2Config | None, trigger: str) -> None:
+def _run_route_optimization(
+    config: V2Config | None,
+    trigger: str,
+    previous: dict[str, Any] | None = None,
+) -> None:
     global _RECOVERY_THREAD
     candidate_pid: int | None = None
     promoted = False
-    previous = tunnel_quality_snapshot() or {}
+    recovery_trigger = trigger
+    recovery_thread = threading.current_thread()
+    previous = previous or tunnel_quality_snapshot() or {}
     previous_rtt = previous.get("rtt_ms") if isinstance(previous.get("rtt_ms"), dict) else {}
     previous_median = float(previous_rtt["median"]) if previous_rtt.get("median") is not None else None
     _report_runtime_status_async(event="route_optimization_started")
@@ -916,11 +972,21 @@ def _run_route_optimization(config: V2Config | None, trigger: str) -> None:
         candidate_snapshot = _candidate_average_snapshot(metrics_url)
         if _RECOVERY_CANCEL_EVENT.is_set():
             raise RuntimeError("route_optimization_cancelled")
-        if candidate_snapshot is None or not tunnel_quality.candidate_is_better(previous, candidate_snapshot, trigger=trigger):
+        active_now = _state_connector("active") or {}
+        active_now_pid = active_now.get("pid")
+        comparison_snapshot = previous
+        if not isinstance(active_now_pid, int) or not _is_cloudflared_pid(active_now_pid):
+            recovery_trigger = "availability"
+            comparison_snapshot = {**previous, "ha_connections": 0}
+        if candidate_snapshot is None or not tunnel_quality.candidate_is_better(
+            comparison_snapshot,
+            candidate_snapshot,
+            trigger=recovery_trigger,
+        ):
             result_rtt = (candidate_snapshot or {}).get("rtt_ms")
             result_median = float(result_rtt["median"]) if isinstance(result_rtt, dict) and result_rtt.get("median") is not None else None
             _finish_recovery(
-                trigger=trigger,
+                trigger=recovery_trigger,
                 result="no_improvement",
                 previous_median=previous_median,
                 result_median=result_median,
@@ -937,17 +1003,37 @@ def _run_route_optimization(config: V2Config | None, trigger: str) -> None:
             candidate = state.get("candidate")
             if not isinstance(candidate, dict) or candidate.get("pid") != candidate_pid:
                 raise RuntimeError("candidate_state_changed")
+            candidate_metrics_url = candidate.get("metrics_url")
+            if not isinstance(candidate_metrics_url, str) or not _connector_ready_now(
+                candidate_pid,
+                candidate_metrics_url,
+            ):
+                raise RuntimeError("candidate_no_longer_ready")
             state["active"] = candidate
             state["candidate"] = None
+            state["draining"] = active if isinstance(old_pid, int) and old_pid != candidate_pid else None
             state["pid"] = candidate_pid
             runtime.write_json(_state_path(), state)
             _pid_path().write_text(str(candidate_pid), encoding="utf-8")
             _candidate_pid_path().unlink(missing_ok=True)
             promoted = True
-        if isinstance(old_pid, int) and old_pid != candidate_pid and _is_cloudflared_pid(old_pid):
-            runtime.stop_pid(old_pid, timeout=RECOVERY_DRAIN_SECONDS)
+        if isinstance(old_pid, int) and old_pid != candidate_pid:
+            old_pid_state = _cloudflared_pid_state(old_pid)
+            if old_pid_state == "cloudflared":
+                drained = runtime.stop_pid(old_pid, timeout=RECOVERY_DRAIN_SECONDS)
+            else:
+                drained = old_pid_state in {"dead", "other"}
+            if drained:
+                with _CONNECTOR_LOCK:
+                    state = _read_state() or {}
+                    draining = state.get("draining")
+                    if isinstance(draining, dict) and draining.get("pid") == old_pid:
+                        state["draining"] = None
+                        runtime.write_json(_state_path(), state)
+            else:
+                logger.warning("Old Tunnel connector remains tracked after drain failed pid=%s", old_pid)
         _finish_recovery(
-            trigger=trigger,
+            trigger=recovery_trigger,
             result="improved",
             previous_median=previous_median,
             result_median=result_median,
@@ -955,7 +1041,7 @@ def _run_route_optimization(config: V2Config | None, trigger: str) -> None:
     except Exception:
         logger.warning("Tunnel route optimization failed", exc_info=True)
         _finish_recovery(
-            trigger=trigger,
+            trigger=recovery_trigger,
             result="failed",
             previous_median=previous_median,
             result_median=None,
@@ -969,7 +1055,8 @@ def _run_route_optimization(config: V2Config | None, trigger: str) -> None:
                 if _state_path().exists():
                     _replace_state_connector("candidate", None)
         with _RECOVERY_LOCK:
-            _RECOVERY_THREAD = None
+            if _RECOVERY_THREAD is recovery_thread:
+                _RECOVERY_THREAD = None
 
 
 def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
@@ -983,7 +1070,14 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
             active = _state_connector("active") or {}
             metrics_url = active.get("metrics_url")
             candidate = _state_connector("candidate") or {}
-            connector_count = 1 + int(_is_cloudflared_pid(candidate.get("pid"))) if running else 0
+            draining = _state_connector("draining") or {}
+            connector_count = (
+                1
+                + int(_is_cloudflared_pid(candidate.get("pid")))
+                + int(_is_cloudflared_pid(draining.get("pid")))
+                if running
+                else 0
+            )
             sample = None
             if running and isinstance(metrics_url, str) and metrics_url:
                 try:
@@ -1029,6 +1123,25 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
     finally:
         with _QUALITY_MONITOR_LOCK:
             _QUALITY_MONITOR_STARTED = False
+
+
+def _reconcile_draining_connector() -> None:
+    draining = _state_connector("draining")
+    if not draining or not isinstance(draining.get("pid"), int):
+        return
+    draining_pid = int(draining["pid"])
+    active = _state_connector("active") or {}
+    if active.get("pid") == draining_pid:
+        _replace_state_connector("draining", None)
+        return
+    draining_state = _cloudflared_pid_state(draining_pid)
+    if draining_state == "unknown":
+        logger.warning("Preserving draining Tunnel connector with unknown identity pid=%s", draining_pid)
+        return
+    if draining_state == "cloudflared" and not runtime.stop_pid(draining_pid, timeout=8):
+        logger.warning("Could not stop draining Tunnel connector pid=%s", draining_pid)
+        return
+    _replace_state_connector("draining", None)
 
 
 def _reconcile_orphan_candidate() -> None:
@@ -1113,6 +1226,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                     _RECOVERY_ATTEMPTS[:] = [float(item) for item in attempts if isinstance(item, (int, float))][-100:]
                 _RECOVERY_MANUAL_BYPASS_USED = bool(persisted.get("manual_bypass_used"))
                 _RECOVERY_EMERGENCY_BYPASS_USED = bool(persisted.get("emergency_bypass_used"))
+        _reconcile_draining_connector()
         _reconcile_orphan_candidate()
         quality_path = _quality_state_path()
         try:
@@ -1136,11 +1250,22 @@ def stop(config: V2Config | None = None) -> dict[str, Any]:
         config = None
     with _CONNECTOR_LOCK:
         _RECOVERY_CANCEL_EVENT.set()
-        candidate = _state_connector("candidate") or {}
-        candidate_pid = candidate.get("pid")
-        if isinstance(candidate_pid, int) and _is_cloudflared_pid(candidate_pid):
-            runtime.stop_pid(candidate_pid, timeout=8)
-        _candidate_pid_path().unlink(missing_ok=True)
+        for connector_name in ("candidate", "draining"):
+            connector = _state_connector(connector_name) or {}
+            connector_pid = connector.get("pid")
+            connector_state = _cloudflared_pid_state(connector_pid)
+            if connector_state == "unknown":
+                result = {**status(config), "ok": False, "error": "cloudflared_process_unknown", "stopped": False}
+                _report_runtime_status_async(config, event="stop_failed", last_error="cloudflared_process_unknown")
+                return result
+            if connector_state == "cloudflared" and not runtime.stop_pid(connector_pid, timeout=8):
+                result = {**status(config), "ok": False, "error": "cloudflared_stop_failed", "stopped": False}
+                _report_runtime_status_async(config, event="stop_failed", last_error="cloudflared_stop_failed")
+                return result
+            if _state_path().exists():
+                _replace_state_connector(connector_name, None)
+            if connector_name == "candidate":
+                _candidate_pid_path().unlink(missing_ok=True)
         pid = _read_pid()
         pid_state = _cloudflared_pid_state(pid)
         if pid is not None and pid_state == "unknown":
