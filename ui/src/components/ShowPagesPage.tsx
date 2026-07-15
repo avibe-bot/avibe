@@ -6,6 +6,7 @@ import {
   ChevronUp,
   Copy,
   ExternalLink,
+  ImageUp,
   Link2,
   Loader2,
   Minus,
@@ -56,6 +57,7 @@ interface RowProps {
   onToggleExpand: () => void;
   onToggleInstall: (next: boolean) => void;
   onRename: (title: string | null) => Promise<void>;
+  onUploadIcon: (file: File) => Promise<void>;
   onSetVisibility: (visibility: Visibility) => void;
   onRotate: () => void;
   onCopy: () => void;
@@ -73,6 +75,7 @@ function ShowPageRow({
   onToggleExpand,
   onToggleInstall,
   onRename,
+  onUploadIcon,
   onSetVisibility,
   onRotate,
   onCopy,
@@ -190,7 +193,12 @@ function ShowPageRow({
         <div className="bg-surface-2 px-5 pb-6 pt-2">
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
             <div className="flex flex-col gap-5">
-              <InlineTitleRename page={page} disabled={busy} onRename={onRename} />
+              {/* Name + app-icon editor side by side (§7.1j): the name field is
+                  intentionally narrow now, leaving room for the icon preview + upload. */}
+              <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
+                <InlineTitleRename page={page} disabled={busy} onRename={onRename} />
+                <IconEditor page={page} disabled={busy} onUploadIcon={onUploadIcon} />
+              </div>
 
               <div className="flex flex-col gap-2">
                 <span className={LABEL}>{t('showPages.visibilityLabel')}</span>
@@ -368,10 +376,10 @@ const InlineTitleRename: React.FC<{
           }}
           placeholder={t('chat.titlePlaceholder')}
           aria-label={t('showPages.nameLabel')}
-          className="h-9 max-w-[360px] px-3 text-[13px]"
+          className="h-9 w-[240px] max-w-full px-3 text-[13px]"
         />
       ) : (
-        <div className="flex max-w-[360px] items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
+        <div className="flex w-[240px] max-w-full items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
           <span className="min-w-0 flex-1 truncate text-[13px] text-foreground">
             {page.title?.trim() || t('chat.untitled')}
           </span>
@@ -391,6 +399,63 @@ const InlineTitleRename: React.FC<{
   );
 };
 
+// Image types the picker accepts, aligned with the server's upload whitelist (§7.1j).
+// The server derives the on-disk name from the type/extension; the client only sends
+// the bytes + filename, so no path is ever composed here.
+const ICON_UPLOAD_ACCEPT = 'image/svg+xml,image/png,image/x-icon,image/vnd.microsoft.icon,image/jpeg,image/webp,.svg,.png,.ico,.jpg,.jpeg,.webp';
+
+// The app-icon preview + upload/replace control, sitting beside the name field in the
+// expanded panel (§7.1j). The preview reuses the shared avatar tile (icon-or-letter,
+// content-versioned), so on a successful upload the returned icon_version flows through
+// the inventory and the preview refetches with no extra wiring.
+const IconEditor: React.FC<{
+  page: ShowPage;
+  disabled: boolean;
+  onUploadIcon: (file: File) => Promise<void>;
+}> = ({ page, disabled, onUploadIcon }) => {
+  const { t } = useTranslation();
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const hasIcon = Boolean(page.icon_version);
+
+  const pick = () => {
+    if (disabled || uploading) return;
+    inputRef.current?.click();
+  };
+  const onChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // let the same file be re-picked after a failed attempt
+    if (!file) return;
+    setUploading(true);
+    void onUploadIcon(file)
+      .catch(() => undefined)
+      .finally(() => setUploading(false));
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <span className={LABEL}>{t('showPages.iconLabel')}</span>
+      <div className="flex items-center gap-2">
+        <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconVersion={page.icon_version} />
+        <Button type="button" variant="secondary" size="sm" onClick={pick} disabled={disabled || uploading}>
+          {uploading ? <Loader2 className="size-3.5 animate-spin" /> : <ImageUp className="size-3.5" />}
+          {hasIcon ? t('showPages.icon.replace') : t('showPages.icon.upload')}
+        </Button>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ICON_UPLOAD_ACCEPT}
+          className="hidden"
+          onChange={onChange}
+          aria-hidden
+          tabIndex={-1}
+        />
+      </div>
+      <span className="max-w-[240px] text-[11px] text-muted">{t('showPages.icon.hint')}</span>
+    </div>
+  );
+};
+
 // The full Show Pages inventory view (the "AI" tab): search + visibility filter +
 // rows that OPEN the page as an app window on click, each with a state-aware
 // install toggle (添加到 App ↔ 移出) and an explicit chevron for the share-link
@@ -403,6 +468,7 @@ export function ShowPagesView({
   setVisibility,
   rotate,
   rename,
+  uploadIcon,
   onShareIdSaved,
   reload,
   onOpenApp,
@@ -499,6 +565,7 @@ export function ShowPagesView({
               onToggleExpand={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
               onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
               onRename={(title) => rename(page, title)}
+              onUploadIcon={(file) => uploadIcon(page, file)}
               onSetVisibility={(visibility) => setVisibility(page, visibility)}
               onRotate={() => rotate(page)}
               onCopy={() => copy(page)}

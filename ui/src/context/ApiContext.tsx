@@ -407,6 +407,9 @@ export type ApiContextType = {
   rotateShowPageShare: (sessionId: string) => Promise<any>;
   /** Set a custom public link suffix (public pages only); rejects on a taken/invalid id. */
   setShowPageShareId: (sessionId: string, shareId: string) => Promise<any>;
+  /** Upload an image as the page's workspace-root favicon (multipart); resolves to the
+   *  refreshed page payload carrying the fresh `icon_version` (§7.1j). */
+  uploadShowPageIcon: (sessionId: string, file: File) => Promise<any>;
   /** The workbench Dock document (resident-tile order + pinned Show Pages). */
   getDock: () => Promise<DockResponse>;
   /** Pin a session's Show Page to the Dock as an app (idempotent). */
@@ -2160,6 +2163,18 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     rotateShowPageShare: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/rotate-share`, {}),
     setShowPageShareId: (sessionId, shareId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/share-id`, { share_id: shareId }),
+    uploadShowPageIcon: async (sessionId, file) => {
+      // Multipart POST: the server names the on-disk file, so we send only the bytes
+      // and a filename hint. `requestJson` adds CSRF + surfaces errors like everything
+      // else; letting the browser set the multipart Content-Type/boundary (no JSON).
+      const form = new FormData();
+      form.append('file', file, file.name);
+      const { payloadJson } = await requestJson(
+        `/api/show-pages/${encodeURIComponent(sessionId)}/icon`,
+        { method: 'POST', body: form },
+      );
+      return payloadJson;
+    },
     getDock: () => getJson('/api/dock'),
     pinDockShowPage: (sessionId) => postJson('/api/dock/pins', { session_id: sessionId }),
     unpinDockShowPage: (sessionId) => deleteJson(`/api/dock/pins/${encodeURIComponent(sessionId)}`),

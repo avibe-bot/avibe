@@ -206,7 +206,24 @@ export function useShowPages() {
     }
   };
 
-  return { pages, loading, loaded, busyId, setVisibility, rotate, rename, onShareIdSaved, reload };
+  // Upload a new app icon (§7.1j). The server writes the workspace-root favicon and
+  // returns the refreshed payload; merging it updates `icon_version`, so the
+  // content-versioned icon URL changes and every avatar surface refetches on its own.
+  const uploadIcon = async (page: ShowPage, file: File) => {
+    if (busyId) return;
+    setBusyId(page.session_id);
+    try {
+      const res = await api.uploadShowPageIcon(page.session_id, file);
+      mergePage(res);
+      showToast(t('showPages.icon.toast.updated'));
+    } catch {
+      // ApiContext surfaces a toast on failure.
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return { pages, loading, loaded, busyId, setVisibility, rotate, rename, uploadIcon, onShareIdSaved, reload };
 }
 
 export type ShowPagesController = ReturnType<typeof useShowPages>;

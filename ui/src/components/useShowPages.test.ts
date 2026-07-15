@@ -9,6 +9,7 @@ const page = (title: string | null): ShowPage => ({
   platform: null,
   agent: null,
   path: '/tmp/show',
+  icon_version: null,
   active_url: null,
   private_url: null,
   public_url: null,

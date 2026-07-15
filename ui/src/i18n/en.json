@@ -176,6 +176,15 @@
     "emptyFiltered": "No Show Pages match this filter.",
     "nameLabel": "Name",
     "rename": "Rename",
+    "iconLabel": "Icon",
+    "icon": {
+      "upload": "Upload",
+      "replace": "Replace",
+      "hint": "SVG, PNG, ICO, JPEG, or WebP · up to 2 MiB. Shown in the Dock and App Library.",
+      "toast": {
+        "updated": "App icon updated"
+      }
+    },
     "visibilityLabel": "Visibility",
     "visibilityOffline": "Offline",
     "liveLink": "Live link",
@@ -231,7 +240,7 @@
       "system": "system",
       "dock": "Dock",
       "undock": "Undock",
-      "remove": "Remove",
+      "remove": "Remove App",
       "reorder": "Reorder",
       "empty": "No apps match your search."
     },
@@ -646,6 +655,10 @@
     "missing_share_id": "Enter a custom link first.",
     "not_public": "Make the Show Page public first to change its link.",
     "session_archived": "This session is archived, so its Show Page can't be changed.",
+    "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",
+    "icon_too_large": "That icon is too large. Use an image up to 2 MiB.",
+    "icon_required": "Choose an icon file to upload.",
+    "icon_write_failed": "Couldn't save the icon. Please try again.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
     "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
