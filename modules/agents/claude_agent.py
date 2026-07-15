@@ -878,7 +878,8 @@ class ClaudeAgent(BaseAgent):
                         # so sending both would duplicate the content.
 
                         pending_request = self._pop_pending_request(composite_key)
-                        output_activity = getattr(pending_request, "output_activity", None)
+                        output_activities = self._request_activities(pending_request)
+                        output_activity = output_activities[-1] if output_activities else None
 
                         # The receiver is long-lived and reused across a session's
                         # turns, so ``context`` still carries the FIRST turn's
@@ -907,7 +908,7 @@ class ClaudeAgent(BaseAgent):
                                 )
                                 registry = self._activity_registry()
                                 if registry is not None:
-                                    registry.ack_completed_output(output_activity)
+                                    self._ack_request_activities(pending_request)
                             else:
                                 await self.emit_result_message(
                                     context,
@@ -920,9 +921,7 @@ class ClaudeAgent(BaseAgent):
                         except Exception:
                             emit_failed = True
                             if output_activity is not None:
-                                registry = self._activity_registry()
-                                if registry is not None:
-                                    registry.requeue_completed_output(output_activity)
+                                self._requeue_request_activity(pending_request)
                                 await self._settle_activity_turn_after_delivery_failure(
                                     context
                                 )
@@ -1359,14 +1358,49 @@ class ClaudeAgent(BaseAgent):
         service = getattr(self.controller, "agent_service", None)
         return getattr(service, "activities", None)
 
+    @staticmethod
+    def _request_activities(request: AgentRequest | None) -> list[SessionActivity]:
+        if request is None:
+            return []
+        return list(getattr(request, "output_activities", None) or [])
+
+    def _attach_request_activity(
+        self,
+        request: AgentRequest,
+        activity: SessionActivity,
+    ) -> None:
+        retained = list(getattr(request, "output_activities", None) or [])
+        if all(item is not activity for item in retained):
+            retained.append(activity)
+        request.output_activities = retained
+        request.output = self._activity_message_output(
+            activity,
+            detached=False,
+            completes_turn=True,
+        )
+
+    def _clear_request_activities(self, request: AgentRequest | None) -> None:
+        if request is None:
+            return
+        request.output_activities = []
+
+    def _ack_request_activities(self, request: AgentRequest | None) -> None:
+        activities = self._request_activities(request)
+        registry = self._activity_registry()
+        if registry is not None:
+            for activity in activities:
+                registry.ack_completed_output(activity)
+        self._clear_request_activities(request)
+
     def _requeue_request_activity(self, request: AgentRequest | None) -> None:
-        activity = getattr(request, "output_activity", None)
-        if activity is None or request is None:
+        activities = self._request_activities(request)
+        if not activities or request is None:
             return
         registry = self._activity_registry()
         if registry is not None:
-            registry.requeue_completed_output(activity)
-        request.output_activity = None
+            for activity in activities:
+                registry.requeue_completed_output(activity)
+        self._clear_request_activities(request)
         request.output = terminal_turn_output()
 
     def _activity_output_pending(self, composite_key: str) -> bool:
@@ -1827,6 +1861,7 @@ class ClaudeAgent(BaseAgent):
             if same_turn:
                 matched_request = self._pop_pending_request(composite_key)
                 self._adopt_pending_turn_token(context, matched_request)
+                self._attach_request_activity(matched_request, activity)
                 try:
                     await self._emit_activity_result(
                         context,
@@ -1836,9 +1871,9 @@ class ClaudeAgent(BaseAgent):
                         completes_turn=True,
                         request=matched_request,
                     )
-                    registry.ack_completed_output(activity)
+                    self._ack_request_activities(matched_request)
                 except Exception:
-                    registry.requeue_completed_output(activity)
+                    self._requeue_request_activity(matched_request)
                     await self._settle_activity_turn_after_delivery_failure(context)
                     raise
                 finally:
@@ -1958,12 +1993,7 @@ class ClaudeAgent(BaseAgent):
                 or ""
             ).strip()
             if completed_activity.turn_id and completed_activity.turn_id == pending_turn_id:
-                pending_request.output = self._activity_message_output(
-                    completed_activity,
-                    detached=False,
-                    completes_turn=True,
-                )
-                pending_request.output_activity = completed_activity
+                self._attach_request_activity(pending_request, completed_activity)
                 return None
             self._detached_activity_outputs[composite_key] = completed_activity
             logger.info(
@@ -2028,7 +2058,11 @@ class ClaudeAgent(BaseAgent):
                 if completed_activity is not None
                 else None
             ),
-            output_activity=completed_activity,
+            output_activities=(
+                [completed_activity]
+                if completed_activity is not None
+                else []
+            ),
         )
         self._pending_requests.setdefault(composite_key, []).append(request)
         logger.info(

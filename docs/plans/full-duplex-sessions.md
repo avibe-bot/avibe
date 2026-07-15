@@ -113,6 +113,13 @@ without acquiring lifecycle authority over whichever foreground Turn is current.
 Deferred terminal intent is excluded from generic restart requeueing, then
 reconciled against recovered Activity/output snapshots before normal Run drain.
 
+Several Claude Activities can complete inside one Turn before the backend emits
+its single final Result. The pending request retains all claimed completions as
+one delivery batch: the latest Activity supplies the visible Result provenance,
+and every retained completion is acknowledged only after that Result is durably
+delivered. A later completion must never overwrite and strand an earlier claim,
+because an unreachable claimed output would block native-query admission forever.
+
 ## Claude mapping
 
 Claude task frames map into the shared Activity registry:
