@@ -6432,6 +6432,7 @@ async def show_page_icon_upload(session_id: str, starlette_request: FastAPIReque
         from core.file_browser_service import FileBrowserError
         from core.show_pages import ShowPageError
         from vibe import api
+        from vibe.sse_broker import broker
 
         try:
             _validate_file_upload_content_length(starlette_request.headers, SHOW_PAGE_ICON_MAX_UPLOAD_BYTES)
@@ -6444,15 +6445,23 @@ async def show_page_icon_upload(session_id: str, starlette_request: FastAPIReque
                     raise ShowPageError("An icon file is required.", code="icon_required")
                 await upload.seek(0)
                 data = await upload.read()
-                return jsonify(
-                    await asyncio.to_thread(
-                        api.upload_show_page_icon,
-                        session_id,
-                        data,
-                        filename=upload.filename,
-                        content_type=upload.content_type,
-                    )
+                result = await asyncio.to_thread(
+                    api.upload_show_page_icon,
+                    session_id,
+                    data,
+                    filename=upload.filename,
+                    content_type=upload.content_type,
                 )
+                # Broadcast so EVERY already-mounted inventory (Dock, WindowLayer, mobile
+                # drawer, app search) reloads and picks up the new icon_version — the
+                # optimistic mergePage only updates the Library instance that uploaded
+                # (§7.1j review P2). Reuses the existing "show page changed → reload"
+                # signal that those surfaces already listen for.
+                broker.publish(
+                    "session.activity",
+                    {"session_id": session_id, "scope_id": None, "event": "show_event"},
+                )
+                return jsonify(result)
             finally:
                 await form.close()
         except MultiPartException as exc:
@@ -6462,8 +6471,12 @@ async def show_page_icon_upload(session_id: str, starlette_request: FastAPIReque
         except StarletteHTTPException as exc:
             return _show_page_icon_upload_error("invalid_icon", str(exc.detail))
         except FileBrowserError as exc:
-            # _parse_file_upload_form raises this when the body is not multipart.
-            return _show_page_icon_upload_error("invalid_icon", exc.message)
+            # _parse_file_upload_form raises this for a non-multipart body; the
+            # Content-Length guard raises it with code "too_large" (413) BEFORE parsing a
+            # very large body — that must keep the documented icon_too_large/413 path
+            # instead of collapsing to a generic 400 (§7.1j review P3).
+            code = "icon_too_large" if exc.code == "too_large" else "invalid_icon"
+            return _show_page_icon_upload_error(code, exc.message)
         except ShowPageError as exc:
             return _show_page_icon_upload_error(getattr(exc, "code", "invalid_icon"), str(exc))
         except Exception:

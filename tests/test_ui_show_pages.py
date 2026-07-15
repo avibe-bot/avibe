@@ -593,6 +593,10 @@ def test_show_page_icon_upload_happy_path(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")  # index.html has no <link rel=icon>
+    published: list = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish", lambda event_type, data: published.append((event_type, data))
+    )
     client = app.test_client()
 
     response = client.post(
@@ -608,6 +612,34 @@ def test_show_page_icon_upload_happy_path(monkeypatch, tmp_path):
     assert isinstance(body["icon_version"], str) and body["icon_version"]
     # The server chose favicon.svg at the workspace root and wrote the exact bytes.
     assert (ensure_show_page_dir("ses123") / "favicon.svg").read_bytes() == b"<svg>UPLOADED</svg>"
+    # Every already-mounted inventory (Dock, WindowLayer, mobile drawer, search) reloads:
+    # a session.activity show_event is broadcast so they pick up the new icon (§7.1j P2).
+    assert ("session.activity", {"session_id": "ses123", "scope_id": None, "event": "show_event"}) in published
+
+
+def test_show_page_icon_upload_length_guard_maps_too_large(monkeypatch, tmp_path):
+    # The Content-Length guard rejects an oversized body (413) BEFORE the multipart parser
+    # runs; that too_large must surface as icon_too_large/413, not collapse to a generic
+    # invalid_icon/400 like a non-multipart body would (§7.1j review P3).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    from core.file_browser_service import FileBrowserError
+
+    def _too_large(*_args, **_kwargs):
+        raise FileBrowserError("too_large", "File is too large", 413)
+
+    monkeypatch.setattr("vibe.ui_server._validate_file_upload_content_length", _too_large)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/show-pages/ses123/icon",
+        files={"file": ("logo.svg", b"<svg/>", "image/svg+xml")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["error"]["code"] == "icon_too_large"
 
 
 def test_show_page_icon_upload_rejects_bad_type(monkeypatch, tmp_path):

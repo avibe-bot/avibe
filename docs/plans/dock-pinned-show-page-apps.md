@@ -673,6 +673,20 @@ alongside §7.1h item 3), in `AppWindow.tsx` + `WindowManagerContext.tsx`:
 3. **Copy**: the Library 移出 button text → 「移出 App」 (en aligned, e.g.
    "Remove App").
 
+**Hardening (review round 1, 2026-07-16 — #916):** four Codex findings, all fixed:
+- **Preserve the old icon until the new write lands (P2):** the write reorders to
+  temp → atomic `os.replace` → *then* remove the other-extension root `favicon.*`, so a
+  failed/partial write (e.g. disk full) never deletes the user's existing icon first.
+- **Cross-surface freshness (P2):** a successful upload broadcasts a `session.activity`
+  `show_event`, so every already-mounted inventory (Dock, WindowLayer, mobile drawer,
+  ⌘K search) reloads and picks up the new `icon_version` — not just the Library instance
+  that ran the upload (its optimistic `mergePage` is local).
+- **Preserve the too-large path (P3):** the Content-Length guard's `too_large` keeps its
+  `icon_too_large`/413 mapping instead of collapsing to a generic `invalid_icon`/400.
+- **Reject explicit non-image content types (P3):** an explicit, non-generic MIME that is
+  not a whitelisted image is refused even when the filename extension is whitelisted;
+  filename fallback is limited to blank / `application/octet-stream` types.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:

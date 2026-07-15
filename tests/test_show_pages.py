@@ -1311,6 +1311,9 @@ def test_write_show_page_icon_rejects_non_whitelisted_type(monkeypatch, tmp_path
     # A content-type that disagrees with a whitelisted extension is also refused.
     with pytest.raises(ShowPageError):
         write_show_page_icon("sesbad", b"x", filename="icon.svg", content_type="image/png")
+    # A whitelisted extension can't smuggle an explicit non-image content-type through.
+    with pytest.raises(ShowPageError):
+        write_show_page_icon("sesbad", b"x", filename="logo.svg", content_type="text/html")
     assert not any((show_page_dir("sesbad")).glob("favicon.*"))
 
 
@@ -1376,6 +1379,33 @@ def test_write_show_page_icon_does_not_follow_symlink_at_target(monkeypatch, tmp
     assert resolved is not None and resolved[0] == favicon.resolve()
 
 
+def test_write_show_page_icon_preserves_old_favicon_on_write_failure(monkeypatch, tmp_path):
+    # A failure while the replacement lands (e.g. disk full during os.replace) must NOT
+    # destroy the user's existing icon — old favicons stay until the new one succeeds, and
+    # the other-ext cleanup only runs afterwards, so a prior favicon.png survives (§7.1j P2).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon, show_page_dir, write_show_page_icon
+
+    page_dir = show_page_dir("sesfail")
+    page_dir.mkdir(parents=True)
+    (page_dir / "favicon.png").write_bytes(b"OLD-PNG")
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("core.show_pages.os.replace", _boom)
+
+    with pytest.raises(OSError):
+        write_show_page_icon("sesfail", b"<svg>NEW</svg>", filename="i.svg", content_type="image/svg+xml")
+
+    # The old icon (a different extension) survives and still resolves; no temp is orphaned.
+    assert (page_dir / "favicon.png").read_bytes() == b"OLD-PNG"
+    assert not (page_dir / "favicon.svg").exists()
+    assert not list(page_dir.glob(".favicon.*.tmp"))
+    resolved = resolve_show_page_icon("sesfail")
+    assert resolved is not None and resolved[0] == (page_dir / "favicon.png").resolve()
+
+
 def test_write_show_page_icon_version_changes_on_replace(monkeypatch, tmp_path):
     # Re-uploading different bytes changes icon_version (the content-versioned URL busts
     # the cache); identical bytes keep it stable — the freshness invariant on the write.
@@ -1420,6 +1450,11 @@ def test_canonical_upload_icon_ext_rules():
     assert _canonical_upload_icon_ext("x.gif", "image/gif") is None  # gif is servable, not uploadable
     assert _canonical_upload_icon_ext("x.txt", "text/plain") is None
     assert _canonical_upload_icon_ext("x.svg", "image/png") is None  # mismatch
+    # An EXPLICIT non-image content-type is rejected even with a whitelisted extension;
+    # only a blank / generic (octet-stream) type falls back to the filename (Codex P3).
+    assert _canonical_upload_icon_ext("logo.svg", "text/html") is None
+    assert _canonical_upload_icon_ext("logo.svg", "application/octet-stream") == "svg"
+    assert _canonical_upload_icon_ext("logo.svg", "") == "svg"
 
 
 def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, tmp_path):

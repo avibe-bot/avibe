@@ -879,8 +879,15 @@ def _canonical_upload_icon_ext(filename: str | None, content_type: str | None) -
     Derived from the content-type first, then the filename suffix (jpeg→jpg). A
     recognizable, whitelisted signal that DISAGREES with the other is refused (a PNG
     announced as ``image/svg+xml`` is suspicious), so the server writes exactly the type
-    it validated. None → the route answers 415 rather than guessing an extension."""
-    type_ext = _ICON_UPLOAD_CONTENT_TYPE_EXT.get((content_type or "").split(";", 1)[0].strip().lower())
+    it validated. Falling back to the filename is limited to a BLANK or generic
+    (``application/octet-stream``) content-type: an EXPLICIT, non-generic type that isn't
+    a whitelisted image is a rejection signal (a ``text/html`` body named ``logo.svg`` is
+    not an icon), not something to accept on the extension alone. None → the route answers
+    415 rather than guessing an extension."""
+    raw_type = (content_type or "").split(";", 1)[0].strip().lower()
+    type_ext = _ICON_UPLOAD_CONTENT_TYPE_EXT.get(raw_type)
+    if type_ext is None and raw_type and raw_type != "application/octet-stream":
+        return None  # an explicit, non-image content-type → reject, don't trust the name
     name_ext = _ICON_UPLOAD_NAME_EXT.get(Path(filename or "").suffix.lower().lstrip("."))
     if type_ext and name_ext and type_ext != name_ext:
         return None
@@ -897,20 +904,20 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def _write_root_favicon_atomically(page_dir: Path, ext: str, data: bytes) -> None:
-    """Write ``<page_dir>/favicon.<ext>`` as the SOLE conventional root icon, safely.
+    """Write ``<page_dir>/favicon.<ext>`` as the SOLE conventional root icon, safely, and
+    WITHOUT destroying the existing icon unless the replacement actually lands.
 
-    Mirrors the read-safety discipline (§7.1f) on the write side: every root
-    ``favicon.<servable-ext>`` is unlinked FIRST — so a pre-existing ``favicon.svg``
-    can't shadow a freshly-uploaded ``favicon.jpg`` in the resolver's svg>ico>png>… order,
-    AND a symlink at the name is removed rather than written through — then the bytes land
-    via a fresh ``O_EXCL | O_NOFOLLOW`` temp + ``os.replace`` (atomic rename: no reader
-    ever sees a half-written icon, and the rename swaps the final NAME without following a
-    symlink raced back in). Threat model: the racing party is the user's own agent with
-    local FS access, so this is defense-in-depth, not a boundary — but a symlinked/partial
-    favicon must never become servable."""
-    # Clear every root favicon.* the resolver could pick, so exactly ONE source remains.
-    for servable_ext in SHOW_PAGE_ICON_CONTENT_TYPES:
-        _unlink_quietly(page_dir / f"favicon.{servable_ext}")
+    The new bytes go to a fresh ``O_EXCL | O_NOFOLLOW`` temp and are atomically
+    ``os.replace``d onto ``favicon.<ext>`` FIRST — so a failure while opening/writing the
+    temp or replacing (e.g. disk full mid-upload) raises with every existing favicon still
+    in place (no data loss — §7.1j review P2). ONLY AFTER the new file lands are the
+    OTHER-extension root ``favicon.*`` removed, leaving exactly one conventional source
+    (e.g. a prior ``favicon.svg`` after uploading ``favicon.png``, which would otherwise
+    shadow it in the resolver's svg>ico>png>… order). ``os.replace`` swaps the final NAME
+    without following a symlink raced back in, and no reader sees a half-written icon.
+    Threat model: the racing party is the user's own agent with local FS access, so the
+    swap guards are defense-in-depth, not a boundary — but a symlinked/partial favicon
+    must never become servable."""
     target = page_dir / f"favicon.{ext}"
     tmp = page_dir / f".favicon.{ext}.{secrets.token_hex(8)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -918,14 +925,18 @@ def _write_root_favicon_atomically(page_dir: Path, ext: str, data: bytes) -> Non
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+        # Atomic: overwrites any existing favicon.<ext> in place (a symlink at the name is
+        # replaced, not followed). Old favicons of every extension are still intact here.
+        os.replace(tmp, target)
     except BaseException:
         _unlink_quietly(tmp)
         raise
-    try:
-        os.replace(tmp, target)
-    except OSError:
-        _unlink_quietly(tmp)
-        raise
+    # The replacement has landed — now drop the OTHER-extension root favicons so exactly
+    # one conventional source remains. Done last so a failed write above never orphans the
+    # page icon-less.
+    for servable_ext in SHOW_PAGE_ICON_CONTENT_TYPES:
+        if servable_ext != ext:
+            _unlink_quietly(page_dir / f"favicon.{servable_ext}")
 
 
 def write_show_page_icon(
