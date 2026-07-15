@@ -130,6 +130,7 @@ DockDoc = { order: string[], pins: DockPin[] }
 DockPin = { session_id: string, title_snapshot: string, pinned_at: string }
 
 GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404   # §7.1f
+POST     /api/show-pages/{session_id}/icon   (multipart file) → { ok, ...page }  # §7.1j
 ```
 
 - `POST pins` appends `show:<sid>` to the end of `order`; captures
@@ -144,6 +145,16 @@ GET|HEAD /api/show-pages/{session_id}/icon   → 200 image bytes | 404   # §7.1
   `nosniff` + `Content-Security-Policy: sandbox` + `Cache-Control: private,
   max-age=604800, immutable` (safe because the token versions the URL); 404s are
   `no-store`. Never boots the Show Runtime.
+- `POST /api/show-pages/{sid}/icon` (§7.1j, **multipart**): uploads an image as the
+  page's workspace-root conventional favicon. The **server** chooses the on-disk name
+  — `favicon.<ext>`, `ext` derived from a whitelisted content-type/extension
+  (`svg,png,ico,jpg,jpeg,webp`) — so the client NEVER supplies a path; 2 MiB cap;
+  write-safe (removes sibling root `favicon.*` so one source remains, no symlink
+  follow, atomic replace); index.html is never edited. Returns the refreshed page
+  payload (incl. the new `icon_version`). Errors are structured 4xx (`invalid_icon_type`
+  415, `icon_too_large` 413, `icon_required` 400, `show_page_not_found` 404) — never a
+  500. An explicit usable `<link rel=icon>` in index.html still WINS over the uploaded
+  conventional file (§7.1f resolution order); the editor covers the common no-link case.
 
 ## 5. Frontend Changes (map to real files)
 
@@ -640,6 +651,27 @@ alongside §7.1h item 3), in `AppWindow.tsx` + `WindowManagerContext.tsx`:
    is a pure predicate (skips minimized windows); both it and the shield have
    vitest DOM-structure coverage. The real gesture FEEL is verified by the owner
    via CDP on the regression env post-merge (residual manual check).
+
+### 7.1j Phase 2.5 — icon self-serve (owner 2026-07-15 23:04)
+
+1. **Scaffold head comment** (English, in the default Show Page template's
+   `<head>`): to give the app an icon, place a favicon FILE (e.g.
+   `favicon.svg` at the workspace root or a `<link rel="icon">` to a relative
+   file) — do NOT inject icons dynamically via JS; the file becomes the app
+   icon in the Dock / App Library. Rationale: the rule lives in the artifact
+   agents actually edit (no prompt verbosity); closes the JS-injection blind
+   spot at the source.
+2. **Icon editor beside the page rename** (AI view expanded panel): shorten
+   the name input; add current-icon preview + upload/replace control. Upload
+   writes the workspace-root conventional favicon file (server-chosen fixed
+   name `favicon.<ext>`; replaces siblings to keep one source). New authed
+   endpoint `POST /api/show-pages/<sid>/icon` (multipart): extension+type
+   whitelist, 2MiB cap, write-safe (no symlink follow, fixed name — client
+   never names paths), returns fresh `icon_version`. Ledger: an explicit
+   usable `<link rel=icon>` still wins over the uploaded conventional file
+   (we do not edit user HTML).
+3. **Copy**: the Library 移出 button text → 「移出 App」 (en aligned, e.g.
+   "Remove App").
 
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
