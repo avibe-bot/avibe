@@ -287,7 +287,8 @@ Additional rules:
 
 1. Start a second connector with the same tunnel token, origin, and remote
    configuration, but distinct PID, metrics port, and logs.
-2. Wait up to 30 seconds for four ready connections.
+2. Wait up to 30 seconds for `/ready` and four HA connections before starting
+   the evaluation window.
 3. Collect candidate samples for 45 seconds, requiring at least four valid samples.
 4. Reject the candidate if it has fewer than four connections, any request
    errors, unstable metrics, or a worse maximum RTT than the active connector.
@@ -348,6 +349,8 @@ Connector state writes are atomic. On startup:
 - if only the candidate remains and is ready, promote it;
 - retry cleanup of a recorded draining connector without losing its PID when
   termination cannot be verified;
+- retain a failed candidate's state and PID marker when process identity cannot
+  be verified, so stop/startup reconciliation can safely retry cleanup;
 - reset persisted `evaluating` or `draining` recovery state to a failed
   cooldown when no matching candidate or draining connector survives startup;
   and

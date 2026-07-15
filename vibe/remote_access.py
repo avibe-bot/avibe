@@ -779,7 +779,12 @@ def _parse_timestamp(value: Any) -> float | None:
 def _reserve_recovery(thread: threading.Thread, *, manual: bool, emergency: bool, now: float) -> bool:
     global _RECOVERY_THREAD, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
     with _RECOVERY_LOCK:
-        if _RECOVERY_THREAD is not None or _state_connector("draining") is not None:
+        if (
+            _RECOVERY_THREAD is not None
+            or _state_connector("candidate") is not None
+            or _state_connector("draining") is not None
+            or _read_pid_file(_candidate_pid_path()) is not None
+        ):
             return False
         next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
         cooling_down = next_attempt is not None and now < next_attempt
@@ -918,8 +923,9 @@ def _connector_ready_now(pid: int, metrics_url: str) -> bool:
     if not _is_cloudflared_pid(pid):
         return False
     try:
-        return requests.get(f"{metrics_url.rstrip('/')}/ready", timeout=0.5).ok
-    except requests.RequestException:
+        sample = tunnel_quality.scrape_metrics(metrics_url)
+        return sample.ready and sample.ha_connections >= 4
+    except Exception:
         return False
 
 
@@ -1071,13 +1077,20 @@ def _run_route_optimization(
             result_median=None,
         )
     finally:
-        if candidate_pid is not None and not promoted and _is_cloudflared_pid(candidate_pid):
-            runtime.stop_pid(candidate_pid, timeout=8)
-        if not promoted:
+        candidate_cleaned = promoted or candidate_pid is None
+        if candidate_pid is not None and not promoted:
+            candidate_state = _cloudflared_pid_state(candidate_pid)
+            if candidate_state == "cloudflared":
+                runtime.stop_pid(candidate_pid, timeout=8)
+                candidate_state = _cloudflared_pid_state(candidate_pid)
+            candidate_cleaned = candidate_state in {"dead", "other"}
+        if not promoted and candidate_cleaned:
             _candidate_pid_path().unlink(missing_ok=True)
             with _CONNECTOR_LOCK:
                 if _state_path().exists():
                     _replace_state_connector("candidate", None)
+        elif not promoted:
+            logger.warning("Preserving Tunnel candidate with unverified process identity pid=%s", candidate_pid)
         with _RECOVERY_LOCK:
             if _RECOVERY_THREAD is recovery_thread:
                 _RECOVERY_THREAD = None
@@ -1203,7 +1216,9 @@ def _reconcile_orphan_candidate() -> None:
             state = _read_state() or {}
             if isinstance(state.get("candidate"), dict) and state["candidate"].get("pid") == candidate_pid:
                 state["candidate"] = None
-                runtime.write_json(_state_path(), state)
+            state["pid"] = candidate_pid
+            runtime.write_json(_state_path(), state)
+            _pid_path().write_text(str(candidate_pid), encoding="utf-8")
             _candidate_pid_path().unlink(missing_ok=True)
         _finish_reconciled_recovery("improved")
         return
@@ -1291,8 +1306,8 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                     _RECOVERY_ATTEMPTS[:] = [float(item) for item in attempts if isinstance(item, (int, float))][-100:]
                 _RECOVERY_MANUAL_BYPASS_USED = bool(persisted.get("manual_bypass_used"))
                 _RECOVERY_EMERGENCY_BYPASS_USED = bool(persisted.get("emergency_bypass_used"))
-        _reconcile_draining_connector()
         _reconcile_orphan_candidate()
+        _reconcile_draining_connector()
         _normalize_orphaned_recovery_state()
         quality_path = _quality_state_path()
         try:
@@ -1312,8 +1327,8 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
 def start_runtime_monitoring(config: V2Config | None = None) -> None:
     """Ensure the UI-owned heartbeat and quality workers are running."""
 
-    start_status_heartbeat(config)
     start_tunnel_quality_monitor()
+    start_status_heartbeat(config)
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:

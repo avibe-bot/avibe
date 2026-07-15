@@ -3,6 +3,7 @@ import { CheckCircle2, Cloud, ExternalLink, Link2, RefreshCcw, Route } from 'luc
 import { Trans, useTranslation } from 'react-i18next';
 import { type RemoteAccessStatus, useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
+import { getTunnelQualityDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -163,18 +164,14 @@ export const RemoteAccess: React.FC = () => {
   const qualityFresh = quality
     ? Date.now() - Date.parse(quality.sampled_at) <= 150_000
     : false;
-  const qualityGrade = qualityFresh && quality?.state === 'recovering'
-    ? 'recovering'
-    : qualityFresh
-      ? quality?.grade || 'unknown'
-      : 'unknown';
+  const qualityGrade = getTunnelQualityDisplayState(quality, qualityFresh);
   const qualityVariant = qualityGrade === 'good'
     ? 'success'
     : qualityGrade === 'fair'
       ? 'info'
       : qualityGrade === 'poor' || qualityGrade === 'recovering'
         ? 'warning'
-        : qualityGrade === 'critical'
+        : qualityGrade === 'critical' || qualityGrade === 'degraded'
           ? 'destructive'
           : 'secondary';
   const qualityLabel = t(`remoteAccess.quality${qualityGrade.charAt(0).toUpperCase()}${qualityGrade.slice(1)}`);

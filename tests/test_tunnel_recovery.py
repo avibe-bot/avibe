@@ -16,6 +16,19 @@ def _quality(median: float) -> dict:
     }
 
 
+def _metrics_sample(*, connections: int = 4) -> remote_access.tunnel_quality.MetricsSample:
+    return remote_access.tunnel_quality.MetricsSample(
+        sampled_at=time.time(),
+        ready=connections > 0,
+        ha_connections=connections,
+        edge_locations=("sin01", "sin02"),
+        smoothed_rtt_ms=(70, 75, 80, 85),
+        request_errors_total=0,
+        packet_loss_total=0,
+        closed_connections_total=0,
+    )
+
+
 def _setup_recovery(monkeypatch, tmp_path, candidate_quality: dict):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
@@ -37,6 +50,7 @@ def _setup_recovery(monkeypatch, tmp_path, candidate_quality: dict):
     monkeypatch.setattr(remote_access, "_allocate_metrics_url", lambda: "http://127.0.0.1:29002")
     monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, url: True)
     monkeypatch.setattr(remote_access, "_candidate_average_snapshot", lambda url: candidate_quality)
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample())
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in alive)
     monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"{binary} tunnel run")
 
@@ -173,6 +187,17 @@ def test_optimize_route_does_not_start_without_fresh_active_sample(monkeypatch) 
 
     assert result["ok"] is False
     assert result["error"] == "route_optimization_unavailable"
+
+
+def test_candidate_readiness_requires_four_ha_connections(monkeypatch) -> None:
+    monkeypatch.setattr(remote_access, "_is_cloudflared_pid", lambda pid: True)
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample(connections=3))
+
+    assert remote_access._connector_ready_now(222, "http://127.0.0.1:29002") is False
+
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample(connections=4))
+
+    assert remote_access._connector_ready_now(222, "http://127.0.0.1:29002") is True
 
 
 def test_manual_optimization_uses_active_availability_trigger(monkeypatch) -> None:
@@ -382,6 +407,7 @@ def test_restart_removes_candidate_recorded_only_in_pid_file(monkeypatch, tmp_pa
 
 def test_restart_clears_candidate_pid_when_it_is_already_active(monkeypatch, tmp_path) -> None:
     _, active_pid, _, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    remote_access._pid_path().write_text("999", encoding="utf-8")
     remote_access._candidate_pid_path().write_text(str(active_pid), encoding="utf-8")
     stopped = []
     recovery_results = []
@@ -392,8 +418,28 @@ def test_restart_clears_candidate_pid_when_it_is_already_active(monkeypatch, tmp
 
     assert active_pid in alive
     assert stopped == []
+    assert remote_access._read_pid() == active_pid
     assert not remote_access._candidate_pid_path().exists()
     assert recovery_results == ["improved"]
+
+
+def test_failed_candidate_with_unknown_identity_remains_tracked(monkeypatch, tmp_path) -> None:
+    config, active_pid, candidate_pid, _ = _setup_recovery(monkeypatch, tmp_path, _quality(220))
+    results = []
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: "/usr/local/bin/cloudflared tunnel run" if pid == active_pid else None,
+    )
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+
+    remote_access._run_route_optimization(config, "latency")
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert state["candidate"]["pid"] == candidate_pid
+    assert remote_access._candidate_pid_path().read_text(encoding="utf-8") == str(candidate_pid)
+    assert results[0]["result"] == "no_improvement"
+    assert remote_access._reserve_recovery(object(), manual=False, emergency=False, now=time.time()) is False
 
 
 def test_startup_resets_inflight_recovery_without_connector(monkeypatch, tmp_path) -> None:

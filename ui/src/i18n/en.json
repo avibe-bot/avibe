@@ -628,6 +628,7 @@
     "qualityCritical": "Very slow",
     "qualityUnknown": "Measuring",
     "qualityRecovering": "Optimizing",
+    "qualityDegraded": "Degraded",
     "optimizeRoute": "Optimize route",
     "optimizingRoute": "Optimizing...",
     "optimizeStarted": "A second Connector is evaluating a better route"

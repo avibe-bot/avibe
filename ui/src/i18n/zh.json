@@ -628,6 +628,7 @@
     "qualityCritical": "很慢",
     "qualityUnknown": "测量中",
     "qualityRecovering": "正在优化",
+    "qualityDegraded": "异常",
     "optimizeRoute": "优化线路",
     "optimizingRoute": "优化中...",
     "optimizeStarted": "第二条 Connector 正在评估更优线路"
