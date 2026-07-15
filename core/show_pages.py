@@ -917,6 +917,15 @@ def _default_index_html(session_id: str) -> str:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Show Page {escaped}</title>
+    <!-- App icon (Avibe Dock / App Library): to give this app an icon, place a
+         favicon FILE in this workspace — either `favicon.svg` (or .png/.ico) at the
+         workspace root, or a `<link rel="icon" href="./your-icon.svg">` in this
+         <head> pointing at a RELATIVE file here. Avibe reads that static FILE to
+         render the app tile. Do NOT inject the icon from JavaScript at runtime
+         (e.g. appending a <link> in a script): the icon is resolved from the file
+         on disk, so a script-created one is never picked up. You can also upload one
+         from the App Library (the AI page's expanded panel), which writes the
+         workspace-root favicon for you. -->
     <!-- PWA: let a user "Add to Home Screen" this Show Page as a standalone app.
          We declare it standalone-capable but DELIBERATELY ship no apple-touch-icon
          or apple-mobile-web-app-title here. A page customizes its installed icon

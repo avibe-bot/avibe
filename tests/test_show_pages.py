@@ -719,6 +719,14 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     # Must NOT link the workbench manifest — its start_url "/" would hijack the
     # installed Home Screen icon back to the workbench instead of this page.
     assert 'rel="manifest"' not in index_html
+    # §7.1j: the App-icon self-serve guidance lives in the artifact the agent edits.
+    # It must tell the author to give the app its Dock / App Library icon via a static
+    # FILE (favicon at root or a relative <link rel=icon>), NOT a JS-injected one —
+    # closing the JS-injection blind spot at the source. This <head> comment holds a
+    # `<link rel="icon">` EXAMPLE, but it is inside an HTML comment, so the scaffold
+    # still resolves to no icon (see test_extract_icon_path_stock_scaffold_index_is_null).
+    assert "App icon (Avibe Dock / App Library)" in index_html
+    assert "Do NOT inject the icon from JavaScript" in index_html
     main_tsx = (page_dir / "src" / "main.tsx").read_text(encoding="utf-8")
     assert "globalThis.__AVIBE_SHOW__" in main_tsx
     assert "declare global" in main_tsx
