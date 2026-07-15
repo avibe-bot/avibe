@@ -1357,6 +1357,18 @@ export type InstallResult = {
   path?: string | null;
   job_id?: string;
   status?: 'running' | 'succeeded' | 'failed';
+  reason?: string | null;
+  download_error?: DependencyDownloadError | null;
+};
+
+export type DependencyDownloadError = {
+  kind: 'http' | 'dns' | 'tls' | 'timeout' | 'network' | 'permission' | 'disk' | 'io' | 'unknown';
+  message: string;
+  url?: string | null;
+  host?: string | null;
+  http_status?: number;
+  retryable: boolean;
+  attempts: number;
 };
 
 export type DependencyItem = {
@@ -1366,6 +1378,8 @@ export type DependencyItem = {
   installed: boolean;
   version: string | null;
   status: 'ready' | 'missing' | 'upgrade_required';
+  reason?: string | null;
+  download_error?: DependencyDownloadError | null;
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };

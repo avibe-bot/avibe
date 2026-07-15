@@ -447,7 +447,8 @@ install_uv() {
     
     case "$os" in
         macos|linux)
-            curl -LsSf https://astral.sh/uv/install.sh | sh
+            curl -LsSf --retry 2 --retry-all-errors --retry-delay 1 --connect-timeout 10 --max-time 120 \
+                https://astral.sh/uv/install.sh | sh
             # Add to PATH for current session
             export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
             ;;

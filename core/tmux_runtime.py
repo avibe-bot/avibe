@@ -21,6 +21,14 @@ from sysconfig import get_platform
 from typing import Any
 
 from config import paths
+from core.dependency_network import (
+    dependency_error_details,
+    dependency_error_message,
+    fetch_bytes,
+    fetch_to_path,
+    probe_url,
+    redact_url,
+)
 from core.process_isolation import isolated_subprocess_kwargs
 
 
@@ -78,6 +86,7 @@ class TmuxRuntimeManager:
         self.manifest_url = manifest_url if manifest_url is not None else os.environ.get("VIBE_TMUX_MANIFEST_URL")
         self.offline = _env_flag_enabled("VIBE_TMUX_OFFLINE", default=False) if offline is None else offline
         self._install_reason: str | None = None
+        self._download_error: dict[str, Any] | None = None
 
     def ensure(self, *, force: bool = False) -> dict[str, Any]:
         if not _TMUX_INSTALL_LOCK.acquire(blocking=False):
@@ -195,7 +204,27 @@ class TmuxRuntimeManager:
             "manifest": _manifest_status_payload(manifest),
             "archive": _archive_status_payload(archive),
             "reason": self._install_reason,
+            "download_error": self._download_error,
         }
+
+    def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
+        manifest = self._load_manifest()
+        if manifest is None:
+            return {
+                "ok": False,
+                "checked": bool(self._download_error),
+                "reason": self._install_reason or "tmux_manifest_missing",
+                "download_error": self._download_error,
+            }
+        archive = self._manifest_archive_for_platform(manifest)
+        if archive is None:
+            return {"ok": False, "checked": False, "reason": self._install_reason}
+        return probe_url(
+            archive.url,
+            timeout=timeout,
+            opener=urllib.request.urlopen,
+            user_agent="avibe-tmux-doctor",
+        )
 
     def _load_manifest(self) -> TmuxManifest | None:
         payload: bytes | None = None
@@ -211,12 +240,16 @@ class TmuxRuntimeManager:
                 self._install_reason = "tmux_manifest_unavailable_offline"
                 return None
             try:
-                with urllib.request.urlopen(self.manifest_url, timeout=30) as response:
-                    payload = response.read()
+                payload = fetch_bytes(
+                    self.manifest_url,
+                    timeout=30,
+                    opener=urllib.request.urlopen,
+                )
                 loaded_from = self.manifest_url
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to download tmux manifest from %s", self.manifest_url)
                 self._install_reason = "tmux_manifest_download_failed"
+                self._download_error = dependency_error_details(exc, self.manifest_url)
                 return None
         else:
             try:
@@ -284,17 +317,23 @@ class TmuxRuntimeManager:
         tmp_path = cached.with_suffix(cached.suffix + ".tmp")
         cached.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(archive.url, timeout=60) as response, tmp_path.open("wb") as destination:
-                shutil.copyfileobj(response, destination)
+            fetch_to_path(
+                archive.url,
+                tmp_path,
+                timeout=60,
+                opener=urllib.request.urlopen,
+            )
             if not self._downloaded_archive_matches(tmp_path, archive):
                 tmp_path.unlink(missing_ok=True)
                 return None
             tmp_path.replace(cached)
+            self._download_error = None
             return cached
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to download tmux archive from %s", archive.url)
             tmp_path.unlink(missing_ok=True)
             self._install_reason = "tmux_archive_download_failed"
+            self._download_error = dependency_error_details(exc, archive.url)
             return None
 
     def _downloaded_archive_matches(self, path: Path, archive: TmuxArchive) -> bool:
@@ -425,11 +464,17 @@ class TmuxRuntimeManager:
             "installed": False,
             "changed": False,
             "reason": reason,
-            "message": message or _reason_message(reason),
+            "message": message
+            or (
+                dependency_error_message(self._download_error, label="tmux dependency download")
+                if self._download_error
+                else _reason_message(reason)
+            ),
             "version": manifest.tmux_version if manifest else None,
             "platform": archive.platform if archive else _runtime_platform_tag(),
             "path": None,
             "output": None,
+            "download_error": self._download_error,
         }
 
 
@@ -623,7 +668,7 @@ def _archive_status_payload(archive: TmuxArchive | None) -> dict[str, Any] | Non
     return {
         "platform": archive.platform,
         "name": archive.name,
-        "url": archive.url,
+        "url": redact_url(archive.url),
         "sha256": archive.sha256,
         "size": archive.size,
         "bin_path": archive.bin_path,

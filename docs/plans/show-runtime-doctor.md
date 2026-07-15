@@ -9,6 +9,10 @@ retry is useful from that reason alone.
 
 ## Design
 
+The implementation now uses the shared managed-dependency network and Doctor
+contracts described in `dependency-reliability.md`; Show Runtime is one
+dependency adapter rather than a separate retry/error taxonomy.
+
 - Keep `vibe doctor` fast and read-only: inspect the selected provider,
   packaged manifest, platform archive, Node.js compatibility, and installed
   runtime state without making a network request.

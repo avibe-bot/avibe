@@ -80,15 +80,23 @@ DOCTOR_REPAIR_TARGETS = (
     "stale-install-runtime",
     "duplicate-service-processes",
     "stale-restart-state",
+    "askill",
+    "avault",
+    "git-runtime",
     "show-runtime",
+    "tmux",
 )
-DOCTOR_DEFAULT_REPAIR_TARGETS = DOCTOR_REPAIR_TARGETS[:-1]
+DOCTOR_DEFAULT_REPAIR_TARGETS = DOCTOR_REPAIR_TARGETS[:4]
 DOCTOR_REPAIR_DRY_RUN_MESSAGES = {
     "home-migration": "Would migrate ~/.vibe_remote to ~/.avibe when safe, or recreate the legacy compatibility symlink.",
     "stale-install-runtime": "Would stop a running legacy vibe-remote service and start the current Avibe service.",
     "duplicate-service-processes": "Would stop extra Avibe service processes outside the service lock.",
     "stale-restart-state": "Would remove stale restart metadata and refresh runtime status.",
+    "askill": "Would install or refresh askill with the official installer.",
+    "avault": "Would install or refresh the manifest-pinned avault release.",
+    "git-runtime": "Would install or refresh the manifest-pinned Git Runtime.",
     "show-runtime": "Would prepare the manifest-pinned Show Runtime archive when it is missing or invalid.",
+    "tmux": "Would install or refresh the manifest-pinned tmux runtime.",
 }
 
 DEFAULT_VAULT_APPROVAL_WAIT_SECONDS = 9 * 60
@@ -7937,68 +7945,201 @@ def cmd_watch_remove(watch_id: str):
     return 0
 
 
-def _add_show_runtime_download_failure(items: list[dict], error: dict | None) -> None:
+def _add_dependency_download_failure(
+    items: list[dict],
+    error: dict | None,
+    *,
+    label: str,
+    code_prefix: str,
+    repair_target: str,
+    failure_status: str = "fail",
+) -> None:
     error = error or {}
     kind = str(error.get("kind") or "unknown")
-    url = str(error.get("url") or "the selected archive URL")
+    url = str(error.get("url") or "the selected dependency URL")
+    attempts = int(error.get("attempts") or 1)
+    attempt_text = f" after {attempts} attempts" if attempts > 1 else ""
     if kind == "http" and error.get("http_status") == 404:
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime release asset is missing (HTTP 404): {url}",
+            failure_status,
+            f"{label} release asset is missing (HTTP 404): {url}",
             "Verify the exact URL from another network. If the release asset is absent, upgrade or reinstall Avibe; "
             "if it works elsewhere, fix the proxy or security gateway.",
-            code="show_runtime.archive_http_404",
+            code=f"{code_prefix}_http_404",
         )
     elif kind == "http":
         status = error.get("http_status") or "error"
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime archive request returned HTTP {status}: {url}",
-            "Check the exact release asset and any proxy or security gateway response, then retry the repair.",
-            code="show_runtime.archive_http_error",
+            failure_status,
+            f"{label} request returned HTTP {status}{attempt_text}: {url}",
+            f"Check the exact release asset and any proxy response, then run `vibe doctor repair {repair_target}`.",
+            code=f"{code_prefix}_http_error",
         )
     elif kind == "dns":
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime archive host DNS lookup failed: {error.get('host') or url}",
-            "Fix DNS access to GitHub release hosts, then run `vibe doctor repair show-runtime`.",
-            code="show_runtime.archive_dns_failed",
+            failure_status,
+            f"{label} host DNS lookup failed{attempt_text}: {error.get('host') or url}",
+            f"Fix DNS access to the dependency host, then run `vibe doctor repair {repair_target}`.",
+            code=f"{code_prefix}_dns_failed",
         )
     elif kind == "tls":
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime archive TLS verification failed: {url}",
+            failure_status,
+            f"{label} TLS verification failed: {url}",
             "Fix the host CA or HTTPS inspection proxy for the Avibe service, then retry the repair.",
-            code="show_runtime.archive_tls_failed",
+            code=f"{code_prefix}_tls_failed",
         )
-    elif kind == "timeout":
+    elif kind in {"timeout", "network"}:
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime archive connection timed out: {url}",
-            "Allow HTTPS access to github.com and release-assets.githubusercontent.com, then retry the repair.",
-            code="show_runtime.archive_timeout",
+            failure_status,
+            f"{label} network request failed{attempt_text}: {url}",
+            f"Allow HTTPS access to the dependency host, then run `vibe doctor repair {repair_target}`.",
+            code=f"{code_prefix}_{kind}_failed",
         )
     elif kind in {"permission", "disk", "io"}:
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime archive could not be stored: {error.get('message') or kind}",
+            failure_status,
+            f"{label} could not be stored: {error.get('message') or kind}",
             "Fix the runtime cache permissions or available disk space, then retry the repair.",
-            code=f"show_runtime.archive_{kind}_failed",
+            code=f"{code_prefix}_{kind}_failed",
         )
     else:
         _add_doctor_item(
             items,
-            "fail",
-            f"Show Runtime archive is unreachable: {error.get('message') or url}",
+            failure_status,
+            f"{label} is unreachable: {error.get('message') or url}",
             "Inspect the Avibe log for the matching download exception, then retry the repair.",
-            code="show_runtime.archive_unreachable",
+            code=f"{code_prefix}_unreachable",
         )
+
+
+def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
+    from core.dependency_network import probe_url
+
+    labels = {
+        "askill": "askill",
+        "avault": "avault",
+        "tmux": "tmux runtime",
+        "git-runtime": "Git Runtime",
+        "node": "Node.js",
+    }
+    repair_targets = {
+        "askill": "askill",
+        "avault": "avault",
+        "git-runtime": "git-runtime",
+        "tmux": "tmux",
+    }
+    items: list[dict] = []
+    try:
+        dependencies = list(api.dependencies_status(offline=True).get("deps") or [])
+        from core.git_runtime import GitRuntimeManager
+
+        if not any(dependency.get("id") == "git-runtime" for dependency in dependencies):
+            git_status = GitRuntimeManager(offline=True).status()
+            dependencies.append(
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": bool(git_status.get("installed")),
+                    "status": "ready" if git_status.get("installed") else "missing",
+                    "version": git_status.get("version"),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Managed dependency status could not be inspected: {exc}",
+            "Inspect the Avibe log and rerun Doctor.",
+            code="dependencies.status_failed",
+        )
+        return items
+
+    for dependency in dependencies:
+        dependency_id = str(dependency.get("id") or "")
+        if dependency_id == "show-runtime" or dependency_id not in labels:
+            continue
+        label = labels[dependency_id]
+        status = str(dependency.get("status") or "missing")
+        ready = bool(dependency.get("installed")) and status == "ready"
+        version = dependency.get("version")
+        if ready:
+            suffix = f" {version}" if version else ""
+            _add_doctor_item(items, "pass", f"{label}{suffix} is ready", code=f"dependencies.{dependency_id}.ready")
+            continue
+
+        required = bool(dependency.get("required"))
+        severity = "fail" if required else "warn"
+        if dependency_id == "node":
+            _add_doctor_item(
+                items,
+                severity,
+                f"{label} is missing or unsupported",
+                "Install a supported Node.js release (^20.19.0 or >=22.12.0).",
+                code="dependencies.node.not_ready",
+            )
+            continue
+
+        repair_target = repair_targets[dependency_id]
+        _add_doctor_item(
+            items,
+            severity,
+            f"{label} is not ready ({status})",
+            f"Run `vibe doctor repair {repair_target}`.",
+            code=f"dependencies.{dependency_id}.not_ready",
+            repair_target=repair_target,
+            repair_risk="low",
+        )
+        if not deep:
+            continue
+
+        if dependency_id == "askill":
+            probe = probe_url("https://askill.sh", user_agent="avibe-askill-doctor")
+        elif dependency_id == "avault":
+            probe = probe_url(
+                api.avault_manifest_url(),
+                user_agent="avibe-avault-doctor",
+            )
+        elif dependency_id == "tmux":
+            from core.tmux_runtime import TmuxRuntimeManager
+
+            probe = TmuxRuntimeManager().probe_archive_reachability()
+        else:
+            from core.git_runtime import GitRuntimeManager
+
+            probe = GitRuntimeManager().probe_archive_reachability()
+
+        if probe.get("ok"):
+            _add_doctor_item(
+                items,
+                "pass",
+                f"{label} download endpoint is reachable: {probe.get('url')}",
+                code=f"dependencies.{dependency_id}.reachable",
+            )
+        elif not probe.get("checked"):
+            _add_doctor_item(
+                items,
+                "warn",
+                f"{label} server does not support a body-free probe",
+                f"Run `vibe doctor repair {repair_target}` to perform the verified install attempt.",
+                code=f"dependencies.{dependency_id}.probe_unsupported",
+            )
+        elif probe.get("download_error"):
+            _add_dependency_download_failure(
+                items,
+                probe.get("download_error"),
+                label=label,
+                code_prefix=f"dependencies.{dependency_id}.download",
+                repair_target=repair_target,
+                failure_status=severity,
+            )
+    return items
 
 
 def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
@@ -8035,24 +8176,6 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
 
     node_available = bool(status.get("node_available"))
     node_supported = status.get("node_supported") is not False
-    if not node_available:
-        _add_doctor_item(
-            items,
-            "fail",
-            "Show Runtime requires Node.js, but Node.js is not available",
-            "Install a supported Node.js release, then run `vibe doctor repair show-runtime`.",
-            code="show_runtime.node_missing",
-        )
-    elif not node_supported:
-        _add_doctor_item(
-            items,
-            "fail",
-            f"Show Runtime does not support the installed Node.js {status.get('node_version') or 'version'}",
-            "Install Node.js ^20.19.0 or >=22.12.0, then retry the repair.",
-            code="show_runtime.node_unsupported",
-        )
-    else:
-        _add_doctor_item(items, "pass", f"Show Runtime Node.js is supported: {status.get('node_version') or 'available'}")
 
     manifest = status.get("manifest") if isinstance(status.get("manifest"), dict) else None
     archive = status.get("archive") if isinstance(status.get("archive"), dict) else None
@@ -8172,7 +8295,13 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             code="show_runtime.archive_probe_unsupported",
         )
     elif probe.get("download_error"):
-        _add_show_runtime_download_failure(items, probe.get("download_error"))
+        _add_dependency_download_failure(
+            items,
+            probe.get("download_error"),
+            label="Show Runtime archive",
+            code_prefix="show_runtime.archive",
+            repair_target="show-runtime",
+        )
     else:
         _add_doctor_item(
             items,
@@ -8578,12 +8707,15 @@ def _doctor(*, deep: bool = False):
 
     groups.append({"name": "Runtime", "items": runtime_items})
 
-    show_runtime_items = _show_runtime_doctor_items(deep=deep)
-    for item in show_runtime_items:
+    dependency_items = [
+        *_managed_dependencies_doctor_items(deep=deep),
+        *_show_runtime_doctor_items(deep=deep),
+    ]
+    for item in dependency_items:
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Show Runtime", "items": show_runtime_items})
+    groups.append({"name": "Dependencies", "items": dependency_items})
 
     local_cli_items = _local_cli_installation_items()
     for item in local_cli_items:
@@ -9107,6 +9239,51 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
     )
 
 
+def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False) -> dict:
+    if dry_run:
+        return _doctor_repair_result(target, "planned", DOCTOR_REPAIR_DRY_RUN_MESSAGES[target])
+    try:
+        result = installer(force=True)
+    except Exception as exc:  # noqa: BLE001
+        return _doctor_repair_result(target, "failed", f"{target} repair failed: {exc}")
+    if result.get("ok"):
+        return _doctor_repair_result(
+            target,
+            "repaired" if result.get("changed", True) else "skipped",
+            str(result.get("message") or f"{target} is ready."),
+            path=result.get("path"),
+            version=result.get("version"),
+        )
+    return _doctor_repair_result(
+        target,
+        "failed",
+        str(result.get("message") or result.get("reason") or f"{target} repair failed"),
+        reason=result.get("reason"),
+        download_error=result.get("download_error"),
+        output=result.get("output"),
+    )
+
+
+def _repair_askill(*, dry_run: bool = False) -> dict:
+    return _repair_managed_dependency("askill", api.ensure_askill_installed, dry_run=dry_run)
+
+
+def _repair_avault(*, dry_run: bool = False) -> dict:
+    return _repair_managed_dependency("avault", api.ensure_avault_installed, dry_run=dry_run)
+
+
+def _repair_tmux(*, dry_run: bool = False) -> dict:
+    from core.tmux_runtime import ensure_tmux_installed
+
+    return _repair_managed_dependency("tmux", ensure_tmux_installed, dry_run=dry_run)
+
+
+def _repair_git_runtime(*, dry_run: bool = False) -> dict:
+    from core.git_runtime import GitRuntimeManager
+
+    return _repair_managed_dependency("git-runtime", GitRuntimeManager().ensure, dry_run=dry_run)
+
+
 def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     from core.show_runtime import ShowRuntimeManager
 
@@ -9203,7 +9380,11 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False) -> dict
         "stale-install-runtime": _repair_stale_install_runtime,
         "duplicate-service-processes": _repair_duplicate_service_processes,
         "stale-restart-state": _repair_stale_restart_state,
+        "askill": _repair_askill,
+        "avault": _repair_avault,
+        "git-runtime": _repair_git_runtime,
         "show-runtime": _repair_show_runtime,
+        "tmux": _repair_tmux,
     }
     results = [handlers[target](dry_run=dry_run) for target in requested_targets]
     payload = {

@@ -608,8 +608,9 @@ vibe doctor
 - checks backend CLI availability
 - checks runtime home migration state
 - checks runtime process, install, and restart metadata state
-- checks the Show Runtime provider, pinned manifest, Node.js, platform archive, and install state
-- `vibe doctor --deep` also probes the exact Show Runtime archive URL without downloading its body
+- checks askill, avault, Git Runtime, Show Runtime, tmux, and Node.js through one dependency diagnostic group
+- `vibe doctor --deep` probes missing dependency endpoints without downloading their bodies
+- managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
 
 Repair mode is explicit and supports dry-run:
 
@@ -619,7 +620,11 @@ vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
 vibe doctor repair stale-restart-state --yes
+vibe doctor repair askill --yes
+vibe doctor repair avault --yes
+vibe doctor repair git-runtime --yes
 vibe doctor repair show-runtime --yes
+vibe doctor repair tmux --yes
 ```
 
 ### `vibe remote`

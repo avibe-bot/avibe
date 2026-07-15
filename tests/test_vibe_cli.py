@@ -1065,6 +1065,82 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
     assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
 
 
+def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
+    offline_calls: list[bool] = []
+
+    def status(*, offline=False):
+        offline_calls.append(offline)
+        return {
+            "deps": [
+                {"id": "askill", "required": True, "installed": False, "status": "missing"},
+                {"id": "avault", "required": True, "installed": True, "status": "ready", "version": "0.1.6"},
+                {"id": "show-runtime", "required": True, "installed": False, "status": "missing"},
+                {"id": "tmux", "required": False, "installed": False, "status": "missing"},
+                {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
+                {"id": "node", "required": True, "installed": False, "status": "missing"},
+            ]
+        }
+
+    monkeypatch.setattr(cli.api, "dependencies_status", status)
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    assert offline_calls == [True]
+    assert next(item for item in items if item.get("code") == "dependencies.askill.not_ready")["repair"]["target"] == "askill"
+    assert next(item for item in items if item.get("code") == "dependencies.avault.ready")["status"] == "pass"
+    assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
+    assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
+    assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
+
+
+def test_managed_dependencies_doctor_deep_reports_retry_exhaustion(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {"id": "askill", "required": True, "installed": False, "status": "missing"},
+                {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "core.dependency_network.probe_url",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "checked": True,
+            "download_error": {
+                "kind": "timeout",
+                "url": "https://askill.sh",
+                "attempts": 2,
+                "retryable": True,
+            },
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    failure = next(item for item in items if item.get("code") == "dependencies.askill.download_timeout_failed")
+    assert "after 2 attempts" in failure["message"]
+
+
+def test_repair_managed_dependency_preserves_structured_download_error():
+    error = {"kind": "dns", "attempts": 3, "retryable": True}
+
+    result = cli._repair_managed_dependency(
+        "avault",
+        lambda force: {
+            "ok": False,
+            "reason": "avault_download_failed",
+            "message": "download failed",
+            "download_error": error,
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["download_error"] == error
+
+
 def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monkeypatch):
     archive_url = (
         "https://github.com/avibe-bot/avibe/releases/download/"
@@ -1232,6 +1308,14 @@ def test_doctor_parser_accepts_show_runtime_repair_target():
     args = parser.parse_args(["doctor", "repair", "show-runtime", "--yes"])
 
     assert args.doctor_repair_targets == ["show-runtime"]
+
+
+def test_doctor_parser_accepts_managed_dependency_repair_targets():
+    parser = cli.build_parser()
+
+    for target in ("askill", "avault", "git-runtime", "tmux"):
+        args = parser.parse_args(["doctor", "repair", target, "--yes"])
+        assert args.doctor_repair_targets == [target]
     assert args.yes is True
 
 

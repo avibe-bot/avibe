@@ -2560,8 +2560,38 @@ def test_show_runtime_manager_preserves_structured_http_download_error(monkeypat
         "host": "github.com",
         "exception_type": "HTTPError",
         "http_status": 404,
+        "retryable": False,
+        "attempts": 1,
     }
     assert "secret" not in json.dumps(result)
+
+
+def test_show_runtime_manager_retries_transient_archive_failure(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path)
+    archive_url = "https://example.test/runtime.tgz"
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path, url=archive_url)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    attempts = 0
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    def opener(_request, timeout):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise urllib.error.URLError(ConnectionResetError("reset"))
+        return io.BytesIO(archive_path.read_bytes())
+
+    monkeypatch.setattr("core.show_runtime.urllib.request.urlopen", opener)
+    monkeypatch.setattr("core.dependency_network.time.sleep", lambda _delay: None)
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert attempts == 2
 
 
 def test_show_runtime_status_refresh_does_not_erase_archive_download_error(monkeypatch, tmp_path):

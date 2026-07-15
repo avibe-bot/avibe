@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import asyncio
-import errno
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -10,15 +9,12 @@ import logging
 import os
 import platform
 import re
-import socket
 import shlex
 import shutil
 import signal
-import ssl
 import subprocess
 import tarfile
 import tempfile
-import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -29,6 +25,7 @@ from typing import Any
 import httpx
 
 from config import paths
+from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
 from core.show_pages import SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
 
@@ -526,47 +523,17 @@ class ShowRuntimeManager:
                 "reason": "runtime_archive_url_unsupported",
             }
 
-        request = urllib.request.Request(
+        result = probe_url(
             archive_url,
-            headers={"User-Agent": "avibe-show-runtime-doctor"},
-            method="HEAD",
+            timeout=timeout,
+            opener=urllib.request.urlopen,
+            user_agent="avibe-show-runtime-doctor",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                status_code = getattr(response, "status", None) or response.getcode()
-                final_url = response.geturl() if hasattr(response, "geturl") else archive_url
-            return {
-                "ok": 200 <= int(status_code) < 400,
-                "checked": True,
-                "kind": "reachable",
-                "http_status": int(status_code),
-                "url": _redact_download_url(archive_url),
-                "final_host": urllib.parse.urlparse(final_url).hostname,
-                "reason": None,
-            }
-        except urllib.error.HTTPError as exc:
-            if exc.code in {405, 501}:
-                return {
-                    "ok": False,
-                    "checked": False,
-                    "kind": "head_unsupported",
-                    "http_status": exc.code,
-                    "url": _redact_download_url(archive_url),
-                    "reason": "runtime_archive_probe_unsupported",
-                }
-            return {
-                "ok": False,
-                "checked": True,
-                "reason": "runtime_archive_download_failed",
-                "download_error": _runtime_download_error(exc, archive_url),
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "checked": True,
-                "reason": "runtime_archive_download_failed",
-                "download_error": _runtime_download_error(exc, archive_url),
-            }
+        if result.get("reason") == "dependency_probe_unsupported":
+            result["reason"] = "runtime_archive_probe_unsupported"
+        elif result.get("reason") == "dependency_download_failed":
+            result["reason"] = "runtime_archive_download_failed"
+        return result
 
     def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
         removed: list[str] = []
@@ -812,8 +779,11 @@ class ShowRuntimeManager:
                 self._install_reason = "runtime_manifest_unavailable_offline"
                 return None
             try:
-                with urllib.request.urlopen(self.manifest_url, timeout=30) as response:
-                    payload = response.read()
+                payload = fetch_bytes(
+                    self.manifest_url,
+                    timeout=30,
+                    opener=urllib.request.urlopen,
+                )
                 source = self.manifest_url
             except Exception as exc:
                 logger.exception("Failed to download Show Runtime manifest from %s", self.manifest_url)
@@ -892,8 +862,12 @@ class ShowRuntimeManager:
         tmp_path = cached.with_suffix(".tmp")
         cached.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(archive.url, timeout=60) as response, tmp_path.open("wb") as destination:
-                shutil.copyfileobj(response, destination)
+            fetch_to_path(
+                archive.url,
+                tmp_path,
+                timeout=60,
+                opener=urllib.request.urlopen,
+            )
             if not self._downloaded_archive_matches(tmp_path, archive):
                 tmp_path.unlink(missing_ok=True)
                 return None
@@ -1075,8 +1049,12 @@ class ShowRuntimeManager:
         target = self.runtime_dir / "downloads" / _runtime_archive_name()
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(archive_url, timeout=60) as response, target.open("wb") as destination:
-                shutil.copyfileobj(response, destination)
+            fetch_to_path(
+                archive_url,
+                target,
+                timeout=60,
+                opener=urllib.request.urlopen,
+            )
             self._download_error = None
         except Exception as exc:
             logger.exception("Failed to download prebuilt Show Runtime from %s", archive_url)
@@ -1498,59 +1476,11 @@ def _manifest_status_payload(manifest: ShowRuntimeManifest | None) -> dict[str, 
 
 
 def _redact_download_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in {"http", "https", "file"}:
-        return f"{parsed.scheme}:" if parsed.scheme else ""
-    if parsed.scheme == "file":
-        return urllib.parse.urlunparse((parsed.scheme, "", parsed.path, "", "", ""))
-    hostname = parsed.hostname or ""
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-    netloc = f"{hostname}:{port}" if port else hostname
-    return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
+    return redact_url(url)
 
 
 def _runtime_download_error(exc: BaseException, url: str) -> dict[str, Any]:
-    safe_url = _redact_download_url(url)
-    host = urllib.parse.urlparse(url).hostname
-    error: dict[str, Any] = {
-        "kind": "unknown",
-        "message": "Unexpected download failure",
-        "url": safe_url,
-        "host": host,
-        "exception_type": type(exc).__name__,
-    }
-    if isinstance(exc, urllib.error.HTTPError):
-        error.update(
-            kind="http",
-            message=f"HTTP {exc.code} {exc.reason or ''}".strip(),
-            http_status=exc.code,
-        )
-        return error
-
-    root = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-    error["exception_type"] = type(root).__name__
-    if isinstance(root, socket.gaierror):
-        error.update(kind="dns", message=f"DNS lookup failed for {host or 'download host'}")
-    elif isinstance(root, (ssl.SSLCertVerificationError, ssl.CertificateError)):
-        error.update(kind="tls", message="TLS certificate verification failed")
-    elif isinstance(root, ssl.SSLError):
-        error.update(kind="tls", message="TLS negotiation failed")
-    elif isinstance(root, (TimeoutError, socket.timeout)):
-        error.update(kind="timeout", message="Connection timed out")
-    elif isinstance(root, PermissionError):
-        error.update(kind="permission", message="Permission denied while writing the Show Runtime cache")
-    elif isinstance(root, OSError) and root.errno == errno.ENOSPC:
-        error.update(kind="disk", message="No space left in the Show Runtime cache")
-    elif isinstance(exc, urllib.error.URLError):
-        error.update(kind="network", message=f"Network request failed ({type(root).__name__})")
-    elif isinstance(root, OSError):
-        error.update(kind="io", message=f"Local or network I/O failed ({type(root).__name__})")
-    return error
+    return dependency_error_details(exc, url)
 
 
 def _archive_status_payload(archive: ShowRuntimeArchive | None) -> dict[str, Any] | None:

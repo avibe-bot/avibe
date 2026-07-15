@@ -54,6 +54,23 @@ function Test-Command {
     return $?
 }
 
+function Invoke-WebScriptWithRetry {
+    param([string]$Url)
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            return Invoke-RestMethod -Uri $Url -TimeoutSec 30
+        } catch {
+            if ($attempt -eq 3) {
+                throw
+            }
+            $delay = [Math]::Pow(2, $attempt - 1)
+            Write-Warning "Dependency request failed (attempt $attempt/3); retrying in $delay second(s)."
+            Start-Sleep -Seconds $delay
+        }
+    }
+}
+
 function Test-Node {
     if (-not (Test-Command "node")) {
         return $false
@@ -139,7 +156,7 @@ function Install-Uv {
     Write-Info "Installing uv (will also manage Python automatically)..."
     
     try {
-        irm https://astral.sh/uv/install.ps1 | iex
+        Invoke-WebScriptWithRetry "https://astral.sh/uv/install.ps1" | iex
         
         # Refresh PATH
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")

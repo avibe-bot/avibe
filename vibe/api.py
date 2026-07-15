@@ -73,9 +73,12 @@ from core.vibe_agents import (
     validate_agent_backend,
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
+from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
 
 
 logger = logging.getLogger(__name__)
+
+_CURL_INSTALL_RETRY_FLAGS = "--retry 2 --retry-all-errors --retry-delay 1 --connect-timeout 10 --max-time 120"
 
 # Cache per cwd: { cwd: { "data": ..., "updated_at": ... } }
 _OPENCODE_OPTIONS_CACHE: dict[str, dict] = {}
@@ -5806,7 +5809,7 @@ def install_agent(name: str) -> dict:
             if error:
                 return {"ok": False, "message": error, "output": None}
         # Use pipefail to ensure curl failures are detected
-        cmd = ["bash", "-c", "set -euo pipefail; curl -fsSL https://opencode.ai/install | bash"]
+        cmd = _curl_installer_command("https://opencode.ai/install", "bash")
     elif name == "claude":
         # Claude Code: platform-specific installer
         if system == "windows":
@@ -5821,7 +5824,7 @@ def install_agent(name: str) -> dict:
                 error = _check_binary(binary)
                 if error:
                     return {"ok": False, "message": error, "output": None}
-            cmd = ["bash", "-c", "set -euo pipefail; curl -fsSL https://claude.ai/install.sh | bash"]
+            cmd = _curl_installer_command("https://claude.ai/install.sh", "bash")
     elif name == "codex":
         # Fresh installs use npm because it is the documented cross-platform
         # package source that does not require OS package-manager privileges.
@@ -5839,6 +5842,15 @@ def install_agent(name: str) -> dict:
         return {"ok": False, "message": f"Unknown agent: {name}", "output": None}
 
     return _run_install_command(name, cmd, _truncate_output, mode="install", env=command_env)
+
+
+def _curl_installer_command(url: str, consumer: str) -> list[str]:
+    """Build the shared bounded-retry command for trusted script installers."""
+    return [
+        "bash",
+        "-c",
+        f"set -euo pipefail; curl -fsSL {_CURL_INSTALL_RETRY_FLAGS} {url} | {consumer}",
+    ]
 
 
 def _run_install_command(
@@ -5972,6 +5984,10 @@ AVAULT_VERSION = "0.1.6"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
+def avault_manifest_url() -> str:
+    return urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
+
+
 def _truncate_install_output(output: str, limit: int = 8192) -> str:
     return output if len(output) <= limit else "...(truncated)\n" + output[-limit:]
 
@@ -6049,7 +6065,7 @@ def install_askill() -> dict:
 
     system = platform.system().lower()
     if system != "windows" and resolve_cli_path("curl") and resolve_cli_path("bash"):
-        cmd = ["bash", "-c", "set -euo pipefail; curl -fsSL https://askill.sh | sh"]
+        cmd = _curl_installer_command("https://askill.sh", "sh")
         return _run_install_command("askill", cmd, _truncate_install_output, mode="install")
     # No npm fallback: askill is distributed via the askill.sh installer, not a
     # public npm package, so a curl/bash-less host (e.g. Windows) must install
@@ -6201,8 +6217,11 @@ def _download_avault_release_file(url: str) -> bytes:
             "User-Agent": "avibe/avault-installer",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - public GitHub release asset
-        return response.read()
+    return fetch_bytes(
+        request,
+        timeout=30,
+        opener=urllib.request.urlopen,
+    )
 
 
 def _extract_avault_binary(archive_bytes: bytes, output_path: Path, member_name: str = "avault") -> None:
@@ -6274,7 +6293,7 @@ def install_avault(force: bool = False) -> dict:
         }
 
     try:
-        manifest_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
+        manifest_url = avault_manifest_url()
         manifest = json.loads(_download_avault_release_file(manifest_url).decode("utf-8"))
         entry = manifest["versions"][AVAULT_VERSION][target]
         asset = entry["asset"]
@@ -6319,12 +6338,17 @@ def install_avault(force: bool = False) -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("avault install failed: %s", exc, exc_info=True)
-        return {
+        result = {
             "ok": False,
             "message": backend_t("dependencies.avault.installFailed", error=str(exc)),
             "output": None,
             "path": None,
         }
+        if isinstance(exc, DependencyNetworkError):
+            result["reason"] = "avault_download_failed"
+            result["download_error"] = dict(exc.details)
+            result["message"] = dependency_error_message(exc.details, label="avault download")
+        return result
 
 
 def ensure_avault_installed(force: bool = False) -> dict:
@@ -7133,7 +7157,7 @@ _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 
 
-def dependencies_status() -> dict:
+def dependencies_status(*, offline: bool = False) -> dict:
     """Status of the required local runtime dependencies for the Dependencies
     settings page: askill, the Show Page runtime, and the shared Node.js
     prerequisite. (Agent backend CLIs are managed on the Backends tab.)
@@ -7172,9 +7196,10 @@ def dependencies_status() -> dict:
     )
 
     try:
-        from core.show_runtime import get_show_runtime_manager
+        from core.show_runtime import ShowRuntimeManager, get_show_runtime_manager
 
-        srt = get_show_runtime_manager().status()
+        srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
+        srt = srt_manager.status()
     except Exception as exc:  # noqa: BLE001
         srt = {"installed": False, "node_available": None, "node_version": None, "reason": str(exc)}
     manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
@@ -7187,13 +7212,15 @@ def dependencies_status() -> dict:
             "installed": srt_installed,
             "version": manifest.get("runtime_version"),
             "status": "ready" if srt_installed else "missing",
+            "reason": srt.get("reason"),
+            "download_error": srt.get("download_error"),
         }
     )
 
     try:
-        from core.tmux_runtime import tmux_status
+        from core.tmux_runtime import TmuxRuntimeManager, tmux_status
 
-        tmux = tmux_status()
+        tmux = TmuxRuntimeManager(offline=True).status() if offline else tmux_status()
     except Exception as exc:  # noqa: BLE001
         tmux = {"installed": False, "version": None, "status": "missing", "reason": str(exc)}
     deps.append(
@@ -7204,6 +7231,8 @@ def dependencies_status() -> dict:
             "installed": bool(tmux.get("installed")),
             "version": tmux.get("version"),
             "status": "ready" if tmux.get("installed") else "missing",
+            "reason": tmux.get("reason"),
+            "download_error": tmux.get("download_error"),
         }
     )
 
@@ -7230,11 +7259,19 @@ def _prepare_show_runtime_job() -> dict:
 
         payload = get_show_runtime_manager().prepare(force=True)
         ok = bool(payload.get("ok"))
-        return {
+        result = {
             "ok": ok,
             "message": "Show Runtime ready." if ok else (payload.get("reason") or "Show Runtime prepare failed"),
             "output": None,
         }
+        if not ok:
+            status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+            download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
+            result["reason"] = payload.get("reason")
+            result["download_error"] = download_error
+            if download_error:
+                result["message"] = dependency_error_message(download_error, label="Show Runtime download")
+        return result
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc), "output": None}
 
@@ -7245,10 +7282,19 @@ def _prepare_tmux_job() -> dict:
 
         payload = ensure_tmux_installed(force=True)
         ok = bool(payload.get("ok"))
+        download_error = payload.get("download_error") if isinstance(payload.get("download_error"), dict) else None
         return {
             **payload,
             "ok": ok,
-            "message": "tmux runtime ready." if ok else (payload.get("message") or payload.get("reason") or "tmux install failed"),
+            "message": (
+                "tmux runtime ready."
+                if ok
+                else (
+                    dependency_error_message(download_error, label="tmux download")
+                    if download_error
+                    else (payload.get("message") or payload.get("reason") or "tmux install failed")
+                )
+            ),
             "output": payload.get("output"),
         }
     except Exception as exc:  # noqa: BLE001

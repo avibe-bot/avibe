@@ -587,8 +587,9 @@ vibe doctor
 - 检查 backend CLI 是否可用
 - 检查 runtime home 迁移状态
 - 检查 runtime 进程、安装来源和重启元数据状态
-- 检查 Show Runtime provider、固定 manifest、Node.js、平台归档包和安装状态
-- `vibe doctor --deep` 还会在不下载归档包正文的情况下探测其精确 URL
+- 通过统一依赖诊断组检查 askill、avault、Git Runtime、Show Runtime、tmux 和 Node.js
+- `vibe doctor --deep` 会在不下载正文的情况下探测缺失依赖的地址
+- 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
 
 修复模式需要显式执行，并支持 dry-run：
 
@@ -598,7 +599,11 @@ vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
 vibe doctor repair stale-restart-state --yes
+vibe doctor repair askill --yes
+vibe doctor repair avault --yes
+vibe doctor repair git-runtime --yes
 vibe doctor repair show-runtime --yes
+vibe doctor repair tmux --yes
 ```
 
 ### `vibe remote`

@@ -98,7 +98,11 @@ vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
 vibe doctor repair stale-restart-state --yes
+vibe doctor repair askill --yes
+vibe doctor repair avault --yes
+vibe doctor repair git-runtime --yes
 vibe doctor repair show-runtime --yes
+vibe doctor repair tmux --yes
 ```
 
 **检查内容：**
@@ -107,8 +111,9 @@ vibe doctor repair show-runtime --yes
 - Agent CLI 可用性（Claude Code、OpenCode、Codex）
 - runtime home 迁移状态
 - runtime 进程、安装来源和重启元数据状态
-- Show Runtime provider、manifest、Node.js、平台归档包和安装状态
-- `vibe doctor --deep` 还会在不下载归档包正文的情况下探测其精确 URL
+- 通过统一依赖诊断组检查 askill、avault、Git Runtime、Show Runtime、tmux 和 Node.js
+- `vibe doctor --deep` 还会在不下载正文的情况下探测缺失依赖的精确地址
+- 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
 
 ### `vibe remote`
 
