@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import threading
 import time
 from typing import Dict, Any, Optional, Callable, List
 
@@ -36,6 +37,9 @@ from modules.agents.native_sessions.types import NativeResumeSession
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_RETRY_INITIAL_SECONDS = 1.0
+_RUNTIME_RETRY_MAX_SECONDS = 30.0
 
 
 def _prioritize_claude_model_choices(models: List[str], current_model: Optional[str]) -> List[str]:
@@ -81,6 +85,7 @@ class DiscordBot(BaseIMClient):
         self._recent_interaction_ids: Dict[str, float] = {}
         self._recent_callback_keys: Dict[str, float] = {}
         self._callback_dedupe_ttl_seconds = 3.0
+        self._stop_event = threading.Event()
 
         self.client.on_ready = self._on_ready_event
         self.client.on_message = self._on_message_event
@@ -324,6 +329,8 @@ class DiscordBot(BaseIMClient):
         if not self.config.bot_token:
             raise ValueError("Discord bot token is required")
 
+        self._stop_event.clear()
+
         async def _run():
             self._loop = asyncio.get_running_loop()
             # Inject proxy connector inside the event loop (required by
@@ -343,12 +350,34 @@ class DiscordBot(BaseIMClient):
             async with self.client:
                 await self.client.start(self.config.bot_token)
 
-        try:
-            asyncio.run(_run())
-        except KeyboardInterrupt:
-            return
+        retry_delay = _RUNTIME_RETRY_INITIAL_SECONDS
+        while not self._stop_event.is_set():
+            try:
+                asyncio.run(_run())
+            except KeyboardInterrupt:
+                return
+            except Exception:
+                if self._stop_event.is_set():
+                    return
+                logger.exception(
+                    "Discord runtime failed; retrying in %.1f seconds",
+                    retry_delay,
+                )
+            else:
+                if self._stop_event.is_set():
+                    return
+                logger.warning(
+                    "Discord runtime exited unexpectedly; retrying in %.1f seconds",
+                    retry_delay,
+                )
+
+            if self._stop_event.wait(retry_delay):
+                return
+            self.client.clear()
+            retry_delay = min(retry_delay * 2, _RUNTIME_RETRY_MAX_SECONDS)
 
     def stop(self) -> None:
+        self._stop_event.set()
         loop = getattr(self, "_loop", None)
         if loop is None or loop.is_closed():
             return
@@ -358,6 +387,7 @@ class DiscordBot(BaseIMClient):
             logger.exception("Failed to stop Discord client")
 
     async def shutdown(self) -> None:
+        self._stop_event.set()
         loop = getattr(self, "_loop", None)
         current_loop = asyncio.get_running_loop()
         if loop is None or loop is current_loop:

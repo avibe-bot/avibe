@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import logging
 import threading
-import time
 from typing import Any, Callable, Dict, Optional, cast
 
 from config.v2_settings import _infer_channel_platform, _infer_user_platform, _split_scoped_key
@@ -34,7 +33,6 @@ class MultiIMClient(BaseIMClient):
         self._auxiliary_clients = auxiliary_clients or {}
         self.primary_platform = primary_platform
         self._threads: Dict[str, threading.Thread] = {}
-        self._run_exceptions: Dict[str, BaseException] = {}
         self._run_started = threading.Event()
         # Guards mutations of ``clients`` / ``_threads`` so the run() monitor
         # loop (IM worker thread) and runtime add/remove_client calls (the
@@ -443,7 +441,6 @@ class MultiIMClient(BaseIMClient):
         self._stop_requested.clear()
         with self._clients_lock:
             self._threads = {}
-            self._run_exceptions = {}
             for platform, client in self.clients.items():
                 thread = threading.Thread(target=self._run_client, args=(platform, client), daemon=True)
                 thread.start()
@@ -452,42 +449,19 @@ class MultiIMClient(BaseIMClient):
                 self._emit_empty_ready_once()
 
         try:
-            # Idle-loop until an explicit stop. The runtime stays alive even when
-            # no platform threads remain — that is a valid state now: hot
-            # reconcile can disable every IM platform (workbench-only) or be
-            # mid-rebuild, and the runtime must keep running so a platform can be
-            # added back without restarting the service. (Previously this broke
-            # out when ``_threads`` emptied, which — via Controller._run_im_runtime
-            # calling loop.stop() — would tear the whole service down.)
-            while not self._stop_requested.is_set():
-                should_exit = False
-                crash_exception: BaseException | None = None
+            # Platform runtimes are failure-isolated from the service lifecycle.
+            # Keep the aggregate runtime alive until an explicit stop so the
+            # workbench remains available and hot reconcile can replace a failed
+            # or disabled platform without restarting Avibe.
+            while not self._stop_requested.wait(0.5):
                 with self._clients_lock:
                     for platform, thread in list(self._threads.items()):
                         if thread.is_alive():
                             continue
                         if platform in self._removing_platforms:
                             continue
-                        logger.warning("IM runtime for %s exited", platform)
+                        logger.warning("IM runtime for %s exited; Avibe remains available", platform)
                         self._threads.pop(platform, None)
-                    active_platforms = [platform for platform in self.clients if platform not in self._removing_platforms]
-                    live_active_threads = [
-                        platform
-                        for platform in active_platforms
-                        if (thread := self._threads.get(platform)) is not None and thread.is_alive()
-                    ]
-                    if active_platforms and not live_active_threads:
-                        logger.error("All enabled IM runtime threads exited")
-                        crash_exception = next(
-                            (self._run_exceptions[platform] for platform in active_platforms if platform in self._run_exceptions),
-                            None,
-                        )
-                        should_exit = True
-                if crash_exception is not None:
-                    raise crash_exception
-                if should_exit:
-                    break
-                time.sleep(0.5)
         finally:
             self.stop()
             for thread in list(self._threads.values()):
@@ -497,9 +471,7 @@ class MultiIMClient(BaseIMClient):
     def _run_client(self, platform: str, client: BaseIMClient) -> None:
         try:
             client.run()
-        except Exception as exc:
-            with self._clients_lock:
-                self._run_exceptions[platform] = exc
+        except Exception:
             logger.exception("IM runtime for %s crashed", platform)
 
     def add_client(self, platform: str, client: BaseIMClient) -> None:
@@ -514,7 +486,6 @@ class MultiIMClient(BaseIMClient):
                 logger.warning("add_client: platform %s already present; skipping", platform)
                 return
             self._removing_platforms.discard(platform)
-            self._run_exceptions.pop(platform, None)
             self._register_client_callbacks(platform, client)
             self.clients[platform] = client
             if self.primary_platform not in self.clients:
@@ -568,7 +539,6 @@ class MultiIMClient(BaseIMClient):
             with self._clients_lock:
                 self.clients.pop(platform, None)
                 self._threads.pop(platform, None)
-                self._run_exceptions.pop(platform, None)
                 self._removing_platforms.discard(platform)
                 if self.clients:
                     if self.primary_platform not in self.clients:
