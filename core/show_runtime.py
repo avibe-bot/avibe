@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import errno
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -9,12 +10,15 @@ import logging
 import os
 import platform
 import re
+import socket
 import shlex
 import shutil
 import signal
+import ssl
 import subprocess
 import tarfile
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -132,6 +136,7 @@ class ShowRuntimeManager:
         self.cache_root = self.runtime_dir / "vite-cache"
         self._install_attempted = False
         self._install_reason: str | None = None
+        self._download_error: dict[str, Any] | None = None
         self._managed_command: list[str] | None = None
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
@@ -388,6 +393,7 @@ class ShowRuntimeManager:
             self._install_reason = "runtime_source_unsupported"
             return None
         if command:
+            self._download_error = None
             self._clean_after_managed_install(command)
         return command
 
@@ -421,6 +427,7 @@ class ShowRuntimeManager:
         installed_command: list[str] | None = configured_command
         installed_dir: Path | None = None
         archive: ShowRuntimeArchive | None = None
+        archive_status: dict[str, Any] | None = None
         installed_matches = False
         if not configured_command and manifest:
             archive = manifest.archives.get(platform_tag)
@@ -432,6 +439,14 @@ class ShowRuntimeManager:
         elif not configured_command and self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
             installed_dir = self._archive_install_dir()
             installed_command = self._archive_runtime_command(installed_dir, node or ["node"])
+            archive_status = {
+                "platform": platform_tag,
+                "name": _runtime_archive_name(),
+                "url": _redact_download_url(self.archive_url) if not self.archive_path else None,
+                "path": str(self.archive_path) if self.archive_path else None,
+                "sha256": None,
+                "size": None,
+            }
         elif not configured_command and self.runtime_source == _RUNTIME_SOURCE_GITHUB:
             installed_dir = self._github_source_dir()
             installed_command = self._github_runtime_command(installed_dir, node or ["node"])
@@ -446,13 +461,112 @@ class ShowRuntimeManager:
             "node_version": _format_semver(node_version),
             "node_supported": node_supported,
             "manifest": _manifest_status_payload(manifest),
-            "archive": _archive_status_payload(archive),
+            "archive": archive_status or _archive_status_payload(archive),
             "installed": installed_command is not None,
             "installed_matches_manifest": installed_matches,
             "install_dir": str(installed_dir) if installed_dir else None,
             "command": installed_command,
             "reason": self._install_reason,
+            "download_error": self._download_error,
         }
+
+    def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
+        """Check the selected archive without downloading its body or mutating the cache."""
+        archive_url: str | None = None
+        if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            manifest = self._load_runtime_manifest()
+            if not manifest:
+                return {
+                    "ok": False,
+                    "checked": False,
+                    "reason": self._install_reason or "runtime_manifest_missing",
+                    "download_error": self._download_error,
+                }
+            archive = self._manifest_archive_for_platform(manifest)
+            if not archive:
+                return {
+                    "ok": False,
+                    "checked": False,
+                    "reason": self._install_reason or "runtime_platform_unsupported",
+                }
+            archive_url = archive.url
+        elif self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
+            if self.archive_path:
+                return {
+                    "ok": self.archive_path.is_file(),
+                    "checked": True,
+                    "kind": "local_file",
+                    "path": str(self.archive_path),
+                    "reason": None if self.archive_path.is_file() else "runtime_archive_missing",
+                }
+            archive_url = self.archive_url
+        else:
+            return {
+                "ok": False,
+                "checked": False,
+                "reason": "runtime_archive_probe_not_applicable",
+                "provider": self.runtime_source,
+            }
+
+        parsed = urllib.parse.urlparse(archive_url)
+        if parsed.scheme == "file":
+            path = Path(urllib.request.url2pathname(parsed.path))
+            return {
+                "ok": path.is_file(),
+                "checked": True,
+                "kind": "local_file",
+                "url": _redact_download_url(archive_url),
+                "reason": None if path.is_file() else "runtime_archive_missing",
+            }
+        if parsed.scheme != "https":
+            return {
+                "ok": False,
+                "checked": False,
+                "url": _redact_download_url(archive_url),
+                "reason": "runtime_archive_url_unsupported",
+            }
+
+        request = urllib.request.Request(
+            archive_url,
+            headers={"User-Agent": "avibe-show-runtime-doctor"},
+            method="HEAD",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status_code = getattr(response, "status", None) or response.getcode()
+                final_url = response.geturl() if hasattr(response, "geturl") else archive_url
+            return {
+                "ok": 200 <= int(status_code) < 400,
+                "checked": True,
+                "kind": "reachable",
+                "http_status": int(status_code),
+                "url": _redact_download_url(archive_url),
+                "final_host": urllib.parse.urlparse(final_url).hostname,
+                "reason": None,
+            }
+        except urllib.error.HTTPError as exc:
+            if exc.code in {405, 501}:
+                return {
+                    "ok": False,
+                    "checked": False,
+                    "kind": "head_unsupported",
+                    "http_status": exc.code,
+                    "url": _redact_download_url(archive_url),
+                    "reason": "runtime_archive_probe_unsupported",
+                }
+            return {
+                "ok": False,
+                "checked": True,
+                "reason": "runtime_archive_download_failed",
+                "download_error": _runtime_download_error(exc, archive_url),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "checked": True,
+                "reason": "runtime_archive_download_failed",
+                "download_error": _runtime_download_error(exc, archive_url),
+            }
 
     def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
         removed: list[str] = []
@@ -701,9 +815,10 @@ class ShowRuntimeManager:
                 with urllib.request.urlopen(self.manifest_url, timeout=30) as response:
                     payload = response.read()
                 source = self.manifest_url
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to download Show Runtime manifest from %s", self.manifest_url)
                 self._install_reason = "runtime_manifest_download_failed"
+                self._download_error = _runtime_download_error(exc, self.manifest_url)
                 return None
         else:
             try:
@@ -765,6 +880,7 @@ class ShowRuntimeManager:
     def _resolve_manifest_archive(self, archive: ShowRuntimeArchive) -> Path | None:
         cached = self.runtime_dir / "downloads" / f"{archive.sha256}.tgz"
         if cached.exists() and self._downloaded_archive_matches(cached, archive):
+            self._download_error = None
             return cached
         if self.offline:
             self._install_reason = "runtime_archive_unavailable_offline"
@@ -782,11 +898,13 @@ class ShowRuntimeManager:
                 tmp_path.unlink(missing_ok=True)
                 return None
             tmp_path.replace(cached)
+            self._download_error = None
             return cached
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to download Show Runtime archive from %s", archive.url)
             tmp_path.unlink(missing_ok=True)
             self._install_reason = "runtime_archive_download_failed"
+            self._download_error = _runtime_download_error(exc, archive.url)
             return None
 
     def _downloaded_archive_matches(self, path: Path, archive: ShowRuntimeArchive) -> bool:
@@ -959,9 +1077,11 @@ class ShowRuntimeManager:
         try:
             with urllib.request.urlopen(archive_url, timeout=60) as response, target.open("wb") as destination:
                 shutil.copyfileobj(response, destination)
-        except Exception:
+            self._download_error = None
+        except Exception as exc:
             logger.exception("Failed to download prebuilt Show Runtime from %s", archive_url)
             self._install_reason = "runtime_archive_download_failed"
+            self._download_error = _runtime_download_error(exc, archive_url)
             return None
         return target
 
@@ -1377,13 +1497,69 @@ def _manifest_status_payload(manifest: ShowRuntimeManifest | None) -> dict[str, 
     }
 
 
+def _redact_download_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https", "file"}:
+        return f"{parsed.scheme}:" if parsed.scheme else ""
+    if parsed.scheme == "file":
+        return urllib.parse.urlunparse((parsed.scheme, "", parsed.path, "", "", ""))
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port else hostname
+    return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
+
+
+def _runtime_download_error(exc: BaseException, url: str) -> dict[str, Any]:
+    safe_url = _redact_download_url(url)
+    host = urllib.parse.urlparse(url).hostname
+    error: dict[str, Any] = {
+        "kind": "unknown",
+        "message": "Unexpected download failure",
+        "url": safe_url,
+        "host": host,
+        "exception_type": type(exc).__name__,
+    }
+    if isinstance(exc, urllib.error.HTTPError):
+        error.update(
+            kind="http",
+            message=f"HTTP {exc.code} {exc.reason or ''}".strip(),
+            http_status=exc.code,
+        )
+        return error
+
+    root = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    error["exception_type"] = type(root).__name__
+    if isinstance(root, socket.gaierror):
+        error.update(kind="dns", message=f"DNS lookup failed for {host or 'download host'}")
+    elif isinstance(root, (ssl.SSLCertVerificationError, ssl.CertificateError)):
+        error.update(kind="tls", message="TLS certificate verification failed")
+    elif isinstance(root, ssl.SSLError):
+        error.update(kind="tls", message="TLS negotiation failed")
+    elif isinstance(root, (TimeoutError, socket.timeout)):
+        error.update(kind="timeout", message="Connection timed out")
+    elif isinstance(root, PermissionError):
+        error.update(kind="permission", message="Permission denied while writing the Show Runtime cache")
+    elif isinstance(root, OSError) and root.errno == errno.ENOSPC:
+        error.update(kind="disk", message="No space left in the Show Runtime cache")
+    elif isinstance(exc, urllib.error.URLError):
+        error.update(kind="network", message=f"Network request failed ({type(root).__name__})")
+    elif isinstance(root, OSError):
+        error.update(kind="io", message=f"Local or network I/O failed ({type(root).__name__})")
+    return error
+
+
 def _archive_status_payload(archive: ShowRuntimeArchive | None) -> dict[str, Any] | None:
     if archive is None:
         return None
     return {
         "platform": archive.platform,
         "name": archive.name,
-        "url": archive.url,
+        "url": _redact_download_url(archive.url),
         "sha256": archive.sha256,
         "size": archive.size,
     }

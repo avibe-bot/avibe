@@ -98,6 +98,7 @@ vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
 vibe doctor repair stale-restart-state --yes
+vibe doctor repair show-runtime --yes
 ```
 
 **检查内容：**
@@ -106,6 +107,8 @@ vibe doctor repair stale-restart-state --yes
 - Agent CLI 可用性（Claude Code、OpenCode、Codex）
 - runtime home 迁移状态
 - runtime 进程、安装来源和重启元数据状态
+- Show Runtime provider、manifest、Node.js、平台归档包和安装状态
+- `vibe doctor --deep` 还会在不下载归档包正文的情况下探测其精确 URL
 
 ### `vibe remote`
 

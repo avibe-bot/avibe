@@ -3,7 +3,10 @@ import hashlib
 import io
 import json
 import os
+import socket
+import ssl
 import tarfile
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,7 +20,13 @@ from core.show_pages import (
     ensure_show_page_dir,
     show_cli_event_token,
 )
-from core.show_runtime import ShowRuntimeManager, _runtime_platform_tag, _safe_extract_tar, set_show_runtime_manager_for_tests
+from core.show_runtime import (
+    ShowRuntimeManager,
+    _runtime_download_error,
+    _runtime_platform_tag,
+    _safe_extract_tar,
+    set_show_runtime_manager_for_tests,
+)
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
@@ -158,7 +167,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_runtime_manifest(tmp_path: Path, archive_path: Path, *, sha256: str | None = None, size: int | None = None) -> Path:
+def _write_runtime_manifest(
+    tmp_path: Path,
+    archive_path: Path,
+    *,
+    sha256: str | None = None,
+    size: int | None = None,
+    url: str | None = None,
+) -> Path:
     manifest_path = tmp_path / "show_runtime_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -170,7 +186,7 @@ def _write_runtime_manifest(tmp_path: Path, archive_path: Path, *, sha256: str |
                 "archives": {
                     _runtime_platform_tag(): {
                         "name": archive_path.name,
-                        "url": archive_path.resolve().as_uri(),
+                        "url": url or archive_path.resolve().as_uri(),
                         "sha256": sha256 or _sha256(archive_path),
                         "size": archive_path.stat().st_size if size is None else size,
                     }
@@ -2515,6 +2531,128 @@ def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path
     status = manager.status()
     assert status["installed"] is True
     assert status["installed_matches_manifest"] is True
+
+
+def test_show_runtime_manager_preserves_structured_http_download_error(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path)
+    archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz?token=secret"
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path, url=archive_url)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    def fail_download(*_args, **_kwargs):
+        raise urllib.error.HTTPError(archive_url, 404, "Not Found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("core.show_runtime.urllib.request.urlopen", fail_download)
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["status"]["download_error"] == {
+        "kind": "http",
+        "message": "HTTP 404 Not Found",
+        "url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz",
+        "host": "github.com",
+        "exception_type": "HTTPError",
+        "http_status": 404,
+    }
+    assert "secret" not in json.dumps(result)
+
+
+def test_show_runtime_status_refresh_does_not_erase_archive_download_error(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path)
+    archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path, url=archive_url)
+    manifest_url = "https://example.test/show-runtime-manifest.json"
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_url=manifest_url,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    class ManifestResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return manifest_path.read_bytes()
+
+    def fake_urlopen(request, **_kwargs):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if url == manifest_url:
+            return ManifestResponse()
+        raise urllib.error.HTTPError(archive_url, 404, "Not Found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("core.show_runtime.urllib.request.urlopen", fake_urlopen)
+
+    result = manager.prepare()
+
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["status"]["download_error"]["http_status"] == 404
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (urllib.error.URLError(socket.gaierror(-2, "Name or service not known")), "dns"),
+        (urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")), "tls"),
+        (urllib.error.URLError(TimeoutError("timed out")), "timeout"),
+    ],
+)
+def test_show_runtime_download_error_classifies_network_failures(exc, kind):
+    error = _runtime_download_error(exc, "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz")
+
+    assert error["kind"] == kind
+    assert error["host"] == "github.com"
+
+
+def test_show_runtime_archive_probe_uses_body_free_head_request(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path)
+    archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path, url=archive_url)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    requests = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def getcode(self):
+            return self.status
+
+        def geturl(self):
+            return "https://release-assets.githubusercontent.com/runtime.tgz"
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr("core.show_runtime.urllib.request.urlopen", fake_urlopen)
+
+    result = manager.probe_archive_reachability()
+
+    assert result["ok"] is True
+    assert result["http_status"] == 200
+    assert result["final_host"] == "release-assets.githubusercontent.com"
+    assert requests[0].get_method() == "HEAD"
 
 
 def test_show_runtime_manager_manifest_install_dir_includes_manifest_and_archive_identity(monkeypatch, tmp_path):

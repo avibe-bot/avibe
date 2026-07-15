@@ -1038,6 +1038,156 @@ def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     assert result["results"][0]["status"] == "planned"
 
 
+def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monkeypatch):
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {
+            "name": "vibe-show-runtime-node-linux-x64.tgz",
+            "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.5/vibe-show-runtime-node-linux-x64.tgz",
+        },
+        "installed": False,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: (_ for _ in ()).throw(AssertionError("fast Doctor must not probe network")),
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    assert next(item for item in items if item.get("code") == "show_runtime.not_ready")["repair"]["target"] == "show-runtime"
+    assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
+
+
+def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monkeypatch):
+    archive_url = (
+        "https://github.com/avibe-bot/avibe/releases/download/"
+        "v3.0.5/vibe-show-runtime-node-linux-x64.tgz"
+    )
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {"name": "vibe-show-runtime-node-linux-x64.tgz", "url": archive_url},
+        "installed": False,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: {
+            "ok": False,
+            "checked": True,
+            "reason": "runtime_archive_download_failed",
+            "download_error": {
+                "kind": "http",
+                "message": "HTTP 404 Not Found",
+                "url": archive_url,
+                "host": "github.com",
+                "http_status": 404,
+            },
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=True)
+
+    failure = next(item for item in items if item.get("code") == "show_runtime.archive_http_404")
+    assert failure["status"] == "fail"
+    assert "proxy or security gateway" in failure["action"]
+
+
+def test_show_runtime_doctor_identifies_legacy_upstream_fallback(monkeypatch):
+    status = {
+        "provider": "archive",
+        "platform": "darwin-arm64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": None,
+        "archive": {
+            "name": "vibe-show-runtime-node-darwin-arm64.tgz",
+            "url": "https://github.com/avibe-bot/vibe-show-runtime/releases/latest/download/"
+            "vibe-show-runtime-node-darwin-arm64.tgz",
+        },
+        "installed": False,
+    }
+    manager = SimpleNamespace(status=lambda: status)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    failure = next(item for item in items if item.get("code") == "show_runtime.legacy_archive_provider")
+    assert failure["status"] == "fail"
+    assert "does not publish release assets" in failure["action"]
+    assert "repair" not in next(item for item in items if item.get("code") == "show_runtime.not_ready")
+
+
+def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
+    archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "archive": {"url": archive_url},
+            "installed": False,
+        },
+        prepare=lambda force=False: {
+            "ok": False,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "reason": "runtime_archive_download_failed",
+            "status": {
+                "download_error": {
+                    "kind": "timeout",
+                    "message": "Connection timed out",
+                    "url": archive_url,
+                }
+            },
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["download_error"]["kind"] == "timeout"
+    assert archive_url in result["message"]
+
+
+def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
+            "installed": False,
+        },
+        prepare=lambda force=False: {
+            "ok": True,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "status": {"install_dir": str(tmp_path / "runtime")},
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "repaired"
+    assert result["install_dir"] == str(tmp_path / "runtime")
+
+
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
     paths.ensure_data_dirs()
     restart_path = runtime.get_restart_status_path()
@@ -1075,6 +1225,14 @@ def test_doctor_parser_accepts_repair_target_and_dry_run():
     assert args.doctor_action == "repair"
     assert args.doctor_repair_targets == ["duplicate-service-processes"]
     assert args.dry_run is True
+
+
+def test_doctor_parser_accepts_show_runtime_repair_target():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "repair", "show-runtime", "--yes"])
+
+    assert args.doctor_repair_targets == ["show-runtime"]
+    assert args.yes is True
 
 
 def test_doctor_parser_accepts_fast_and_deep_modes():

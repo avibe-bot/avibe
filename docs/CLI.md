@@ -113,6 +113,7 @@ vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
 vibe doctor repair stale-restart-state --yes
+vibe doctor repair show-runtime --yes
 ```
 
 **Checks:**
@@ -121,6 +122,8 @@ vibe doctor repair stale-restart-state --yes
 - Agent CLI availability (Claude Code, OpenCode, Codex)
 - Runtime home migration state
 - Runtime process, install, and restart metadata state
+- Show Runtime provider, manifest, Node.js, platform archive, and install state
+- `vibe doctor --deep` also probes the exact Show Runtime archive URL without downloading its body
 
 ### `vibe remote`
 
