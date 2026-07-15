@@ -1093,6 +1093,118 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
 
 
+def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "tmux",
+                    "required": False,
+                    "installed": False,
+                    "status": "missing",
+                    "reason": "tmux_platform_unsupported",
+                },
+                {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    unsupported = next(
+        item for item in items if item.get("code") == "dependencies.tmux.platform_unsupported"
+    )
+    assert unsupported["status"] == "warn"
+    assert "repair" not in unsupported
+    assert not any(item.get("code") == "dependencies.tmux.not_ready" for item in items)
+
+
+def test_managed_dependencies_doctor_accepts_usable_system_git(monkeypatch):
+    monkeypatch.setattr(cli.api, "dependencies_status", lambda **_kwargs: {"deps": []})
+    monkeypatch.setattr(
+        "core.git_runtime.git_runtime_status",
+        lambda: {
+            "resolution": "system",
+            "path": "/usr/bin/git",
+            "version": None,
+            "managed": {
+                "installed": False,
+                "status": "missing",
+                "reason": "git_platform_unsupported",
+            },
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    system_git = next(
+        item for item in items if item.get("code") == "dependencies.git-runtime.system_ready"
+    )
+    assert system_git["status"] == "pass"
+    assert not any(item.get("code") == "dependencies.git-runtime.not_ready" for item in items)
+
+
+def test_managed_dependencies_doctor_does_not_offer_unsupported_git_runtime_repair(monkeypatch):
+    monkeypatch.setattr(cli.api, "dependencies_status", lambda **_kwargs: {"deps": []})
+    monkeypatch.setattr(
+        "core.git_runtime.git_runtime_status",
+        lambda: {
+            "resolution": "none",
+            "path": None,
+            "version": None,
+            "managed": {
+                "installed": False,
+                "status": "missing",
+                "reason": "git_platform_unsupported",
+            },
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    unsupported = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.git-runtime.platform_unsupported"
+    )
+    assert unsupported["status"] == "warn"
+    assert "repair" not in unsupported
+
+
+def test_managed_dependencies_doctor_rejects_unsupported_archive_url_without_repair(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {"id": "git-runtime", "required": False, "installed": False, "status": "missing"},
+            ]
+        },
+    )
+    manager = SimpleNamespace(
+        probe_archive_reachability=lambda: {
+            "ok": False,
+            "checked": False,
+            "reason": "git_archive_url_unsupported",
+            "url": "http://example.test/git.tar.gz",
+        }
+    )
+    monkeypatch.setattr("core.git_runtime.GitRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    unsupported = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.git-runtime.archive_url_unsupported"
+    )
+    assert unsupported["status"] == "warn"
+    assert "repair" not in unsupported
+    assert not any(item.get("code") == "dependencies.git-runtime.not_ready" for item in items)
+
+
 def test_managed_dependencies_doctor_deep_reports_retry_exhaustion(monkeypatch):
     monkeypatch.setattr(
         cli.api,

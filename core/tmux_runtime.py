@@ -219,6 +219,14 @@ class TmuxRuntimeManager:
         archive = self._manifest_archive_for_platform(manifest)
         if archive is None:
             return {"ok": False, "checked": False, "reason": self._install_reason}
+        parsed = urllib.parse.urlparse(archive.url)
+        if parsed.scheme not in {"https", "file"}:
+            return {
+                "ok": False,
+                "checked": False,
+                "reason": "tmux_archive_url_unsupported",
+                "url": redact_url(archive.url),
+            }
         return probe_url(
             archive.url,
             timeout=timeout,
@@ -323,11 +331,11 @@ class TmuxRuntimeManager:
                 timeout=60,
                 opener=urllib.request.urlopen,
             )
+            self._download_error = None
             if not self._downloaded_archive_matches(tmp_path, archive):
                 tmp_path.unlink(missing_ok=True)
                 return None
             tmp_path.replace(cached)
-            self._download_error = None
             return cached
         except Exception as exc:
             logger.exception("Failed to download tmux archive from %s", archive.url)

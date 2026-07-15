@@ -8038,17 +8038,22 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     items: list[dict] = []
     try:
         dependencies = list(api.dependencies_status(offline=True).get("deps") or [])
-        from core.git_runtime import GitRuntimeManager
+        from core.git_runtime import git_runtime_status
 
         if not any(dependency.get("id") == "git-runtime" for dependency in dependencies):
-            git_status = GitRuntimeManager(offline=True).status()
+            git_status = git_runtime_status()
+            managed_git = git_status.get("managed") or {}
+            git_ready = git_status.get("resolution") in {"vendored", "system"}
             dependencies.append(
                 {
                     "id": "git-runtime",
                     "required": False,
-                    "installed": bool(git_status.get("installed")),
-                    "status": "ready" if git_status.get("installed") else "missing",
-                    "version": git_status.get("version"),
+                    "installed": git_ready,
+                    "status": "ready" if git_ready else "missing",
+                    "version": git_status.get("version") or managed_git.get("version"),
+                    "source": git_status.get("resolution"),
+                    "reason": managed_git.get("reason"),
+                    "download_error": managed_git.get("download_error"),
                 }
             )
     except Exception as exc:  # noqa: BLE001
@@ -8071,7 +8076,20 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         version = dependency.get("version")
         if ready:
             suffix = f" {version}" if version else ""
-            _add_doctor_item(items, "pass", f"{label}{suffix} is ready", code=f"dependencies.{dependency_id}.ready")
+            if dependency_id == "git-runtime" and dependency.get("source") == "system":
+                _add_doctor_item(
+                    items,
+                    "pass",
+                    "Git is ready via the system runtime",
+                    code="dependencies.git-runtime.system_ready",
+                )
+            else:
+                _add_doctor_item(
+                    items,
+                    "pass",
+                    f"{label}{suffix} is ready",
+                    code=f"dependencies.{dependency_id}.ready",
+                )
             continue
 
         required = bool(dependency.get("required"))
@@ -8086,7 +8104,39 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             )
             continue
 
+        dependency_reason = str(dependency.get("reason") or "")
+        if dependency_reason.endswith("_platform_unsupported"):
+            _add_doctor_item(
+                items,
+                severity,
+                f"{label} is not published for this platform",
+                "Use a system dependency where supported, or run Avibe on a platform with a published runtime.",
+                code=f"dependencies.{dependency_id}.platform_unsupported",
+            )
+            continue
+
         repair_target = repair_targets[dependency_id]
+        probe = None
+        if deep and dependency_id == "tmux":
+            from core.tmux_runtime import TmuxRuntimeManager
+
+            probe = TmuxRuntimeManager().probe_archive_reachability()
+        elif deep and dependency_id == "git-runtime":
+            from core.git_runtime import GitRuntimeManager
+
+            probe = GitRuntimeManager().probe_archive_reachability()
+
+        probe_reason = str((probe or {}).get("reason") or "")
+        if probe_reason.endswith("_archive_url_unsupported"):
+            _add_doctor_item(
+                items,
+                severity,
+                f"{label} archive URL uses an unsupported scheme: {probe.get('url') or 'unknown'}",
+                "Configure the dependency manifest with an HTTPS or file URL.",
+                code=f"dependencies.{dependency_id}.archive_url_unsupported",
+            )
+            continue
+
         _add_doctor_item(
             items,
             severity,
@@ -8106,11 +8156,11 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 api.avault_manifest_url(),
                 user_agent="avibe-avault-doctor",
             )
-        elif dependency_id == "tmux":
+        elif dependency_id == "tmux" and probe is None:
             from core.tmux_runtime import TmuxRuntimeManager
 
             probe = TmuxRuntimeManager().probe_archive_reachability()
-        else:
+        elif dependency_id == "git-runtime" and probe is None:
             from core.git_runtime import GitRuntimeManager
 
             probe = GitRuntimeManager().probe_archive_reachability()
@@ -8122,7 +8172,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 f"{label} download endpoint is reachable: {probe.get('url')}",
                 code=f"dependencies.{dependency_id}.reachable",
             )
-        elif not probe.get("checked"):
+        elif not probe.get("checked") and probe.get("reason") == "dependency_probe_unsupported":
             _add_doctor_item(
                 items,
                 "warn",
@@ -8138,6 +8188,14 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 code_prefix=f"dependencies.{dependency_id}.download",
                 repair_target=repair_target,
                 failure_status=severity,
+            )
+        elif not probe.get("checked"):
+            _add_doctor_item(
+                items,
+                severity,
+                f"{label} archive could not be resolved ({probe.get('reason') or 'unknown'})",
+                "Inspect the dependency manifest and platform mapping before retrying.",
+                code=f"dependencies.{dependency_id}.probe_unavailable",
             )
     return items
 
