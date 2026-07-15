@@ -818,6 +818,14 @@ class UpdateChecker:
                         delivered = self._delivery_succeeded(result)
                         if delivered:
                             logger.info("Sent post-update failure notification to %s", owner_id)
+            elif not configured_admin_ids and resolved_platform == "discord":
+                channel_id = self._get_default_notification_channel_id("discord")
+                if channel_id:
+                    context = MessageContext(user_id="system", channel_id=channel_id, platform="discord")
+                    result = await im_client.send_message(context, failure_text)
+                    delivered = self._delivery_succeeded(result)
+                    if delivered:
+                        logger.info("Sent post-update failure notification to Discord channel %s", channel_id)
             return delivered
         except Exception as e:
             logger.error("Failed to send post-update failure notification: %s", e)
@@ -994,13 +1002,13 @@ class UpdateChecker:
             logger.error(f"Failed to send Discord update notification: {e}")
             return False
 
-    def _get_default_notification_channel_id(self) -> Optional[str]:
+    def _get_default_notification_channel_id(self, platform: Optional[str] = None) -> Optional[str]:
         if not hasattr(self.controller, "settings_manager"):
             return None
         store = self.controller.settings_manager.get_store()
         if store is None:
             return None
-        platform = getattr(self.controller.config, "platform", "slack")
+        platform = platform or getattr(self.controller.config, "platform", "slack")
         for channel_id, settings in store.get_channels_for_platform(platform).items():
             if getattr(settings, "enabled", False):
                 if platform == "discord" and not str(channel_id).isdigit():
@@ -1218,6 +1226,10 @@ class UpdateChecker:
                 attempt_admin_ids = [
                     uid for uid in active_admin_ids if self._user_platform(uid) in pending_platforms
                 ]
+                if not configured_admin_ids:
+                    platform = data.get("platform") or getattr(self.controller.config, "platform", "slack")
+                    if ready_platform is not None and ready_platform != platform:
+                        return False
             # Use the target version from marker (more reliable than __version__ in edge cases)
             target_version = data.get("version", "unknown")
             running_version = str(__version__ or "").strip()
@@ -1260,6 +1272,14 @@ class UpdateChecker:
                 )
                 if delivered:
                     marker_path.unlink(missing_ok=True)
+                elif not channel_id and not configured_admin_ids:
+                    no_target = platform not in {"slack", "discord"} or (
+                        platform == "discord" and not self._get_default_notification_channel_id("discord")
+                    )
+                    if no_target:
+                        logger.info("Discarding post-update marker with no viable %s notification target", platform)
+                        marker_path.unlink(missing_ok=True)
+                        return True
                 return delivered
 
             if self.state.blocked_auto_update_version == target_version:
@@ -1329,6 +1349,21 @@ class UpdateChecker:
                             delivered = self._delivery_succeeded(result)
                             if delivered:
                                 logger.info(f"Sent post-update notification to {owner_id}")
+                elif platform == "discord":
+                    channel_id = self._get_default_notification_channel_id("discord")
+                    if not channel_id:
+                        logger.info("Discarding post-update marker with no viable Discord notification target")
+                        marker_path.unlink(missing_ok=True)
+                        return True
+                    context = MessageContext(user_id="system", channel_id=channel_id, platform="discord")
+                    result = await im_client.send_message(context, success_text)
+                    delivered = self._delivery_succeeded(result)
+                    if delivered:
+                        logger.info("Sent post-update notification to Discord channel %s", channel_id)
+                else:
+                    logger.info("Discarding post-update marker with no viable %s notification target", platform)
+                    marker_path.unlink(missing_ok=True)
+                    return True
             if delivered:
                 marker_path.unlink(missing_ok=True)
             else:
