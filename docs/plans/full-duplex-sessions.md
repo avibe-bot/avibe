@@ -117,8 +117,10 @@ Several Claude Activities can complete inside one Turn before the backend emits
 its single final Result. The pending request retains all claimed completions as
 one delivery batch: the latest Activity supplies the visible Result provenance,
 and every retained completion is acknowledged only after that Result is durably
-delivered. A later completion must never overwrite and strand an earlier claim,
-because an unreachable claimed output would block native-query admission forever.
+delivered. The receiver drains every already-queued completion owned by that Turn
+before handling its Result. A later completion must never overwrite and strand
+an earlier claim, because an unreachable claimed output would block native-query
+admission forever.
 
 ## Claude mapping
 

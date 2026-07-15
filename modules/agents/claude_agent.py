@@ -1379,6 +1379,38 @@ class ClaudeAgent(BaseAgent):
             completes_turn=True,
         )
 
+    def _attach_queued_same_turn_activities(
+        self,
+        registry,
+        composite_key: str,
+        request: AgentRequest,
+        first_activity: SessionActivity,
+    ) -> SessionActivity:
+        """Claim the complete queued batch owned by one pending Turn."""
+
+        pending_turn_id = str(
+            (
+                getattr(
+                    getattr(request, "context", None),
+                    "platform_specific",
+                    None,
+                )
+                or {}
+            ).get(AGENT_TURN_TOKEN)
+            or ""
+        ).strip()
+        latest = first_activity
+        self._attach_request_activity(request, first_activity)
+        while True:
+            candidate = registry.claim_completed_output(self.name, composite_key)
+            if candidate is None:
+                return latest
+            if not candidate.turn_id or candidate.turn_id != pending_turn_id:
+                registry.requeue_completed_output(candidate)
+                return latest
+            self._attach_request_activity(request, candidate)
+            latest = candidate
+
     def _clear_request_activities(self, request: AgentRequest | None) -> None:
         if request is None:
             return
@@ -1861,7 +1893,13 @@ class ClaudeAgent(BaseAgent):
             if same_turn:
                 matched_request = self._pop_pending_request(composite_key)
                 self._adopt_pending_turn_token(context, matched_request)
-                self._attach_request_activity(matched_request, activity)
+                activity = self._attach_queued_same_turn_activities(
+                    registry,
+                    composite_key,
+                    matched_request,
+                    activity,
+                )
+                result_text = str(activity.metadata.get("summary") or "").strip()
                 try:
                     await self._emit_activity_result(
                         context,
@@ -1993,7 +2031,12 @@ class ClaudeAgent(BaseAgent):
                 or ""
             ).strip()
             if completed_activity.turn_id and completed_activity.turn_id == pending_turn_id:
-                self._attach_request_activity(pending_request, completed_activity)
+                self._attach_queued_same_turn_activities(
+                    registry,
+                    composite_key,
+                    pending_request,
+                    completed_activity,
+                )
                 return None
             self._detached_activity_outputs[composite_key] = completed_activity
             logger.info(
