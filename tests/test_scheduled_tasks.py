@@ -852,6 +852,8 @@ def test_run_task_stays_queued_until_target_transport_is_ready(tmp_path: Path) -
     service = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
 
     asyncio.run(service._run_task(task.id))
+    restarted = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
+    asyncio.run(restarted._run_task(task.id))
 
     pending = request_store.list_pending()
     assert len(pending) == 1

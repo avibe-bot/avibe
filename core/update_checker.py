@@ -419,9 +419,16 @@ class UpdateChecker:
                     cached=release_notifications_enabled,
                 )
                 if release_notifications_enabled:
-                    admin_ids = self._get_admin_user_ids()
+                    configured_admin_ids = self._get_admin_user_ids()
+                    admin_ids = self._active_admin_ids(configured_admin_ids)
                     platform = getattr(self.controller.config, "platform", "slack")
-                    if self._notification_targets_waiting_for_transport(admin_ids, platform):
+                    if admin_ids:
+                        waiting_for_transport = self._notification_targets_waiting_for_transport(admin_ids, platform)
+                    elif configured_admin_ids:
+                        waiting_for_transport = False
+                    else:
+                        waiting_for_transport = self._notification_targets_waiting_for_transport([], platform)
+                    if waiting_for_transport:
                         logger.info(
                             "Deferring update notification and auto-update for %s until an admin transport is ready",
                             latest,
@@ -632,12 +639,21 @@ class UpdateChecker:
     def _admin_ids_for_platform(self, admin_ids: list, platform: str) -> list:
         return [uid for uid in admin_ids if self._user_platform(uid) == platform]
 
-    def _ready_admin_ids(self, admin_ids: list) -> list:
-        return [uid for uid in admin_ids if self._is_transport_ready(self._user_platform(uid))]
+    def _active_admin_ids(self, admin_ids: Optional[list] = None) -> list:
+        admin_ids = self._get_admin_user_ids() if admin_ids is None else admin_ids
+        im_clients = getattr(self.controller, "im_clients", None)
+        if isinstance(im_clients, dict) and im_clients:
+            enabled_platforms = set(im_clients)
+        else:
+            enabled = getattr(getattr(self.controller, "config", None), "enabled_platforms", None)
+            enabled_platforms = set(enabled()) if callable(enabled) else set()
+        if not enabled_platforms:
+            return admin_ids
+        return [uid for uid in admin_ids if self._user_platform(uid) in enabled_platforms]
 
     def _notification_targets_waiting_for_transport(self, admin_ids: list, platform: str) -> bool:
         if admin_ids:
-            return not self._ready_admin_ids(admin_ids)
+            return any(not self._is_transport_ready(self._user_platform(uid)) for uid in admin_ids)
         if platform in {"slack", "discord"}:
             return not self._is_transport_ready(platform)
         return False
@@ -720,16 +736,18 @@ class UpdateChecker:
     async def _send_update_notification(self, current: str, latest: str) -> bool:
         """Send update notification to admin users, with platform-specific fallbacks."""
         platform = getattr(self.controller.config, "platform", "slack")
-        all_admin_ids = self._get_admin_user_ids()
-        admin_ids = self._ready_admin_ids(all_admin_ids)
+        configured_admin_ids = self._get_admin_user_ids()
+        admin_ids = self._active_admin_ids(configured_admin_ids)
 
-        if all_admin_ids:
+        if configured_admin_ids:
             # Send DM to each admin via the platform-agnostic send_dm method
-            if not admin_ids:
+            if not admin_ids or self._notification_targets_waiting_for_transport(admin_ids, platform):
                 return False
             return await self._send_notification_to_admins(admin_ids, current, latest, platform)
         else:
             # Legacy fallback: no admins configured
+            if self._notification_targets_waiting_for_transport([], platform):
+                return False
             if platform == "slack":
                 return await self._send_slack_notification_legacy(current, latest)
             elif platform == "discord":
@@ -775,20 +793,23 @@ class UpdateChecker:
                     return True
                 return False
 
-            all_admin_ids = self._get_admin_user_ids()
-            admin_ids = self._admin_ids_for_platform(all_admin_ids, admin_platform) if admin_platform else all_admin_ids
+            configured_admin_ids = self._get_admin_user_ids()
+            active_admin_ids = self._active_admin_ids(configured_admin_ids)
+            admin_ids = (
+                self._admin_ids_for_platform(active_admin_ids, admin_platform)
+                if admin_platform
+                else active_admin_ids
+            )
             delivered = False
             if admin_ids:
-                for uid in admin_ids:
-                    try:
-                        admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
-                        result = await admin_client.send_dm(raw_user_id, failure_text)
-                        if self._delivery_succeeded(result):
-                            delivered = True
-                            logger.info("Sent post-update failure notification to admin %s", uid)
-                    except Exception as e:
-                        logger.error("Failed to send post-update failure notification to admin %s: %s", uid, e)
-            elif not all_admin_ids and resolved_platform == "slack":
+                delivered = bool(
+                    await self._send_admin_text(
+                        admin_ids,
+                        failure_text,
+                        log_label="post-update failure notification",
+                    )
+                )
+            elif not configured_admin_ids and resolved_platform == "slack":
                 owner_id = await self._get_workspace_owner_id()
                 if owner_id:
                     dm_channel = await self._open_dm_channel(owner_id)
@@ -801,6 +822,19 @@ class UpdateChecker:
         except Exception as e:
             logger.error("Failed to send post-update failure notification: %s", e)
             return False
+
+    async def _send_admin_text(self, admin_ids: list, text: str, *, log_label: str) -> set[str]:
+        delivered_platforms: set[str] = set()
+        for uid in admin_ids:
+            try:
+                admin_client, raw_user_id, user_platform = self._get_im_client_for_user(uid)
+                result = await admin_client.send_dm(raw_user_id, text)
+                if self._delivery_succeeded(result):
+                    delivered_platforms.add(user_platform)
+                    logger.info("Sent %s to admin %s", log_label, uid)
+            except Exception as e:
+                logger.error("Failed to send %s to admin %s: %s", log_label, uid, e)
+        return delivered_platforms
 
     @staticmethod
     def _delivery_succeeded(result: Any) -> bool:
@@ -1077,8 +1111,6 @@ class UpdateChecker:
     ) -> None:
         """Write a marker file to trigger post-update notification."""
         try:
-            marker_path = paths.get_state_dir() / "pending_update_notification.json"
-            marker_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "version": version,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1091,16 +1123,42 @@ class UpdateChecker:
                 data["message_id"] = message_id
             if platform:
                 data["platform"] = platform
-
-            # Atomic write
-            with tempfile.NamedTemporaryFile(
-                mode="w", dir=marker_path.parent, suffix=".tmp", delete=False, encoding="utf-8"
-            ) as f:
-                json.dump(data, f)
-                temp_path = Path(f.name)
-            temp_path.replace(marker_path)
+            self._write_update_marker_payload(data)
         except Exception as e:
             logger.error(f"Failed to write update marker: {e}")
+
+    @staticmethod
+    def _write_update_marker_payload(data: dict[str, Any]) -> None:
+        marker_path = paths.get_state_dir() / "pending_update_notification.json"
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=marker_path.parent, suffix=".tmp", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(data, f)
+            temp_path = Path(f.name)
+        temp_path.replace(marker_path)
+
+    def _record_post_update_admin_progress(
+        self,
+        *,
+        marker_path: Path,
+        data: dict[str, Any],
+        active_platforms: set[str],
+        handled_platforms: set[str],
+        delivered_platforms: set[str],
+    ) -> bool:
+        handled_platforms.update(delivered_platforms)
+        if active_platforms.issubset(handled_platforms):
+            marker_path.unlink(missing_ok=True)
+            return True
+        if delivered_platforms:
+            data["handled_admin_platforms"] = sorted(handled_platforms)
+            self._write_update_marker_payload(data)
+        logger.info(
+            "Post-update notification is waiting for admin transport(s): %s",
+            ", ".join(sorted(active_platforms - handled_platforms)),
+        )
+        return False
 
     def _remove_update_marker(self) -> None:
         """Remove the update marker file."""
@@ -1133,6 +1191,33 @@ class UpdateChecker:
                 platform = ready_platform
             if channel_id and ready_platform is not None and ready_platform != platform:
                 return False
+            configured_admin_ids: list = []
+            active_admin_ids: list = []
+            active_admin_platforms: set[str] = set()
+            handled_admin_platforms: set[str] = set()
+            attempt_admin_ids: list = []
+            if not channel_id:
+                configured_admin_ids = self._get_admin_user_ids()
+                active_admin_ids = self._active_admin_ids(configured_admin_ids)
+                active_admin_platforms = {self._user_platform(uid) for uid in active_admin_ids}
+                stored_handled_platforms = data.get("handled_admin_platforms", [])
+                if not isinstance(stored_handled_platforms, list):
+                    stored_handled_platforms = []
+                handled_admin_platforms = {
+                    str(value)
+                    for value in stored_handled_platforms
+                    if isinstance(value, str)
+                } & active_admin_platforms
+                pending_platforms = active_admin_platforms - handled_admin_platforms
+                if ready_platform is not None:
+                    pending_platforms &= {ready_platform}
+                else:
+                    pending_platforms = {
+                        candidate for candidate in pending_platforms if self._is_transport_ready(candidate)
+                    }
+                attempt_admin_ids = [
+                    uid for uid in active_admin_ids if self._user_platform(uid) in pending_platforms
+                ]
             # Use the target version from marker (more reliable than __version__ in edge cases)
             target_version = data.get("version", "unknown")
             running_version = str(__version__ or "").strip()
@@ -1147,6 +1232,24 @@ class UpdateChecker:
                     "post_update_version_mismatch",
                     current_version=running_version or None,
                 )
+                if not channel_id and configured_admin_ids:
+                    failure_text = self._t(
+                        "update.postUpdateVersionMismatch",
+                        target=str(target_version),
+                        current=running_version or "unknown",
+                    )
+                    delivered_platforms = await self._send_admin_text(
+                        attempt_admin_ids,
+                        failure_text,
+                        log_label="post-update failure notification",
+                    )
+                    return self._record_post_update_admin_progress(
+                        marker_path=marker_path,
+                        data=data,
+                        active_platforms=active_admin_platforms,
+                        handled_platforms=handled_admin_platforms,
+                        delivered_platforms=delivered_platforms,
+                    )
                 delivered = await self._send_post_update_failure_notification(
                     target_version=str(target_version),
                     running_version=running_version or "unknown",
@@ -1198,26 +1301,22 @@ class UpdateChecker:
                         logger.info("Updated %s message with post-update notification", platform)
                 except Exception as e:
                     logger.error("Failed to edit %s update message: %s", platform, e)
-            else:
-                # Fallback: send a new message to admins, or workspace owner
-                all_admin_ids = self._get_admin_user_ids()
-                admin_ids = (
-                    self._admin_ids_for_platform(all_admin_ids, ready_platform)
-                    if ready_platform is not None
-                    else all_admin_ids
+            elif configured_admin_ids:
+                delivered_platforms = await self._send_admin_text(
+                    attempt_admin_ids,
+                    success_text,
+                    log_label="post-update notification",
                 )
-                if admin_ids:
-                    for uid in admin_ids:
-                        try:
-                            admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
-                            result = await admin_client.send_dm(raw_user_id, success_text)
-                            if self._delivery_succeeded(result):
-                                delivered = True
-                                logger.info(f"Sent post-update notification to admin {uid}")
-                        except Exception as e:
-                            logger.error(f"Failed to send post-update notification to admin {uid}: {e}")
-                elif not all_admin_ids and platform == "slack":
-                    # Legacy fallback: try workspace owner
+                return self._record_post_update_admin_progress(
+                    marker_path=marker_path,
+                    data=data,
+                    active_platforms=active_admin_platforms,
+                    handled_platforms=handled_admin_platforms,
+                    delivered_platforms=delivered_platforms,
+                )
+            else:
+                # Legacy fallback: try workspace owner
+                if platform == "slack":
                     owner_id = await self._get_workspace_owner_id()
                     if owner_id:
                         dm_channel = await self._open_dm_channel(owner_id)

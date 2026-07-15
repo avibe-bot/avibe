@@ -204,7 +204,7 @@ def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch,
     assert performed == [("1.0.1", {})]
 
 
-def test_unready_admin_transport_defers_notification_and_auto_update(monkeypatch, tmp_path):
+def test_partial_admin_transport_readiness_defers_all_notifications_and_auto_update(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
@@ -212,12 +212,15 @@ def test_unready_admin_transport_defers_notification_and_auto_update(monkeypatch
         "discord",
         {"123456789012345678": UserSettings(display_name="Discord", is_admin=True)},
     )
+    store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
     store.save()
 
     controller = _StubController(store)
-    controller.ready_platforms = set()
+    controller.ready_platforms = {"slack"}
     discord = _FakeIMClient()
-    controller.im_clients = {"discord": discord}
+    slack = _FakeIMClient()
+    controller.im_clients = {"discord": discord, "slack": slack}
+    controller.im_client = slack
     checker = UpdateChecker(
         controller,
         UpdateConfig(check_interval_minutes=1, notify_admins=True, auto_update=True),
@@ -247,6 +250,7 @@ def test_unready_admin_transport_defers_notification_and_auto_update(monkeypatch
     asyncio.run(checker._do_check())
 
     assert discord.dm_calls == []
+    assert slack.dm_calls == []
     assert checker.state.notified_at is None
     assert performed == []
 
@@ -254,9 +258,57 @@ def test_unready_admin_transport_defers_notification_and_auto_update(monkeypatch
     asyncio.run(checker._do_check())
 
     assert len(discord.dm_calls) == 1
+    assert len(slack.dm_calls) == 1
     assert checker.state.notified_version == "1.0.1"
     assert checker.state.notified_at is not None
     assert performed == []
+
+
+def test_stale_admin_transport_does_not_block_auto_update(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform(
+        "discord",
+        {"123456789012345678": UserSettings(display_name="Disabled Discord", is_admin=True)},
+    )
+    store.save()
+
+    controller = _StubController(store)
+    controller.ready_platforms = {"slack"}
+    slack = _FakeIMClient()
+    controller.im_clients = {"slack": slack}
+    controller.im_client = slack
+    checker = UpdateChecker(
+        controller,
+        UpdateConfig(check_interval_minutes=1, notify_admins=True, auto_update=True),
+    )
+    checker.state.last_activity_at = time.time() - 3600
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_pypi_version_sync",
+        lambda: {"current": "1.0.0", "latest": "1.0.1", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
+    )
+    monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/vibe")
+    performed = []
+
+    async def fake_perform_update(target_version, **kwargs):
+        performed.append((target_version, kwargs))
+        return {"ok": True, "restarting": False, "message": "ok"}
+
+    monkeypatch.setattr(checker, "_perform_update", fake_perform_update)
+
+    asyncio.run(checker._do_check())
+
+    assert slack.dm_calls == []
+    assert performed == [("1.0.1", {})]
 
 
 def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monkeypatch, tmp_path):
@@ -447,7 +499,7 @@ def test_post_update_marker_is_retained_when_delivery_returns_none(monkeypatch, 
     assert marker.exists()
 
 
-def test_no_channel_post_update_marker_retries_on_each_admin_transport(monkeypatch, tmp_path):
+def test_no_channel_post_update_marker_tracks_completed_admin_platforms(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
@@ -462,7 +514,7 @@ def test_no_channel_post_update_marker_retries_on_each_admin_transport(monkeypat
     store.save()
 
     controller = _StubController(store)
-    discord = _FakeIMClient(message_id=None)
+    discord = _FakeIMClient()
     telegram = _FakeIMClient()
     controller.im_clients = {"discord": discord, "telegram": telegram}
     checker = UpdateChecker(controller, UpdateConfig())
@@ -476,12 +528,45 @@ def test_no_channel_post_update_marker_retries_on_each_admin_transport(monkeypat
     assert len(discord.dm_calls) == 1
     assert telegram.dm_calls == []
     assert marker.exists()
+    marker_data = json.loads(marker.read_text(encoding="utf-8"))
+    assert marker_data["handled_admin_platforms"] == ["discord"]
+
+    delivered = asyncio.run(checker.check_and_send_post_update_notification(ready_platform="discord"))
+
+    assert delivered is False
+    assert len(discord.dm_calls) == 1
+    assert marker.exists()
 
     delivered = asyncio.run(checker.check_and_send_post_update_notification(ready_platform="telegram"))
 
     assert delivered is True
     assert len(discord.dm_calls) == 1
     assert len(telegram.dm_calls) == 1
+    assert not marker.exists()
+
+
+def test_no_channel_post_update_marker_skips_disabled_admin_platforms(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform(
+        "discord",
+        {"123456789012345678": UserSettings(display_name="Disabled Discord", is_admin=True)},
+    )
+    store.save()
+
+    controller = _StubController(store)
+    slack = _FakeIMClient()
+    controller.im_clients = {"slack": slack}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker("1.0.1")
+    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
+
+    delivered = asyncio.run(checker.check_and_send_post_update_notification(ready_platform="slack"))
+
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert delivered is True
+    assert slack.dm_calls == []
     assert not marker.exists()
 
 

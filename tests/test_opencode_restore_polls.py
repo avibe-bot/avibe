@@ -170,6 +170,26 @@ def test_restore_active_polls_filters_for_ready_platform() -> None:
     assert [entry[1] for entry in request_sessions] == ["oc-discord"]
 
 
+def test_restore_active_polls_derives_legacy_platform_from_session_key() -> None:
+    poll = _make_poll(platform="", base_session_id="telegram:thread", opencode_session_id="oc-telegram")
+    poll.session_key = "telegram::channel::chat-1"
+    agent, status_writes, _, request_sessions = _build_agent({"oc-telegram": poll})
+
+    async def _run():
+        restored = await agent.restore_active_polls({"telegram"})
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert status_writes == []
+    assert [entry[1] for entry in request_sessions] == ["oc-telegram"]
+
+
 def test_restored_telegram_dm_poll_keeps_typed_user_session_key():
     poll = ActivePollInfo(
         opencode_session_id="oc-telegram",

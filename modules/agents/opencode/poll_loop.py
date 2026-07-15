@@ -21,9 +21,18 @@ from .server import OpenCodeServerManager
 logger = logging.getLogger(__name__)
 
 
-def restored_context_from_poll_info(poll_info) -> MessageContext:
+def restored_platform_from_poll_info(poll_info) -> str:
     snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
     platform = str(snapshot.get("platform") or poll_info.platform or "")
+    if platform:
+        return platform
+    session_key = str(getattr(poll_info, "session_key", "") or "").strip()
+    return session_key.split("::", 1)[0] if "::" in session_key else ""
+
+
+def restored_context_from_poll_info(poll_info) -> MessageContext:
+    snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
+    platform = restored_platform_from_poll_info(poll_info)
     user_id = str(snapshot.get("user_id") or poll_info.user_id or "")
     channel_id = str(snapshot.get("channel_id") or poll_info.channel_id or "")
     context_token = str(snapshot.get("context_token") or getattr(poll_info, "context_token", "") or "")

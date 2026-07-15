@@ -1955,6 +1955,14 @@ class ScheduledTaskService:
         task = self.store.get_task(task_id)
         if not task or not task.enabled:
             return
+        if any(
+            request.request_type == "scheduled"
+            and request.source_kind == "scheduler"
+            and request.task_id == task.id
+            for request in self.request_store.list_pending()
+        ):
+            self._drain_dirty = True
+            return
         queued = self.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
         if not self._transport_ready_for_request(queued):
             self._drain_dirty = True
