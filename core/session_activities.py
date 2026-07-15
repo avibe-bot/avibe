@@ -96,6 +96,21 @@ class SessionActivity:
         )
 
 
+@dataclass(frozen=True)
+class _CompletedOutputEntry:
+    """One completion's stable position in a runtime output queue."""
+
+    sequence: int
+    queued_at: float
+    activity: SessionActivity
+
+
+@dataclass(frozen=True)
+class _ClaimedCompletedOutput:
+    entry: _CompletedOutputEntry
+    recovered: bool
+
+
 def activity_completion_output(
     activity: SessionActivity,
     *,
@@ -136,11 +151,12 @@ class SessionActivityRegistry:
         self._active: dict[tuple[str, str, str], SessionActivity] = {}
         self._connections: dict[tuple[str, str], tuple[str | None, str]] = {}
         self._completed_outputs: dict[
-            tuple[str, str], deque[tuple[float, SessionActivity]]
+            tuple[str, str], deque[_CompletedOutputEntry]
         ] = defaultdict(deque)
         self._claimed_completed_outputs: dict[
-            tuple[str, str, str], tuple[SessionActivity, bool]
+            tuple[str, str, str], _ClaimedCompletedOutput
         ] = {}
+        self._next_completed_output_sequence = 0
         self._recovered_output_ids: set[tuple[str, str, str]] = set()
         self._recovered_terminals: deque[SessionActivity] = deque()
         self._restore()
@@ -161,6 +177,17 @@ class SessionActivityRegistry:
     @classmethod
     def _activity_key(cls, activity: SessionActivity) -> tuple[str, str, str]:
         return cls._key(activity.backend, activity.runtime_key, activity.id)
+
+    def _new_completed_output_entry(
+        self,
+        activity: SessionActivity,
+    ) -> _CompletedOutputEntry:
+        self._next_completed_output_sequence += 1
+        return _CompletedOutputEntry(
+            sequence=self._next_completed_output_sequence,
+            queued_at=time.monotonic(),
+            activity=activity,
+        )
 
     @staticmethod
     def _activity_run_ids(activity: SessionActivity) -> set[str]:
@@ -269,7 +296,9 @@ class SessionActivityRegistry:
             )
             phase = record.get("phase")
             if phase == "awaiting_output":
-                self._completed_outputs[connection_key].append((time.monotonic(), activity))
+                self._completed_outputs[connection_key].append(
+                    self._new_completed_output_entry(activity)
+                )
                 self._recovered_output_ids.add(key)
                 continue
 
@@ -421,7 +450,7 @@ class SessionActivityRegistry:
                 self._persist_activity(completed, phase="awaiting_output")
                 self._active.pop(key, None)
                 self._completed_outputs[(str(backend), str(runtime_key))].append(
-                    (time.monotonic(), completed)
+                    self._new_completed_output_entry(completed)
                 )
             elif retain_terminal_snapshot:
                 self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
@@ -468,36 +497,148 @@ class SessionActivityRegistry:
         max_age_seconds: float = 0,
         recovered_only: bool = False,
     ) -> SessionActivity | None:
+        claimed = self._claim_completed_outputs(
+            backend,
+            runtime_key,
+            max_age_seconds=max_age_seconds,
+            recovered_only=recovered_only,
+            limit=1,
+        )
+        return claimed[0] if claimed else None
+
+    def claim_completed_output_batch(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        turn_ids: set[str] | None = None,
+    ) -> list[SessionActivity]:
+        """Atomically claim one causal batch without disturbing other output.
+
+        Explicit ``turn_ids`` select every matching completion in FIFO order,
+        even when unrelated output is interleaved. Without them, the queue head
+        defines the batch; turn-less legacy completions remain single-item.
+        """
+
         key = (str(backend), str(runtime_key))
+        with self._lock:
+            queue = self._completed_outputs.get(key)
+            if not queue:
+                return []
+            identities = (
+                {str(turn_id or "").strip() for turn_id in turn_ids}
+                if turn_ids is not None
+                else None
+            )
+            if identities is not None:
+                identities.discard("")
+                if not identities:
+                    return []
+            else:
+                head_turn_id = str(queue[0].activity.turn_id or "").strip()
+                if not head_turn_id:
+                    return self._claim_completed_outputs(
+                        backend,
+                        runtime_key,
+                        limit=1,
+                    )
+                identities = {head_turn_id}
+            return self._claim_completed_outputs(
+                backend,
+                runtime_key,
+                turn_ids=identities,
+            )
+
+    def _claim_completed_outputs(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        turn_ids: set[str] | None = None,
+        max_age_seconds: float = 0,
+        recovered_only: bool = False,
+        limit: int | None = None,
+    ) -> list[SessionActivity]:
+        key = (str(backend), str(runtime_key))
+        identities = (
+            {str(turn_id or "").strip() for turn_id in turn_ids}
+            if turn_ids is not None
+            else None
+        )
+        if identities is not None:
+            identities.discard("")
+            if not identities:
+                return []
         now = time.monotonic()
         with self._lock:
             queue = self._completed_outputs.get(key)
             if not queue:
-                return None
-            candidates = len(queue)
-            while queue and candidates > 0:
-                candidates -= 1
-                completed_at, activity = queue.popleft()
+                return []
+            retained: deque[_CompletedOutputEntry] = deque()
+            claimed: list[SessionActivity] = []
+            while queue:
+                entry = queue.popleft()
+                if limit is not None and len(claimed) >= limit:
+                    retained.append(entry)
+                    retained.extend(queue)
+                    break
+                activity = entry.activity
                 activity_key = self._activity_key(activity)
                 is_recovered = activity_key in self._recovered_output_ids
                 if recovered_only and not is_recovered:
-                    queue.append((completed_at, activity))
+                    retained.append(entry)
                     continue
-                if max_age_seconds <= 0 or now - completed_at <= max_age_seconds:
-                    self._claimed_completed_outputs[activity_key] = (activity, is_recovered)
+                if max_age_seconds > 0 and now - entry.queued_at > max_age_seconds:
+                    try:
+                        self._delete_activity(activity)
+                    except Exception:
+                        retained.append(entry)
+                        retained.extend(queue)
+                        self._completed_outputs[key] = retained
+                        raise
                     self._recovered_output_ids.discard(activity_key)
-                    if not queue:
-                        self._completed_outputs.pop(key, None)
-                    return activity
-                try:
-                    self._delete_activity(activity)
-                except Exception:
-                    queue.appendleft((completed_at, activity))
-                    raise
+                    continue
+                turn_id = str(activity.turn_id or "").strip()
+                if identities is not None and turn_id not in identities:
+                    retained.append(entry)
+                    continue
+                self._claimed_completed_outputs[activity_key] = _ClaimedCompletedOutput(
+                    entry=entry,
+                    recovered=is_recovered,
+                )
                 self._recovered_output_ids.discard(activity_key)
-            if not queue:
+                claimed.append(activity)
+            if retained:
+                self._completed_outputs[key] = retained
+            else:
                 self._completed_outputs.pop(key, None)
-        return None
+            return claimed
+
+    def requeue_completed_outputs(
+        self,
+        activities: list[SessionActivity],
+    ) -> int:
+        """Restore a claimed batch to its original positions atomically."""
+
+        restored_by_runtime: dict[
+            tuple[str, str], list[_ClaimedCompletedOutput]
+        ] = defaultdict(list)
+        with self._lock:
+            for activity in activities:
+                activity_key = self._activity_key(activity)
+                claimed = self._claimed_completed_outputs.pop(activity_key, None)
+                if claimed is None:
+                    continue
+                key = (str(activity.backend), str(activity.runtime_key))
+                restored_by_runtime[key].append(claimed)
+                if claimed.recovered:
+                    self._recovered_output_ids.add(activity_key)
+            for key, restored in restored_by_runtime.items():
+                entries = list(self._completed_outputs.get(key) or ())
+                entries.extend(item.entry for item in restored)
+                entries.sort(key=lambda item: item.sequence)
+                self._completed_outputs[key] = deque(entries)
+        return sum(len(items) for items in restored_by_runtime.values())
 
     def requeue_completed_output(
         self,
@@ -506,22 +647,31 @@ class SessionActivityRegistry:
         front: bool = True,
         recovered: bool | None = None,
     ) -> bool:
-        """Restore a claimed completion when its causal output cannot be consumed yet."""
+        """Restore one claim, optionally promoting it for immediate retry."""
 
         key = (str(activity.backend), str(activity.runtime_key))
         activity_key = self._activity_key(activity)
-        item = (time.monotonic(), activity)
         with self._lock:
             claimed = self._claimed_completed_outputs.pop(activity_key, None)
             if claimed is None:
                 return False
             if recovered is None:
-                recovered = claimed[1]
+                recovered = claimed.recovered
             queue = self._completed_outputs[key]
             if front:
-                queue.appendleft(item)
+                lowest_sequence = min(
+                    (entry.sequence for entry in queue),
+                    default=claimed.entry.sequence + 1,
+                )
+                queue.appendleft(
+                    replace(
+                        claimed.entry,
+                        sequence=lowest_sequence - 1,
+                        queued_at=time.monotonic(),
+                    )
+                )
             else:
-                queue.append(item)
+                queue.append(self._new_completed_output_entry(activity))
             if recovered:
                 self._recovered_output_ids.add(activity_key)
         return True
@@ -534,7 +684,7 @@ class SessionActivityRegistry:
             claimed = self._claimed_completed_outputs.get(activity_key)
             if claimed is None:
                 return False
-            self._delete_activity(claimed[0])
+            self._delete_activity(claimed.entry.activity)
             self._claimed_completed_outputs.pop(activity_key, None)
             self._recovered_output_ids.discard(activity_key)
             callback = self._output_settled_callback
@@ -555,8 +705,8 @@ class SessionActivityRegistry:
         with self._lock:
             prefix = (str(backend), str(runtime_key))
             return bool(self._completed_outputs.get(prefix)) or any(
-                (item.backend, item.runtime_key) == prefix
-                for item, _recovered in self._claimed_completed_outputs.values()
+                (claimed.entry.activity.backend, claimed.entry.activity.runtime_key) == prefix
+                for claimed in self._claimed_completed_outputs.values()
             )
 
     def has_pending_run_output(self, run_id: str) -> bool:
@@ -565,11 +715,14 @@ class SessionActivityRegistry:
             return False
         with self._lock:
             pending = [
-                activity
+                entry.activity
                 for queue in self._completed_outputs.values()
-                for _created_at, activity in queue
+                for entry in queue
             ]
-            pending.extend(activity for activity, _recovered in self._claimed_completed_outputs.values())
+            pending.extend(
+                claimed.entry.activity
+                for claimed in self._claimed_completed_outputs.values()
+            )
             return any(identity in self._activity_run_ids(activity) for activity in pending)
 
     def recovered_output_runtimes(self) -> list[tuple[str, str]]:
@@ -577,10 +730,10 @@ class SessionActivityRegistry:
 
         with self._lock:
             runtimes = {
-                (activity.backend, activity.runtime_key)
+                (entry.activity.backend, entry.activity.runtime_key)
                 for queue in self._completed_outputs.values()
-                for _created_at, activity in queue
-                if self._activity_key(activity) in self._recovered_output_ids
+                for entry in queue
+                if self._activity_key(entry.activity) in self._recovered_output_ids
             }
         return sorted(runtimes)
 
@@ -648,15 +801,15 @@ class SessionActivityRegistry:
         now = _now_iso()
         with self._lock:
             pending_by_key = {
-                self._activity_key(activity): activity
+                self._activity_key(entry.activity): entry.activity
                 for key, queue in self._completed_outputs.items()
                 if key[0] == identity
-                for _completed_at, activity in queue
+                for entry in queue
             }
             pending_by_key.update(
                 {
-                    key: activity
-                    for key, (activity, _recovered) in self._claimed_completed_outputs.items()
+                    key: claimed.entry.activity
+                    for key, claimed in self._claimed_completed_outputs.items()
                     if key[0] == identity
                 }
             )
@@ -741,12 +894,12 @@ class SessionActivityRegistry:
             pending_output_count = sum(
                 1
                 for queue in self._completed_outputs.values()
-                for _created_at, activity in queue
-                if activity.session_id == session_id
+                for entry in queue
+                if entry.activity.session_id == session_id
             ) + sum(
                 1
-                for activity, _recovered in self._claimed_completed_outputs.values()
-                if activity.session_id == session_id
+                for claimed in self._claimed_completed_outputs.values()
+                if claimed.entry.activity.session_id == session_id
             )
         if "connected" in connection_states:
             connection = "connected"

@@ -125,10 +125,11 @@ admission forever.
 Batch membership follows the Activity origin IDs already retained by the pending
 request plus that request's own `turn_id`, not queue adjacency. This lets a
 synthetic agent-initiated Turn settle both the completion that opened it and any
-Activity it completes itself. Batch selection may scan past unrelated completions,
-which are restored in their original FIFO order. Likewise, a failed delivery
-requeues the claimed batch without reversing it even though the registry's
-single-item requeue operation inserts at the queue front.
+Activity it completes itself. The shared Activity Registry owns this transaction:
+it atomically claims every matching completion without removing unrelated queue
+entries, records each claim's stable queue sequence, and restores a failed batch
+to those original positions. Backend adapters consume the selected batch but do
+not scan or rebuild the completion queue themselves.
 
 ## Claude mapping
 

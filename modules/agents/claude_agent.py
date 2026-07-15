@@ -1392,37 +1392,23 @@ class ClaudeAgent(BaseAgent):
         registry,
         activities: list[SessionActivity],
     ) -> None:
-        """Restore a claimed batch without reversing its FIFO order."""
+        """Restore a claimed batch to its Registry-owned queue positions."""
 
-        for activity in reversed(activities):
-            registry.requeue_completed_output(activity)
+        registry.requeue_completed_outputs(activities)
 
     def _claim_activity_batch_for_turns(
         self,
         registry,
         composite_key: str,
         turn_ids: set[str],
-        *,
-        claimed: list[SessionActivity] | None = None,
     ) -> list[SessionActivity]:
-        """Claim one causal batch while preserving unrelated queue order."""
+        """Claim one causal batch through the shared Registry transaction."""
 
-        batch = list(claimed or [])
-        identities = {str(turn_id or "").strip() for turn_id in turn_ids}
-        identities.discard("")
-        if not identities:
-            return batch
-        skipped: list[SessionActivity] = []
-        while True:
-            candidate = registry.claim_completed_output(self.name, composite_key)
-            if candidate is None:
-                break
-            if candidate.turn_id in identities:
-                batch.append(candidate)
-            else:
-                skipped.append(candidate)
-        self._requeue_activities(registry, skipped)
-        return batch
+        return registry.claim_completed_output_batch(
+            self.name,
+            composite_key,
+            turn_ids=turn_ids,
+        )
 
     def _attach_request_activities(
         self,
@@ -1910,14 +1896,7 @@ class ClaudeAgent(BaseAgent):
                     pending_turn_ids,
                 )
                 if not activities:
-                    candidate = registry.claim_completed_output(
-                        self.name,
-                        composite_key,
-                    )
-                    if candidate is None:
-                        return False
-                    registry.requeue_completed_output(candidate)
-                    return True
+                    return registry.has_completed_output(self.name, composite_key)
 
                 self._attach_request_activities(pending_request, activities)
                 matched_request = self._pop_pending_request(composite_key)
@@ -1951,15 +1930,12 @@ class ClaudeAgent(BaseAgent):
                     self._signal_activity_output_settled(composite_key)
                 continue
 
-            activity = registry.claim_completed_output(self.name, composite_key)
-            if activity is None:
-                return False
-            activities = self._claim_activity_batch_for_turns(
-                registry,
+            activities = registry.claim_completed_output_batch(
+                self.name,
                 composite_key,
-                {str(activity.turn_id or "")},
-                claimed=[activity],
             )
+            if not activities:
+                return False
             activity = activities[-1]
             result_text = str(activity.metadata.get("summary") or "").strip()
             try:
@@ -2079,32 +2055,29 @@ class ClaudeAgent(BaseAgent):
                     )
                 return None
 
-            completed_activity = (
-                registry.claim_completed_output(self.name, composite_key)
-                if registry is not None
-                else None
-            )
-            if completed_activity is None:
-                return None
             pending_turn_ids = self._request_activity_turn_ids(pending_request)
-            if completed_activity.turn_id in pending_turn_ids:
-                activities = self._claim_activity_batch_for_turns(
+            activities = (
+                self._claim_activity_batch_for_turns(
                     registry,
                     composite_key,
                     pending_turn_ids,
-                    claimed=[completed_activity],
                 )
+                if registry is not None
+                else []
+            )
+            if activities:
                 self._attach_request_activities(
                     pending_request,
                     activities,
                 )
                 return None
-            activities = self._claim_activity_batch_for_turns(
-                registry,
-                composite_key,
-                {str(completed_activity.turn_id or "")},
-                claimed=[completed_activity],
+            activities = (
+                registry.claim_completed_output_batch(self.name, composite_key)
+                if registry is not None
+                else []
             )
+            if not activities:
+                return None
             self._detached_activity_outputs[composite_key] = activities
             logger.info(
                 "Claude Activity batch %s output detached from the current user turn in %s",
@@ -2113,19 +2086,9 @@ class ClaudeAgent(BaseAgent):
             )
             return "activity"
 
-        completed_activity = (
-            registry.claim_completed_output(self.name, composite_key)
-            if registry is not None
-            else None
-        )
         completed_activities = (
-            self._claim_activity_batch_for_turns(
-                registry,
-                composite_key,
-                {str(completed_activity.turn_id or "")},
-                claimed=[completed_activity],
-            )
-            if registry is not None and completed_activity is not None
+            registry.claim_completed_output_batch(self.name, composite_key)
+            if registry is not None
             else []
         )
         service = getattr(self.controller, "agent_service", None)

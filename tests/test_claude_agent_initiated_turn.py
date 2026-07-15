@@ -575,7 +575,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
         self.assertFalse(gate.lock.locked())
 
-    async def test_activity_batch_scan_preserves_interleaved_completion(self):
+    async def test_pending_activity_batch_scans_past_older_queue_head(self):
         agent, service = _build_agent()
         composite_key = "session-interleaved-batch:/tmp/work"
         context = SimpleNamespace(
@@ -593,8 +593,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[composite_key] = [pending_request]
 
         for activity_id, turn_id in (
-            ("task-current-a", "current-turn"),
             ("task-detached", "older-turn"),
+            ("task-current-a", "current-turn"),
             ("task-current-b", "current-turn"),
         ):
             service.activities.start(
@@ -1100,7 +1100,59 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(activity)
             service.activities.ack_completed_output(activity)
 
-    async def test_requeued_terminal_only_activity_flushes_after_pending_turn(self):
+    async def test_failed_pending_batch_restores_older_global_output_order(self):
+        agent, service = _build_agent()
+        composite_key = "session-global-requeue-order:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "current-turn"},
+            ),
+            output_activities=[],
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-global-requeue-order"},
+        )
+        for activity_id, turn_id in (
+            ("task-old", "older-turn"),
+            ("task-current-a", "current-turn"),
+            ("task-current-b", "current-turn"),
+        ):
+            service.activities.start(
+                backend="claude",
+                runtime_key=composite_key,
+                session_id="sess-global-requeue-order",
+                activity_id=activity_id,
+                kind="local_bash",
+                turn_id=turn_id,
+            )
+            service.activities.complete(
+                backend="claude",
+                runtime_key=composite_key,
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": f"{activity_id} finished"},
+                expects_output=True,
+            )
+        agent.emit_result_message = AsyncMock(return_value=None)
+
+        with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
+            await agent._flush_completed_activity_outputs(composite_key, context)
+
+        restored = []
+        while activity := service.activities.claim_completed_output(
+            "claude",
+            composite_key,
+        ):
+            restored.append(activity)
+        self.assertEqual(
+            [activity.id for activity in restored],
+            ["task-old", "task-current-a", "task-current-b"],
+        )
+        for activity in restored:
+            service.activities.ack_completed_output(activity)
+
+    async def test_terminal_only_activity_waits_queued_until_pending_turn_finishes(self):
         agent, service = _build_agent()
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
         composite_key = "session-retry-flush:/tmp/work"
@@ -1126,26 +1178,24 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        requeued = asyncio.Event()
-        original_requeue = service.activities.requeue_completed_output
+        agent.emit_result_message = AsyncMock(return_value="message-id")
 
-        def _requeue(activity, *, front=True):
-            original_requeue(activity, front=front)
-            requeued.set()
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
 
-        service.activities.requeue_completed_output = _requeue
-        emitted = asyncio.Event()
-        async def _emit(*_args, **_kwargs):
-            emitted.set()
-            return "message-id"
-
-        agent.emit_result_message = AsyncMock(side_effect=_emit)
-
-        agent._schedule_completed_activity_flush(composite_key, context)
-        await asyncio.wait_for(requeued.wait(), timeout=1)
+        self.assertTrue(should_retry)
+        agent.emit_result_message.assert_not_awaited()
+        self.assertTrue(service.activities.has_completed_output("claude", composite_key))
         agent._pending_requests.pop(composite_key)
-        await asyncio.wait_for(emitted.wait(), timeout=1)
+        should_retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
 
+        self.assertFalse(should_retry)
+        agent.emit_result_message.assert_awaited_once()
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
         self.assertFalse(agent._activity_output_pending(composite_key))
 
