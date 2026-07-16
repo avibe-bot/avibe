@@ -67,6 +67,13 @@ const ShowPageRoute = lazy(() =>
   import('./components/apps/ShowPageRoute').then((m) => ({ default: m.ShowPageRoute })),
 );
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
+import { isStandalonePwa } from './lib/platform';
+import {
+  readLastPwaPath,
+  resolvePwaLaunchPath,
+  shouldRestorePwaLaunch,
+  writeLastPwaPath,
+} from './lib/pwaRouteMemory';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -376,11 +383,40 @@ const DocumentTitle = () => {
   return null;
 };
 
+// Installed PWAs always launch at the manifest's `/` start URL after iOS has
+// evicted the process. Restore the last canonical app route only for that cold
+// launch; later in-app navigation to `/` must still reach the workbench canvas.
+const PwaRouteMemory = () => {
+  const location = useLocation();
+  const [launch] = useState(() => {
+    const standalone = isStandalonePwa();
+    return {
+      standalone,
+      locationKey: location.key,
+      restorePath: resolvePwaLaunchPath(standalone, location, readLastPwaPath()),
+    };
+  });
+  const restoringLaunch = shouldRestorePwaLaunch(launch.restorePath, launch.locationKey, location);
+  const restorePath = restoringLaunch ? launch.restorePath : null;
+
+  useEffect(() => {
+    if (!launch.standalone) return;
+    // Do not overwrite the remembered destination while <Navigate> is still
+    // replacing the manifest start URL (including StrictMode's second effect).
+    if (restoringLaunch) return;
+
+    writeLastPwaPath(location.pathname);
+  }, [launch.standalone, location.pathname, restoringLaunch]);
+
+  return restorePath ? <Navigate to={restorePath} replace /> : null;
+};
+
 function RouterRoot() {
   return (
     <UnsavedChangesProvider>
       <DocumentTitle />
       <WebPushNotificationNavigator />
+      <PwaRouteMemory />
       <Outlet />
     </UnsavedChangesProvider>
   );
