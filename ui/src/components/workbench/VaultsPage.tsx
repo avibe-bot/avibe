@@ -21,8 +21,8 @@ import { VaultRequestSessionLink, vaultRequestSessionDisplay } from '../ui/vault
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault } from '../../lib/useProtectedVault';
+import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 
-const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 
@@ -315,10 +315,10 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
 };
 
 /**
- * Pending approvals strip for the hub: lists requests an agent is waiting on, polls for
- * new ones, and opens the full {@link VaultApprovalCard} in a dialog to approve or deny.
- * Best-effort — a requests fetch failure (e.g. an older backend without the route) must
- * not surface an error or blank the rest of the hub.
+ * Pending approvals strip for the hub: lists requests an agent is waiting on,
+ * follows Vault events with disconnected polling as a fallback, and opens the
+ * full {@link VaultApprovalCard} in a dialog to approve or deny. Best-effort —
+ * a requests fetch failure must not surface an error or blank the rest of the hub.
  */
 const PendingRequestsSection: React.FC<{
   onResolved: () => void;
@@ -334,8 +334,8 @@ const PendingRequestsSection: React.FC<{
 
   const load = useCallback(async () => {
     try {
-      // Best-effort with suppressed errors so an older backend without the route doesn't
-      // spam global toasts on every 5s poll.
+      // Best-effort with suppressed errors so an older backend without the route
+      // does not spam global toasts while fallback polling is active.
       const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
       const pending = (res.requests ?? []).filter((r) => {
         const type = requestReviewType(r);
@@ -348,72 +348,7 @@ const PendingRequestsSection: React.FC<{
     }
   }, [api]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useEffect(() => {
-    return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          load();
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        if (connected) load();
-      },
-      onVaultsUpdated: () => load(),
-    });
-  }, [api, load]);
-
-  useEffect(() => {
-    // CLI-created requests can arrive without a browser bridge event, so keep
-    // a light fallback poll even when SSE is connected.
-    let timer: number | undefined;
-    let cancelled = false;
-    let inFlight = false;
-    let pendingWake = false;
-
-    const tick = async () => {
-      if (cancelled) return;
-      if (document.visibilityState !== 'visible') {
-        timer = window.setTimeout(tick, PENDING_REQUEST_POLL_INTERVAL_MS);
-        return;
-      }
-      if (inFlight) {
-        pendingWake = true;
-        return;
-      }
-      inFlight = true;
-      window.clearTimeout(timer);
-      try {
-        await load();
-      } finally {
-        inFlight = false;
-      }
-      if (cancelled) return;
-      if (pendingWake) {
-        pendingWake = false;
-        void tick();
-        return;
-      }
-      timer = window.setTimeout(tick, PENDING_REQUEST_POLL_INTERVAL_MS);
-    };
-
-    const refreshNow = () => {
-      if (document.visibilityState === 'visible') void tick();
-    };
-
-    void tick();
-    document.addEventListener('visibilitychange', refreshNow);
-    window.addEventListener('focus', refreshNow);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', refreshNow);
-      window.removeEventListener('focus', refreshNow);
-    };
-  }, [load]);
+  useVaultRequestRefresh(load);
 
   useEffect(() => {
     const expiresAt = earliestRequestExpiry(requests);
