@@ -2167,6 +2167,56 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
     assert callback_runs[0]["source_actor"] == request.id
 
 
+def test_settled_deferred_run_delivers_saved_terminal_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+    )
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert request_store.claim(request.id) is not None
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+        result_text="terminal delegated result",
+    ) is True
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    sqlite_store.record_run_output(
+        request.id,
+        output_id="activity-output",
+        text="intermediate activity output",
+    )
+    assert request_store.settle_deferred_run(request.id) is True
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original is not None
+    assert original["result_text"] == "terminal delegated result"
+    assert "deferred_terminal_result_text" not in original["result_payload"]
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    assert [run["message"] for run in callback_runs] == ["terminal delegated result"]
+
+
 @pytest.mark.parametrize(
     ("terminal_status", "expected_message"),
     [

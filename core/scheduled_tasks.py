@@ -1142,6 +1142,7 @@ class TaskExecutionStore:
         *,
         terminal_status: str,
         error: Optional[str] = None,
+        result_text: Optional[str] = None,
     ) -> bool:
         if self._sqlite is None:
             return False
@@ -1149,6 +1150,7 @@ class TaskExecutionStore:
             run_id,
             terminal_status=terminal_status,
             error=error,
+            result_text=result_text,
         )
 
     def update_callback_status(

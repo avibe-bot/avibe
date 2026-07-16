@@ -995,7 +995,10 @@ class ConsolidatedMessageDispatcher:
             if run_terminal_status and self._run_has_blocking_activity(run_id):
                 defer_terminal = getattr(store, "defer_run_terminal", None)
                 if callable(defer_terminal):
-                    defer_kwargs = {"terminal_status": run_terminal_status}
+                    defer_kwargs = {
+                        "terminal_status": run_terminal_status,
+                        "result_text": text,
+                    }
                     if terminal_error is not None:
                         defer_kwargs["error"] = terminal_error
                     defer_terminal(run_id, **defer_kwargs)

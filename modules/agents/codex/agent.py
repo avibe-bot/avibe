@@ -927,13 +927,16 @@ class CodexAgent(BaseAgent):
         source_state = fork_source_state(fork)
         if source_state.anchor_is_terminal_agent_output:
             return False
-        anchor_is_running_user = (
-            getattr(source_state, "anchor_author", None) == "user"
-            and getattr(source_state, "anchor_type", None) == "user"
-        )
-        if getattr(source_state, "has_user_turn_after_anchor", False):
+        anchor_is_running_input = (
+            getattr(source_state, "anchor_author", None),
+            getattr(source_state, "anchor_type", None),
+        ) in {
+            ("user", "user"),
+            ("harness", "harness"),
+        }
+        if getattr(source_state, "has_input_turn_after_anchor", False):
             return False
-        if anchor_is_running_user:
+        if anchor_is_running_input:
             if source_state.has_messages_after_anchor:
                 return True
             if bool(fork.get("native_turn_started")):

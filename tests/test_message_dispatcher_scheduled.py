@@ -293,7 +293,11 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             (
                 "defer",
                 "run-failed",
-                {"terminal_status": "failed", "error": "provider unavailable"},
+                {
+                    "terminal_status": "failed",
+                    "result_text": "",
+                    "error": "provider unavailable",
+                },
             ),
         )
         self.assertEqual(calls[1][0:2], ("output", "run-failed"))
@@ -530,8 +534,8 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             def get_run(self, run_id):
                 return {"status": "running"}
 
-            def defer_run_terminal(self, run_id, *, terminal_status):
-                calls.append(("defer", run_id, terminal_status))
+            def defer_run_terminal(self, run_id, *, terminal_status, result_text):
+                calls.append(("defer", run_id, terminal_status, result_text))
 
             def record_run_output(self, run_id, **kwargs):
                 calls.append(("output", run_id, kwargs["output_id"], kwargs["terminal_status"]))
@@ -571,7 +575,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("defer", "run-owned", "succeeded"),
+                ("defer", "run-owned", "succeeded", "started background work"),
                 ("output", "run-owned", "output-1", None),
                 ("output", "run-owned", "output-2", "succeeded"),
             ],

@@ -1278,12 +1278,14 @@ class SQLiteBackgroundTaskStore:
             payload_changed = False
             effective_terminal_status = terminal_status
             effective_terminal_error = error
+            deferred_result_text = None
             if terminal_status and "deferred_terminal_status" in result_payload:
                 effective_terminal_status = _stronger_terminal_status(
                     result_payload.pop("deferred_terminal_status", None),
                     terminal_status,
                 )
                 deferred_error = result_payload.pop("deferred_terminal_error", None)
+                deferred_result_text = result_payload.pop("deferred_terminal_result_text", None)
                 if deferred_error is not None:
                     effective_terminal_error = str(deferred_error)
                 payload_changed = True
@@ -1325,11 +1327,14 @@ class SQLiteBackgroundTaskStore:
                     .values(**values)
                 )
             if effective_terminal_status:
+                terminal_result_text = visible_text
+                if not terminal_result_text.strip() and deferred_result_text is not None:
+                    terminal_result_text = str(deferred_result_text)
                 terminal_values: dict[str, Any] = {
                     "status": normalize_run_status(effective_terminal_status),
                     # Structured outputs remain available in result_payload, but
                     # result_text is the one terminal result used by callbacks.
-                    "result_text": visible_text,
+                    "result_text": terminal_result_text,
                     "completed_at": now,
                     "updated_at": now,
                 }
@@ -1370,9 +1375,10 @@ class SQLiteBackgroundTaskStore:
         *,
         terminal_status: str,
         error: Optional[str] = None,
+        result_text: Optional[str] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
-        """Remember a terminal intent and diagnostic while an Activity blocks it."""
+        """Remember a terminal intent and result while an Activity blocks it."""
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -1399,11 +1405,18 @@ class SQLiteBackgroundTaskStore:
                 error_text is not None
                 and not result_payload.get("deferred_terminal_error")
             )
-            if not status_changed and not error_changed:
+            deferred_result_text = str(result_text) if result_text is not None else None
+            result_text_changed = bool(
+                deferred_result_text is not None
+                and result_payload.get("deferred_terminal_result_text") != deferred_result_text
+            )
+            if not status_changed and not error_changed and not result_text_changed:
                 return False
             result_payload["deferred_terminal_status"] = normalized
             if error_changed:
                 result_payload["deferred_terminal_error"] = error_text
+            if result_text_changed:
+                result_payload["deferred_terminal_result_text"] = deferred_result_text
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
@@ -1447,6 +1460,7 @@ class SQLiteBackgroundTaskStore:
                 return False
             result_payload.pop("deferred_terminal_status", None)
             deferred_error = result_payload.pop("deferred_terminal_error", None)
+            deferred_result_text = result_payload.pop("deferred_terminal_result_text", None)
             status = (
                 _stronger_terminal_status(deferred_status, terminal_status)
                 if terminal_status
@@ -1461,6 +1475,8 @@ class SQLiteBackgroundTaskStore:
             effective_error = deferred_error if deferred_error is not None else error
             if effective_error is not None:
                 values["error"] = str(effective_error)
+            if deferred_result_text is not None:
+                values["result_text"] = str(deferred_result_text)
             transition = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)

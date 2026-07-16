@@ -2153,7 +2153,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 latest_after_anchor_type="result",
                 has_messages_after_anchor=True,
                 has_terminal_agent_output_after_anchor=True,
-                has_user_turn_after_anchor=False,
+                has_input_turn_after_anchor=False,
             ),
         ):
             thread_id = await agent._start_or_resume_thread(transport, request)
@@ -2220,7 +2220,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 latest_after_anchor_type="user",
                 has_messages_after_anchor=True,
                 has_terminal_agent_output_after_anchor=False,
-                has_user_turn_after_anchor=True,
+                has_input_turn_after_anchor=True,
             ),
         ):
             thread_id = await agent._start_or_resume_thread(transport, request)
@@ -2230,6 +2230,31 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "thread/fork",
             "thread/inject_items",
         ])
+
+    async def test_should_roll_back_forked_running_harness_turn(self):
+        agent = object.__new__(CodexAgent)
+        fork = {
+            "source_session_id": "ses-source",
+            "source_message_id": "msg-harness",
+            "trim_latest_running_turn": True,
+            "native_turn_started": True,
+        }
+
+        with patch.object(
+            _MODULE,
+            "fork_source_state",
+            return_value=SimpleNamespace(
+                anchor_author="harness",
+                anchor_type="harness",
+                anchor_is_terminal_agent_output=False,
+                has_messages_after_anchor=True,
+                has_terminal_agent_output_after_anchor=False,
+                has_input_turn_after_anchor=False,
+            ),
+        ):
+            should_rollback = await agent._should_rollback_forked_running_turn(fork)
+
+        self.assertTrue(should_rollback)
 
     async def test_start_or_resume_thread_does_not_roll_back_user_anchor_before_native_start(self):
         agent = object.__new__(CodexAgent)

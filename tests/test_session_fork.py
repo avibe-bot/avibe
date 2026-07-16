@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from core.services.session_fork import (
     SessionForkError,
+    SourceMessageAnchor,
     fork_anchor_is_terminal_agent_output,
     fork_metadata_from_session_metadata,
     fork_source_has_agent_output_after_anchor,
@@ -175,7 +176,15 @@ def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:
     assert metadata["fork_native_turn_started"] is True
 
 
-def test_reserve_forked_session_infers_running_user_anchor_without_live_hint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("author", "message_type"),
+    [("user", "user"), ("harness", messages_service.HARNESS_TYPE)],
+)
+def test_reserve_forked_session_infers_running_input_anchor_without_live_hint(
+    tmp_path: Path,
+    author: str,
+    message_type: str,
+) -> None:
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)
     engine = create_sqlite_engine(db_path)
@@ -184,21 +193,22 @@ def test_reserve_forked_session_infers_running_user_anchor_without_live_hint(tmp
             row = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
             ).mappings().one()
-            running_user = messages_service.append(
+            running_input = messages_service.append(
                 conn,
                 scope_id=row["scope_id"],
                 session_id=source_id,
                 platform="avibe",
-                author="user",
-                message_type="user",
+                author=author,
+                message_type=message_type,
                 text="long running request",
+                source="harness" if author == "harness" else None,
             )
     finally:
         engine.dispose()
 
     result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
 
-    assert result.fork.source_message_id == running_user["id"]
+    assert result.fork.source_message_id == running_input["id"]
     assert result.fork.trim_latest_running_turn is True
     assert result.fork.native_turn_started is False
     engine = create_sqlite_engine(db_path)
@@ -211,7 +221,7 @@ def test_reserve_forked_session_infers_running_user_anchor_without_live_hint(tmp
         engine.dispose()
 
     metadata = json.loads(forked["metadata_json"])
-    assert metadata["fork_source_message_id"] == running_user["id"]
+    assert metadata["fork_source_message_id"] == running_input["id"]
     assert metadata["fork_trim_latest_running_turn"] is True
     assert metadata["fork_native_turn_started"] is False
 
@@ -1300,7 +1310,63 @@ def test_fork_source_state_uses_latest_progress_after_anchor(
         assert state.latest_after_anchor_type == "user"
         assert state.has_messages_after_anchor is True
         assert state.has_terminal_agent_output_after_anchor is False
-        assert state.has_user_turn_after_anchor is True
+        assert state.has_input_turn_after_anchor is True
+    finally:
+        engine.dispose()
+
+
+def test_harness_message_is_an_input_turn() -> None:
+    assert SourceMessageAnchor(
+        author="harness",
+        message_type="harness",
+    ).is_running_input_turn is True
+
+
+def test_fork_source_state_tracks_harness_turn_after_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            anchor = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous result",
+            )
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="harness",
+                message_type=messages_service.HARNESS_TYPE,
+                text="automated follow-up",
+                source="harness",
+            )
+
+        state = fork_source_state(
+            {"source_session_id": source_id, "source_message_id": anchor["id"]}
+        )
+
+        assert state.latest_after_anchor_author == "harness"
+        assert state.latest_after_anchor_type == messages_service.HARNESS_TYPE
+        assert state.has_messages_after_anchor is True
+        assert state.has_terminal_agent_output_after_anchor is False
+        assert state.has_input_turn_after_anchor is True
     finally:
         engine.dispose()
 

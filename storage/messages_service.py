@@ -129,17 +129,17 @@ def search_messages(
     *,
     query: str,
     platform: str = "avibe",
-    types: Iterable[str] = ("user", "result"),
+    types: Optional[Iterable[str]] = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
     Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
-    ``types`` (the user's prompts + the agent's rendered ``result`` replies — both
-    land on a message the chat actually renders, so a clicked result is always
-    jumpable). Archived sessions are excluded, as are messages under an archived
-    PROJECT — ``projects_service.archive_project`` disables a project by setting
+    ``types`` (human prompts + harness prompts + the agent's rendered ``result``
+    replies — all land on a message the chat actually renders, so a clicked result
+    is always jumpable). Archived sessions are excluded, as are messages under an
+    archived PROJECT — ``projects_service.archive_project`` disables a project by setting
     ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
     disabled state is the authoritative "archived project" signal here. A scope
     with no ``scope_settings`` row is treated as enabled (legacy / folder-less
@@ -160,7 +160,7 @@ def search_messages(
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
-    type_list = list(types)
+    type_list = list(types if types is not None else ("user", HARNESS_TYPE, "result"))
     effective_limit = min(max(int(limit), 1), 200)
 
     stmt = (
