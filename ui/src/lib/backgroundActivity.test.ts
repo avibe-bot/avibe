@@ -98,6 +98,15 @@ describe('sortBackgroundActivities', () => {
     sortBackgroundActivities(items);
     expect(items).toEqual(copy);
   });
+
+  it('treats the raw "processing" status as in-progress', () => {
+    const items = [
+      item({ id: 'task', status: 'scheduled', since: '2026-07-16T09:00:00Z' }),
+      item({ id: 'run', status: 'processing', since: '2026-07-16T02:00:00Z' }),
+    ];
+    // The processing run ranks above the (newer) scheduled task.
+    expect(sortBackgroundActivities(items).map((i) => i.id)).toEqual(['run', 'task']);
+  });
 });
 
 describe('harnessNavPath', () => {

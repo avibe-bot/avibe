@@ -152,7 +152,15 @@ export const HarnessPage: React.FC = () => {
     setWatchesPage(1);
   }, [sessionParam]);
   useEffect(() => {
-    if (runParam) setSelection({ kind: 'run', id: runParam });
+    if (runParam) {
+      setSelection({ kind: 'run', id: runParam });
+    } else {
+      // A deep-link that drops ?run (e.g. browser back/forward from a run link
+      // to a watch/task session link) must not leave the previous run's detail
+      // panel open on the new tab. Only clear a stale RUN anchor — a task/watch
+      // row the user clicked stays selected.
+      setSelection((prev) => (prev?.kind === 'run' ? null : prev));
+    }
   }, [runParam]);
 
   // Global banner toggle: read once, default ON on any error.

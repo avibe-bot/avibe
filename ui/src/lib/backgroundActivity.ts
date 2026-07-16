@@ -38,12 +38,18 @@ export function harnessItemNativeId(item: Pick<SessionActivityState, 'id'>): str
   return idx >= 0 ? id.slice(idx + 1) : id;
 }
 
+// Status values that mean "actively executing" for banner ordering. ``running``
+// is the normalized form; ``processing`` is the raw/legacy alias the durable
+// store may still carry (see storage/background.RUN_STATUS_ALIASES) — both must
+// rank as in-progress or a live delegated run could sort below pending items.
+const RUNNING_STATUSES = new Set(['running', 'processing']);
+
 // Popover ordering (spec req 5): in-progress items first, then start time
-// descending. Backend activities and running delegated runs are "in progress"
-// (status === 'running'); watches (enabled), tasks (scheduled), and queued runs
-// are pending. Stable, pure copy — never mutates the input.
+// descending. Backend activities and running/processing delegated runs are
+// "in progress"; watches (enabled), tasks (scheduled), and queued runs are
+// pending. Stable, pure copy — never mutates the input.
 export function sortBackgroundActivities(items: SessionActivityState[]): SessionActivityState[] {
-  const activeRank = (it: SessionActivityState) => (it.status === 'running' ? 0 : 1);
+  const activeRank = (it: SessionActivityState) => (RUNNING_STATUSES.has(it.status) ? 0 : 1);
   const sinceOf = (it: SessionActivityState) => it.since ?? it.started_at ?? '';
   return [...items].sort((a, b) => {
     const rank = activeRank(a) - activeRank(b);
