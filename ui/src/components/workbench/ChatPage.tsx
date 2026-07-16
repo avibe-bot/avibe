@@ -33,6 +33,7 @@ import { Markdown } from '../ui/markdown';
 import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
 import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
+import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
@@ -235,13 +236,13 @@ export const ChatPage: React.FC = () => {
   );
   const [offscreenApprovals, setOffscreenApprovals] = useState<VaultRequest[]>([]);
 
-  // Back returns to the page the user came from, not a hardcoded inbox.
-  // location.key === 'default' means /chat was the first history entry (deep
-  // link / refresh) with nothing to pop back to — fall back to the inbox then.
+  // Back returns to the page the user came from, not a hardcoded inbox. The
+  // history index is the source of truth: replaceState can assign a non-default
+  // location key without creating an entry that can actually be popped.
   const goBack = useCallback(() => {
-    if (location.key !== 'default') navigate(-1);
+    if (hasInAppBackEntry(window.history.state)) navigate(-1);
     else navigate('/inbox');
-  }, [location.key, navigate]);
+  }, [navigate]);
 
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
