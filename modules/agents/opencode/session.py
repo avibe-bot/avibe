@@ -12,9 +12,10 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import fork_source_state, is_input_turn, pending_native_fork
+from core.services.session_fork import fork_source_state, pending_native_fork
 from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 from modules.agents.base import AgentRequest, BaseAgent
+from vibe.message_identity import is_input_turn
 
 from .server import OpenCodeServerManager
 

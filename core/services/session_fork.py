@@ -15,8 +15,8 @@ from typing import Any, Optional
 
 from config import paths
 from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
-from storage.messages_service import INPUT_TURN_AUTHOR_TYPES
 from vibe.i18n import t
+from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error"}
@@ -27,12 +27,6 @@ INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_
 
 class SessionForkError(ValueError):
     """Raised when a Session cannot be forked."""
-
-
-def is_input_turn(author: Optional[str], message_type: Optional[str]) -> bool:
-    """Return whether a transcript row starts human or harness agent work."""
-
-    return (author, message_type) in INPUT_TURN_AUTHOR_TYPES
 
 
 @dataclass(frozen=True)

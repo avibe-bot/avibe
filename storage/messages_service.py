@@ -22,6 +22,7 @@ from sqlalchemy.engine import Connection
 
 from storage.db import escape_sql_like
 from storage.models import agent_sessions, messages, scope_settings, scopes
+from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 
 
 def _utc_now_iso() -> str:
@@ -560,8 +561,6 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 # unread queries are all type-filtered, so neither leaks into the conversation.
 
 QUEUED_TYPE = "queued"
-HARNESS_TYPE = "harness"
-INPUT_TURN_AUTHOR_TYPES = (("user", "user"), ("harness", HARNESS_TYPE))
 DRAFT_TYPE = "draft"
 # A reserved-but-not-yet-accepted user row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
