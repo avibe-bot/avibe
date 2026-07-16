@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, Copy, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
 
@@ -13,10 +13,11 @@ import { copyTextToClipboard } from '../../lib/utils';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { ShowPageShareIdField } from './ShowPageShareIdField';
+import { useShowPageInventory, type ShowPage } from '../useShowPages';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
-  url_guidance: string | null;
+  url_guidance?: string | null;
   offline: boolean;
   // The live session title (joined server-side by ensureShowPage); labels the
   // pinned-app confirmation. Null for untitled IM-dispatch sessions.
@@ -39,8 +40,15 @@ export const ShowPageShareControl: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const dock = useDock();
+  const { pages, mergePage, reload } = useShowPageInventory();
+  const inventoryPage = pages.find((page) => page.session_id === sessionId);
   const [open, setOpen] = useState(false);
-  const [payload, setPayload] = useState<ShowPagePayload | null>(null);
+  const [localPayload, setLocalPayload] = useState<ShowPagePayload | null>(null);
+  const payload = useMemo<ShowPagePayload | null>(() => {
+    const local = localPayload?.session_id === sessionId ? localPayload : null;
+    if (!inventoryPage) return local;
+    return { ...local, ...inventoryPage } as ShowPagePayload;
+  }, [inventoryPage, localPayload, sessionId]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -49,6 +57,11 @@ export const ShowPageShareControl: React.FC<{
   // before it resolved. A refresh (read) only applies if no newer request has
   // superseded it. reqSeq orders the reads; a mutation bumps it on resolve.
   const reqSeq = useRef(0);
+
+  const applyPayload = (next: ShowPagePayload) => {
+    setLocalPayload(next);
+    mergePage(next as ShowPage);
+  };
 
   useEffect(() => {
     if (payload) onPayloadChange?.(payload);
@@ -84,7 +97,9 @@ export const ShowPageShareControl: React.FC<{
     api
       .ensureShowPage(sessionId)
       .then((res: ShowPagePayload) => {
-        if (seq === reqSeq.current) setPayload(res);
+        if (seq !== reqSeq.current) return;
+        applyPayload(res);
+        if (!inventoryPage) reload();
       })
       .catch(() => undefined)
       .finally(() => setLoading(false));
@@ -103,7 +118,7 @@ export const ShowPageShareControl: React.FC<{
       .then((res: ShowPagePayload) => {
         // Authoritative server state: always apply it, and invalidate any
         // in-flight refresh read so a stale read can't revert us afterwards.
-        setPayload(res);
+        applyPayload(res);
         reqSeq.current += 1;
       })
       .catch(() => undefined)
@@ -221,7 +236,7 @@ export const ShowPageShareControl: React.FC<{
                   onSaved={(res) => {
                     // Authoritative server state, same handling as a visibility
                     // change: apply it and invalidate any in-flight refresh read.
-                    setPayload(res as ShowPagePayload);
+                    applyPayload(res as ShowPagePayload);
                     reqSeq.current += 1;
                   }}
                 />
