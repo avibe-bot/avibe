@@ -892,7 +892,8 @@ class ClaudeAgent(BaseAgent):
                             context,
                             composite_key,
                             message,
-                            raw_result_text,
+                            raw_result_text
+                            or self._last_assistant_text.get(composite_key),
                         )
                         if failure_disposition == "auth":
                             self._foreground_tool_use_ids.pop(composite_key, None)
@@ -1110,6 +1111,8 @@ class ClaudeAgent(BaseAgent):
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
             self._suppressed_synthetic_error_text.pop(composite_key, None)
+            self._foreground_tool_use_ids.pop(composite_key, None)
+            self._turns_with_foreground_tools.discard(composite_key)
             detached_activities = self._detached_activity_outputs.pop(composite_key, None)
             if detached_activities:
                 registry = self._activity_registry()
@@ -1765,15 +1768,11 @@ class ClaudeAgent(BaseAgent):
             status=status,
             metadata=metadata,
             expects_output=status == "completed" and not foreground,
-            retain_terminal_snapshot=status != "completed",
+            retain_terminal_snapshot=status != "completed" and not foreground,
         )
-        if tool_use_id:
-            foreground_tool_ids.discard(tool_use_id)
-            if not foreground_tool_ids:
-                self._foreground_tool_use_ids.pop(composite_key, None)
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
-        if completed is not None and callable(on_terminal):
+        if completed is not None and not foreground and callable(on_terminal):
             on_terminal(completed)
         if status != "completed" or foreground:
             self._mark_session_idle_if_runtime_free(composite_key)

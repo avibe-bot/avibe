@@ -22,7 +22,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -221,6 +221,7 @@ def _foreground_bash_then_delayed_result_client(
                 task_completed.summary = "Push branch, confirm repo"
                 task_completed.tool_use_id = "toolu_push"
                 task_completed.data = {}
+                yield task_completed
                 yield task_completed
                 notification_seen.set()
                 await release_result.wait()
@@ -1044,6 +1045,122 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "Push branch, confirm repo",
             ),
             "",
+        )
+
+    def test_foreground_tool_failure_does_not_settle_owned_run(self):
+        agent, service = _build_agent()
+        composite_key = "session-foreground-failure:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-foreground-failure",
+                "turn_token": "turn-foreground-failure",
+            }
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        tool_block = object.__new__(ToolUseBlock)
+        tool_block.id = "toolu_failure"
+        tool_block.name = "Bash"
+        tool_block.input = {
+            "command": "false",
+            "description": "Run failing probe",
+        }
+        agent._track_tool_activity_mode(composite_key, tool_block)
+        on_terminal = Mock()
+        service.on_activity_terminal = on_terminal
+
+        started = TaskStartedMessage()
+        started.task_id = "task-failure"
+        started.description = "Run failing probe"
+        started.tool_use_id = "toolu_failure"
+        started.task_type = "local_bash"
+        started.data = {}
+        self.assertTrue(
+            agent._handle_activity_message(started, composite_key, context)
+        )
+
+        failed = TaskNotificationMessage()
+        failed.task_id = "task-failure"
+        failed.status = "failed"
+        failed.summary = "Run failing probe"
+        failed.tool_use_id = "toolu_failure"
+        failed.data = {}
+        self.assertTrue(
+            agent._handle_activity_message(failed, composite_key, context)
+        )
+
+        on_terminal.assert_not_called()
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertEqual(
+            service.activities.active_for_runtime("claude", composite_key),
+            [],
+        )
+
+    async def test_receiver_exit_clears_foreground_tool_state(self):
+        agent, _service = _build_agent()
+        composite_key = "session-dead-receiver:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-dead-receiver"}
+        )
+        agent._foreground_tool_use_ids[composite_key] = {"toolu_stale"}
+        agent._turns_with_foreground_tools.add(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-dead-receiver",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        self.assertNotIn(composite_key, agent._foreground_tool_use_ids)
+        self.assertNotIn(composite_key, agent._turns_with_foreground_tools)
+
+    async def test_empty_error_result_uses_last_assistant_diagnostic(self):
+        agent, _service = _build_agent()
+        composite_key = "session-empty-error:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"agent_session_id": "sess-empty-error"},
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        agent._last_assistant_text[composite_key] = "Detailed provider diagnostic"
+        agent._handle_terminal_failure_result = AsyncMock(return_value=True)
+
+        class ResultMessage:
+            subtype = "error_during_execution"
+            result = None
+            duration_ms = 1
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-empty-error",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent._handle_terminal_failure_result.assert_awaited_once_with(
+            context,
+            composite_key,
+            ANY,
+            "Detailed provider diagnostic",
         )
 
     async def test_summaryless_completed_activity_settles_silently(self):
