@@ -432,11 +432,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               </DialogTitle>
             </DialogHeader>
             {providerModal && (
-              // ``deferRestart``: the wizard runs before/while the controller
-              // is started, so the embedded runtime Save persists the cli_path
-              // without attempting a (would-be-unacknowledged) restart that
-              // otherwise reads as a failed/dirty save.
-              <BackendProviderConfig backend={providerModal as RuntimeBackendId} hideEnableToggle deferRestart />
+              // Config saves reconcile a live controller at the shared API
+              // boundary and defer naturally when the controller is stopped.
+              <BackendProviderConfig backend={providerModal as RuntimeBackendId} hideEnableToggle />
             )}
           </DialogContent>
         </Dialog>

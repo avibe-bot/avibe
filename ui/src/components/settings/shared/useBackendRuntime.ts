@@ -19,16 +19,6 @@ export interface UseBackendRuntimeOptions {
   backend: BackendId;
   /** Fallback CLI binary name when V2Config carries no override. */
   defaultCli: string;
-  /**
-   * Skip the controller restart in ``onSaveRuntime`` and treat the save as
-   * successful once the config write lands. Used by the setup wizard, where
-   * the controller is not necessarily running yet — there, attempting a
-   * restart and treating "not acknowledged" as a failure would surface a
-   * spurious failed/dirty save even though the cli_path write succeeded. The
-   * settings route leaves this unset so saving a CLI path still restarts the
-   * backend exactly as before.
-   */
-  deferRestart?: boolean;
 }
 
 export interface BackendRuntimeState {
@@ -76,6 +66,29 @@ const withoutLegacyDefaultBackend = (agents: Record<string, any> | undefined | n
   return rest;
 };
 
+type BackendRuntimeApplyResult = {
+  hot_reconciled?: boolean;
+  restart_scheduled?: boolean;
+  apply_on_next_start?: boolean;
+  restart_error?: string;
+  error?: string;
+};
+
+const assertBackendRuntimeApplied = (savedConfig: unknown, fallbackMessage: string) => {
+  const runtime = (
+    savedConfig as { agent_backend_runtime?: BackendRuntimeApplyResult } | null
+  )?.agent_backend_runtime;
+  if (
+    !runtime ||
+    runtime.hot_reconciled === true ||
+    runtime.restart_scheduled === true ||
+    runtime.apply_on_next_start === true
+  ) {
+    return;
+  }
+  throw new Error(runtime.restart_error || runtime.error || fallbackMessage);
+};
+
 /**
  * Encapsulates the runtime (CLI lifecycle) state shared by every
  * Settings → Backends provider page. Previously each page (Claude /
@@ -88,7 +101,6 @@ const withoutLegacyDefaultBackend = (agents: Record<string, any> | undefined | n
 export function useBackendRuntime({
   backend,
   defaultCli,
-  deferRestart = false,
 }: UseBackendRuntimeOptions): BackendRuntimeState {
   const api = useApi();
   const { showToast } = useToast();
@@ -197,18 +209,11 @@ export function useBackendRuntime({
           cli_path: cliPath || defaultCli,
         },
       };
-      await api.saveConfig({ agents: nextAgents });
-      // In the wizard the controller may not be running yet, so a restart
-      // would (correctly) go un-acknowledged. Treat the config write as the
-      // success boundary there and skip the restart — the controller picks up
-      // the new cli_path when it next starts. The settings route keeps the
-      // restart so an edit to a live backend takes effect immediately.
-      if (!deferRestart) {
-        const restart = await api.restartBackend(backend);
-        if (!restart?.ok) {
-          throw new Error(restart?.message || t('common.saveFailed'));
-        }
-      }
+      const saved = await api.saveConfig({ agents: nextAgents });
+      // The config boundary owns both persistence and live runtime
+      // reconciliation. A second route-level restart would refresh the backend
+      // twice and could interrupt a transport that was just rebuilt.
+      assertBackendRuntimeApplied(saved, t('common.saveFailed'));
       setSavedCliPath(cliPath);
       showToast(t('common.saved'), 'success');
     } catch (e: any) {
@@ -216,7 +221,7 @@ export function useBackendRuntime({
     } finally {
       setSavingRuntime(false);
     }
-  }, [api, backend, cliPath, defaultCli, deferRestart, enabled, showToast, t]);
+  }, [api, backend, cliPath, defaultCli, enabled, showToast, t]);
 
   const toggleEnabled = useCallback(() => {
     const next = !enabled;
@@ -236,22 +241,17 @@ export function useBackendRuntime({
             enabled: next,
           },
         };
-        await api.saveConfig({
+        const savedConfig = await api.saveConfig({
           agents: nextAgents,
         });
         saved = true;
-        if (!deferRestart) {
-          const restart = await api.restartBackend(backend);
-          if (!restart?.ok) {
-            throw new Error(restart?.message || t('common.saveFailed'));
-          }
-        }
+        assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
       } catch (e: any) {
         showToast(e?.message || t('common.saveFailed'), 'error');
         if (!saved) setEnabled(!next);
       }
     })();
-  }, [api, backend, deferRestart, enabled, showToast, t]);
+  }, [api, backend, enabled, showToast, t]);
 
   const handleLifecycleChanged = useCallback(
     async (info: { installedPath?: string | null } | undefined | null) => {

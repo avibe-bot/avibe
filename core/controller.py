@@ -479,6 +479,28 @@ class Controller:
                 "primary": next_primary,
             }
 
+    async def reconcile_agent_backends(self, backends: list[str]) -> dict[str, Any]:
+        """Hot-apply persisted config for the requested Agent backends."""
+        from modules.agents.catalog import AGENT_BACKENDS
+
+        requested: list[str] = []
+        for backend in backends:
+            if backend not in AGENT_BACKENDS:
+                raise ValueError(f"Unsupported agent backend: {backend}")
+            if backend not in requested:
+                requested.append(backend)
+
+        states: dict[str, str] = {}
+        for backend in requested:
+            states[backend] = await self.backend_restart_coordinator.request_restart(backend)
+
+        logger.info("Hot-reconciled Agent backends: %s", states)
+        return {
+            "ok": True,
+            "backends": requested,
+            "states": states,
+        }
+
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
             return

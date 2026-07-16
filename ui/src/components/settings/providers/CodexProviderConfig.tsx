@@ -23,8 +23,7 @@ const DEFAULT_CLI = 'codex';
 
 export const CodexProviderConfig: React.FC<{
   hideEnableToggle?: boolean;
-  deferRestart?: boolean;
-}> = ({ hideEnableToggle, deferRestart } = {}) => {
+}> = ({ hideEnableToggle } = {}) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -35,7 +34,6 @@ export const CodexProviderConfig: React.FC<{
   const runtime = useBackendRuntime({
     backend: BACKEND_ID,
     defaultCli: DEFAULT_CLI,
-    deferRestart,
   });
 
   const [state, setState] = useState<CodexAuthState | null>(null);

@@ -1387,6 +1387,27 @@ def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Confi
     )
 
 
+def _changed_agent_backend_runtimes(
+    previous: V2Config | None,
+    current: V2Config,
+    payload: dict,
+) -> list[str]:
+    """Return backends whose persisted runtime projection changed."""
+    if previous is None or "agents" not in payload:
+        return []
+
+    from config.v2_compat import to_app_config
+    from modules.agents.catalog import AGENT_BACKENDS
+
+    previous_runtime = to_app_config(previous)
+    current_runtime = to_app_config(current)
+    return [
+        backend
+        for backend in AGENT_BACKENDS
+        if getattr(previous_runtime, backend, None) != getattr(current_runtime, backend, None)
+    ]
+
+
 # Static PWA / icon assets must be reachable WITHOUT the remote-access auth
 # cookie. iOS "Add to Home Screen" fetches the apple-touch-icon + manifest in a
 # context that doesn't carry the session, so gating them makes the installed app
@@ -3973,7 +3994,7 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     return {"ok": True, "restart": restart}
 
 
-def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool]:
+def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool, list[str]]:
     from vibe import api
     from vibe import remote_access
 
@@ -3987,7 +4008,8 @@ def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, b
                 config = V2Config.load()
             should_reconcile_remote_access = True
         should_reconcile_platforms = _platform_runtime_fields_changed(previous_config, config, payload)
-        return config, should_reconcile_remote_access, should_reconcile_platforms
+        changed_agent_backends = _changed_agent_backend_runtimes(previous_config, config, payload)
+        return config, should_reconcile_remote_access, should_reconcile_platforms, changed_agent_backends
 
 
 _UI_RUNTIME_ACTIVE = False
@@ -4063,7 +4085,12 @@ async def config_post():
     payload = request.json or {}
     remote_access_runtime = None
     try:
-        config, should_reconcile_remote_access, should_reconcile_platforms = await asyncio.to_thread(
+        (
+            config,
+            should_reconcile_remote_access,
+            should_reconcile_platforms,
+            changed_agent_backends,
+        ) = await asyncio.to_thread(
             _save_config_and_runtime_decisions,
             payload,
         )
@@ -4092,11 +4119,52 @@ async def config_post():
             else:
                 platform_runtime["restart_error"] = restart_result.get("error")
                 platform_runtime["restart_code"] = restart_result.get("code")
+    agent_backend_runtime = None
+    if changed_agent_backends:
+        try:
+            result = await internal_client.reconcile_agent_backends(changed_agent_backends)
+            body = result.get("body") or {}
+            hot_reconciled = result.get("status_code") == 200 and bool(body.get("ok"))
+            agent_backend_runtime = {
+                "ok": hot_reconciled,
+                "hot_reconciled": hot_reconciled,
+                "backends": changed_agent_backends,
+                "body": body,
+            }
+        except internal_client.InternalServerUnavailable as exc:
+            agent_backend_runtime = {
+                "ok": False,
+                "hot_reconciled": False,
+                "backends": changed_agent_backends,
+                "error": str(exc),
+            }
+
+        if not agent_backend_runtime.get("ok"):
+            from vibe import runtime
+
+            service_running = await asyncio.to_thread(runtime.service_process_running)
+            if service_running:
+                if platform_runtime and platform_runtime.get("restart_scheduled"):
+                    agent_backend_runtime["restart_scheduled"] = True
+                    if platform_runtime.get("restart"):
+                        agent_backend_runtime["restart"] = platform_runtime["restart"]
+                else:
+                    restart_result = await asyncio.to_thread(_schedule_service_restart_for_config_fallback)
+                    agent_backend_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
+                    if restart_result.get("ok"):
+                        agent_backend_runtime["restart"] = restart_result.get("restart")
+                    else:
+                        agent_backend_runtime["restart_error"] = restart_result.get("error")
+                        agent_backend_runtime["restart_code"] = restart_result.get("code")
+            else:
+                agent_backend_runtime["apply_on_next_start"] = True
     response_payload = api.config_to_payload(config)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:
         response_payload["platform_runtime"] = platform_runtime
+    if agent_backend_runtime is not None:
+        response_payload["agent_backend_runtime"] = agent_backend_runtime
     return jsonify(response_payload)
 
 

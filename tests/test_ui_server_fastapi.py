@@ -499,6 +499,173 @@ def test_platform_runtime_fields_changed_detects_primary_only_change():
     )
 
 
+def test_changed_agent_backend_runtimes_uses_backend_runtime_projection():
+    from config.v2_config import V2Config
+
+    payload = _full_config_payload()
+    payload["agents"]["codex"]["enabled"] = False
+    previous = V2Config.from_payload(payload)
+
+    changed_payload = json.loads(json.dumps(payload))
+    changed_payload["agents"]["codex"] = {
+        **changed_payload["agents"]["codex"],
+        "enabled": True,
+        "cli_path": "/opt/codex",
+    }
+    changed_payload["agents"]["opencode"] = {
+        **changed_payload["agents"]["opencode"],
+        "cli_path": "/opt/opencode",
+    }
+    changed_payload["agents"]["claude"] = {
+        **changed_payload["agents"]["claude"],
+        "cli_path": "/opt/claude",
+    }
+    current = V2Config.from_payload(changed_payload)
+
+    assert ui_server._changed_agent_backend_runtimes(
+        previous,
+        current,
+        {"agents": changed_payload["agents"]},
+    ) == ["opencode", "claude", "codex"]
+    assert ui_server._changed_agent_backend_runtimes(previous, current, {"show_duration": False}) == []
+    assert ui_server._changed_agent_backend_runtimes(None, current, {"agents": changed_payload["agents"]}) == []
+
+
+def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-902."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["agents"]["codex"]["enabled"] = False
+    api.save_config(payload)
+
+    reconcile_calls = []
+
+    async def _reconcile_agent_backends(backends):
+        reconcile_calls.append(backends)
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "backends": backends,
+                "states": {"codex": "restarted"},
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={
+            "agents": {
+                "codex": {
+                    "enabled": True,
+                    "cli_path": "/opt/codex",
+                }
+            }
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["agents"]["codex"]["enabled"] is True
+    assert data["agent_backend_runtime"] == {
+        "ok": True,
+        "hot_reconciled": True,
+        "backends": ["codex"],
+        "body": {
+            "ok": True,
+            "backends": ["codex"],
+            "states": {"codex": "restarted"},
+        },
+    }
+    assert reconcile_calls == [["codex"]]
+
+
+def test_config_post_defers_backend_reconcile_until_next_start_when_service_is_stopped(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+    from vibe import runtime
+
+    payload = _full_config_payload()
+    payload["agents"]["codex"]["enabled"] = False
+    api.save_config(payload)
+
+    async def _reconcile_agent_backends(_backends):
+        raise internal_client.InternalServerUnavailable("missing socket")
+
+    restart_calls = []
+    monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
+    monkeypatch.setattr(runtime, "service_process_running", lambda: False)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: restart_calls.append(True) or {"ok": True},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"agents": {"codex": {"enabled": True}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime_result = response.get_json()["agent_backend_runtime"]
+    assert runtime_result["hot_reconciled"] is False
+    assert runtime_result["apply_on_next_start"] is True
+    assert restart_calls == []
+
+
+def test_config_post_restarts_running_service_when_backend_reconcile_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+    from vibe import runtime
+
+    payload = _full_config_payload()
+    payload["agents"]["opencode"]["enabled"] = False
+    api.save_config(payload)
+
+    async def _reconcile_agent_backends(_backends):
+        raise internal_client.InternalServerUnavailable("missing socket")
+
+    restart_calls = []
+    monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
+    monkeypatch.setattr(runtime, "service_process_running", lambda: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: restart_calls.append(True)
+        or {"ok": True, "restart": {"job_id": "job-backend-fallback"}},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"agents": {"opencode": {"enabled": True}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime_result = response.get_json()["agent_backend_runtime"]
+    assert runtime_result["hot_reconciled"] is False
+    assert runtime_result["restart_scheduled"] is True
+    assert runtime_result["restart"]["job_id"] == "job-backend-fallback"
+    assert restart_calls == [True]
+
+
 def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
@@ -511,13 +678,18 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
     async def _reconcile_platforms():
         raise AssertionError("platform reconcile should not run")
 
+    async def _reconcile_agent_backends(_backends):
+        raise AssertionError("Agent backend reconcile should not run")
+
     monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
 
     client = app.test_client()
     response = client.post("/api/config", json={"show_duration": False}, headers=csrf_headers(client))
 
     assert response.status_code == 200
     assert "platform_runtime" not in response.get_json()
+    assert "agent_backend_runtime" not in response.get_json()
 
 
 def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):

@@ -160,8 +160,7 @@ const providerMatchesSearch = (provider: OpencodeProvider, q: string): boolean =
 
 export const OpencodeProviderConfig: React.FC<{
   hideEnableToggle?: boolean;
-  deferRestart?: boolean;
-}> = ({ hideEnableToggle, deferRestart } = {}) => {
+}> = ({ hideEnableToggle } = {}) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -170,7 +169,6 @@ export const OpencodeProviderConfig: React.FC<{
   const runtime = useBackendRuntime({
     backend: BACKEND_ID,
     defaultCli: DEFAULT_CLI,
-    deferRestart,
   });
   const permission = useOpencodePermission();
   const { setPermissionAllowed } = permission;
