@@ -28,6 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve pinned manifest identity
+        id: manifest
+        shell: bash
+        run: |
+          echo "sha256=$(sha256sum vibe/git_runtime_manifest.json | cut -d' ' -f1)" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Fetch and verify published assets
         id: probe
         continue-on-error: true
@@ -39,11 +46,11 @@ jobs:
         if: steps.probe.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}
         shell: bash
         run: |
           set -euo pipefail
-          manifest_sha="$(sha256sum vibe/git_runtime_manifest.json | cut -d' ' -f1)"
-          artifact_name="git-runtime-release-backup-$manifest_sha"
+          artifact_name="git-runtime-release-backup-$MANIFEST_SHA"
           mapfile -t backup_runs < <(
             gh run list \
               --repo "$GITHUB_REPOSITORY" \
@@ -68,7 +75,7 @@ jobs:
             fi
           done
           if [ -z "$backup_run" ]; then
-            echo "::error::No verified backup is available for manifest $manifest_sha."
+            echo "::error::No verified backup is available for manifest $MANIFEST_SHA."
             exit 1
           fi
           python3 scripts/git_runtime_release_guard.py verify \
@@ -80,10 +87,30 @@ jobs:
           assets=("$restore_dir"/*)
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            declare -A existing_assets=()
+            while IFS= read -r asset_name; do
+              existing_assets["$asset_name"]=1
+            done < <(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json assets \
+                --jq '.assets[].name'
+            )
+
+            missing_assets=()
+            for asset in "${assets[@]}"; do
+              asset_name="${asset##*/}"
+              if [ -z "${existing_assets[$asset_name]:-}" ]; then
+                missing_assets+=("$asset")
+              fi
+            done
+            if [ "${#missing_assets[@]}" -eq 0 ]; then
+              echo "::error::Release contains every expected asset name but failed integrity verification; refusing to overwrite pinned assets."
+              exit 1
+            fi
             gh release upload "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
-              --clobber \
-              "${assets[@]}"
+              "${missing_assets[@]}"
           else
             gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
@@ -107,7 +134,7 @@ jobs:
           steps.probe.outcome == 'failure'
         uses: actions/upload-artifact@v6
         with:
-          name: git-runtime-release-backup-${{ hashFiles('vibe/git_runtime_manifest.json') }}
+          name: git-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}
           path: ${{ runner.temp }}/git-runtime-release
           if-no-files-found: error
           retention-days: 90

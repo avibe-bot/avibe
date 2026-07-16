@@ -164,7 +164,12 @@ def test_workflow_has_scheduled_backup_and_recovery_path() -> None:
     assert "schedule:" in workflow
     assert "continue-on-error: true" in workflow
     assert "gh run download" in workflow
-    assert "git-runtime-release-backup-${{ hashFiles('vibe/git_runtime_manifest.json') }}" in workflow
+    assert "id: manifest" in workflow
+    assert "MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}" in workflow
+    assert "git-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}" in workflow
+    assert "hashFiles(" not in workflow
     assert "retention-days: 90" in workflow
     assert "--verify-tag" in workflow
     assert "--latest=false" in workflow
+    assert "missing_assets" in workflow
+    assert "--clobber" not in workflow
