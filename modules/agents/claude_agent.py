@@ -70,6 +70,8 @@ class ClaudeAgent(BaseAgent):
         self._activity_settle_events: dict[str, asyncio.Event] = {}
         self._foreground_tool_use_ids: dict[str, set[str]] = {}
         self._turns_with_foreground_tools: set[str] = set()
+        self._detached_foreground_tool_use_ids: dict[str, set[str]] = {}
+        self._detached_foreground_task_ids: dict[str, set[str]] = {}
 
         # Question handler for AskUserQuestion support (disabled)
         # NOTE: Uncomment when SDK adds AskUserQuestion support
@@ -411,6 +413,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
         self._turns_with_foreground_tools.discard(composite_key)
+        self._clear_detached_foreground_tool_state(composite_key)
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
         self._suppressed_synthetic_error_text.pop(composite_key, None)
@@ -656,7 +659,14 @@ class ClaudeAgent(BaseAgent):
 
                         for block in getattr(message, "content", []) or []:
                             if isinstance(block, ToolUseBlock):
-                                self._track_tool_activity_mode(composite_key, block)
+                                self._track_tool_activity_mode(
+                                    composite_key,
+                                    block,
+                                    detached=(
+                                        output_mode == "detached"
+                                        or composite_key in self._detached_activity_outputs
+                                    ),
+                                )
                                 # AskUserQuestion handling disabled - tool is disallowed via ClaudeAgentOptions
                                 # if self.ENABLE_ASK_USER_QUESTION and self._question_handler:
                                 #     if self._question_handler.is_ask_user_question(block):
@@ -822,6 +832,7 @@ class ClaudeAgent(BaseAgent):
                                 composite_key
                             )
                             result_text = self._select_detached_result_text(
+                                composite_key,
                                 message,
                                 raw_result_text,
                                 detached_text,
@@ -854,12 +865,14 @@ class ClaudeAgent(BaseAgent):
                             # own backend query and liveness/timeout path.
                             self._mark_session_idle_if_runtime_free(composite_key)
                             self._signal_activity_output_settled(composite_key)
+                            self._clear_detached_foreground_tool_state(composite_key)
                             continue
                         if output_mode == "detached":
                             detached_text = self._detached_unsolicited_text.get(
                                 composite_key
                             )
                             result_text = self._select_detached_result_text(
+                                composite_key,
                                 message,
                                 raw_result_text,
                                 detached_text,
@@ -875,6 +888,7 @@ class ClaudeAgent(BaseAgent):
                                     parse_mode="markdown",
                                     output=self._unsolicited_message_output(message),
                                 )
+                            self._clear_detached_foreground_tool_state(composite_key)
                             continue
                         self._pending_assistant_message.pop(composite_key, None)
                         if self._consume_suppressed_synthetic_result(
@@ -1112,6 +1126,7 @@ class ClaudeAgent(BaseAgent):
             self._suppressed_synthetic_error_text.pop(composite_key, None)
             self._foreground_tool_use_ids.pop(composite_key, None)
             self._turns_with_foreground_tools.discard(composite_key)
+            self._clear_detached_foreground_tool_state(composite_key)
             detached_activities = self._detached_activity_outputs.pop(composite_key, None)
             if detached_activities:
                 registry = self._activity_registry()
@@ -1578,7 +1593,13 @@ class ClaudeAgent(BaseAgent):
         data = getattr(message, "data", None)
         return data.get(name, default) if isinstance(data, dict) else default
 
-    def _track_tool_activity_mode(self, composite_key: str, block: ToolUseBlock) -> None:
+    def _track_tool_activity_mode(
+        self,
+        composite_key: str,
+        block: ToolUseBlock,
+        *,
+        detached: bool = False,
+    ) -> None:
         """Remember which Claude task frames belong to foreground tool steps."""
 
         tool_use_id = str(getattr(block, "id", "") or "").strip()
@@ -1590,10 +1611,20 @@ class ClaudeAgent(BaseAgent):
         )
         if runs_in_background:
             return
+        if detached:
+            self._detached_foreground_tool_use_ids.setdefault(
+                composite_key,
+                set(),
+            ).add(tool_use_id)
+            return
         self._foreground_tool_use_ids.setdefault(composite_key, set()).add(
             tool_use_id
         )
         self._turns_with_foreground_tools.add(composite_key)
+
+    def _clear_detached_foreground_tool_state(self, composite_key: str) -> None:
+        self._detached_foreground_tool_use_ids.pop(composite_key, None)
+        self._detached_foreground_task_ids.pop(composite_key, None)
 
     def _select_terminal_text(
         self,
@@ -1608,21 +1639,25 @@ class ClaudeAgent(BaseAgent):
         if assistant_text:
             return assistant_text
         if composite_key in self._turns_with_foreground_tools:
-            return ""
+            return "<silent>Claude turn completed without assistant text.</silent>"
         return str(sdk_result or "")
 
     def _select_detached_result_text(
         self,
+        composite_key: str,
         message,
         sdk_result: str | None,
         assistant_text: str | None,
     ) -> str | None:
         """Prefer assistant text unless a detached Result carries a real failure."""
 
-        if not assistant_text:
-            return sdk_result
-        if not sdk_result or self._terminal_backend_failure(message, sdk_result) is None:
+        failure = self._terminal_backend_failure(message, sdk_result)
+        if failure is not None:
+            return sdk_result or assistant_text
+        if assistant_text:
             return assistant_text
+        if composite_key in self._detached_foreground_tool_use_ids:
+            return "<silent>Claude turn completed without assistant text.</silent>"
         return sdk_result
 
     def _current_turn_id(
@@ -1698,6 +1733,13 @@ class ClaudeAgent(BaseAgent):
         description = str(self._task_field(message, "description", "") or "").strip() or None
         task_type = str(self._task_field(message, "task_type", "") or "").strip()
         tool_use_id = str(self._task_field(message, "tool_use_id", "") or "").strip()
+        detached_tool_ids = self._detached_foreground_tool_use_ids.get(composite_key) or set()
+        detached_task_ids = self._detached_foreground_task_ids.get(composite_key) or set()
+        if task_id in detached_task_ids or (tool_use_id and tool_use_id in detached_tool_ids):
+            self._detached_foreground_task_ids.setdefault(composite_key, set()).add(
+                task_id
+            )
+            return True
         foreground_tool_ids = self._foreground_tool_use_ids.get(composite_key) or set()
         foreground = bool(
             (existing_activity is not None and existing_activity.foreground)
