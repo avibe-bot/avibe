@@ -2139,6 +2139,14 @@
       "disabled": "Disabled only"
     },
     "filtered": "{{shown}}/{{total}}",
+    "bannerToggle": {
+      "title": "Background-work banner",
+      "description": "Show in-progress background work at the bottom of chats."
+    },
+    "sessionFilter": {
+      "chip": "Only: this session {{id}}",
+      "clear": "Clear session filter"
+    },
     "selectPrompt": "Select a row to view its full configuration.",
     "emptyTasks": "No scheduled tasks. Ask an agent to create one.",
     "emptyWatches": "No watches running. Ask an agent to start one.",
@@ -2330,7 +2338,12 @@
     "activities": {
       "running": "Background work · {{count}}",
       "delivering": "Delivering background output · {{count}}",
+      "toggle": "Toggle background work",
+      "manageInHarness": "Manage in Harness",
       "openHarness": "Open in Harness · {{kind}}",
+      "status": {
+        "running": "Running"
+      },
       "kind": {
         "backendActivity": "Background task",
         "watch": "Watch",

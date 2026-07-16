@@ -2139,6 +2139,14 @@
       "disabled": "仅禁用"
     },
     "filtered": "{{shown}}/{{total}}",
+    "bannerToggle": {
+      "title": "后台工作横幅",
+      "description": "在会话底部显示进行中的后台工作。"
+    },
+    "sessionFilter": {
+      "chip": "仅看:本会话 {{id}}",
+      "clear": "移除会话筛选"
+    },
     "selectPrompt": "选择左侧条目查看完整配置。",
     "emptyTasks": "暂无定时任务。让 Agent 帮你创建一个。",
     "emptyWatches": "没有正在运行的 Watch。让 Agent 帮你开启一个。",
@@ -2330,7 +2338,12 @@
     "activities": {
       "running": "后台工作 · {{count}}",
       "delivering": "正在投递后台输出 · {{count}}",
+      "toggle": "展开后台工作",
+      "manageInHarness": "在 Harness 中管理",
       "openHarness": "在 Harness 中打开 · {{kind}}",
+      "status": {
+        "running": "运行中"
+      },
       "kind": {
         "backendActivity": "后台任务",
         "watch": "监视",

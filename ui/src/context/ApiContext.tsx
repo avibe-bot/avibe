@@ -9,6 +9,11 @@ import type { DockDoc } from './DockContext';
 // itself lives with the DockProvider that owns reconciliation.
 export type DockResponse = { ok: boolean; dock: DockDoc };
 
+// Global workbench toggles persisted server-side in state_meta. Currently just
+// the background-work banner switch (spec req 2); read by ChatPage (to gate the
+// banner) and the Harness page (the toggle card).
+export type WorkbenchPrefs = { ok?: boolean; background_work_banner_enabled: boolean };
+
 // One backend's *global* instructions file, surfaced by the Global Prompts
 // editor. ``backend`` is an agent backend id (claude / opencode / codex).
 export type GlobalPromptFile = {
@@ -421,6 +426,10 @@ export type ApiContextType = {
    *  reorder is rejected server-side and re-synced without a toast. Returns the
    *  payload; check ``ok``. */
   setDockOrder: (order: string[], known?: string[]) => Promise<DockResponse>;
+  /** Global workbench toggles (state_meta-backed): banner on/off. */
+  getWorkbenchPrefs: () => Promise<WorkbenchPrefs>;
+  /** Persist the background-work banner global toggle; resolves to updated prefs. */
+  setBackgroundWorkBannerEnabled: (enabled: boolean) => Promise<WorkbenchPrefs>;
   getBindCodes: () => Promise<any>;
   createBindCode: (type: string, expiresAt?: string) => Promise<any>;
   deleteBindCode: (code: string) => Promise<any>;
@@ -1277,6 +1286,8 @@ export type HarnessBootstrapParams = {
   tab?: 'tasks' | 'watches' | 'runs';
   status?: HarnessDefinitionStatus | HarnessRunStatus;
   query?: string;
+  /** Scope tasks/watches to a bound session (background-work banner deep-link). */
+  session_id?: string;
   page?: number;
   limit?: number;
 };
@@ -2222,6 +2233,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       return payloadJson;
     },
+    getWorkbenchPrefs: () => getCachedJson('/api/workbench/prefs', 5_000),
+    setBackgroundWorkBannerEnabled: async (enabled) => {
+      const { payloadJson } = await requestJson(
+        '/api/workbench/prefs',
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ background_work_banner_enabled: enabled }),
+        },
+        'PUT /api/workbench/prefs',
+        { handleError: false },
+      );
+      return payloadJson;
+    },
     getBindCodes: () => getJson('/api/bind-codes'),
     createBindCode: (type, expiresAt) => postJson('/api/bind-codes', { type, expires_at: expiresAt }),
     deleteBindCode: (code) => deleteJson(`/api/bind-codes/${encodeURIComponent(code)}`),
@@ -2622,6 +2647,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.tab) search.set('tab', params.tab);
       if (params?.status) search.set('status', params.status);
       if (params?.query) search.set('query', params.query);
+      if (params?.session_id) search.set('session_id', params.session_id);
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();

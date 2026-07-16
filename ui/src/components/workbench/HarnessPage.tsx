@@ -22,9 +22,11 @@ import {
   Bot,
   MessageSquare,
   ArrowUpRight,
+  Filter,
+  X,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
 import type {
@@ -121,11 +123,81 @@ export const HarnessPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<HarnessDefinitionStatus>('enabled');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const refreshSeq = useRef(0);
+  // URL scope from the background-work banner (spec req 4): ?tab / ?session /
+  // ?run deep-link into a session-scoped tab (removable "只看本会话" chip) or a
+  // specific run. One-way URL -> state, keyed per-param so a user's tab click
+  // (which doesn't touch the URL) is never clobbered by a re-sync.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [sessionFilter, setSessionFilter] = useState<string | undefined>(undefined);
+  // Global background-work banner toggle (spec req 2), persisted server-side.
+  const [bannerEnabled, setBannerEnabled] = useState(true);
+  const [bannerPending, setBannerPending] = useState(false);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => window.clearTimeout(timeout);
   }, [search]);
+
+  const tabParam = searchParams.get('tab');
+  const sessionParam = searchParams.get('session');
+  const runParam = searchParams.get('run');
+  useEffect(() => {
+    if (tabParam && (['tasks', 'watches', 'runs'] as string[]).includes(tabParam)) {
+      setTab(tabParam as TabKey);
+    }
+  }, [tabParam]);
+  useEffect(() => {
+    setSessionFilter(sessionParam || undefined);
+    setTasksPage(1);
+    setWatchesPage(1);
+  }, [sessionParam]);
+  useEffect(() => {
+    if (runParam) setSelection({ kind: 'run', id: runParam });
+  }, [runParam]);
+
+  // Global banner toggle: read once, default ON on any error.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getWorkbenchPrefs()
+      .then((prefs) => {
+        if (!cancelled) setBannerEnabled(prefs?.background_work_banner_enabled !== false);
+      })
+      .catch(() => {
+        /* keep default ON */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  const onToggleBanner = useCallback(
+    async (next: boolean) => {
+      setBannerEnabled(next); // optimistic
+      setBannerPending(true);
+      try {
+        const prefs = await api.setBackgroundWorkBannerEnabled(next);
+        setBannerEnabled(prefs?.background_work_banner_enabled !== false);
+      } catch {
+        setBannerEnabled(!next); // revert on failure
+      } finally {
+        setBannerPending(false);
+      }
+    },
+    [api],
+  );
+
+  const clearSessionFilter = useCallback(() => {
+    setSessionFilter(undefined);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('session');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [setSearchParams]);
 
   const refresh = useCallback(async () => {
     const seq = refreshSeq.current + 1;
@@ -147,6 +219,8 @@ export const HarnessPage: React.FC = () => {
         tab,
         status: tab === 'runs' ? undefined : statusFilter,
         query,
+        // Session scope applies to definition tabs; runs anchor by ?run instead.
+        session_id: tab === 'tasks' || tab === 'watches' ? sessionFilter : undefined,
         page: tab === 'tasks' ? tasksPage : tab === 'watches' ? watchesPage : runsPage,
         limit: PAGE_LIMIT,
       });
@@ -175,7 +249,7 @@ export const HarnessPage: React.FC = () => {
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [api, tab, debouncedSearch, statusFilter, tasksPage, watchesPage, runsPage]);
+  }, [api, tab, debouncedSearch, statusFilter, sessionFilter, tasksPage, watchesPage, runsPage]);
 
   useEffect(() => {
     refresh();
@@ -377,6 +451,21 @@ export const HarnessPage: React.FC = () => {
         </Button>
       </div>
 
+      {/* Global background-work banner toggle (spec req 2). Off → the workbench
+          chat banner never renders in any session; data/API unaffected. */}
+      <div className="flex items-center justify-between gap-4 rounded-xl border border-border-strong bg-surface px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-foreground">{t('harness.bannerToggle.title')}</div>
+          <div className="text-[12px] text-muted">{t('harness.bannerToggle.description')}</div>
+        </div>
+        <Switch
+          checked={bannerEnabled}
+          onCheckedChange={onToggleBanner}
+          disabled={bannerPending}
+          label={t('harness.bannerToggle.title')}
+        />
+      </div>
+
       {/* Tab row */}
       <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
         {TAB_ORDER.map((key) => {
@@ -457,6 +546,23 @@ export const HarnessPage: React.FC = () => {
               </button>
             ))}
           </div>
+          {sessionFilter && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan/30 bg-cyan/[0.10] py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-cyan">
+              <Filter className="size-3 shrink-0" />
+              <span className="max-w-[180px] truncate">
+                {t('harness.sessionFilter.chip', { id: sessionFilter })}
+              </span>
+              <button
+                type="button"
+                onClick={clearSessionFilter}
+                aria-label={t('harness.sessionFilter.clear')}
+                title={t('harness.sessionFilter.clear')}
+                className="rounded-full p-0.5 text-cyan/80 transition-colors hover:bg-cyan/20 hover:text-cyan"
+              >
+                <X className="size-3" />
+              </button>
+            </span>
+          )}
           {(search || statusFilter !== 'all') && (
             <span className="ml-auto font-mono text-[10px] text-muted">
               {t('harness.filtered', { shown: shownForTab, total: totalForTab })}
