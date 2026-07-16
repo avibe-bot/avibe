@@ -29,9 +29,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
 from modules.claude_sdk_compat import (
-    AssistantMessage as SDKAssistantMessage,
-    TaskNotificationMessage as SDKTaskNotificationMessage,
-    TaskStartedMessage as SDKTaskStartedMessage,
     TextBlock,
     ToolUseBlock,
 )
@@ -167,6 +164,12 @@ def _foreground_bash_then_delayed_result_client(
     notification_seen: asyncio.Event,
     release_result: asyncio.Event,
 ):
+    def _content_block(block_type, **values):
+        block = object.__new__(block_type)
+        for name, value in values.items():
+            setattr(block, name, value)
+        return block
+
     class ResultMessage:
         subtype = "success"
         result = "Push branch, confirm repo"
@@ -175,51 +178,50 @@ def _foreground_bash_then_delayed_result_client(
     class _Client:
         def receive_messages(self):
             async def _iterate():
-                yield SDKAssistantMessage(
-                    content=[
-                        TextBlock(
-                            text=(
-                                "Two clean commits. Let me push the branch and "
-                                "confirm the repo/remote for the PR."
-                            )
-                        )
-                    ],
-                    model="claude-test",
-                )
-                yield SDKAssistantMessage(
-                    content=[
-                        ToolUseBlock(
-                            id="toolu_push",
-                            name="Bash",
-                            input={
-                                "command": "git push",
-                                "description": "Push branch, confirm repo",
-                            },
-                        )
-                    ],
-                    model="claude-test",
-                )
-                yield SDKTaskStartedMessage(
-                    subtype="task_started",
-                    data={},
-                    task_id="task-push",
-                    description="Push branch, confirm repo",
-                    uuid="task-start-uuid",
-                    session_id="claude-native-session",
-                    tool_use_id="toolu_push",
-                    task_type="local_bash",
-                )
-                yield SDKTaskNotificationMessage(
-                    subtype="task_notification",
-                    data={},
-                    task_id="task-push",
-                    status="completed",
-                    output_file="/tmp/task-push.output",
-                    summary="Push branch, confirm repo",
-                    uuid="task-end-uuid",
-                    session_id="claude-native-session",
-                    tool_use_id="toolu_push",
-                )
+                text_message = AssistantMessage()
+                text_message.content = [
+                    _content_block(
+                        TextBlock,
+                        text=(
+                            "Two clean commits. Let me run `git push` and "
+                            "**confirm** the repo/remote for the PR."
+                        ),
+                    )
+                ]
+                yield text_message
+
+                tool_message = AssistantMessage()
+                tool_message.content = [
+                    _content_block(
+                        ToolUseBlock,
+                        id="toolu_push",
+                        name="Bash",
+                        input={
+                            "command": "git push",
+                            "description": "Push branch, confirm repo",
+                        },
+                    )
+                ]
+                yield tool_message
+
+                task_started = TaskStartedMessage()
+                task_started.subtype = "task_started"
+                task_started.task_id = "task-push"
+                task_started.description = "Push branch, confirm repo"
+                task_started.tool_use_id = "toolu_push"
+                task_started.task_type = "local_bash"
+                task_started.data = {}
+                yield task_started
+
+                task_completed = TaskNotificationMessage()
+                task_completed.subtype = "task_notification"
+                task_completed.task_id = "task-push"
+                task_completed.status = "completed"
+                task_completed.output_file = "/tmp/task-push.output"
+                task_completed.summary = "Push branch, confirm repo"
+                task_completed.tool_use_id = "toolu_push"
+                task_completed.data = {}
+                yield task_completed
                 notification_seen.set()
                 await release_result.wait()
                 yield ResultMessage()
@@ -903,7 +905,9 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         agent, service = _build_agent()
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
         formatter = SimpleNamespace(
-            escape_special_chars=lambda text: text,
+            escape_special_chars=lambda text: text.replace("`", "\\`").replace(
+                "*", "\\*"
+            ),
             format_assistant_message=lambda parts: "\n\n".join(parts),
             format_toolcall=lambda *_args, **_kwargs: "Bash tool call",
             format_toolcall_label=lambda *_args, **_kwargs: "Push branch, confirm repo",
@@ -968,11 +972,66 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             agent.emit_result_message.await_args.args[1],
             (
-                "Two clean commits. Let me push the branch and confirm the "
+                "Two clean commits. Let me run `git push` and **confirm** the "
                 "repo/remote for the PR."
             ),
         )
         self.assertEqual(agent._pending_requests[composite_key], [queued_request])
+
+    async def test_detached_activity_error_keeps_sdk_failure_text(self):
+        agent, service = _build_agent()
+        composite_key = "session-detached-error:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-error"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-detached-error",
+            activity_id="task-detached-error",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-detached-error",
+            status="completed",
+            expects_output=True,
+        )
+        activities = service.activities.claim_completed_output_batch(
+            "claude",
+            composite_key,
+        )
+        agent._detached_activity_outputs[composite_key] = activities
+        agent._detached_assistant_text[composite_key] = "Earlier assistant text"
+        agent._emit_activity_result = AsyncMock()
+
+        class ResultMessage:
+            subtype = "error_during_execution"
+            result = "Bash exited with status 1"
+            duration_ms = 1
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-detached-error",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent._emit_activity_result.assert_awaited_once()
+        self.assertEqual(
+            agent._emit_activity_result.await_args.args[2],
+            "Bash exited with status 1",
+        )
 
     def test_foreground_tool_without_text_rejects_sdk_result_label(self):
         agent, _service = _build_agent()

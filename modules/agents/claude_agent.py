@@ -821,7 +821,10 @@ class ClaudeAgent(BaseAgent):
                             detached_text = self._detached_assistant_text.get(
                                 composite_key
                             )
-                            if detached_text:
+                            if detached_text and self._terminal_backend_failure(
+                                message,
+                                raw_result_text,
+                            ) is None:
                                 result_text = detached_text
                             self._detached_assistant_text.pop(composite_key, None)
                             try:
@@ -2374,14 +2377,14 @@ class ClaudeAgent(BaseAgent):
                 return session_id
         return None
 
-    def _extract_text_blocks(self, message, context: MessageContext) -> str:
+    def _extract_text_blocks(self, message, _context: MessageContext) -> str:
         """Extract text-only content blocks for result fallbacks."""
         parts = []
         for block in getattr(message, "content", []) or []:
             if isinstance(block, TextBlock):
                 text = block.text.strip() if block.text else ""
                 if text:
-                    parts.append(self._get_formatter(context).escape_special_chars(text))
+                    parts.append(text)
         return "\n\n".join(parts).strip()
 
     @staticmethod
