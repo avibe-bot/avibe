@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi, type VaultRequest } from '@/context/ApiContext';
-
-const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
+import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 
 /**
- * Pending vault requests (access/sign/provision) for one chat session. Fed by the workbench SSE
- * (`vaults.updated`) plus a visibility-aware poll that runs even while SSE is connected — CLI/
- * agent-created requests can arrive without a browser bridge event (mirrors VaultsPage). A timer
- * also refreshes at the earliest visible `expires_at` (expiry emits no event). Lifted into a hook
- * so the in-scroll cards and the floating approval bar share one source.
+ * Pending vault requests (access/sign/provision) for one chat session. Fed by
+ * `vaults.updated`, with polling only when the controller event bridge is down.
+ * A timer also refreshes at the earliest visible `expires_at` because expiry
+ * emits no event. Lifted into a hook so the in-scroll cards and floating
+ * approval bar share one source.
  */
 export function usePendingVaultRequests(sessionId: string): { requests: VaultRequest[]; refresh: () => void } {
   const api = useApi();
@@ -55,62 +54,7 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
     }
   }, [api, sessionId]);
 
-  useEffect(() => {
-    return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') void load();
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        if (connected) void load();
-      },
-      onVaultsUpdated: () => void load(),
-    });
-  }, [api, load]);
-
-  // Non-stacking recursive poll; also refreshes immediately on tab focus / visibility.
-  useEffect(() => {
-    let timer: number | undefined;
-    let cancelled = false;
-    let inFlight = false;
-    let pendingWake = false;
-    const tick = async () => {
-      if (cancelled) return;
-      if (document.visibilityState !== 'visible') {
-        timer = window.setTimeout(tick, PENDING_REQUEST_POLL_INTERVAL_MS);
-        return;
-      }
-      if (inFlight) {
-        pendingWake = true;
-        return;
-      }
-      inFlight = true;
-      window.clearTimeout(timer);
-      try {
-        await load();
-      } finally {
-        inFlight = false;
-      }
-      if (cancelled) return;
-      if (pendingWake) {
-        pendingWake = false;
-        void tick();
-        return;
-      }
-      timer = window.setTimeout(tick, PENDING_REQUEST_POLL_INTERVAL_MS);
-    };
-    const refreshNow = () => {
-      if (document.visibilityState === 'visible') void tick();
-    };
-    void tick();
-    document.addEventListener('visibilitychange', refreshNow);
-    window.addEventListener('focus', refreshNow);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', refreshNow);
-      window.removeEventListener('focus', refreshNow);
-    };
-  }, [load]);
+  useVaultRequestRefresh(load);
 
   // Expiry has no SSE event → refresh at the earliest visible expires_at.
   useEffect(() => {
