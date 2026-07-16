@@ -46,6 +46,25 @@ in this phase — the expanded list links to the Harness page (watches/tasks) or
   (status running/queued, callback lineage) — read-only queries.
 - Banner UI: ChatPage banner block (~1626-1670) + `chat.activities.*` i18n keys.
 
+## Owner design review (2026-07-16 21:15) — five requirements folded in
+
+1. **Popover opens UPWARD.** The banner sits at the bottom of the chat (above the composer);
+   the expanded list anchors to the pill's TOP edge and grows upward. Never downward.
+2. **Harness-page toggle.** A switch on the Harness page ("后台工作横幅", default ON) hides the
+   banner entirely for users who don't want it. Global (not per-session), persisted server-side
+   (same `state_meta` family as other workbench prefs — lane picks the exact key, declares it).
+   When off, the banner never renders; the underlying data/API is unaffected.
+3. **Length discipline.** The pill has a max width (~420px); the first-item summary truncates
+   with ellipsis; the count badge is always visible. The expanded list has a max height
+   (~340px ≈ 5 rows); more items scroll inside the popover.
+4. **Row navigation = Harness with an automatic SESSION filter.** Clicking a Watch/task row
+   opens the Harness page's matching tab with a session filter applied (route param, e.g.
+   `?session=<id>`), shown as a removable chip ("仅看:本会话") — WITHOUT the filter the page
+   would show everything, which is wrong coming from a session context. A delegated-run row
+   opens the runs view similarly filtered/anchored to that run. **This adds Harness-page scope:
+   the route param + filter chip + filtered queries are part of this PR** (declare the files).
+5. Ordering inside the popover: active/running first, then by start time descending.
+
 ## Non-goals (this phase)
 
 - No execution-layer unification (P2, shelved).
