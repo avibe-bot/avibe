@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from core.backend_restart import BackendRestartCoordinator
+from core.controller import Controller
 
 
 class _AgentService:
@@ -161,3 +162,35 @@ def test_idle_refresh_failure_is_propagated_before_ack() -> None:
         )
 
     asyncio.run(run())
+
+
+def test_controller_reconciles_requested_backends_once_in_order() -> None:
+    async def run() -> None:
+        coordinator = SimpleNamespace(request_restart=AsyncMock(side_effect=["restarted", "draining"]))
+        controller = SimpleNamespace(backend_restart_coordinator=coordinator)
+
+        result = await Controller.reconcile_agent_backends(
+            controller,
+            ["codex", "codex", "opencode"],
+        )
+
+        assert result == {
+            "ok": True,
+            "backends": ["codex", "opencode"],
+            "states": {"codex": "restarted", "opencode": "draining"},
+        }
+        assert [awaited.args for awaited in coordinator.request_restart.await_args_list] == [
+            ("codex",),
+            ("opencode",),
+        ]
+
+    asyncio.run(run())
+
+
+def test_controller_rejects_unknown_backend_reconcile() -> None:
+    controller = SimpleNamespace(backend_restart_coordinator=SimpleNamespace(request_restart=AsyncMock()))
+
+    with pytest.raises(ValueError, match="Unsupported agent backend: unknown"):
+        asyncio.run(Controller.reconcile_agent_backends(controller, ["unknown"]))
+
+    controller.backend_restart_coordinator.request_restart.assert_not_awaited()

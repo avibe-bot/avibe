@@ -158,6 +158,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/health", ("GET",)) in routes
     assert ("/internal/dispatch_async", ("POST",)) in routes
     assert ("/internal/reconcile-platforms", ("POST",)) in routes
+    assert ("/internal/reconcile-agent-backends", ("POST",)) in routes
     assert ("/internal/cancel/{session_id}", ("POST",)) in routes
     assert ("/internal/dispatch", ("POST",)) in routes
     assert ("/internal/events", ("GET",)) in routes
@@ -305,6 +306,59 @@ def test_reconcile_platforms_endpoint_reports_controller_failure(monkeypatch):
 
     assert resp.status_code == 500
     assert resp.json() == {"ok": False, "error": "IM thread for discord did not stop within timeout"}
+
+
+def test_reconcile_agent_backends_endpoint_calls_controller():
+    controller = _build_controller_double()
+    calls = []
+
+    async def reconcile_agent_backends(backends):
+        calls.append(backends)
+        return {
+            "ok": True,
+            "backends": backends,
+            "states": {backend: "restarted" for backend in backends},
+        }
+
+    controller.reconcile_agent_backends = reconcile_agent_backends
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/reconcile-agent-backends",
+                json={"backends": ["codex", "opencode"]},
+            )
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json()["states"] == {
+        "codex": "restarted",
+        "opencode": "restarted",
+    }
+    assert calls == [["codex", "opencode"]]
+
+
+def test_reconcile_agent_backends_endpoint_rejects_invalid_shape():
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/reconcile-agent-backends",
+                json={"backends": "codex"},
+            )
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "ok": False,
+        "error": "backends must be a list of strings",
+    }
 
 
 async def _dispatch_round_trip(body: dict) -> httpx.Response:

@@ -406,6 +406,25 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.exception("internal platform reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/reconcile-agent-backends")
+    async def _reconcile_agent_backends(request: Request) -> Any:
+        """Hot-apply persisted Agent backend config on the controller loop."""
+        payload = await _safe_json(request)
+        backends = payload.get("backends")
+        if not isinstance(backends, list) or not all(isinstance(item, str) for item in backends):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "backends must be a list of strings"},
+            )
+        try:
+            result = await controller.reconcile_agent_backends(backends)
+            return JSONResponse(status_code=200, content=result)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        except Exception as exc:
+            logger.exception("internal Agent backend reconcile failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
     @app.get("/internal/events")
     async def _events() -> Any:
         """Long-lived SSE feed of Controller-side inbox events.

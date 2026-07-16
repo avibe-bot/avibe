@@ -130,6 +130,51 @@ def test_reconcile_platforms_missing_socket_raises_unavailable(tmp_path):
         asyncio.run(internal_client.reconcile_platforms(socket_path=sock))
 
 
+def test_reconcile_agent_backends_round_trip(tmp_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/reconcile-agent-backends")
+    async def _reconcile(payload: dict):
+        captured["payload"] = payload
+        return {
+            "ok": True,
+            "backends": payload["backends"],
+            "states": {backend: "restarted" for backend in payload["backends"]},
+        }
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.reconcile_agent_backends(
+                ["codex", "opencode"],
+                socket_path=sock,
+            )
+
+    result = asyncio.run(_go())
+
+    assert captured["payload"] == {"backends": ["codex", "opencode"]}
+    assert result["status_code"] == 200
+    assert result["body"]["states"] == {
+        "codex": "restarted",
+        "opencode": "restarted",
+    }
+
+
+def test_reconcile_agent_backends_missing_socket_raises_unavailable(tmp_path):
+    sock = tmp_path / "missing.sock"
+    with pytest.raises(internal_client.InternalServerUnavailable):
+        asyncio.run(
+            internal_client.reconcile_agent_backends(
+                ["codex"],
+                socket_path=sock,
+            )
+        )
+
+
 def test_notify_vault_request_created_round_trip(tmp_path):
     app = FastAPI()
     captured: dict = {}
