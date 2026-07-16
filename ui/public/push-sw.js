@@ -15,6 +15,24 @@ function syncAppBadge(count) {
   return op && typeof op.catch === 'function' ? op.catch(() => {}) : null;
 }
 
+const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
+const WEB_PUSH_LAUNCH_ENTRY_PATH = '/__avibe/web-push-launch';
+
+// iOS may honor an installed PWA's manifest start URL instead of the path passed
+// to openWindow(). Leave a short-lived launch handoff in Cache Storage so the
+// app shell can still prefer the tapped notification over its remembered page.
+function rememberPendingNotificationLaunch(url) {
+  if (!self.caches) return Promise.resolve();
+  const entryUrl = new URL(WEB_PUSH_LAUNCH_ENTRY_PATH, self.location.origin).href;
+  const response = new Response(JSON.stringify({ url, createdAt: Date.now() }), {
+    headers: { 'content-type': 'application/json' },
+  });
+  return self.caches
+    .open(WEB_PUSH_LAUNCH_CACHE)
+    .then((cache) => cache.put(entryUrl, response))
+    .catch(() => {});
+}
+
 self.addEventListener('push', (event) => {
   let payload = {};
   try {
@@ -69,7 +87,16 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (self.clients.openWindow) {
-        return self.clients.openWindow(href);
+        return rememberPendingNotificationLaunch(message.url)
+          .then(() => self.clients.openWindow(href))
+          .then((openedClient) => {
+            try {
+              openedClient?.postMessage(message);
+            } catch {
+              // Cache Storage remains as the cold-launch fallback.
+            }
+            return openedClient;
+          });
       }
       return undefined;
     }),
