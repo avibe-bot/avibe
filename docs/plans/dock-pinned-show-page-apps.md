@@ -695,6 +695,18 @@ alongside §7.1h item 3), in `AppWindow.tsx` + `WindowManagerContext.tsx`:
   archived session with `session_archived` (the store's `is_archived` check is promoted to
   public), matching every other Show Page mutator's archived guard.
 
+**Amendment (owner-reported bug, 2026-07-16 — Vite publicDir root-mapping):** the icon
+resolver resolved a declared `<link rel=icon href="./icon.png">` only against `<ws>/icon.png`
+on disk, so a fully-compliant page whose icon lives at `public/icon.png` (Vite serves
+`public/*` at the SITE ROOT, so the browser loads `./icon.png` fine) was deemed unusable →
+letter avatar. Fix: when the declared href misses at the exact path, also try
+`<ws>/public/<path>` before falling through. Precedence: **exact path first, then the
+`public/` mapping**, then the conventional fallback (unchanged). The mapped candidate runs
+through the same `_resolve_icon_candidate` chokepoint, so the whitelist / 2 MiB cap /
+traversal-realpath guards apply to it too (a hostile `..` href is already rejected by the
+href policy before mapping), and `icon_version` hashes the resolved (mapped) file so it stays
+content-correct. The mapping is LINK-scoped — it is not a blanket scan of `public/`.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:
