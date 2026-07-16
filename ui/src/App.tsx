@@ -389,6 +389,8 @@ const DocumentTitle = () => {
 // launch; later in-app navigation to `/` must still reach the workbench canvas.
 const PwaRouteMemory = () => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const restoreStartedRef = useRef(false);
   const [launch] = useState(() => {
     const iosStandalone = isIosDevice() && isStandalonePwa();
     return {
@@ -424,14 +426,26 @@ const PwaRouteMemory = () => {
 
   useEffect(() => {
     if (!launch.iosStandalone || launchRestorePath === undefined) return;
-    // Do not overwrite the remembered destination while <Navigate> is still
-    // replacing the manifest start URL (including StrictMode's second effect).
-    if (restoringLaunch) return;
+    // Do not overwrite the remembered destination before the one-shot restore
+    // starts. Once it has, returning to this root is real user navigation and
+    // must remember `/` instead of immediately restoring the old page again.
+    if (restoringLaunch && !restoreStartedRef.current) return;
 
     writeLastPwaPath(location.pathname);
   }, [launch.iosStandalone, launchRestorePath, location.pathname, restoringLaunch]);
 
-  return restorePath ? <Navigate to={restorePath} replace /> : null;
+  // Keep the manifest root underneath the restored page. Replacing that first
+  // entry strands a cold-launched PWA on the restored route: neither the chat
+  // back button nor iOS's edge-swipe has an in-app history entry to return to.
+  // The ref makes this one-shot even when the user later returns to the launch
+  // entry and while React StrictMode replays effects in development.
+  useEffect(() => {
+    if (!restorePath || restoreStartedRef.current) return;
+    restoreStartedRef.current = true;
+    navigate(restorePath);
+  }, [navigate, restorePath]);
+
+  return null;
 };
 
 function RouterRoot() {
