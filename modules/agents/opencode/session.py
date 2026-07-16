@@ -12,7 +12,7 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import fork_source_state, pending_native_fork
+from core.services.session_fork import fork_source_state, is_input_turn, pending_native_fork
 from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 from modules.agents.base import AgentRequest, BaseAgent
 
@@ -117,9 +117,9 @@ class OpenCodeSessionManager:
             if bool(fork.get("opencode_boundary_from_active_run")):
                 return True, message_id
             source_state = fork_source_state(fork)
-            anchor_is_running_user = (
-                getattr(source_state, "anchor_author", None) == "user"
-                and getattr(source_state, "anchor_type", None) == "user"
+            anchor_is_running_input = is_input_turn(
+                getattr(source_state, "anchor_author", None),
+                getattr(source_state, "anchor_type", None),
             )
             if source_state.anchor_is_terminal_agent_output:
                 logger.info(
@@ -127,13 +127,13 @@ class OpenCodeSessionManager:
                     source_session_id,
                 )
                 return True, None
-            if source_state.has_terminal_agent_output_after_anchor and not anchor_is_running_user:
+            if source_state.has_terminal_agent_output_after_anchor and not anchor_is_running_input:
                 logger.info(
                     "OpenCode running fork for %s kept full history because the source completed before first use",
                     source_session_id,
                 )
                 return True, None
-            if getattr(source_state, "has_messages_after_anchor", False) and not anchor_is_running_user:
+            if getattr(source_state, "has_messages_after_anchor", False) and not anchor_is_running_input:
                 point = self._current_running_fork_point(source_session_id)
                 if point.available:
                     return True, point.message_id

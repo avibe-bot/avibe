@@ -669,6 +669,38 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
     assert row2["preview_text"] == "R2"
 
 
+def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_harness", "Automated")
+        _insert_msg(conn, scope_id, "ses_harness", "agent", "R1", "2026-05-30T10:00:00Z")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "harness",
+            "scheduled follow-up",
+            "2026-05-30T10:01:00Z",
+            msg_type=messages_service.HARNESS_TYPE,
+        )
+
+    with engine.connect() as conn:
+        pending = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert pending["replied"] is True
+    assert pending["last_message_author"] == "harness"
+    assert pending["preview_text"] == "R1"
+
+    with engine.begin() as conn:
+        _insert_msg(conn, scope_id, "ses_harness", "agent", "R2", "2026-05-30T10:02:00Z")
+    with engine.connect() as conn:
+        completed = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert completed["replied"] is False
+    assert completed["preview_text"] == "R2"
+
+
 def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_state):
     """``created_at`` is second-resolution, so a follow-up sent in the SAME second
     as the prior agent reply ties on time; the time-sortable message id breaks the

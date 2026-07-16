@@ -1327,9 +1327,11 @@ class SQLiteBackgroundTaskStore:
                     .values(**values)
                 )
             if effective_terminal_status:
-                terminal_result_text = visible_text
-                if not terminal_result_text.strip() and deferred_result_text is not None:
-                    terminal_result_text = str(deferred_result_text)
+                terminal_result_text = (
+                    str(deferred_result_text)
+                    if deferred_result_text is not None
+                    else visible_text
+                )
                 terminal_values: dict[str, Any] = {
                     "status": normalize_run_status(effective_terminal_status),
                     # Structured outputs remain available in result_payload, but

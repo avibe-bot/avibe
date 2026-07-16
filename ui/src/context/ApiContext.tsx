@@ -984,14 +984,14 @@ export type MessageSnippet = {
   suffix: string;
 };
 
-// A single matching message within a session group. ``type`` is the coarse
-// chat role the row chip renders ('user' → YOU, otherwise AGENT); ``source``
-// carries provenance (harness/user/agent) like WorkbenchMessage.
+// A single matching message within a session group. The row chip derives its
+// role from author/type/source so harness prompts remain distinct from both
+// human input and agent output.
 export type MessageSearchMatch = {
   id: string;
   author: string;
   source: string | null;
-  type: 'user' | 'result' | string;
+  type: 'user' | 'harness' | 'result' | string;
   created_at: string;
   snippet: MessageSnippet;
 };

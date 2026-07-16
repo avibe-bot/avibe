@@ -629,7 +629,9 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
     conn.execute(
         "create index ix_messages_inbox_user_send "
         "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and author = 'user' and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
+        "where session_id is not null and "
+        "((author = 'user' and type = 'user') or "
+        "(author = 'harness' and type = 'harness'))"
     )
 
 

@@ -561,6 +561,7 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 
 QUEUED_TYPE = "queued"
 HARNESS_TYPE = "harness"
+INPUT_TURN_AUTHOR_TYPES = (("user", "user"), ("harness", HARNESS_TYPE))
 DRAFT_TYPE = "draft"
 # A reserved-but-not-yet-accepted user row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
@@ -859,9 +860,9 @@ def list_inbox_sessions(
     session's most recent message of *any* author (the activity clock),
     descending. The preview text is the session's latest *agent* reply
     (distinct from the sort key). ``replied`` is True when the session is
-    *awaiting the agent* — the user's latest message is newer than the agent's
-    latest reply — so it stays set for the whole time the agent is working and
-    survives a reload, clearing only once the agent replies.
+    *awaiting the agent* — the latest human or harness input is newer than the
+    agent's latest reply — so it stays set for the whole time the agent is
+    working and survives a reload, clearing only once the agent replies.
 
     Keyset pagination via ``before`` (an opaque ``"<last_activity_at>|<session_id>"``
     cursor returned as ``next_cursor``).
@@ -873,6 +874,7 @@ def list_inbox_sessions(
         author: Optional[str] = None,
         types: Optional[tuple[str, ...]] = None,
         conversation_only: bool = False,
+        input_turn_only: bool = False,
     ) -> Any:
         msg = messages.alias()
         query = (
@@ -888,6 +890,15 @@ def list_inbox_sessions(
             query = query.where(msg.c.author == author)
         if types is not None:
             query = query.where(msg.c.type.in_(types))
+        if input_turn_only:
+            query = query.where(
+                or_(
+                    *(
+                        and_(msg.c.author == input_author, msg.c.type == input_type)
+                        for input_author, input_type in INPUT_TURN_AUTHOR_TYPES
+                    )
+                )
+            )
         if conversation_only:
             query = query.where(msg.c.type.notin_(NON_CONVERSATION_TYPES))
         return query.scalar_subquery()
@@ -899,8 +910,10 @@ def list_inbox_sessions(
     last_author = _latest_message_value("author", conversation_only=True)
     preview_id = _latest_message_value("id", types=("result", "notify", "error"))
     preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
-    last_user_at = _latest_message_value("created_at", author="user", conversation_only=True)
-    last_user_id = _latest_message_value("id", author="user", conversation_only=True)
+    last_input_at = _latest_message_value(
+        "created_at", conversation_only=True, input_turn_only=True
+    )
+    last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
 
     # Unread agent messages per session.
     m = messages
@@ -929,8 +942,8 @@ def list_inbox_sessions(
             unread_count_col,
             preview_id.label("preview_id"),
             preview_at.label("preview_at"),
-            last_user_at.label("last_user_at"),
-            last_user_id.label("last_user_id"),
+            last_input_at.label("last_input_at"),
+            last_input_id.label("last_input_id"),
         )
         .select_from(
             agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True).join(
@@ -986,23 +999,23 @@ def list_inbox_sessions(
             except json.JSONDecodeError:
                 preview = ""
         unread = int(row["unread_count"] or 0)
-        # Awaiting the agent: the user's latest message is newer than the agent's
-        # latest reply. Persistent across a reload and stays set for the whole
-        # agent turn, unlike a "last author == user" check. ``created_at`` is
+        # Awaiting the agent: the latest human or harness input is newer than the
+        # agent's latest reply. Persistent across a reload and stays set for the whole
+        # agent turn, unlike a literal "last author" check. ``created_at`` is
         # second-resolution, so compare ``(created_at, id)`` tuples — the message
         # id carries a microsecond-clock prefix (see ``_new_message_id``), giving
         # the right order for a follow-up sent in the same second as the prior
         # reply.
-        last_user_at = row["last_user_at"]
-        last_user_id = row["last_user_id"]
+        last_input_at = row["last_input_at"]
+        last_input_id = row["last_input_id"]
         preview_at = row["preview_at"]
         preview_id = row["preview_id"]
         awaiting_reply = bool(
-            last_user_at is not None
+            last_input_at is not None
             and preview_at is not None
             and (
-                last_user_at > preview_at
-                or (last_user_at == preview_at and (last_user_id or "") > (preview_id or ""))
+                last_input_at > preview_at
+                or (last_input_at == preview_at and (last_input_id or "") > (preview_id or ""))
             )
         )
         sessions.append(

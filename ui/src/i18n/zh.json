@@ -1043,6 +1043,7 @@
     },
     "search": {
       "roleYou": "你",
+      "roleAutomated": "自动触发",
       "roleAgent": "助手",
       "title": "搜索",
       "entry": "搜索",

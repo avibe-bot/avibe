@@ -2101,12 +2101,13 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
     assert sqlite_store.defer_run_terminal(
         request.id,
         terminal_status="succeeded",
+        result_text="terminal delegated result",
     ) is True
 
     first = sqlite_store.record_run_output(
         request.id,
-        output_id="output-1",
-        text="intermediate activity output",
+        output_id="terminal-output",
+        text="terminal delegated result",
         sequence=1,
         provenance={"run_id": request.id},
     )
@@ -2122,8 +2123,8 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
 
     second = sqlite_store.record_run_output(
         request.id,
-        output_id="output-2",
-        text="terminal delegated result",
+        output_id="activity-output",
+        text="background activity completion",
         sequence=2,
         provenance={"run_id": request.id},
         terminal_status="succeeded",
@@ -2134,8 +2135,8 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
 
     duplicate = sqlite_store.record_run_output(
         request.id,
-        output_id="output-2",
-        text="terminal delegated result",
+        output_id="activity-output",
+        text="background activity completion",
         sequence=2,
         provenance={"run_id": request.id},
         terminal_status="succeeded",
@@ -2152,10 +2153,11 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
     assert original["completed_at"] == completed_at
     assert original["callback_status"] == "sent"
     assert "deferred_terminal_status" not in original["result_payload"]
+    assert "deferred_terminal_result_text" not in original["result_payload"]
     assert original["result_text"] == "terminal delegated result"
     assert [item["id"] for item in original["result_payload"]["outputs"]] == [
-        "output-1",
-        "output-2",
+        "terminal-output",
+        "activity-output",
     ]
 
     callback_runs = [

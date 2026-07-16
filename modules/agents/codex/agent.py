@@ -19,7 +19,7 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import terminal_output_for
-from core.services.session_fork import fork_source_state, pending_native_fork
+from core.services.session_fork import fork_source_state, is_input_turn, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
@@ -927,13 +927,10 @@ class CodexAgent(BaseAgent):
         source_state = fork_source_state(fork)
         if source_state.anchor_is_terminal_agent_output:
             return False
-        anchor_is_running_input = (
+        anchor_is_running_input = is_input_turn(
             getattr(source_state, "anchor_author", None),
             getattr(source_state, "anchor_type", None),
-        ) in {
-            ("user", "user"),
-            ("harness", "harness"),
-        }
+        )
         if getattr(source_state, "has_input_turn_after_anchor", False):
             return False
         if anchor_is_running_input:
