@@ -298,8 +298,10 @@ export const ChatPage: React.FC = () => {
   const [working, setWorking] = useState(false);
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>(emptyRuntimeState);
   // Global background-work banner toggle (spec req 2), persisted server-side.
-  // Default ON; the banner never renders when the owner turns it off in Harness.
-  const [bannerEnabled, setBannerEnabled] = useState(true);
+  // Tri-state: null = not yet known → suppress the banner so a stored "off"
+  // never flashes on first paint; resolves to the stored value (ON when absent),
+  // or ON on a fetch error so a transient failure can't hide live work.
+  const [bannerEnabled, setBannerEnabled] = useState<boolean | null>(null);
   // Bumped on resume (tab visible again / network back) to force the transcript
   // subscription effect to reopen a possibly-dead SSE stream — see the
   // visibility effect below.
@@ -388,7 +390,7 @@ export const ChatPage: React.FC = () => {
         if (!cancelled) setBannerEnabled(prefs?.background_work_banner_enabled !== false);
       })
       .catch(() => {
-        /* keep default ON */
+        if (!cancelled) setBannerEnabled(true); // default ON on error
       });
     return () => {
       cancelled = true;
@@ -1549,7 +1551,7 @@ export const ChatPage: React.FC = () => {
             ) : null
           }
         />
-        <ActivityStrip state={runtimeState} sessionId={sessionId ?? ''} enabled={bannerEnabled} />
+        <ActivityStrip state={runtimeState} sessionId={sessionId ?? ''} enabled={bannerEnabled === true} />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         {sessionId && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
@@ -1824,6 +1826,10 @@ const ActivityStrip: React.FC<{
               side="top"
               align="start"
               sideOffset={8}
+              // Spec req 1: anchor to the pill's top edge and never open downward
+              // (a downward flip would cover the composer). Disable Radix
+              // collision flipping so the popover stays above even when zoomed.
+              avoidCollisions={false}
               className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border-border-strong p-0 shadow-lg"
             >
               <div className="flex max-h-[300px] flex-col gap-0.5 overflow-y-auto p-1">

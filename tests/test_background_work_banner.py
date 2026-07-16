@@ -64,6 +64,9 @@ def _insert_run(engine, **overrides) -> str:
         "prompt": None,
         "session_id": None,
         "callback_session_id": None,
+        # Async delegated runs carry a pending callback while running; the banner
+        # only surfaces these (sync --sync runs leave callback_status null).
+        "callback_status": "pending",
         "created_at": _NOW,
         "started_at": _NOW,
         "updated_at": _NOW,
@@ -173,6 +176,23 @@ def test_self_run_is_not_counted_as_dispatched_work(tmp_path: Path):
     engine, _ = _make_engine(tmp_path)
     _insert_run(
         engine, id="r-self", callback_session_id="ses-1", session_id="ses-1"
+    )
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-1")
+    assert items == []
+
+
+def test_sync_run_without_pending_callback_is_excluded(tmp_path: Path):
+    # A synchronous ``--sync`` delegated run carries callback_session_id but a
+    # null callback_status (caller waits inline; no callback owed), so it is NOT
+    # background work this session is waiting on.
+    engine, _ = _make_engine(tmp_path)
+    _insert_run(
+        engine,
+        id="r-sync",
+        callback_session_id="ses-1",
+        session_id="ses-delegate",
+        callback_status=None,
     )
     with engine.connect() as conn:
         items = derive_session_harness_activities(conn, "ses-1")

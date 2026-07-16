@@ -2235,6 +2235,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getWorkbenchPrefs: () => getCachedJson('/api/workbench/prefs', 5_000),
     setBackgroundWorkBannerEnabled: async (enabled) => {
+      // Default handleError:true — a non-2xx (auth/CSRF/server) throws so the
+      // caller reverts its optimistic switch instead of diverging from the
+      // persisted value.
       const { payloadJson } = await requestJson(
         '/api/workbench/prefs',
         {
@@ -2243,7 +2246,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           body: JSON.stringify({ background_work_banner_enabled: enabled }),
         },
         'PUT /api/workbench/prefs',
-        { handleError: false },
       );
       return payloadJson;
     },

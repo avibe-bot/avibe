@@ -737,9 +737,12 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
     # and it is not yet terminal. ``run_type='agent_run'`` excludes task/watch
     # execution runs (already represented by their definitions above); the
     # self-run guard keeps a session's OWN foreground turn — reported via
-    # ``foreground``, not the banner — out of the union. Active-run cardinality
-    # is small, so the (run_type, status) index carries this without a dedicated
-    # ``callback_session_id`` index.
+    # ``foreground``, not the banner — out of the union. ``callback_status =
+    # 'pending'`` further limits this to async/detached runs that will actually
+    # post back: a synchronous ``--sync`` run carries ``callback_session_id`` but
+    # a null ``callback_status`` (the caller is waiting inline, no callback owed).
+    # Active-run cardinality is small, so the (run_type, status) index carries
+    # this without a dedicated ``callback_session_id`` index.
     run_rows = (
         conn.execute(
             select(
@@ -755,6 +758,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             )
             .where(agent_runs.c.callback_session_id == session_id)
             .where(agent_runs.c.run_type == "agent_run")
+            .where(agent_runs.c.callback_status == "pending")
             .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
             .where(
                 or_(
