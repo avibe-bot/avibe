@@ -70,6 +70,7 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
 // the same rows the initial load shows (assistant / tool_call are process log).
 const isTranscriptMessage = (msg: WorkbenchMessage): boolean =>
   msg.type === 'user' ||
+  msg.type === 'harness' ||
   msg.type === 'result' ||
   msg.type === 'error' ||
   msg.type === 'notify' ||
@@ -2471,8 +2472,8 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   const isNotify = isNotifyMessageType(message.type);
   const isAgent = !isNotify && message.author === 'agent';
   const isSystem = !isNotify && message.author === 'system';
-  // A harness-origin row is a user-role prompt the human didn't type (scheduled
-  // task / watch / webhook); collapsed by default so it doesn't dominate.
+  // A harness-origin row is turn input the human didn't type (scheduled task /
+  // watch / webhook); collapsed by default so it doesn't dominate.
   const isHarness = !isNotify && !isAgent && !isSystem && message.source === 'harness';
   const isUser = !isNotify && !isAgent && !isSystem && !isHarness;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };

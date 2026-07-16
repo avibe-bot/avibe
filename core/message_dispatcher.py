@@ -1051,23 +1051,6 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to inspect owned Activities for Run %s", run_id, exc_info=True)
             return True
 
-    def _forward_agent_run_outputs(
-        self,
-        run_ids: list[str],
-        *,
-        raise_on_error: bool = False,
-    ) -> None:
-        service = getattr(self.controller, "scheduled_task_service", None)
-        forward = getattr(service, "forward_run_outputs", None)
-        if not callable(forward):
-            return
-        try:
-            forward(run_ids)
-        except Exception:
-            logger.warning("Failed to forward Agent Run outputs for %s", ",".join(run_ids), exc_info=True)
-            if raise_on_error:
-                raise
-
     def _record_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -1119,11 +1102,6 @@ class ConsolidatedMessageDispatcher:
         finally:
             if store is not None:
                 store.close()
-        self._forward_agent_run_outputs(
-            run_ids,
-            raise_on_error=require_confirmation,
-        )
-
     def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,

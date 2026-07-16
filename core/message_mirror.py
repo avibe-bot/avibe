@@ -349,12 +349,11 @@ def agent_message_exists(context: MessageContext, native_message_id: str | None)
 def mirror_harness_inbound(context: MessageContext, text: str) -> None:
     """Record a harness-originated prompt (scheduled task / watch / webhook).
 
-    Harness turns inject a *user-role* prompt into a session that the human
-    never typed, so the row is ``author='user'`` (the agent reads it as user
-    input) but ``source='harness'`` — the transcript can then mark it as
-    triggered by a scheduled task / watch instead of the user. ``author_name``
-    carries the trigger kind (scheduled / watch / webhook / ...) and
-    ``author_id`` the run-definition id, per the provenance spec.
+    The backend consumes the prompt as turn input, but the persisted row must
+    not claim the human authored it. ``author`` and ``type`` therefore use the
+    first-class harness role while ``source='harness'`` preserves provenance.
+    ``author_name`` carries the trigger kind (scheduled / watch / webhook / ...)
+    and ``author_id`` the run-definition id, per the provenance spec.
 
     Unlike :func:`mirror_inbound` this *does* cover avibe: no REST endpoint
     writes the harness prompt, so without this the workbench transcript would
@@ -406,11 +405,11 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
                 scope_id=scope_id,
                 session_id=row_session_id,
                 platform=context.platform,
-                author="user",
+                author="harness",
                 source="harness",
                 author_name=trigger_kind,
                 author_id=definition_id,
-                message_type="user",
+                message_type=messages_service.HARNESS_TYPE,
                 text=text,
                 native_message_id=context.message_id,
                 parent_native_message_id=context.thread_id,

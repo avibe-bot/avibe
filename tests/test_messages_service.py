@@ -254,6 +254,42 @@ def test_error_terminal_in_transcript_but_not_unread(isolated_state):
     assert unread.get(scope_id, 0) == 0
 
 
+def test_harness_prompt_is_visible_but_not_treated_as_user_text(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "harness",
+            "scheduled input",
+            "2026-05-30T10:00:00Z",
+            msg_type=messages_service.HARNESS_TYPE,
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "user",
+            "human input",
+            "2026-05-30T10:00:01Z",
+            msg_type="user",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_harness",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
+        first_user = messages_service.first_user_text(conn, "ses_harness")
+
+    assert [message["type"] for message in transcript["messages"]] == ["harness", "user"]
+    assert first_user == "human input"
+
+
 def test_same_second_messages_order_by_insertion(isolated_state):
     """Rows sharing a (second-resolution) created_at still order by insertion in
     the transcript: the monotonic message id breaks the ``(created_at, id)`` tie,

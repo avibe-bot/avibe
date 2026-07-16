@@ -1306,11 +1306,6 @@ class SQLiteBackgroundTaskStore:
                 recorded = True
                 payload_changed = True
 
-            existing_text = str(row["result_text"] or "")
-            if recorded:
-                result_text = f"{existing_text}\n\n{visible_text}" if existing_text else visible_text
-            else:
-                result_text = existing_text
             message_ids = _json_loads(row["message_ids_json"], [])
             if not isinstance(message_ids, list):
                 message_ids = []
@@ -1323,10 +1318,7 @@ class SQLiteBackgroundTaskStore:
                     "updated_at": now,
                 }
                 if recorded:
-                    values.update(
-                        result_text=result_text,
-                        message_ids_json=_json_dumps(message_ids),
-                    )
+                    values["message_ids_json"] = _json_dumps(message_ids)
                 conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
@@ -1335,6 +1327,9 @@ class SQLiteBackgroundTaskStore:
             if effective_terminal_status:
                 terminal_values: dict[str, Any] = {
                     "status": normalize_run_status(effective_terminal_status),
+                    # Structured outputs remain available in result_payload, but
+                    # result_text is the one terminal result used by callbacks.
+                    "result_text": visible_text,
                     "completed_at": now,
                     "updated_at": now,
                 }
@@ -1493,7 +1488,7 @@ class SQLiteBackgroundTaskStore:
         parent_run_id: str,
         source_actor: str,
     ) -> Optional[dict[str, Any]]:
-        """Return the callback Run for one structured parent-output identity."""
+        """Return the callback Run for one parent callback identity."""
 
         with self.engine.connect() as conn:
             row = conn.execute(
@@ -1502,6 +1497,28 @@ class SQLiteBackgroundTaskStore:
                 .where(agent_runs.c.source_kind == "callback")
                 .where(agent_runs.c.parent_run_id == parent_run_id)
                 .where(agent_runs.c.source_actor == source_actor)
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).mappings().first()
+            return self._run_from_row(row) if row else None
+
+    def find_explicit_session_delivery(
+        self,
+        *,
+        parent_run_id: str,
+        session_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return a child Agent Run explicitly delivered to the callback Session."""
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.run_type == "agent_run")
+                .where(agent_runs.c.source_kind == "agent")
+                .where(agent_runs.c.parent_run_id == parent_run_id)
+                .where(agent_runs.c.session_id == session_id)
+                .where(agent_runs.c.message.is_not(None))
+                .where(func.length(func.trim(agent_runs.c.message)) > 0)
                 .order_by(agent_runs.c.created_at, agent_runs.c.id)
                 .limit(1)
             ).mappings().first()

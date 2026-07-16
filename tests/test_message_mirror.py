@@ -597,9 +597,9 @@ def test_persist_agent_sets_source_and_agent_name(isolated_state):
 
 
 def test_harness_inbound_avibe_session_scoped(isolated_state):
-    """A scheduled/watch turn on an avibe session lands an author='user',
-    source='harness' row attributed to the session — with author_name = the
-    trigger kind and author_id = the run-definition id (the provenance spec).
+    """A scheduled/watch turn on an avibe session lands an author/type='harness'
+    row attributed to the session — with author_name = the trigger kind and
+    author_id = the run-definition id (the provenance spec).
     No REST endpoint writes this, so the mirror must cover avibe here."""
     engine = create_sqlite_engine()
     now = "2026-05-30T12:00:00Z"
@@ -640,11 +640,11 @@ def test_harness_inbound_avibe_session_scoped(isolated_state):
             select(messages).where(messages.c.session_id == "ses_harness")
         ).mappings().first()
     assert row is not None
-    assert row["author"] == "user"  # agent reads it as user input
-    assert row["source"] == "harness"  # but origin is the harness
+    assert row["author"] == "harness"
+    assert row["source"] == "harness"
     assert row["author_name"] == "watch"
     assert row["author_id"] == "def_42"
-    assert row["type"] == "user"
+    assert row["type"] == "harness"
     assert row["content_text"] == "the watched condition fired"
 
 
@@ -669,7 +669,8 @@ def test_harness_inbound_im_scope_keyed(isolated_state):
     with engine.connect() as conn:
         row = conn.execute(select(messages).where(messages.c.platform == "slack")).mappings().first()
     assert row["source"] == "harness"
-    assert row["author"] == "user"
+    assert row["author"] == "harness"
+    assert row["type"] == "harness"
     assert row["author_name"] == "scheduled"
     assert row["author_id"] == "def_7"
     assert row["session_id"] is None
@@ -725,6 +726,8 @@ def test_harness_inbound_avibe_publishes_message_new(isolated_state):
     assert event_type == "message.new"
     assert data["session_id"] == "ses_hp"
     assert data["source"] == "harness"
+    assert data["author"] == "harness"
+    assert data["type"] == "harness"
     assert data["author_name"] == "scheduled"
     assert data["text"] == "nightly digest"
 

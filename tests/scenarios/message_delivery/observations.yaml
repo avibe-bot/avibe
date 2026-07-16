@@ -1,3 +1,15 @@
 version: 1
 capability: message_delivery
-observations: []
+observations:
+  - id: OBS-MESSAGE-DELIVERY-001
+    source: live_local_diagnosis
+    related_scenarios:
+      - MESSAGE-DELIVERY-005
+    summary: Structured Run output fan-out injected Activity summaries and duplicate finals into the callback Session.
+    previous_assumption: Every user-visible full-duplex Run output should become its own callback turn.
+    observed_behavior: Callback Sessions received Claude Activity labels, command fragments, and both explicit and automatic copies of the final report.
+    required_updates:
+      - retain intermediate outputs only in the Run output ledger and originating Session
+      - keep result_text terminal-only and enqueue one terminal callback
+      - treat an explicit child delivery to the callback Session as satisfying the automatic callback
+      - persist harness-originated prompts with a non-user author and message type

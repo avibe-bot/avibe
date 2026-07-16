@@ -560,6 +560,7 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 # unread queries are all type-filtered, so neither leaks into the conversation.
 
 QUEUED_TYPE = "queued"
+HARNESS_TYPE = "harness"
 DRAFT_TYPE = "draft"
 # A reserved-but-not-yet-accepted user row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
@@ -578,13 +579,14 @@ NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
 # gate, so what a page loads and what it receives over the stream are identical.
 # Excludes the agent's process log (``assistant`` / ``tool_call``) and ``system``
-# (which isn't persisted at all). Harness-triggered prompts are ``user``, so they
-# are included. ``show_page`` transcript marks are kept via a metadata-source
+# (which isn't persisted at all). Harness-triggered prompts have their own type
+# so they cannot be mistaken for human input. ``show_page`` transcript marks are
+# kept via a metadata-source
 # override in the fetch even though their row type is ``assistant``. ``error`` is a
 # terminal FAILED result (turned the dot red): shown in the conversation like any
 # terminal message, but the unread queries below stay ``result``-only so a failure
 # is not counted as an unread agent reply.
-TRANSCRIPT_TYPES = ("user", "result", "notify", "error")
+TRANSCRIPT_TYPES = ("user", HARNESS_TYPE, "result", "notify", "error")
 
 
 def enqueue_queued(
