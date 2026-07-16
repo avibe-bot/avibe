@@ -292,3 +292,4 @@ Testing guidance:
 - GitHub-only pre-releases should use the `gh-vX.Y.ZrcN` format (for example `gh-v2.2.8rc2`) so they stay distinct from PyPI-triggering `v*` tags
 - GitHub-only pre-releases must include installable artifacts in the GitHub release assets: a wheel built with `ui/dist` and bundled `vibe/show_runtime/*.tgz`, plus the sdist
 - releases are published automatically by workflow after tagging/push
+- Published managed-runtime manifests are availability contracts. Keep their release URLs under a scheduled manifest-verified backup/recovery guard, and publish the new assets before changing a pinned manifest so the guard never restores bytes from a different release.

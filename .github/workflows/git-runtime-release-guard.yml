@@ -1,0 +1,114 @@
+name: Guard Git Runtime release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "vibe/git_runtime_manifest.json"
+      - "scripts/git_runtime_release_guard.py"
+      - ".github/workflows/git-runtime-release-guard.yml"
+  schedule:
+    - cron: "17 */6 * * *"
+    - cron: "47 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: git-runtime-release-guard
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Verify and recover pinned assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and verify published assets
+        id: probe
+        continue-on-error: true
+        run: |
+          python3 scripts/git_runtime_release_guard.py fetch \
+            --output-dir "$RUNNER_TEMP/git-runtime-release"
+
+      - name: Recover from the latest verified backup
+        if: steps.probe.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_sha="$(sha256sum vibe/git_runtime_manifest.json | cut -d' ' -f1)"
+          artifact_name="git-runtime-release-backup-$manifest_sha"
+          mapfile -t backup_runs < <(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow git-runtime-release-guard.yml \
+              --status success \
+              --limit 50 \
+              --json databaseId \
+              --jq '.[].databaseId'
+          )
+          backup_run=""
+
+          restore_dir="$RUNNER_TEMP/git-runtime-restore"
+          for candidate_run in "${backup_runs[@]}"; do
+            rm -rf "$restore_dir"
+            mkdir -p "$restore_dir"
+            if gh run download "$candidate_run" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact_name" \
+              --dir "$restore_dir"; then
+              backup_run="$candidate_run"
+              break
+            fi
+          done
+          if [ -z "$backup_run" ]; then
+            echo "::error::No verified backup is available for manifest $manifest_sha."
+            exit 1
+          fi
+          python3 scripts/git_runtime_release_guard.py verify \
+            --asset-dir "$restore_dir"
+
+          release_tag="$(jq -er '.release_tag' vibe/git_runtime_manifest.json)"
+          git_version="$(jq -er '.git_version' vibe/git_runtime_manifest.json)"
+          release_revision="${release_tag##*-}"
+          assets=("$restore_dir"/*)
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "${assets[@]}"
+          else
+            gh release create "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --latest=false \
+              --title "Avibe local-only Git runtime $git_version (build $release_revision)" \
+              --notes "Avibe-managed local-only Git runtime recovered from a manifest-verified backup." \
+              "${assets[@]}"
+          fi
+
+      - name: Verify recovered release
+        if: steps.probe.outcome == 'failure'
+        run: |
+          python3 scripts/git_runtime_release_guard.py fetch \
+            --output-dir "$RUNNER_TEMP/git-runtime-release"
+
+      - name: Preserve verified release backup
+        if: >-
+          github.event_name != 'schedule' ||
+          github.event.schedule == '47 4 * * 0' ||
+          steps.probe.outcome == 'failure'
+        uses: actions/upload-artifact@v6
+        with:
+          name: git-runtime-release-backup-${{ hashFiles('vibe/git_runtime_manifest.json') }}
+          path: ${{ runner.temp }}/git-runtime-release
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
