@@ -129,7 +129,7 @@ the right-side send/stop button.
 - Reuses 100% of `core/audio_asr.py` + Vibe Cloud device-secret auth.
 - Button gated on Vibe Cloud pairing (D3); disabled + hint otherwise.
 - **Backend (already deployed):** the ASR endpoint `POST /v1/audio/transcriptions`
-  is live on `vibe-remote-backend` `main` (PR #32, merged 2026-05-19; the
+  is live on `avibe-backend` `main` (PR #32, merged 2026-05-19; the
   DashScope/Qwen key lives server-side in Vercel Production). It authenticates
   with the paired device's `X-Vibe-Instance-Id` / `X-Vibe-Device-Secret` and
   requires the device tunnel to be running (else `409 tunnel_not_running`) —
