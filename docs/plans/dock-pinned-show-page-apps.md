@@ -735,6 +735,30 @@ press target must remain a filling non-interactive child (icon `<img
 draggable={false}>` without `pointer-events-none`, letter wrapped in a filling `<span>`);
 see the invariant comment in `showPageAvatarTile.tsx` (§7.1i forensics).
 
+### 7.1l Shared Show-Pages inventory cache (owner 2026-07-17 00:11 — duplicate fetches + icon flash)
+
+Owner-observed symptoms on rc5: opening the Library/Dock fires **two identical
+`/api/show-pages` requests**, and app icons **flash** (letter avatar first, real icon after a
+delay) on every open. Root cause (code-confirmed): `useShowPageInventory` is per-mount
+state — five consumers (Dock, WindowLayer, MobileDockDrawer, ⌘K search, Library) each own an
+instance, each fetches on mount AND on events-(re)connect, and each starts from `pages=[]` so
+tiles paint letters until the metadata roundtrip completes. The icon FILES are already
+strongly cached (content-token + immutable, §7.1f) — the flash is metadata latency, not image
+download. This is the shared-inventory-context promotion deferred by rule-of-three at #903;
+five consumers now exist.
+
+Fix (structural):
+- ONE workbench-wide shared inventory store/provider: single source of truth, ONE
+  workbench-events subscription, single-flight fetch dedup (at most one `/api/show-pages`
+  in flight, concurrent requesters share the promise).
+- Stale-while-revalidate: consumers render the last-known inventory instantly (icons render
+  immediately from cached `icon_version` — no flash within a session) and a background
+  refresh reconciles. First-ever load still letter→icon (acceptable).
+- Consumer hook API stays as-is or shrinks (adapter over the store); mutation helpers
+  (mergePage/removePage/replaceTitleIfCurrent/reload) keep their semantics against the
+  shared store. ShowPageShareControl's separate usage joins the same store.
+- No backend changes; icon endpoint caching unchanged.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:
