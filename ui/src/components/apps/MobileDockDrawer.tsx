@@ -172,11 +172,19 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                   className="flex select-none flex-col items-center gap-1.5"
                 >
                   <span
-                    className="grid size-14 place-items-center overflow-hidden rounded-2xl border text-[20px] font-bold leading-none"
+                    className="grid size-14 place-items-center overflow-hidden rounded-2xl text-[20px] font-bold leading-none"
                     style={{
                       color: `var(${accentVar})`,
                       backgroundColor: `color-mix(in srgb, var(${accentVar}) ${item.kind === 'builtin' ? 14 : 16}%, transparent)`,
-                      borderColor: `color-mix(in srgb, var(${accentVar}) ${item.kind === 'builtin' ? 30 : 34}%, transparent)`,
+                      // §7.1k sweep: pinned Show Page tiles are borderless (the per-session
+                      // accent border was the owner's noise, matching the desktop Dock);
+                      // built-in tiles keep a subtle fixed-accent border. The tile keeps its
+                      // existing 20px radius (mobile tiles are larger than desktop's 40px, so
+                      // the 12px desktop-tile unification does not apply here).
+                      border:
+                        item.kind === 'builtin'
+                          ? `1px solid color-mix(in srgb, var(${accentVar}) 30%, transparent)`
+                          : undefined,
                     }}
                   >
                     {Icon ? (

@@ -276,11 +276,13 @@ export const AppWindow: React.FC<{
           {showpageSid && showpageAvatar ? (
             <span
               aria-hidden
-              className="grid size-4 shrink-0 place-items-center overflow-hidden rounded-[4px] border text-[10px] font-bold leading-none"
+              // §7.1k sweep: borderless — the per-session accent border was the noise the
+              // owner flagged. Keep the 16% tint + accent letter color and the chip's own
+              // 4px radius (a small title-bar chip; the 12px tile unification is not for it).
+              className="grid size-4 shrink-0 place-items-center overflow-hidden rounded-[4px] text-[10px] font-bold leading-none"
               style={{
                 color: `var(${showpageAvatar.accentVar})`,
                 backgroundColor: `color-mix(in srgb, var(${showpageAvatar.accentVar}) 16%, transparent)`,
-                borderColor: `color-mix(in srgb, var(${showpageAvatar.accentVar}) 34%, transparent)`,
               }}
             >
               <ShowPageAvatarContent iconUrl={showPageIconUrl(showpageSid, iconVersion)} letter={showpageAvatar.letter} />

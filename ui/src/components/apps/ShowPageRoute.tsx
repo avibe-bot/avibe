@@ -7,6 +7,7 @@ import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { showPageAvatar, showPagePrivatePath } from '../../apps/showPageAvatar';
+import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 
 // The `/apps/show/:sessionId` route — a pinned Show Page opened as an app on the
 // current surface. Desktop keeps windows (mirrors LibraryRoute): focus an
@@ -122,14 +123,18 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
         {avatar && (
           <span
             aria-hidden
-            className="grid size-7 shrink-0 place-items-center rounded-lg border text-[13px] font-bold leading-none"
+            // §7.1k sweep: borderless — the per-session accent border removed. Keep the 16%
+            // tint + accent letter color and the header's existing 12px radius. Routes the
+            // avatar through the shared ShowPageAvatarContent chokepoint (letter-only here:
+            // this header loads the session, not the icon inventory, so it has no favicon
+            // — §7.1f — but it now shares the one render path if that changes).
+            className="grid size-7 shrink-0 place-items-center overflow-hidden rounded-lg text-[13px] font-bold leading-none"
             style={{
               color: `var(${avatar.accentVar})`,
               backgroundColor: `color-mix(in srgb, var(${avatar.accentVar}) 16%, transparent)`,
-              borderColor: `color-mix(in srgb, var(${avatar.accentVar}) 34%, transparent)`,
             }}
           >
-            {avatar.letter}
+            <ShowPageAvatarContent iconUrl={null} letter={avatar.letter} />
           </span>
         )}
         <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">{label}</span>
