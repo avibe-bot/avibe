@@ -821,11 +821,11 @@ class ClaudeAgent(BaseAgent):
                             detached_text = self._detached_assistant_text.get(
                                 composite_key
                             )
-                            if detached_text and self._terminal_backend_failure(
+                            result_text = self._select_detached_result_text(
                                 message,
                                 raw_result_text,
-                            ) is None:
-                                result_text = detached_text
+                                detached_text,
+                            )
                             self._detached_assistant_text.pop(composite_key, None)
                             try:
                                 await self._emit_activity_result(
@@ -854,15 +854,16 @@ class ClaudeAgent(BaseAgent):
                             # own backend query and liveness/timeout path.
                             self._mark_session_idle_if_runtime_free(composite_key)
                             self._signal_activity_output_settled(composite_key)
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
                             continue
                         if output_mode == "detached":
                             detached_text = self._detached_unsolicited_text.get(
                                 composite_key
                             )
-                            if detached_text:
-                                result_text = detached_text
+                            result_text = self._select_detached_result_text(
+                                message,
+                                raw_result_text,
+                                detached_text,
+                            )
                             self._detached_unsolicited_text.pop(composite_key, None)
                             self._detached_unsolicited_outputs.discard(composite_key)
                             if result_text:
@@ -874,8 +875,6 @@ class ClaudeAgent(BaseAgent):
                                     parse_mode="markdown",
                                     output=self._unsolicited_message_output(message),
                                 )
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
                             continue
                         self._pending_assistant_message.pop(composite_key, None)
                         if self._consume_suppressed_synthetic_result(
@@ -1349,13 +1348,14 @@ class ClaudeAgent(BaseAgent):
 
     @staticmethod
     def _adopt_pending_turn_token(context: MessageContext, pending_request: Optional[AgentRequest]) -> None:
-        """Copy the pending turn tokens onto the reused receiver context.
+        """Copy pending Turn identity onto the reused receiver context.
 
         Claude runs one long-lived receiver per runtime session, so the context
         captured when it started can carry an older turn's tokens. The web stream
         guard uses ``turn_token`` and the shared backend runtime gate uses
         ``agent_runtime_turn_token``; both must follow the FIFO-matched pending
-        request before any assistant/tool/result emit.
+        request before any assistant/tool/result emit. Harness Run attribution is
+        Turn-scoped too, so replace it rather than leaking a prior receiver turn.
         """
         if pending_request is None:
             return
@@ -1364,7 +1364,12 @@ class ClaudeAgent(BaseAgent):
         token = src_payload.get(AGENT_TURN_TOKEN)
         runtime_key = src_payload.get(AGENT_RUNTIME_TURN_KEY)
         runtime_token = src_payload.get(AGENT_RUNTIME_TURN_TOKEN)
-        if not (token or runtime_key or runtime_token):
+        attribution_keys = ("task_trigger_kind", "task_execution_id", "coalesced_queue")
+        current_payload = getattr(context, "platform_specific", None) or {}
+        updates_attribution = any(
+            key in src_payload or key in current_payload for key in attribution_keys
+        )
+        if not (token or runtime_key or runtime_token or updates_attribution):
             return
         if context.platform_specific is None:
             context.platform_specific = {}
@@ -1374,6 +1379,17 @@ class ClaudeAgent(BaseAgent):
             context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
         if runtime_token:
             context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = runtime_token
+        for key in attribution_keys:
+            if key not in src_payload:
+                context.platform_specific.pop(key, None)
+                continue
+            value = src_payload[key]
+            if isinstance(value, dict):
+                value = dict(value)
+                execution_ids = value.get("execution_ids")
+                if isinstance(execution_ids, list):
+                    value["execution_ids"] = list(execution_ids)
+            context.platform_specific[key] = value
 
     def _retire_failed_auth_turn(self, composite_key: str, context: MessageContext) -> None:
         """Retire a terminal auth-failure turn from the pending FIFO.
@@ -1594,6 +1610,20 @@ class ClaudeAgent(BaseAgent):
         if composite_key in self._turns_with_foreground_tools:
             return ""
         return str(sdk_result or "")
+
+    def _select_detached_result_text(
+        self,
+        message,
+        sdk_result: str | None,
+        assistant_text: str | None,
+    ) -> str | None:
+        """Prefer assistant text unless a detached Result carries a real failure."""
+
+        if not assistant_text:
+            return sdk_result
+        if not sdk_result or self._terminal_backend_failure(message, sdk_result) is None:
+            return assistant_text
+        return sdk_result
 
     def _current_turn_id(
         self,

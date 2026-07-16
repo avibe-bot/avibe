@@ -904,6 +904,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_foreground_tool_activity_waits_for_result_and_uses_assistant_text(self):
         agent, service = _build_agent()
+        agent._adopt_pending_turn_token = ClaudeAgent._adopt_pending_turn_token
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
         formatter = SimpleNamespace(
             escape_special_chars=lambda text: text.replace("`", "\\`").replace(
@@ -914,7 +915,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             format_toolcall_label=lambda *_args, **_kwargs: "Push branch, confirm repo",
         )
         agent._get_formatter = lambda _context: formatter
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        emitted_provenance = []
+
+        async def _emit_result(context, _text, *, request=None, output=None, **_kwargs):
+            semantics = output or terminal_output_for(request)
+            emitted_provenance.append(semantics.provenance(context))
+            return "message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
         composite_key = "session-foreground-bash:/tmp/work"
         origin_context = SimpleNamespace(
             platform_specific={
@@ -978,6 +986,102 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(agent._pending_requests[composite_key], [queued_request])
+        self.assertEqual(emitted_provenance[0]["run_id"], "run-origin")
+
+    async def test_detached_unsolicited_error_keeps_sdk_failure_text(self):
+        agent, _service = _build_agent()
+        composite_key = "session-detached-unsolicited-error:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-unsolicited-error"}
+        )
+        agent._detached_unsolicited_outputs.add(composite_key)
+        agent._detached_unsolicited_text[composite_key] = "Earlier assistant text"
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        class ResultMessage:
+            subtype = "error_during_execution"
+            result = "Bash exited with status 1"
+            duration_ms = 1
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-detached-unsolicited-error",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            "Bash exited with status 1",
+        )
+
+    async def test_detached_activity_result_does_not_clear_new_turn_foreground_state(self):
+        agent, service = _build_agent()
+        composite_key = "session-detached-keeps-foreground:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-keeps-foreground"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-detached-keeps-foreground",
+            activity_id="task-older-turn",
+            kind="local_agent",
+            turn_id="older-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-older-turn",
+            status="completed",
+            expects_output=True,
+        )
+        agent._detached_activity_outputs[composite_key] = (
+            service.activities.claim_completed_output_batch("claude", composite_key)
+        )
+        agent._foreground_tool_use_ids[composite_key] = {"toolu_new_turn"}
+        agent._turns_with_foreground_tools.add(composite_key)
+        agent._emit_activity_result = AsyncMock()
+        result_processed = asyncio.Event()
+        release_receiver = asyncio.Event()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+                    result_processed.set()
+                    await release_receiver.wait()
+
+                return _iterate()
+
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _Client(),
+                "session-detached-keeps-foreground",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        try:
+            await asyncio.wait_for(result_processed.wait(), timeout=1)
+            self.assertEqual(
+                agent._foreground_tool_use_ids[composite_key],
+                {"toolu_new_turn"},
+            )
+            self.assertIn(composite_key, agent._turns_with_foreground_tools)
+        finally:
+            release_receiver.set()
+            await receiver
 
     async def test_detached_activity_error_keeps_sdk_failure_text(self):
         agent, service = _build_agent()
