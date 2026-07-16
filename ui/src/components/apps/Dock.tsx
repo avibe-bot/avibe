@@ -47,11 +47,13 @@ export const Dock: React.FC = () => {
   // chips so a page reads identically wherever it appears (§7.1k item 2).
   const showpageIdentity = useMemo(
     () =>
-      (sessionId: string): { title: string; iconVersion: string | null } => {
+      (sessionId: string, fallbackTitle?: string): { title: string; iconVersion: string | null } => {
         const page = pageBySession.get(sessionId);
+        // live session title → pin snapshot → caller fallback (e.g. a minimized
+        // window's own title, so it survives an unloaded/failed inventory) → sid.
         const title = page
           ? page.title?.trim() || t('chat.untitled')
-          : pinBySession.get(sessionId)?.title_snapshot?.trim() || sessionId;
+          : pinBySession.get(sessionId)?.title_snapshot?.trim() || fallbackTitle?.trim() || sessionId;
         return { title, iconVersion: page?.icon_version ?? null };
       },
     [pageBySession, pinBySession, t],
@@ -229,11 +231,15 @@ export const Dock: React.FC = () => {
                         : {
                             // Pinned Show Page: the page's favicon or a letter avatar on a
                             // hashed accent tint (no icon pipeline). §7.1k: the per-session
-                            // accent BORDER is gone (it read as noisy across many pinned
-                            // tiles); the accent survives as the tint + letter color, and
-                            // focus deepens the tint (16%→28%) in place of the removed border.
+                            // accent RESTING border is gone (it read as noisy across many
+                            // pinned tiles); the accent survives as the 16% tint + letter
+                            // color. The FOCUSED tile shows an accent ring (box-shadow, not a
+                            // resting border) — visible even over an opaque favicon, where a
+                            // tint change would be hidden; only one tile is focused at a time,
+                            // so it is not the noisy multi-color resting look §7.1k removed.
                             color: `var(${avatar!.accentVar})`,
-                            backgroundColor: `color-mix(in srgb, var(${avatar!.accentVar}) ${active ? 28 : 16}%, transparent)`,
+                            backgroundColor: `color-mix(in srgb, var(${avatar!.accentVar}) 16%, transparent)`,
+                            boxShadow: active ? `0 0 0 2px var(${avatar!.accentVar})` : undefined,
                           }
                     }
                   >
@@ -302,7 +308,10 @@ export const Dock: React.FC = () => {
           // the typeof check narrows without a possibly-undefined property access.
           const rawSessionId = w.appId === 'showpage' ? w.params?.sessionId : undefined;
           const sessionId = typeof rawSessionId === 'string' && rawSessionId ? rawSessionId : null;
-          const identity = sessionId ? showpageIdentity(sessionId) : null;
+          // Pass w.title as the identity fallback so a persisted minimized window keeps
+          // its real title if the inventory hasn't loaded / failed (Codex P3); the
+          // live/pinned title still wins when available.
+          const identity = sessionId ? showpageIdentity(sessionId, w.title) : null;
           const avatar = sessionId && identity ? showPageAvatar(sessionId, identity.title) : null;
           const label = identity ? identity.title : (w.title ?? t(def.titleKey));
           return (

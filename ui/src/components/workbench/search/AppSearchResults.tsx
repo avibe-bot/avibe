@@ -54,7 +54,9 @@ export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
                   sessionId={result.sessionId}
                   title={result.title}
                   iconVersion={result.iconVersion}
-                  className="size-7 rounded-md"
+                  // §7.1k: size-only override — the radius stays the shared 12px
+                  // (rounded-lg) from the tile, no per-surface radius override.
+                  className="size-7"
                 />
               ) : (
                 <span
