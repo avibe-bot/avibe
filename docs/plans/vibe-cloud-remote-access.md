@@ -437,7 +437,7 @@ GET /oauth/jwks.json
 
 ### Phase 1: Planning and Backend Skeleton
 
-- Create `vibe-remote-backend` private repository.
+- Create the private `avibe-bot/avibe-backend` repository.
 - Add backend architecture plan.
 - Implement API skeleton, data models, config, and tests.
 - Implement OIDC discovery and JWKS endpoints.
