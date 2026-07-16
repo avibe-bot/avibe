@@ -1256,6 +1256,31 @@ def set_dock_order(order: list, known: list | None = None) -> dict:
     return {"ok": True, "dock": _set_dock_order(order, known=known)}
 
 
+def get_workbench_prefs() -> dict:
+    """Global workbench toggles the UI reads (state_meta-backed)."""
+    from core.workbench_prefs import get_background_work_banner_enabled
+
+    return {
+        "ok": True,
+        "background_work_banner_enabled": get_background_work_banner_enabled(),
+    }
+
+
+def set_workbench_prefs(*, background_work_banner_enabled: Optional[bool] = None) -> dict:
+    """Persist provided workbench toggles; omitted fields are left untouched."""
+    from core.workbench_prefs import (
+        get_background_work_banner_enabled,
+        set_background_work_banner_enabled,
+    )
+
+    if background_work_banner_enabled is not None:
+        set_background_work_banner_enabled(bool(background_work_banner_enabled))
+    return {
+        "ok": True,
+        "background_work_banner_enabled": get_background_work_banner_enabled(),
+    }
+
+
 def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:

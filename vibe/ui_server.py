@@ -3697,6 +3697,23 @@ def dock_order_put():
         return _dock_error_response(exc)
 
 
+@app.route("/api/workbench/prefs", methods=["GET"])
+def workbench_prefs_get():
+    from vibe import api
+
+    return jsonify(api.get_workbench_prefs())
+
+
+@app.route("/api/workbench/prefs", methods=["PUT"])
+def workbench_prefs_put():
+    from vibe import api
+
+    payload = request.json or {}
+    raw = payload.get("background_work_banner_enabled")
+    enabled = bool(raw) if raw is not None else None
+    return jsonify(api.set_workbench_prefs(background_work_banner_enabled=enabled))
+
+
 @app.route("/api/csrf-token", methods=["GET"])
 def csrf_token_get():
     token = request.cookies.get(CSRF_COOKIE_NAME) or _new_csrf_token()
@@ -7541,8 +7558,15 @@ def _harness_query_filter() -> str | None:
     return query or None
 
 
+def _harness_session_filter() -> str | None:
+    # ``?session=<id>`` — the background-work banner navigates here to scope a
+    # tab to its originating session (the removable "只看本会话" chip).
+    session_id = (request.args.get("session_id") or "").strip()
+    return session_id or None
+
+
 def _harness_has_list_params() -> bool:
-    return any(key in request.args for key in ("page", "limit", "status", "query"))
+    return any(key in request.args for key in ("page", "limit", "status", "query", "session_id"))
 
 
 def _harness_page_payload(page_result, *, items_key: str, counts: dict[str, int]) -> dict[str, Any]:
@@ -7598,16 +7622,18 @@ def harness_tasks_list():
         page_request = _harness_page_request()
         status = _harness_status_filter()
         query = _harness_query_filter()
+        session_id = _harness_session_filter()
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     with _harness_store() as store:
         page_result = store.list_scheduled_tasks_page(
             status=status,
             query=query,
+            session_id=session_id,
             page_request=page_request,
             newest_first=True,
         )
-        counts = store.count_scheduled_tasks(query=query)
+        counts = store.count_scheduled_tasks(query=query, session_id=session_id)
     return jsonify(_harness_page_payload(page_result, items_key="tasks", counts=counts))
 
 
@@ -7657,16 +7683,18 @@ def harness_watches_list():
         page_request = _harness_page_request()
         status = _harness_status_filter()
         query = _harness_query_filter()
+        session_id = _harness_session_filter()
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     with _harness_store() as store:
         page_result = store.list_watches_page(
             status=status,
             query=query,
+            session_id=session_id,
             page_request=page_request,
             newest_first=True,
         )
-        counts = store.count_watches(query=query)
+        counts = store.count_watches(query=query, session_id=session_id)
         runtime = store.load_watch_runtime().get("watches") or {}
     for watch in page_result.items:
         watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
@@ -7761,6 +7789,10 @@ def harness_bootstrap():
         page_request = _harness_page_request()
         definition_status = _harness_status_filter() if tab in {"tasks", "watches"} else "all"
         query = _harness_query_filter()
+        # Session scope from the background-work banner (tasks/watches only; a
+        # delegated run is anchored by ``?run=`` on the client, not filtered by
+        # its execution session here).
+        session_id = _harness_session_filter() if tab in {"tasks", "watches"} else None
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
 
@@ -7774,19 +7806,21 @@ def harness_bootstrap():
             page_result = store.list_scheduled_tasks_page(
                 status=definition_status,
                 query=query,
+                session_id=session_id,
                 page_request=page_request,
                 newest_first=True,
             )
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="tasks",
-                counts=store.count_scheduled_tasks(query=query),
+                counts=store.count_scheduled_tasks(query=query, session_id=session_id),
                 status=definition_status,
             )
         elif tab == "watches":
             page_result = store.list_watches_page(
                 status=definition_status,
                 query=query,
+                session_id=session_id,
                 page_request=page_request,
                 newest_first=True,
             )
@@ -7796,7 +7830,7 @@ def harness_bootstrap():
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="watches",
-                counts=store.count_watches(query=query),
+                counts=store.count_watches(query=query, session_id=session_id),
                 status=definition_status,
             )
         else:

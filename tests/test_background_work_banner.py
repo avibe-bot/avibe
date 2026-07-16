@@ -18,6 +18,7 @@ from sqlalchemy import insert
 
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
+from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, run_definitions
@@ -266,3 +267,44 @@ def test_turn_state_survives_harness_derivation_failure(tmp_path: Path):
 
     assert [item["id"] for item in state["background_activities"]] == ["bg-1"]
     assert state["background_activities"][0]["item_kind"] == "backend_activity"
+
+
+def test_banner_enabled_pref_round_trip(tmp_path: Path):
+    # Global toggle (spec req 2): default ON, persisted in state_meta, hermetic
+    # via explicit db_path (never touches real state).
+    from core.workbench_prefs import (
+        get_background_work_banner_enabled,
+        set_background_work_banner_enabled,
+    )
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+
+    assert get_background_work_banner_enabled(db_path=db_path) is True  # default ON
+    assert set_background_work_banner_enabled(False, db_path=db_path) is False
+    assert get_background_work_banner_enabled(db_path=db_path) is False
+    assert set_background_work_banner_enabled(True, db_path=db_path) is True
+    assert get_background_work_banner_enabled(db_path=db_path) is True
+
+
+def test_definition_session_filter_scopes_watches_and_tasks(tmp_path: Path):
+    # Spec req 4: the Harness "只看本会话" chip filters definitions by bound
+    # session. Rows for session A must exclude session B's definitions.
+    engine, db_path = _make_engine(tmp_path)
+    _insert_definition(engine, id="w-a", definition_type="watch", name="wa", session_id="ses-A")
+    _insert_definition(engine, id="w-b", definition_type="watch", name="wb", session_id="ses-B")
+    _insert_definition(engine, id="t-a", definition_type="scheduled", name="ta", session_id="ses-A")
+    _insert_definition(engine, id="t-b", definition_type="scheduled", name="tb", session_id="ses-B")
+
+    store = SQLiteBackgroundTaskStore(db_path=db_path)
+    try:
+        watches_a = store.list_watches_page(session_id="ses-A", page_request=None)
+        assert [w["id"] for w in watches_a.items] == ["w-a"]
+        tasks_a = store.list_scheduled_tasks_page(session_id="ses-A", page_request=None)
+        assert [t["id"] for t in tasks_a.items] == ["t-a"]
+        assert store.count_watches(session_id="ses-A")["all"] == 1
+        assert store.count_scheduled_tasks(session_id="ses-B")["all"] == 1
+        # No filter → both sessions' definitions are returned.
+        assert len(store.list_watches_page(page_request=None).items) == 2
+    finally:
+        store.close()

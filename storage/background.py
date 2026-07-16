@@ -538,10 +538,11 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         query: Optional[str] = None,
+        session_id: Optional[str] = None,
         page_request: PageRequest | None,
         newest_first: bool = True,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled", status=status, query=query)
+        stmt = self._definitions_query("scheduled", status=status, query=query, session_id=session_id)
         activity = func.coalesce(
             run_definitions.c.last_run_at,
             run_definitions.c.updated_at,
@@ -558,8 +559,10 @@ class SQLiteBackgroundTaskStore:
             rows = [self._enrich_task(self._scheduled_task_from_row(row), conn) for row in conn.execute(stmt).mappings()]
         return page_result_from_limit_plus_one(rows, page_request)
 
-    def count_scheduled_tasks(self, *, query: Optional[str] = None) -> dict[str, int]:
-        return self._definition_counts("scheduled", query=query)
+    def count_scheduled_tasks(
+        self, *, query: Optional[str] = None, session_id: Optional[str] = None
+    ) -> dict[str, int]:
+        return self._definition_counts("scheduled", query=query, session_id=session_id)
 
     def get_scheduled_task(self, definition_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
@@ -629,10 +632,11 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         query: Optional[str] = None,
+        session_id: Optional[str] = None,
         page_request: PageRequest | None,
         newest_first: bool = True,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("watch", status=status, query=query)
+        stmt = self._definitions_query("watch", status=status, query=query, session_id=session_id)
         activity = func.coalesce(
             run_definitions.c.last_event_at,
             run_definitions.c.last_started_at,
@@ -650,8 +654,10 @@ class SQLiteBackgroundTaskStore:
             rows = [self._enrich_watch(self._watch_from_row(row), conn) for row in conn.execute(stmt).mappings()]
         return page_result_from_limit_plus_one(rows, page_request)
 
-    def count_watches(self, *, query: Optional[str] = None) -> dict[str, int]:
-        return self._definition_counts("watch", query=query)
+    def count_watches(
+        self, *, query: Optional[str] = None, session_id: Optional[str] = None
+    ) -> dict[str, int]:
+        return self._definition_counts("watch", query=query, session_id=session_id)
 
     def get_watch(self, watch_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
@@ -855,6 +861,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         query: Optional[str] = None,
+        session_id: Optional[str] = None,
         columns: Any = None,
     ):
         if columns is not None:
@@ -865,6 +872,10 @@ class SQLiteBackgroundTaskStore:
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
         )
+        # Precise bound-session filter (ix_run_definitions_session) — powers the
+        # Harness "只看本会话" chip that background-work banner rows navigate into.
+        if session_id:
+            stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
             if status not in {"enabled", "disabled"}:
                 raise ValueError("status must be one of: all, enabled, disabled")
@@ -900,10 +911,17 @@ class SQLiteBackgroundTaskStore:
             stmt = stmt.where(or_(*(field.like(pattern, escape=_LIKE_ESCAPE) for field in fields)))
         return stmt
 
-    def _definition_counts(self, definition_type: str, *, query: Optional[str] = None) -> dict[str, int]:
+    def _definition_counts(
+        self,
+        definition_type: str,
+        *,
+        query: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> dict[str, int]:
         stmt = self._definitions_query(
             definition_type,
             query=query,
+            session_id=session_id,
             columns=(run_definitions.c.enabled, func.count()),
         ).group_by(run_definitions.c.enabled)
         counts = {key: 0 for key in DEFINITION_STATUS_COUNTS}
