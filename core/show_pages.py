@@ -747,6 +747,23 @@ def _resolve_icon_candidate(page_dir: Path, relative: str) -> tuple[Path, str] |
     return candidate, content_type
 
 
+def _public_mapped_icon_relative(relative: str) -> str | None:
+    """The Vite publicDir root-mapping of a declared icon href, or None.
+
+    Vite serves ``public/*`` at the SITE ROOT, so a browser-valid relative href like
+    ``./icon.png`` (which the page resolves against the site root) can live on disk at
+    ``public/icon.png`` — while our resolution is against the workspace root, so the exact
+    on-disk path ``<ws>/icon.png`` misses. This returns the ``public/``-prefixed relative
+    to try AFTER the exact path. None when the path is already under ``public/`` (the
+    exact-path probe covers it — no ``public/public/…``). The result is a plain relative
+    that still flows through :func:`_resolve_icon_candidate`, so the realpath / whitelist /
+    size guards apply to the mapped path too (a hostile ``..`` href is already rejected by
+    :func:`_extract_icon_path`, and the realpath check re-guards the mapped candidate)."""
+    if relative.startswith("public/"):
+        return None
+    return f"public/{relative}"
+
+
 def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     """The absolute path + Content-Type of a Show Page's own icon, or None.
 
@@ -756,8 +773,11 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     the serving layer just streams the file. An explicit ``<link rel="icon">`` WINS;
     when the page declares none, it falls back to the workspace-conventional favicon
     files (root then ``public/``) so agent-built pages — which rarely add a link —
-    still get an icon (§7.1h). Returns None for any missing workspace / no icon /
-    policy rejection — the caller answers 404 and the frontend uses the letter avatar.
+    still get an icon (§7.1h). A declared href also honors Vite's **publicDir
+    root-mapping** (§7.1j): an exact ``<ws>/<path>`` miss falls back to
+    ``<ws>/public/<path>`` (Vite serves ``public/*`` at the site root) before the
+    conventions. Returns None for any missing workspace / no icon / policy rejection —
+    the caller answers 404 and the frontend uses the letter avatar.
     """
     page_dir = show_page_dir(session_id)
     link = _extract_icon_path(page_dir)
@@ -765,7 +785,19 @@ def resolve_show_page_icon(session_id: str) -> tuple[Path, str] | None:
     # explicit link that resolves to nothing (missing file / rejected) must not strand
     # the page icon-less when a conventional favicon exists — fall through to the
     # conventions after it, so coverage is maximized (Codex §7.1h).
-    relatives = (link, *_CONVENTIONAL_ICON_RELATIVES) if link else _CONVENTIONAL_ICON_RELATIVES
+    #
+    # For the declared link, probe the EXACT on-disk path first, then the Vite publicDir
+    # mapping (``public/<path>``): a fully-compliant ``./icon.png`` can live at
+    # ``public/icon.png`` because Vite serves ``public/*`` at the site root while we
+    # resolve against the workspace root on disk, so the exact path misses even though the
+    # browser loads it fine (owner-reported §7.1j). The mapped candidate still goes through
+    # _resolve_icon_candidate, so whitelist/size/traversal-realpath guards apply to it too.
+    if link:
+        mapped = _public_mapped_icon_relative(link)
+        link_candidates = (link, mapped) if mapped else (link,)
+        relatives = (*link_candidates, *_CONVENTIONAL_ICON_RELATIVES)
+    else:
+        relatives = _CONVENTIONAL_ICON_RELATIVES
     for relative in relatives:
         resolved = _resolve_icon_candidate(page_dir, relative)
         if resolved is not None:

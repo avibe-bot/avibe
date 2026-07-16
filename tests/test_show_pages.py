@@ -1165,6 +1165,107 @@ def test_resolve_icon_none_without_link_or_conventional(monkeypatch, tmp_path):
     assert resolve_show_page_icon("sesnone") is None
 
 
+def test_resolve_icon_link_maps_to_vite_public_dir(monkeypatch, tmp_path):
+    # §7.1j: a fully-compliant `./icon.png` whose file lives at public/icon.png (Vite
+    # serves public/* at the SITE ROOT) must resolve — the exact <ws>/icon.png misses, so
+    # the resolver falls back to the publicDir mapping instead of the letter avatar.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sespub")
+    (page_dir / "index.html").write_text(
+        '<link rel="icon" type="image/png" sizes="180x180" href="./icon.png">', encoding="utf-8"
+    )
+    (page_dir / "public").mkdir(parents=True, exist_ok=True)
+    (page_dir / "public" / "icon.png").write_bytes(b"PUBLIC-PNG")
+
+    resolved = resolve_show_page_icon("sespub")
+    assert resolved is not None
+    assert resolved[0] == (page_dir / "public" / "icon.png").resolve()
+    assert resolved[1] == "image/png"
+
+
+def test_resolve_icon_link_exact_path_wins_over_public_mapping(monkeypatch, tmp_path):
+    # Precedence: when the declared href exists at BOTH the exact on-disk path and the
+    # publicDir mapping, the exact path (root) wins (§7.1j).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesboth")
+    (page_dir / "index.html").write_text('<link rel="icon" href="./icon.png">', encoding="utf-8")
+    (page_dir / "icon.png").write_bytes(b"ROOT-PNG")
+    (page_dir / "public").mkdir(parents=True, exist_ok=True)
+    (page_dir / "public" / "icon.png").write_bytes(b"PUBLIC-PNG")
+
+    resolved = resolve_show_page_icon("sesboth")
+    assert resolved is not None
+    assert resolved[0] == (page_dir / "icon.png").resolve()  # exact/root wins over public/
+
+
+def test_resolve_icon_public_mapping_does_not_bypass_traversal(monkeypatch, tmp_path):
+    # The publicDir mapping must not open a traversal hole: a hostile `..` href is rejected
+    # by the href policy (so the mapping is never reached from it), and an outside file is
+    # never served — the mapping only ever prepends `public/` to an already-clean path.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sestrav")
+    (tmp_path / "outside.png").write_bytes(b"OUTSIDE")
+    for href in ("./../outside.png", "./..%2foutside.png", r".\..\outside.png", "public/../../outside.png"):
+        (page_dir / "index.html").write_text(f'<link rel="icon" href="{href}">', encoding="utf-8")
+        assert resolve_show_page_icon("sestrav") is None, href
+
+
+def test_resolve_icon_conventional_order_unchanged_after_unusable_link(monkeypatch, tmp_path):
+    # (d) The publicDir mapping is LINK-scoped and runs before the conventions; it must not
+    # perturb the conventional order. An unusable link (no exact, no public mapping) falls
+    # through, and the conventions still resolve root-before-public.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("sesorder2")
+    (page_dir / "index.html").write_text('<link rel="icon" href="missing.svg">', encoding="utf-8")
+    (page_dir / "public").mkdir(parents=True, exist_ok=True)
+    (page_dir / "public" / "favicon.svg").write_bytes(b"PUB")
+    (page_dir / "favicon.svg").write_bytes(b"ROOT")
+
+    resolved = resolve_show_page_icon("sesorder2")
+    assert resolved is not None
+    assert resolved[0] == (page_dir / "favicon.svg").resolve()  # root convention still wins
+
+
+def test_resolve_icon_public_mapping_is_link_scoped(monkeypatch, tmp_path):
+    # The mapping only applies to a DECLARED link, not a blanket scan of public/: a
+    # non-conventionally-named file in public/ with NO link that points at it is not an
+    # icon (so it stays the letter avatar) — this keeps the fallback rules tight.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import resolve_show_page_icon
+
+    page_dir = ensure_show_page_dir("seslinkscope")
+    (page_dir / "index.html").write_text("<title>no link</title>", encoding="utf-8")
+    (page_dir / "public").mkdir(parents=True, exist_ok=True)
+    (page_dir / "public" / "icon.png").write_bytes(b"UNREFERENCED")  # not a favicon name, no link
+    assert resolve_show_page_icon("seslinkscope") is None
+
+
+def test_icon_version_follows_public_mapped_file(monkeypatch, tmp_path):
+    # (e) icon_version hashes the RESOLVED (mapped) file's content, so overwriting
+    # public/icon.png changes the token — the content-versioned URL stays correct.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.show_pages import show_page_icon_version
+
+    page_dir = ensure_show_page_dir("sespubver")
+    (page_dir / "index.html").write_text('<link rel="icon" href="./icon.png">', encoding="utf-8")
+    (page_dir / "public").mkdir(parents=True, exist_ok=True)
+    (page_dir / "public" / "icon.png").write_bytes(b"V1")
+    v1 = show_page_icon_version("sespubver")
+    assert v1
+
+    (page_dir / "public" / "icon.png").write_bytes(b"V2-different-bytes")
+    v2 = show_page_icon_version("sespubver")
+    assert v2 and v2 != v1
+
+
 def test_read_show_page_icon_enforces_the_token(monkeypatch, tmp_path):
     # ?v= is a content assertion: the correct token yields the bytes; a wrong/empty
     # token is None (→ 404), so `immutable` caching is honest (URL ⇒ one content).
