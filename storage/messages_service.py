@@ -269,6 +269,9 @@ def append(
     # must be ``user`` (not ``assistant``), or the user+result transcript filter
     # would drop it. Typed callers (inbox/IM mirror) pass message_type explicitly.
     resolved_type = message_type or ("user" if author == "user" else "assistant")
+    if source == HARNESS_TYPE and author == "user" and resolved_type == "user":
+        author = HARNESS_TYPE
+        resolved_type = HARNESS_TYPE
 
     now = _utc_now_iso()
     payload = {

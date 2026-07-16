@@ -290,6 +290,27 @@ def test_harness_prompt_is_visible_but_not_treated_as_user_text(isolated_state):
     assert first_user == "human input"
 
 
+def test_append_normalizes_legacy_harness_identity(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness_append")
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_harness_append",
+            platform="avibe",
+            author="user",
+            message_type="user",
+            source="harness",
+            text="scheduled input",
+        )
+
+    assert row["author"] == messages_service.HARNESS_TYPE
+    assert row["type"] == messages_service.HARNESS_TYPE
+    assert row["source"] == messages_service.HARNESS_TYPE
+
+
 def test_same_second_messages_order_by_insertion(isolated_state):
     """Rows sharing a (second-resolution) created_at still order by insertion in
     the transcript: the monotonic message id breaks the ``(created_at, id)`` tie,

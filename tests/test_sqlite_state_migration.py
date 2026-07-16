@@ -355,6 +355,45 @@ def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path
         assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
 
 
+def test_run_migrations_backfills_legacy_harness_prompt_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+
+    run_migrations(db_path, revision="20260707_0029")
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_harness")
+        _insert_agent_session(
+            conn,
+            row_id="ses_harness",
+            scope_id="scope_harness",
+            anchor="ses_harness",
+            workdir=None,
+            backend="codex",
+            native="",
+            last_active="2026-07-15T00:00:00Z",
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, source,
+                content_text, content_json, metadata_json, created_at, updated_at
+            ) values (
+                'msg_harness', 'scope_harness', 'ses_harness', 'avibe',
+                'user', 'user', 'harness', 'scheduled input', '{}', '{}',
+                '2026-07-15T00:00:00Z', '2026-07-15T00:00:00Z'
+            )
+            """
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "select author, type, source from messages where id = 'msg_harness'"
+        ).fetchone()
+    assert row == ("harness", "harness", "harness")
+
+
 def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 

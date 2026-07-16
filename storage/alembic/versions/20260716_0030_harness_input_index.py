@@ -17,6 +17,10 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    bind.exec_driver_sql(
+        "update messages set author = 'harness', type = 'harness' "
+        "where source = 'harness' and author = 'user' and type = 'user'"
+    )
     bind.exec_driver_sql("drop index if exists ix_messages_inbox_user_send")
     bind.exec_driver_sql(
         "create index ix_messages_inbox_user_send "

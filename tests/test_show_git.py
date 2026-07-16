@@ -836,3 +836,63 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     context = show_git.load_turn_checkpoint_context(session_id, after="2099-01-01T00:00:00+00:00")
     assert context.message == "current driving message"
     assert context.message_id == current["id"]
+
+
+def test_storage_lookup_includes_harness_driving_message():
+    from storage import messages_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(primary_platform="avibe")
+    session_id = "ses_harness_checkpoint"
+    with get_cached_sqlite_engine().begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_harness_checkpoint",
+            now="2026-07-15T00:00:00+00:00",
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=session_id,
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-07-15T00:00:00+00:00",
+                updated_at="2026-07-15T00:00:00+00:00",
+                last_active_at="2026-07-15T00:00:00+00:00",
+            )
+        )
+        prompt = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            message_type=messages_service.HARNESS_TYPE,
+            source="harness",
+            text="refresh the dashboard",
+            native_message_id="agent_run:run-harness",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == prompt["id"])
+            .values(created_at="2099-01-01T00:00:01+00:00")
+        )
+
+    expected = TurnCheckpointContext(
+        message="refresh the dashboard",
+        run_id="run-harness",
+        message_id=prompt["id"],
+    )
+    assert show_git.load_turn_checkpoint_context(session_id) == expected
+    assert show_git.load_turn_checkpoint_context(
+        session_id, after="2099-01-01T00:00:00+00:00"
+    ) == expected
