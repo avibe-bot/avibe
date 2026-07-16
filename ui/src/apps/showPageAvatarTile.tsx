@@ -72,13 +72,17 @@ export const ShowPageAvatarTile: React.FC<{
     <span
       aria-hidden
       className={clsx(
-        'flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border text-[14px] font-bold leading-none',
+        // §7.1k: borderless, 12px radius. `rounded-lg` is 12px in this theme
+        // (--radius-lg; NOT stock Tailwind's 8px — `rounded-xl` here is 16px), the
+        // owner's unified target across the Dock, App Library rows, and ⌘K results.
+        // The per-session accent BORDER is dropped (it read as noisy across many
+        // tiles); the accent survives only as the 16% background tint + letter color.
+        'flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg text-[14px] font-bold leading-none',
         className,
       )}
       style={{
         color: `var(${accentVar})`,
         backgroundColor: `color-mix(in srgb, var(${accentVar}) 16%, transparent)`,
-        borderColor: `color-mix(in srgb, var(${accentVar}) 34%, transparent)`,
       }}
     >
       <ShowPageAvatarContent iconUrl={showPageIconUrl(sessionId, iconVersion)} letter={letter} />

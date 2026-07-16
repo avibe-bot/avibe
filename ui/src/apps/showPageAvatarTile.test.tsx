@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { ShowPageAvatarContent } from './showPageAvatarTile';
+import { ShowPageAvatarContent, ShowPageAvatarTile } from './showPageAvatarTile';
 
 // Guards the Dock-drag invariant (§7.1h item 3): a Dock tile is a framer-motion
 // Reorder.Item whose drag pan starts ONLY when the press lands on a non-interactive
@@ -27,5 +27,26 @@ describe('ShowPageAvatarContent — Dock-drag press-target invariant', () => {
     // The #907 pointer-events-none is reverted: it pushed the press back to the
     // button and re-broke drag for icon tiles.
     expect(html).not.toContain('pointer-events-none');
+  });
+});
+
+// §7.1k item 1: the shared chokepoint is borderless — the per-session accent border
+// (the 34% color-mix borderColor + the `border` class) read as noisy across many
+// tiles, so it is gone everywhere ShowPageAvatarTile renders (App Library rows +
+// ⌘K results). The accent survives only as the 16% background tint + letter color,
+// and the tile keeps its 12px radius (`rounded-lg` = --radius-lg in this theme).
+describe('ShowPageAvatarTile — §7.1k borderless accent tile', () => {
+  it('renders no border, keeping the accent tint + letter color + 12px radius', () => {
+    const html = renderToStaticMarkup(<ShowPageAvatarTile sessionId="ses_border" title="Hello" />);
+    // No accent border anywhere: neither the `border` utility class nor a
+    // `border-color` inline style (which is how React serializes borderColor).
+    expect(html).not.toContain('border');
+    // The accent still shows as the background tint + letter color.
+    expect(html).toContain('background-color:');
+    expect(html).toContain('color:var(');
+    // 12px radius preserved (unified with the Dock tile).
+    expect(html).toContain('rounded-lg');
+    // The letter avatar still renders (no icon version supplied).
+    expect(html).toContain('>H</span>');
   });
 });
