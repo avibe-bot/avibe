@@ -12,19 +12,17 @@ import { OpencodeProviderConfig } from './OpencodeProviderConfig';
 export function BackendProviderConfig({
   backend,
   hideEnableToggle,
-  deferRestart,
 }: {
   backend: BackendId;
   hideEnableToggle?: boolean;
-  deferRestart?: boolean;
 }) {
   switch (backend) {
     case 'claude':
-      return <ClaudeProviderConfig hideEnableToggle={hideEnableToggle} deferRestart={deferRestart} />;
+      return <ClaudeProviderConfig hideEnableToggle={hideEnableToggle} />;
     case 'codex':
-      return <CodexProviderConfig hideEnableToggle={hideEnableToggle} deferRestart={deferRestart} />;
+      return <CodexProviderConfig hideEnableToggle={hideEnableToggle} />;
     case 'opencode':
-      return <OpencodeProviderConfig hideEnableToggle={hideEnableToggle} deferRestart={deferRestart} />;
+      return <OpencodeProviderConfig hideEnableToggle={hideEnableToggle} />;
     default:
       return null;
   }

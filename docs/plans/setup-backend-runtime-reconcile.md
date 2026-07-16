@@ -36,6 +36,8 @@ state and any live controller, without requiring a full service restart.
    config will apply on the next start. If a service process is running but its
    internal socket cannot reconcile, schedule the existing service restart
    fallback rather than leaving a live process stale.
+5. Settings and wizard callers consume the config response instead of issuing a
+   second backend restart after the shared boundary has already reconciled it.
 
 No credentials cross the internal boundary. The UI process produces only
 backend IDs; the controller loads the persisted config itself.

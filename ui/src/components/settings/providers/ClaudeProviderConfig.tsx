@@ -32,8 +32,7 @@ const DEFAULT_CLI = 'claude';
 
 export const ClaudeProviderConfig: React.FC<{
   hideEnableToggle?: boolean;
-  deferRestart?: boolean;
-}> = ({ hideEnableToggle, deferRestart } = {}) => {
+}> = ({ hideEnableToggle } = {}) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -43,7 +42,6 @@ export const ClaudeProviderConfig: React.FC<{
   const runtime = useBackendRuntime({
     backend: BACKEND_ID,
     defaultCli: DEFAULT_CLI,
-    deferRestart,
   });
 
   // Auth state — OAuth vs API-key.
