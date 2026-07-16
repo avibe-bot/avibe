@@ -1012,6 +1012,14 @@ export type MessageSearchResult = {
   session_count: number;
 };
 
+// Union item for the background-work banner. Backend activities (from the
+// process-local SessionActivityRegistry) and live-derived harness items
+// (watches / scheduled tasks / delegated agent runs) share this shape. The
+// legacy fields stay for backward compatibility; `item_kind` / `label` /
+// `since` are the unified fields the banner renders and routes on. `item_kind`
+// is optional so a pre-union payload degrades to a backend activity.
+export type SessionActivityItemKind = 'backend_activity' | 'watch' | 'task' | 'agent_run';
+
 export type SessionActivityState = {
   id: string;
   backend: string;
@@ -1022,6 +1030,9 @@ export type SessionActivityState = {
   description: string | null;
   started_at: string;
   updated_at: string;
+  item_kind?: SessionActivityItemKind;
+  label?: string | null;
+  since?: string;
 };
 
 export type SessionRuntimeState = {

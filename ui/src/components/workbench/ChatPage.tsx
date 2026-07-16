@@ -1,21 +1,23 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, Bell, Bot, Calendar, ChevronDown, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Undo2, UploadCloud, X } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import type { SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { isNotifyMessageType, isTerminalAgentMessage } from '../../lib/chatMessageTypes';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
-import { formatLocalDateTime } from '../../lib/relativeTime';
+import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
+import { activityItemKind, resolveActivityLabel } from '../../lib/backgroundActivity';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -1628,8 +1630,65 @@ const QueueRow: React.FC<{
   );
 };
 
+// Kind icon per unified banner item. Backend activities and the three harness
+// sources (watch / scheduled task / delegated agent run) each get a glyph.
+const ACTIVITY_ITEM_ICON: Record<SessionActivityItemKind, LucideIcon> = {
+  backend_activity: Activity,
+  watch: Eye,
+  task: Calendar,
+  agent_run: Bot,
+};
+
+// item_kind (snake_case wire value) -> chat.activities.kind.* i18n leaf.
+const ACTIVITY_ITEM_I18N: Record<SessionActivityItemKind, string> = {
+  backend_activity: 'backendActivity',
+  watch: 'watch',
+  task: 'task',
+  agent_run: 'agentRun',
+};
+
+// One expanded background-work row: kind icon + label + relative time. Backend
+// activities are display-only (current behavior); harness rows navigate to the
+// Harness surface on click.
+const ActivityRow: React.FC<{ item: SessionActivityState; onOpenHarness: () => void }> = ({
+  item,
+  onOpenHarness,
+}) => {
+  const { t } = useTranslation();
+  const kind = activityItemKind(item);
+  const Icon = ACTIVITY_ITEM_ICON[kind];
+  const kindLabel = t(`chat.activities.kind.${ACTIVITY_ITEM_I18N[kind]}`);
+  const label = resolveActivityLabel(item, kindLabel);
+  const relative = formatRelativeTime(item.since ?? item.started_at, t);
+  const body = (
+    <>
+      <Icon className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
+      <span className="min-w-0 flex-1 truncate text-left text-foreground" title={label}>
+        {label}
+      </span>
+      <span className="shrink-0 text-[10px] tabular-nums text-muted">{relative}</span>
+    </>
+  );
+  if (kind === 'backend_activity') {
+    return <div className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[12px]">{body}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onOpenHarness}
+      title={t('chat.activities.openHarness', { kind: kindLabel })}
+      aria-label={t('chat.activities.openHarness', { kind: kindLabel })}
+      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-[12px] transition-colors hover:bg-surface-3"
+    >
+      {body}
+    </button>
+  );
+};
+
 const ActivityStrip: React.FC<{ state: SessionRuntimeState }> = ({ state }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [expanded, setExpanded] = useState(false);
   const active = state.background_activities;
   const pendingOutputs = state.pending_activity_output_count;
   if (active.length === 0 && pendingOutputs === 0) return null;
@@ -1638,14 +1697,41 @@ const ActivityStrip: React.FC<{ state: SessionRuntimeState }> = ({ state }) => {
   const connectionVisible =
     active.length > 0 &&
     (state.connection === 'reconnecting' || state.connection === 'disconnected');
+  // Only the item list (backend + harness) is expandable; a pure "delivering
+  // output" pill has no rows to show.
+  const expandable = active.length > 0;
+  const isExpanded = expandable && expanded;
+  const toggle = () => {
+    if (expandable) setExpanded((v) => !v);
+  };
+  // Harness rows (watch / task / delegated run) link to the Harness surface;
+  // per-tab / run-detail deep-linking is deferred (HarnessPage owns its tab
+  // state and is out of this banner's scope).
+  const openHarness = () => navigate('/harness');
   return (
     <div className="shrink-0 px-4 py-2 md:px-8">
-      <div className="mx-auto flex w-full max-w-[1080px]">
+      <div className="mx-auto w-full max-w-[1080px]">
         <StatusPill
           tone="running"
-          role="status"
+          role={expandable ? 'button' : 'status'}
           aria-live="polite"
-          className="min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5"
+          aria-expanded={expandable ? isExpanded : undefined}
+          tabIndex={expandable ? 0 : undefined}
+          onClick={toggle}
+          onKeyDown={
+            expandable
+              ? (e: React.KeyboardEvent) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setExpanded((v) => !v);
+                  }
+                }
+              : undefined
+          }
+          className={clsx(
+            'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
+            expandable && 'cursor-pointer select-none',
+          )}
           indicator={
             active.length > 0 ? (
               <Activity className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
@@ -1666,9 +1752,25 @@ const ActivityStrip: React.FC<{ state: SessionRuntimeState }> = ({ state }) => {
                   {t(`chat.activities.connection.${state.connection}`)}
                 </span>
               ) : null}
+              {expandable ? (
+                <ChevronDown
+                  className={clsx(
+                    'size-3.5 shrink-0 text-muted transition-transform',
+                    isExpanded && 'rotate-180',
+                  )}
+                  aria-hidden="true"
+                />
+              ) : null}
             </>
           }
         />
+        {isExpanded ? (
+          <div className="mt-1.5 flex max-h-64 flex-col gap-0.5 overflow-y-auto rounded-xl border border-border-strong bg-surface-2 p-1 shadow-sm">
+            {active.map((item) => (
+              <ActivityRow key={item.id} item={item} onOpenHarness={openHarness} />
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );

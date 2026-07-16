@@ -2330,6 +2330,13 @@
     "activities": {
       "running": "后台工作 · {{count}}",
       "delivering": "正在投递后台输出 · {{count}}",
+      "openHarness": "在 Harness 中打开 · {{kind}}",
+      "kind": {
+        "backendActivity": "后台任务",
+        "watch": "监视",
+        "task": "定时任务",
+        "agentRun": "Agent 运行"
+      },
       "connection": {
         "reconnecting": "重连中",
         "disconnected": "已断开"

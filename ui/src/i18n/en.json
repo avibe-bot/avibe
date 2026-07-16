@@ -2330,6 +2330,13 @@
     "activities": {
       "running": "Background work · {{count}}",
       "delivering": "Delivering background output · {{count}}",
+      "openHarness": "Open in Harness · {{kind}}",
+      "kind": {
+        "backendActivity": "Background task",
+        "watch": "Watch",
+        "task": "Scheduled task",
+        "agentRun": "Agent run"
+      },
       "connection": {
         "reconnecting": "Reconnecting",
         "disconnected": "Disconnected"
