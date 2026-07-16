@@ -47,7 +47,21 @@ export const ShowPageShareControl: React.FC<{
   const payload = useMemo<ShowPagePayload | null>(() => {
     const local = localPayload?.session_id === sessionId ? localPayload : null;
     if (!inventoryPage) return local;
-    return { ...local, ...inventoryPage } as ShowPagePayload;
+    if (!local) return inventoryPage as ShowPagePayload;
+
+    // A mutation/ensure response is newer than the retained inventory until its
+    // merge reaches this render. Prefer it while the share identity differs so
+    // onPayloadChange never re-points ChatPage at a revoked cached URL. Once the
+    // shared store catches up, inventory resumes as the live source of truth.
+    const inventoryCaughtUp =
+      inventoryPage.visibility === local.visibility &&
+      inventoryPage.active_url === local.active_url &&
+      inventoryPage.share_id === local.share_id &&
+      inventoryPage.offline === local.offline &&
+      inventoryPage.url_available === local.url_available;
+    return (inventoryCaughtUp
+      ? { ...local, ...inventoryPage }
+      : { ...inventoryPage, ...local }) as ShowPagePayload;
   }, [inventoryPage, localPayload, sessionId]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -57,6 +71,7 @@ export const ShowPageShareControl: React.FC<{
   // before it resolved. A refresh (read) only applies if no newer request has
   // superseded it. reqSeq orders the reads; a mutation bumps it on resolve.
   const reqSeq = useRef(0);
+  const hasObservedPayloadRef = useRef(false);
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
@@ -64,8 +79,17 @@ export const ShowPageShareControl: React.FC<{
   };
 
   useEffect(() => {
-    if (payload) onPayloadChange?.(payload);
-  }, [payload, onPayloadChange]);
+    if (!payload) return;
+    const hasFreshLocalPayload = localPayload?.session_id === sessionId;
+    if (!hasObservedPayloadRef.current) {
+      hasObservedPayloadRef.current = true;
+      // ChatPage just resolved ensureShowPage before mounting this control. Do
+      // not overwrite that fresh route with the retained inventory's first
+      // snapshot; a revalidated store update or local response may notify it.
+      if (!hasFreshLocalPayload) return;
+    }
+    onPayloadChange?.(payload);
+  }, [localPayload, onPayloadChange, payload, sessionId]);
 
   // If we unmount while open (a route/session change tears down Show Page mode),
   // Radix won't fire onOpenChange, so report closed here — otherwise the chat

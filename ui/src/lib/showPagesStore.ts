@@ -181,11 +181,26 @@ export class ShowPagesInventoryStore {
     }
   }
 
+  private invalidateAndReload(): void {
+    // An event can arrive after the server produced the response currently in
+    // flight. Advancing the revision makes that response retry inside the same
+    // single-flight promise instead of either accepting it or starting overlap.
+    this.revision += 1;
+    void this.reload();
+  }
+
   private connectEvents(): void {
     if (this.disconnectEvents) return;
+    let connected = false;
     this.disconnectEvents = this.api.connectWorkbenchEvents({
       onConnected: () => {
-        void this.reload();
+        // activate() already revalidates this subscription's initial connection.
+        // Only later callbacks are reconnects that may cover a missed event gap.
+        if (!connected) {
+          connected = true;
+          return;
+        }
+        this.invalidateAndReload();
       },
       onSessionActivity: (data) => {
         const hasPage = this.snapshot.pages.some(
@@ -212,7 +227,7 @@ export class ShowPagesInventoryStore {
         }
         // Runtime Show activity can materialize a page outside this browser.
         // Normal session/user-message events do not change this inventory.
-        if (data.event === 'show_event') void this.reload();
+        if (data.event === 'show_event') this.invalidateAndReload();
       },
     });
   }

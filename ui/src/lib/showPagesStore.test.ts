@@ -44,10 +44,7 @@ describe('ShowPagesInventoryStore', () => {
     const disconnect = vi.fn();
     const api: ShowPagesInventoryApi = {
       getShowPages: vi.fn(() => response.promise),
-      connectWorkbenchEvents: vi.fn((handlers) => {
-        handlers.onConnected?.({ sub_id: 1, source: 'browser' });
-        return disconnect;
-      }),
+      connectWorkbenchEvents: vi.fn(() => disconnect),
     };
     const store = new ShowPagesInventoryStore(api);
 
@@ -67,6 +64,29 @@ describe('ShowPagesInventoryStore', () => {
     expect(disconnect).not.toHaveBeenCalled();
     releaseSecond();
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not refetch when the initial events connection arrives after the activation read', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi.fn().mockResolvedValue({ pages: [page()] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    await store.reload();
+    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+    await Promise.resolve();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    release();
   });
 
   it('serves stale icon metadata immediately on reopen and revalidates in the background', async () => {
@@ -151,6 +171,37 @@ describe('ShowPagesInventoryStore', () => {
     });
     await store.reload();
     expect(getShowPages).toHaveBeenCalledTimes(2);
+    release();
+  });
+
+  it('queues a show-event reconcile behind an older in-flight read', async () => {
+    let handlers: EventHandlers | undefined;
+    const stale = deferred<{ pages: ShowPage[] }>();
+    const getShowPages = vi
+      .fn()
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValueOnce({ pages: [page({ session_id: 'session-2' })] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    const flight = store.reload();
+    handlers?.onSessionActivity?.({
+      session_id: 'session-2',
+      scope_id: null,
+      event: 'show_event',
+    });
+    expect(store.reload()).toBe(flight);
+
+    stale.resolve({ pages: [] });
+    await flight;
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages[0].session_id).toBe('session-2');
     release();
   });
 
