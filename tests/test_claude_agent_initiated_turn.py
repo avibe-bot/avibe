@@ -28,6 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
+from modules.claude_sdk_compat import (
+    AssistantMessage as SDKAssistantMessage,
+    TaskNotificationMessage as SDKTaskNotificationMessage,
+    TaskStartedMessage as SDKTaskStartedMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 from core.message_output import terminal_output_for
 
 
@@ -150,6 +157,72 @@ def _completed_task_notification_then_wait_client(release: asyncio.Event):
                 yield TaskStartedMessage()
                 yield TaskNotificationMessage()
                 await release.wait()
+
+            return _iterate()
+
+    return _Client()
+
+
+def _foreground_bash_then_delayed_result_client(
+    notification_seen: asyncio.Event,
+    release_result: asyncio.Event,
+):
+    class ResultMessage:
+        subtype = "success"
+        result = "Push branch, confirm repo"
+        duration_ms = 1
+
+    class _Client:
+        def receive_messages(self):
+            async def _iterate():
+                yield SDKAssistantMessage(
+                    content=[
+                        TextBlock(
+                            text=(
+                                "Two clean commits. Let me push the branch and "
+                                "confirm the repo/remote for the PR."
+                            )
+                        )
+                    ],
+                    model="claude-test",
+                )
+                yield SDKAssistantMessage(
+                    content=[
+                        ToolUseBlock(
+                            id="toolu_push",
+                            name="Bash",
+                            input={
+                                "command": "git push",
+                                "description": "Push branch, confirm repo",
+                            },
+                        )
+                    ],
+                    model="claude-test",
+                )
+                yield SDKTaskStartedMessage(
+                    subtype="task_started",
+                    data={},
+                    task_id="task-push",
+                    description="Push branch, confirm repo",
+                    uuid="task-start-uuid",
+                    session_id="claude-native-session",
+                    tool_use_id="toolu_push",
+                    task_type="local_bash",
+                )
+                yield SDKTaskNotificationMessage(
+                    subtype="task_notification",
+                    data={},
+                    task_id="task-push",
+                    status="completed",
+                    output_file="/tmp/task-push.output",
+                    summary="Push branch, confirm repo",
+                    uuid="task-end-uuid",
+                    session_id="claude-native-session",
+                    tool_use_id="toolu_push",
+                )
+                notification_seen.set()
+                await release_result.wait()
+                yield ResultMessage()
 
             return _iterate()
 
@@ -825,6 +898,94 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await receiver
+
+    async def test_foreground_tool_activity_waits_for_result_and_uses_assistant_text(self):
+        agent, service = _build_agent()
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
+        formatter = SimpleNamespace(
+            escape_special_chars=lambda text: text,
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+            format_toolcall=lambda *_args, **_kwargs: "Bash tool call",
+            format_toolcall_label=lambda *_args, **_kwargs: "Push branch, confirm repo",
+        )
+        agent._get_formatter = lambda _context: formatter
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        composite_key = "session-foreground-bash:/tmp/work"
+        origin_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-origin",
+                "turn_token": "turn-origin",
+            }
+        )
+        queued_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-followup",
+                "turn_token": "turn-followup",
+            }
+        )
+        origin_request = SimpleNamespace(context=origin_context)
+        queued_request = SimpleNamespace(context=queued_context)
+        agent._pending_requests[composite_key] = [origin_request, queued_request]
+        receiver_context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sess-foreground-bash"},
+        )
+        notification_seen = asyncio.Event()
+        release_result = asyncio.Event()
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _foreground_bash_then_delayed_result_client(
+                    notification_seen,
+                    release_result,
+                ),
+                "session-foreground-bash",
+                "/tmp/work",
+                receiver_context,
+                composite_key=composite_key,
+            )
+        )
+
+        await asyncio.wait_for(notification_seen.wait(), timeout=1)
+        await asyncio.sleep(0.01)
+
+        agent.emit_result_message.assert_not_awaited()
+        self.assertEqual(
+            agent._pending_requests[composite_key],
+            [origin_request, queued_request],
+        )
+        self.assertFalse(
+            service.activities.has_completed_output("claude", composite_key)
+        )
+
+        release_result.set()
+        await asyncio.wait_for(receiver, timeout=1)
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            (
+                "Two clean commits. Let me push the branch and confirm the "
+                "repo/remote for the PR."
+            ),
+        )
+        self.assertEqual(agent._pending_requests[composite_key], [queued_request])
+
+    def test_foreground_tool_without_text_rejects_sdk_result_label(self):
+        agent, _service = _build_agent()
+        composite_key = "session-textless-tool:/tmp/work"
+        agent._turns_with_foreground_tools.add(composite_key)
+
+        self.assertEqual(
+            agent._select_terminal_text(
+                composite_key,
+                "Push branch, confirm repo",
+            ),
+            "",
+        )
 
     async def test_summaryless_completed_activity_settles_silently(self):
         agent, service = _build_agent()

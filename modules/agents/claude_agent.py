@@ -68,6 +68,8 @@ class ClaudeAgent(BaseAgent):
         self._detached_unsolicited_text: dict[str, str] = {}
         self._activity_flush_tasks: dict[str, asyncio.Task] = {}
         self._activity_settle_events: dict[str, asyncio.Event] = {}
+        self._foreground_tool_use_ids: dict[str, set[str]] = {}
+        self._turns_with_foreground_tools: set[str] = set()
 
         # Question handler for AskUserQuestion support (disabled)
         # NOTE: Uncomment when SDK adds AskUserQuestion support
@@ -407,6 +409,8 @@ class ClaudeAgent(BaseAgent):
 
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
+        self._foreground_tool_use_ids.pop(composite_key, None)
+        self._turns_with_foreground_tools.discard(composite_key)
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
         self._suppressed_synthetic_error_text.pop(composite_key, None)
@@ -652,6 +656,7 @@ class ClaudeAgent(BaseAgent):
 
                         for block in getattr(message, "content", []) or []:
                             if isinstance(block, ToolUseBlock):
+                                self._track_tool_activity_mode(composite_key, block)
                                 # AskUserQuestion handling disabled - tool is disallowed via ClaudeAgentOptions
                                 # if self.ENABLE_ASK_USER_QUESTION and self._question_handler:
                                 #     if self._question_handler.is_ask_user_question(block):
@@ -805,15 +810,19 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     if message_type == "result":
-                        result_text = getattr(message, "result", None)
+                        raw_result_text = getattr(message, "result", None)
+                        result_text = raw_result_text
                         detached_activities = self._detached_activity_outputs.pop(
                             composite_key,
                             None,
                         )
                         if detached_activities:
                             detached_activity = detached_activities[-1]
-                            if not result_text:
-                                result_text = self._detached_assistant_text.get(composite_key)
+                            detached_text = self._detached_assistant_text.get(
+                                composite_key
+                            )
+                            if detached_text:
+                                result_text = detached_text
                             self._detached_assistant_text.pop(composite_key, None)
                             try:
                                 await self._emit_activity_result(
@@ -842,10 +851,15 @@ class ClaudeAgent(BaseAgent):
                             # own backend query and liveness/timeout path.
                             self._mark_session_idle_if_runtime_free(composite_key)
                             self._signal_activity_output_settled(composite_key)
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
                             continue
                         if output_mode == "detached":
-                            if not result_text:
-                                result_text = self._detached_unsolicited_text.get(composite_key)
+                            detached_text = self._detached_unsolicited_text.get(
+                                composite_key
+                            )
+                            if detached_text:
+                                result_text = detached_text
                             self._detached_unsolicited_text.pop(composite_key, None)
                             self._detached_unsolicited_outputs.discard(composite_key)
                             if result_text:
@@ -857,27 +871,33 @@ class ClaudeAgent(BaseAgent):
                                     parse_mode="markdown",
                                     output=self._unsolicited_message_output(message),
                                 )
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
                             continue
                         self._pending_assistant_message.pop(composite_key, None)
-                        if self._consume_suppressed_synthetic_result(composite_key, message, result_text):
+                        if self._consume_suppressed_synthetic_result(
+                            composite_key,
+                            message,
+                            raw_result_text,
+                        ):
                             self._last_assistant_text.pop(composite_key, None)
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
                             continue
-                        if not result_text:
-                            # ResultMessage had no text; use the last assistant
-                            # text as a fallback so the user still sees output.
-                            fallback = self._last_assistant_text.get(composite_key)
-                            if fallback:
-                                result_text = fallback
 
                         failure_disposition = await self._handle_terminal_failure_result(
                             context,
                             composite_key,
                             message,
-                            result_text,
+                            raw_result_text,
                         )
                         if failure_disposition == "auth":
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
                             return
                         if failure_disposition:
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
                             continue
 
                         # NOTE: The pending assistant message is intentionally
@@ -888,6 +908,10 @@ class ClaudeAgent(BaseAgent):
                         pending_request = self._pop_pending_request(composite_key)
                         output_activities = self._request_activities(pending_request)
                         output_activity = output_activities[-1] if output_activities else None
+                        result_text = self._select_terminal_text(
+                            composite_key,
+                            raw_result_text,
+                        )
 
                         # The receiver is long-lived and reused across a session's
                         # turns, so ``context`` still carries the FIRST turn's
@@ -960,6 +984,8 @@ class ClaudeAgent(BaseAgent):
                                 pending_request,
                             )
                             self._last_assistant_text.pop(composite_key, None)
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
                             is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
                             try:
                                 session = await self.session_manager.get_or_create_session(
@@ -1530,6 +1556,39 @@ class ClaudeAgent(BaseAgent):
         data = getattr(message, "data", None)
         return data.get(name, default) if isinstance(data, dict) else default
 
+    def _track_tool_activity_mode(self, composite_key: str, block: ToolUseBlock) -> None:
+        """Remember which Claude task frames belong to foreground tool steps."""
+
+        tool_use_id = str(getattr(block, "id", "") or "").strip()
+        if not tool_use_id:
+            return
+        tool_input = getattr(block, "input", None)
+        runs_in_background = bool(
+            isinstance(tool_input, dict) and tool_input.get("run_in_background") is True
+        )
+        if runs_in_background:
+            return
+        self._foreground_tool_use_ids.setdefault(composite_key, set()).add(
+            tool_use_id
+        )
+        self._turns_with_foreground_tools.add(composite_key)
+
+    def _select_terminal_text(
+        self,
+        composite_key: str,
+        sdk_result: str | None,
+    ) -> str:
+        """Select terminal content from assistant TextBlocks, never tool labels."""
+
+        assistant_text = str(
+            self._last_assistant_text.get(composite_key) or ""
+        ).strip()
+        if assistant_text:
+            return assistant_text
+        if composite_key in self._turns_with_foreground_tools:
+            return ""
+        return str(sdk_result or "")
+
     def _current_turn_id(
         self,
         composite_key: str,
@@ -1603,6 +1662,11 @@ class ClaudeAgent(BaseAgent):
         description = str(self._task_field(message, "description", "") or "").strip() or None
         task_type = str(self._task_field(message, "task_type", "") or "").strip()
         tool_use_id = str(self._task_field(message, "tool_use_id", "") or "").strip()
+        foreground_tool_ids = self._foreground_tool_use_ids.get(composite_key) or set()
+        foreground = bool(
+            (existing_activity is not None and existing_activity.foreground)
+            or (tool_use_id and tool_use_id in foreground_tool_ids)
+        )
         metadata = {
             key: value
             for key, value in {
@@ -1647,6 +1711,7 @@ class ClaudeAgent(BaseAgent):
                 activity_id=task_id,
                 kind=task_type or "background_task",
                 description=description,
+                foreground=foreground,
                 parent_activity_id=tool_use_id or None,
                 turn_id=turn_id,
                 run_id=run_ids[0] if run_ids else None,
@@ -1684,6 +1749,7 @@ class ClaudeAgent(BaseAgent):
                 activity_id=task_id,
                 kind=task_type or "background_task",
                 description=description,
+                foreground=foreground,
                 parent_activity_id=tool_use_id or None,
                 turn_id=turn_id,
                 run_id=run_ids[0] if run_ids else None,
@@ -1695,14 +1761,18 @@ class ClaudeAgent(BaseAgent):
             activity_id=task_id,
             status=status,
             metadata=metadata,
-            expects_output=status == "completed",
+            expects_output=status == "completed" and not foreground,
             retain_terminal_snapshot=status != "completed",
         )
+        if tool_use_id:
+            foreground_tool_ids.discard(tool_use_id)
+            if not foreground_tool_ids:
+                self._foreground_tool_use_ids.pop(composite_key, None)
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
         if completed is not None and callable(on_terminal):
             on_terminal(completed)
-        if status != "completed":
+        if status != "completed" or foreground:
             self._mark_session_idle_if_runtime_free(composite_key)
             self._signal_activity_output_settled(composite_key)
         return True

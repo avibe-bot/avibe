@@ -638,7 +638,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         next_request = SimpleNamespace(started_at=None)
         agent._pending_requests[composite_key] = [queued_request, next_request]
         agent._pending_reactions[composite_key] = [("m1", ":eyes:"), ("m2", ":eyes:")]
-        agent._last_assistant_text[composite_key] = "last"
+        agent._last_assistant_text[composite_key] = "final assistant text"
         controller.session_manager.session.session_active[composite_key] = True
 
         result_message = type(
@@ -659,7 +659,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mark_idle_calls, [])
         agent.emit_result_message.assert_awaited_once_with(
             context,
-            "done",
+            "final assistant text",
             subtype="success",
             duration_ms=1,
             parse_mode="markdown",
