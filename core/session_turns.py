@@ -32,6 +32,7 @@ from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import messages
+from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
 from vibe.i18n import t as i18n_t
 
@@ -39,6 +40,21 @@ if TYPE_CHECKING:
     from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
+
+
+def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Annotate a registry background activity with the unified banner fields.
+
+    The registry (``core/session_activities.py``) is left untouched; we only tag
+    its serialized output so a backend activity and a live-derived harness item
+    share one shape (``item_kind`` / ``label`` / ``since``) for the banner.
+    """
+    enriched = dict(item)
+    enriched["item_kind"] = "backend_activity"
+    enriched["since"] = str(item.get("started_at") or "")
+    enriched["label"] = str(item.get("description") or "")
+    return enriched
+
 
 # A queued row's ``metadata[SCHEDULED_PROVENANCE_KEY]`` carries the scheduled run's
 # context.platform_specific provenance that the gate must restore when the row is
@@ -1105,9 +1121,14 @@ class SessionTurnManager:
             if callable(started):
                 native_turn_started = started(entry.context) is True
         pending_input_count = 0
+        harness_activities: list[dict[str, Any]] = []
         try:
             with self._sqlite_engine().begin() as conn:
                 pending_input_count = len(messages_service.list_queued(conn, session_id))
+                try:
+                    harness_activities = derive_session_harness_activities(conn, session_id)
+                except Exception:
+                    logger.debug("turn_state: failed to derive harness activities", exc_info=True)
         except Exception:
             logger.debug("turn_state: failed to read queued input count", exc_info=True)
         activity_state: dict[str, Any] = {
@@ -1123,6 +1144,16 @@ class SessionTurnManager:
                 activity_state = project(session_id)
             except Exception:
                 logger.debug("turn_state: failed to project Activity state", exc_info=True)
+        # Unified background-work banner: process-local backend activities from the
+        # registry, then live-derived harness items from the durable store. The
+        # registry is never mutated — harness items are appended only to this
+        # projection so the banner survives restarts correct-by-construction.
+        background_activities = [
+            _as_backend_activity_item(item)
+            for item in activity_state.get("background_activities", [])
+            if isinstance(item, dict)
+        ]
+        background_activities.extend(harness_activities)
         result = {
             "ok": True,
             "session_id": session_id,
@@ -1130,7 +1161,7 @@ class SessionTurnManager:
             "native_turn_started": native_turn_started,
             "foreground": "running" if active else "idle",
             "pending_input_count": pending_input_count,
-            "background_activities": activity_state.get("background_activities", []),
+            "background_activities": background_activities,
             "pending_activity_output_count": activity_state.get(
                 "pending_activity_output_count",
                 0,

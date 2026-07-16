@@ -607,6 +607,189 @@ def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
     }
 
 
+# Longest harness label carried in the banner payload; longer strings are
+# elided so one runaway prompt can't bloat the runtime-state response.
+_HARNESS_LABEL_MAX = 80
+
+
+def _banner_label(text: Any, limit: int = _HARNESS_LABEL_MAX) -> str:
+    """Collapse whitespace and clip a harness label to a banner-friendly head."""
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def _harness_banner_item(
+    *,
+    item_id: str,
+    item_kind: str,
+    session_id: str,
+    status: str,
+    label: str,
+    since: str,
+    updated_at: str,
+    backend: str = "",
+) -> dict[str, Any]:
+    """Shape one harness row like a serialized background activity.
+
+    The banner unions these with process-local backend activities
+    (``core/session_activities.SessionActivity.to_dict``), so a harness item
+    carries every key an existing ``background_activities`` consumer already
+    reads, plus the unified ``item_kind`` / ``label`` / ``since`` fields the
+    banner uses to render and route each row. Nothing here is written back into
+    the registry — the row is derived fresh on every runtime-state build.
+    """
+    return {
+        "id": item_id,
+        "backend": backend,
+        "runtime_key": "",
+        "session_id": session_id,
+        "kind": item_kind,
+        "status": status,
+        "description": label or None,
+        "foreground": False,
+        "detached_from_run": False,
+        "parent_activity_id": None,
+        "turn_id": None,
+        "run_id": None,
+        "metadata": {},
+        "started_at": since,
+        "updated_at": updated_at or since,
+        "completed_at": None,
+        # Unified background-work banner fields (spec: kind / label / since).
+        "item_kind": item_kind,
+        "label": label,
+        "since": since,
+    }
+
+
+def derive_session_harness_activities(conn: Connection, session_id: str) -> list[dict[str, Any]]:
+    """Live-derive the harness items the background-work banner unions in.
+
+    Read-only projection from the durable store — deliberately NOT mirrored into
+    the process-local ``SessionActivityRegistry`` so the banner stays correct by
+    construction across restarts (a watch survives a restart; the registry does
+    not). Three sources, all scoped to ``session_id``:
+
+    - enabled, live (not soft-deleted) watches bound to this session;
+    - enabled, live scheduled tasks bound to this session;
+    - queued/running delegated agent runs whose callback returns here (work this
+      session dispatched and is waiting on).
+
+    Each row is shaped like a serialized background activity plus the unified
+    ``item_kind`` / ``label`` / ``since`` fields (see ``_harness_banner_item``).
+    """
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return []
+    items: list[dict[str, Any]] = []
+
+    # Watches + scheduled tasks live in ``run_definitions``, discriminated by
+    # ``definition_type`` (see storage/background.py). Both must be enabled and
+    # not soft-deleted to count as ongoing background work for the session.
+    definition_rows = (
+        conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.definition_type,
+                run_definitions.c.name,
+                run_definitions.c.prompt,
+                run_definitions.c.message,
+                run_definitions.c.created_at,
+                run_definitions.c.updated_at,
+            )
+            .where(run_definitions.c.session_id == session_id)
+            .where(run_definitions.c.deleted_at.is_(None))
+            .where(run_definitions.c.enabled == 1)
+            .order_by(run_definitions.c.created_at, run_definitions.c.id)
+        )
+        .mappings()
+        .all()
+    )
+    for row in definition_rows:
+        definition_type = str(row["definition_type"] or "")
+        if definition_type == "watch":
+            item_kind, status = "watch", "enabled"
+            label = _banner_label(row["name"])
+        elif definition_type == "scheduled":
+            # A fired one-shot is disabled/removed by the scheduler, so an
+            # enabled scheduled definition is the pending-work proxy here.
+            item_kind, status = "task", "scheduled"
+            label = _banner_label(row["name"] or row["prompt"] or row["message"])
+        else:
+            continue
+        since = str(row["created_at"] or "")
+        items.append(
+            _harness_banner_item(
+                item_id=f"{item_kind}:{row['id']}",
+                item_kind=item_kind,
+                session_id=session_id,
+                status=status,
+                label=label,
+                since=since,
+                updated_at=str(row["updated_at"] or since),
+            )
+        )
+
+    # Delegated agent runs this session dispatched and is waiting on: the run
+    # executes elsewhere but its result returns here (``callback_session_id``)
+    # and it is not yet terminal. ``run_type='agent_run'`` excludes task/watch
+    # execution runs (already represented by their definitions above); the
+    # self-run guard keeps a session's OWN foreground turn — reported via
+    # ``foreground``, not the banner — out of the union. Active-run cardinality
+    # is small, so the (run_type, status) index carries this without a dedicated
+    # ``callback_session_id`` index.
+    run_rows = (
+        conn.execute(
+            select(
+                agent_runs.c.id,
+                agent_runs.c.agent_name,
+                agent_runs.c.agent_backend,
+                agent_runs.c.message,
+                agent_runs.c.prompt,
+                agent_runs.c.status,
+                agent_runs.c.created_at,
+                agent_runs.c.started_at,
+                agent_runs.c.updated_at,
+            )
+            .where(agent_runs.c.callback_session_id == session_id)
+            .where(agent_runs.c.run_type == "agent_run")
+            .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
+            .where(
+                or_(
+                    agent_runs.c.session_id.is_(None),
+                    agent_runs.c.session_id != agent_runs.c.callback_session_id,
+                )
+            )
+            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+        )
+        .mappings()
+        .all()
+    )
+    for row in run_rows:
+        head = _banner_label(row["message"] or row["prompt"])
+        agent_name = str(row["agent_name"] or "").strip()
+        if agent_name and head:
+            label = _banner_label(f"{agent_name}: {head}")
+        else:
+            label = agent_name or head
+        since = str(row["started_at"] or row["created_at"] or "")
+        items.append(
+            _harness_banner_item(
+                item_id=f"agent_run:{row['id']}",
+                item_kind="agent_run",
+                session_id=session_id,
+                status=str(row["status"] or "running"),
+                label=label,
+                since=since,
+                updated_at=str(row["updated_at"] or since),
+                backend=str(row["agent_backend"] or ""),
+            )
+        )
+    return items
+
+
 def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     """Permanently archive a session and reclaim everything bound to it.
 
