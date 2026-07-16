@@ -707,6 +707,34 @@ traversal-realpath guards apply to it too (a hostile `..` href is already reject
 href policy before mapping), and `icon_version` hashes the resolved (mapped) file so it stays
 content-correct. The mapping is LINK-scoped — it is not a blanket scan of `public/`.
 
+### 7.1k Dock visual polish — tile radius/borders + minimized-chip icons (owner 2026-07-16 15:56)
+
+Owner feedback on the live Dock (two items):
+
+1. **Tile radius + accent borders.** The Dock tile icon's rounding is too heavy — target
+   **12px** (`rounded-xl`) on the Dock tile box. And the per-session accent BORDERS
+   ("有的绿有的紫") read as noisy — **remove the accent border entirely** from
+   `ShowPageAvatarTile` (the 34% `color-mix` `borderColor` + the `border` class). This is
+   the shared chokepoint, so the border disappears everywhere it renders (Dock, App
+   Library rows, ⌘K results) — ONE consistent look, declared in the PR body. Letter
+   avatars keep their accent-tinted BACKGROUND fill (16% mix) and accent letter color —
+   only the border goes. **Radius is unified too (owner 16:04): 12px (`rounded-xl`) at
+   the shared chokepoint itself** — Dock tiles AND App Library rows AND ⌘K results all
+   render the same 12px, borderless tile; no per-surface radius overrides.
+2. **Minimized-window chips use the app's real icon.** The minimized thumbnail's body
+   currently renders the registry glyph (`def.icon`) for every window. New rule: **if the
+   app has an icon, show it; only fall back otherwise.** Concretely: for `showpage`
+   windows, render the page's own avatar content through the shared chokepoint
+   (`ShowPageAvatarContent`: favicon `<img>` when the page has one, else the letter
+   avatar with its accent — same identity as its Dock tile, sized to the chip); built-ins
+   keep their registry icon (that IS their icon). The letter-not-generic fallback choice
+   is deliberate (consistent with the Dock tile identity) — declare it in the PR body.
+
+Invariant reminder: Dock tile visual changes MUST NOT break the drag gesture — the
+press target must remain a filling non-interactive child (icon `<img
+draggable={false}>` without `pointer-events-none`, letter wrapped in a filling `<span>`);
+see the invariant comment in `showPageAvatarTile.tsx` (§7.1i forensics).
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:
