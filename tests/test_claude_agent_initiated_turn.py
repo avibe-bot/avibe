@@ -22,12 +22,16 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
+from modules.claude_sdk_compat import (
+    TextBlock,
+    ToolUseBlock,
+)
 from core.message_output import terminal_output_for
 
 
@@ -150,6 +154,78 @@ def _completed_task_notification_then_wait_client(release: asyncio.Event):
                 yield TaskStartedMessage()
                 yield TaskNotificationMessage()
                 await release.wait()
+
+            return _iterate()
+
+    return _Client()
+
+
+def _foreground_bash_then_delayed_result_client(
+    notification_seen: asyncio.Event,
+    release_result: asyncio.Event,
+):
+    def _content_block(block_type, **values):
+        block = object.__new__(block_type)
+        for name, value in values.items():
+            setattr(block, name, value)
+        return block
+
+    class ResultMessage:
+        subtype = "success"
+        result = "Push branch, confirm repo"
+        duration_ms = 1
+
+    class _Client:
+        def receive_messages(self):
+            async def _iterate():
+                text_message = AssistantMessage()
+                text_message.content = [
+                    _content_block(
+                        TextBlock,
+                        text=(
+                            "Two clean commits. Let me run `git push` and "
+                            "**confirm** the repo/remote for the PR."
+                        ),
+                    )
+                ]
+                yield text_message
+
+                tool_message = AssistantMessage()
+                tool_message.content = [
+                    _content_block(
+                        ToolUseBlock,
+                        id="toolu_push",
+                        name="Bash",
+                        input={
+                            "command": "git push",
+                            "description": "Push branch, confirm repo",
+                        },
+                    )
+                ]
+                yield tool_message
+
+                task_started = TaskStartedMessage()
+                task_started.subtype = "task_started"
+                task_started.task_id = "task-push"
+                task_started.description = "Push branch, confirm repo"
+                task_started.tool_use_id = "toolu_push"
+                task_started.task_type = "local_bash"
+                task_started.data = {}
+                yield task_started
+
+                task_completed = TaskNotificationMessage()
+                task_completed.subtype = "task_notification"
+                task_completed.task_id = "task-push"
+                task_completed.status = "completed"
+                task_completed.output_file = "/tmp/task-push.output"
+                task_completed.summary = "Push branch, confirm repo"
+                task_completed.tool_use_id = "toolu_push"
+                task_completed.data = {}
+                yield task_completed
+                yield task_completed
+                notification_seen.set()
+                await release_result.wait()
+                yield ResultMessage()
 
             return _iterate()
 
@@ -825,6 +901,470 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await receiver
+
+    async def test_foreground_tool_activity_waits_for_result_and_uses_assistant_text(self):
+        agent, service = _build_agent()
+        agent._adopt_pending_turn_token = ClaudeAgent._adopt_pending_turn_token
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
+        formatter = SimpleNamespace(
+            escape_special_chars=lambda text: text.replace("`", "\\`").replace(
+                "*", "\\*"
+            ),
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+            format_toolcall=lambda *_args, **_kwargs: "Bash tool call",
+            format_toolcall_label=lambda *_args, **_kwargs: "Push branch, confirm repo",
+        )
+        agent._get_formatter = lambda _context: formatter
+        emitted_provenance = []
+
+        async def _emit_result(context, _text, *, request=None, output=None, **_kwargs):
+            semantics = output or terminal_output_for(request)
+            emitted_provenance.append(semantics.provenance(context))
+            return "message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
+        composite_key = "session-foreground-bash:/tmp/work"
+        origin_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-origin",
+                "turn_token": "turn-origin",
+            }
+        )
+        queued_context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-followup",
+                "turn_token": "turn-followup",
+            }
+        )
+        origin_request = SimpleNamespace(context=origin_context)
+        queued_request = SimpleNamespace(context=queued_context)
+        agent._pending_requests[composite_key] = [origin_request, queued_request]
+        receiver_context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sess-foreground-bash"},
+        )
+        notification_seen = asyncio.Event()
+        release_result = asyncio.Event()
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _foreground_bash_then_delayed_result_client(
+                    notification_seen,
+                    release_result,
+                ),
+                "session-foreground-bash",
+                "/tmp/work",
+                receiver_context,
+                composite_key=composite_key,
+            )
+        )
+
+        await asyncio.wait_for(notification_seen.wait(), timeout=1)
+        await asyncio.sleep(0.01)
+
+        agent.emit_result_message.assert_not_awaited()
+        self.assertEqual(
+            agent._pending_requests[composite_key],
+            [origin_request, queued_request],
+        )
+        self.assertFalse(
+            service.activities.has_completed_output("claude", composite_key)
+        )
+
+        release_result.set()
+        await asyncio.wait_for(receiver, timeout=1)
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            (
+                "Two clean commits. Let me run `git push` and **confirm** the "
+                "repo/remote for the PR."
+            ),
+        )
+        self.assertEqual(agent._pending_requests[composite_key], [queued_request])
+        self.assertEqual(emitted_provenance[0]["run_id"], "run-origin")
+
+    async def test_detached_unsolicited_error_keeps_sdk_failure_text(self):
+        agent, _service = _build_agent()
+        composite_key = "session-detached-unsolicited-error:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-unsolicited-error"}
+        )
+        agent._detached_unsolicited_outputs.add(composite_key)
+        agent._detached_unsolicited_text[composite_key] = "Earlier assistant text"
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        class ResultMessage:
+            subtype = "error_during_execution"
+            result = "Bash exited with status 1"
+            duration_ms = 1
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-detached-unsolicited-error",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            "Bash exited with status 1",
+        )
+
+    async def test_detached_activity_result_does_not_clear_new_turn_foreground_state(self):
+        agent, service = _build_agent()
+        composite_key = "session-detached-keeps-foreground:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-keeps-foreground"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-detached-keeps-foreground",
+            activity_id="task-older-turn",
+            kind="local_agent",
+            turn_id="older-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-older-turn",
+            status="completed",
+            expects_output=True,
+        )
+        agent._detached_activity_outputs[composite_key] = (
+            service.activities.claim_completed_output_batch("claude", composite_key)
+        )
+        agent._foreground_tool_use_ids[composite_key] = {"toolu_new_turn"}
+        agent._turns_with_foreground_tools.add(composite_key)
+        agent._emit_activity_result = AsyncMock()
+        result_processed = asyncio.Event()
+        release_receiver = asyncio.Event()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+                    result_processed.set()
+                    await release_receiver.wait()
+
+                return _iterate()
+
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _Client(),
+                "session-detached-keeps-foreground",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        try:
+            await asyncio.wait_for(result_processed.wait(), timeout=1)
+            self.assertEqual(
+                agent._foreground_tool_use_ids[composite_key],
+                {"toolu_new_turn"},
+            )
+            self.assertIn(composite_key, agent._turns_with_foreground_tools)
+        finally:
+            release_receiver.set()
+            await receiver
+
+    async def test_detached_foreground_tool_does_not_poison_next_pending_turn(self):
+        agent, service = _build_agent()
+        agent._adopt_pending_turn_token = ClaudeAgent._adopt_pending_turn_token
+        composite_key = "session-detached-tool-then-user:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sess-detached-tool-then-user"},
+        )
+        next_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "task_trigger_kind": "agent_run",
+                    "task_execution_id": "run-next",
+                    "turn_token": "turn-next",
+                }
+            )
+        )
+        agent._detached_unsolicited_outputs.add(composite_key)
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        def _content_block(block_type, **values):
+            block = object.__new__(block_type)
+            for name, value in values.items():
+                setattr(block, name, value)
+            return block
+
+        class ResultMessage:
+            subtype = "success"
+            duration_ms = 1
+
+            def __init__(self, result):
+                self.result = result
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    tool_message = AssistantMessage()
+                    tool_message.content = [
+                        _content_block(
+                            ToolUseBlock,
+                            id="toolu_detached",
+                            name="Bash",
+                            input={
+                                "command": "git push",
+                                "description": "Push branch, confirm repo",
+                            },
+                        )
+                    ]
+                    yield tool_message
+
+                    started = TaskStartedMessage()
+                    started.task_id = "task-detached-tool"
+                    started.tool_use_id = "toolu_detached"
+                    started.task_type = "local_bash"
+                    started.data = {}
+                    yield started
+
+                    completed = TaskNotificationMessage()
+                    completed.task_id = "task-detached-tool"
+                    completed.status = "completed"
+                    completed.summary = "Push branch, confirm repo"
+                    completed.data = {}
+                    yield completed
+
+                    yield ResultMessage("Push branch, confirm repo")
+                    agent._pending_requests[composite_key] = [next_request]
+                    yield ResultMessage("Actual next-turn answer")
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-detached-tool-then-user",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        self.assertEqual(agent.emit_result_message.await_count, 2)
+        first_text = agent.emit_result_message.await_args_list[0].args[1]
+        second_text = agent.emit_result_message.await_args_list[1].args[1]
+        self.assertIn("<silent>", first_text)
+        self.assertNotIn("Push branch, confirm repo", first_text)
+        self.assertEqual(second_text, "Actual next-turn answer")
+        self.assertFalse(
+            service.activities.has_completed_output("claude", composite_key)
+        )
+
+    async def test_detached_activity_error_keeps_sdk_failure_text(self):
+        agent, service = _build_agent()
+        composite_key = "session-detached-error:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-error"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-detached-error",
+            activity_id="task-detached-error",
+            kind="local_agent",
+            turn_id="origin-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-detached-error",
+            status="completed",
+            expects_output=True,
+        )
+        activities = service.activities.claim_completed_output_batch(
+            "claude",
+            composite_key,
+        )
+        agent._detached_activity_outputs[composite_key] = activities
+        agent._detached_assistant_text[composite_key] = "Earlier assistant text"
+        agent._emit_activity_result = AsyncMock()
+
+        class ResultMessage:
+            subtype = "error_during_execution"
+            result = "Bash exited with status 1"
+            duration_ms = 1
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-detached-error",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent._emit_activity_result.assert_awaited_once()
+        self.assertEqual(
+            agent._emit_activity_result.await_args.args[2],
+            "Bash exited with status 1",
+        )
+
+    async def test_foreground_tool_without_text_settles_silently(self):
+        agent, _service = _build_agent()
+        composite_key = "session-textless-tool:/tmp/work"
+        agent._turns_with_foreground_tools.add(composite_key)
+
+        selected = agent._select_terminal_text(
+            composite_key,
+            "Push branch, confirm repo",
+        )
+        self.assertIn("<silent>", selected)
+        self.assertNotIn("Push branch, confirm repo", selected)
+
+        context = SimpleNamespace(platform_specific={})
+        await agent.emit_result_message(context, selected, duration_ms=1000)
+
+        agent.controller.emit_agent_message.assert_awaited_once()
+        self.assertEqual(agent.controller.emit_agent_message.await_args.args[2], "")
+        self.assertNotIn(
+            "result_footer",
+            agent.controller.emit_agent_message.await_args.kwargs,
+        )
+
+    def test_foreground_tool_failure_does_not_settle_owned_run(self):
+        agent, service = _build_agent()
+        composite_key = "session-foreground-failure:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-foreground-failure",
+                "turn_token": "turn-foreground-failure",
+            }
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        tool_block = object.__new__(ToolUseBlock)
+        tool_block.id = "toolu_failure"
+        tool_block.name = "Bash"
+        tool_block.input = {
+            "command": "false",
+            "description": "Run failing probe",
+        }
+        agent._track_tool_activity_mode(composite_key, tool_block)
+        on_terminal = Mock()
+        service.on_activity_terminal = on_terminal
+
+        started = TaskStartedMessage()
+        started.task_id = "task-failure"
+        started.description = "Run failing probe"
+        started.tool_use_id = "toolu_failure"
+        started.task_type = "local_bash"
+        started.data = {}
+        self.assertTrue(
+            agent._handle_activity_message(started, composite_key, context)
+        )
+
+        failed = TaskNotificationMessage()
+        failed.task_id = "task-failure"
+        failed.status = "failed"
+        failed.summary = "Run failing probe"
+        failed.tool_use_id = "toolu_failure"
+        failed.data = {}
+        self.assertTrue(
+            agent._handle_activity_message(failed, composite_key, context)
+        )
+
+        on_terminal.assert_not_called()
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertEqual(
+            service.activities.active_for_runtime("claude", composite_key),
+            [],
+        )
+
+    async def test_receiver_exit_clears_foreground_tool_state(self):
+        agent, _service = _build_agent()
+        composite_key = "session-dead-receiver:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-dead-receiver"}
+        )
+        agent._foreground_tool_use_ids[composite_key] = {"toolu_stale"}
+        agent._turns_with_foreground_tools.add(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-dead-receiver",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        self.assertNotIn(composite_key, agent._foreground_tool_use_ids)
+        self.assertNotIn(composite_key, agent._turns_with_foreground_tools)
+
+    async def test_empty_error_result_uses_last_assistant_diagnostic(self):
+        agent, _service = _build_agent()
+        composite_key = "session-empty-error:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"agent_session_id": "sess-empty-error"},
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        agent._last_assistant_text[composite_key] = "Detailed provider diagnostic"
+        agent._handle_terminal_failure_result = AsyncMock(return_value=True)
+
+        class ResultMessage:
+            subtype = "error_during_execution"
+            result = None
+            duration_ms = 1
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield ResultMessage()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-empty-error",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent._handle_terminal_failure_result.assert_awaited_once_with(
+            context,
+            composite_key,
+            ANY,
+            "Detailed provider diagnostic",
+        )
 
     async def test_summaryless_completed_activity_settles_silently(self):
         agent, service = _build_agent()

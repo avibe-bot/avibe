@@ -638,7 +638,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         next_request = SimpleNamespace(started_at=None)
         agent._pending_requests[composite_key] = [queued_request, next_request]
         agent._pending_reactions[composite_key] = [("m1", ":eyes:"), ("m2", ":eyes:")]
-        agent._last_assistant_text[composite_key] = "last"
+        agent._last_assistant_text[composite_key] = "final assistant text"
         controller.session_manager.session.session_active[composite_key] = True
 
         result_message = type(
@@ -659,7 +659,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mark_idle_calls, [])
         agent.emit_result_message.assert_awaited_once_with(
             context,
-            "done",
+            "final assistant text",
             subtype="success",
             duration_ms=1,
             parse_mode="markdown",
@@ -2646,9 +2646,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdoptPendingTurnTokenTests(unittest.TestCase):
-    """``_adopt_pending_turn_token`` realigns the reused receiver's stale token
-    with the turn a result belongs to, so the streaming completion guard in
-    ``_stream_chunk`` correlates it to the live sink instead of rejecting it."""
+    """Pending Turn identity replaces stale reused-receiver identity."""
 
     def test_adopts_pending_requests_token(self):
         # Reused receiver context still carries turn-1's token; the FIFO-matched
@@ -2670,6 +2668,54 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
         pending = SimpleNamespace(context=SimpleNamespace(platform_specific={}))
         ClaudeAgent._adopt_pending_turn_token(ctx, pending)
         self.assertEqual(ctx.platform_specific["turn_token"], "T1")
+
+    def test_adopts_agent_run_attribution(self):
+        ctx = SimpleNamespace(
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-old",
+            }
+        )
+        coalesced = {"execution_ids": ["run-new", "run-child"]}
+        pending = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "task_trigger_kind": "agent_run",
+                    "task_execution_id": "run-new",
+                    "coalesced_queue": coalesced,
+                }
+            )
+        )
+
+        ClaudeAgent._adopt_pending_turn_token(ctx, pending)
+
+        self.assertEqual(ctx.platform_specific["task_execution_id"], "run-new")
+        self.assertEqual(ctx.platform_specific["coalesced_queue"], coalesced)
+        self.assertIsNot(ctx.platform_specific["coalesced_queue"], coalesced)
+        self.assertIsNot(
+            ctx.platform_specific["coalesced_queue"]["execution_ids"],
+            coalesced["execution_ids"],
+        )
+
+    def test_clears_stale_agent_run_attribution_for_plain_turn(self):
+        ctx = SimpleNamespace(
+            platform_specific={
+                "turn_token": "T1",
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-old",
+                "coalesced_queue": {"execution_ids": ["run-old"]},
+            }
+        )
+        pending = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={"turn_token": "T2"})
+        )
+
+        ClaudeAgent._adopt_pending_turn_token(ctx, pending)
+
+        self.assertEqual(ctx.platform_specific["turn_token"], "T2")
+        self.assertNotIn("task_trigger_kind", ctx.platform_specific)
+        self.assertNotIn("task_execution_id", ctx.platform_specific)
+        self.assertNotIn("coalesced_queue", ctx.platform_specific)
 
 
 class _FakeBaseAgent(BaseAgent):

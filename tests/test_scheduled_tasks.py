@@ -2326,6 +2326,67 @@ def test_duplicate_terminal_output_does_not_append_result_text_again(
     assert "deferred_terminal_status" not in terminal["result_payload"]
 
 
+def test_claude_terminal_output_records_assistant_text_not_tool_description(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+        callback_session_id=caller_session_id,
+    )
+    assert request_store.claim(request.id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assistant_text = (
+        "Two clean commits. Let me push the branch and confirm the repo/remote "
+        "for the PR."
+    )
+
+    recorded = sqlite_store.record_run_output(
+        request.id,
+        output_id="terminal",
+        text=assistant_text,
+        provenance={"backend": "claude", "run_id": request.id},
+        terminal_status="succeeded",
+    )
+
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert recorded["terminal_transition"] is True
+    assert terminal["result_text"] == assistant_text
+    assert [item["text"] for item in terminal["result_payload"]["outputs"]] == [
+        assistant_text
+    ]
+    assert "Push branch, confirm repo" not in terminal["result_text"]
+
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(
+                submit_scheduled=lambda *_args, **_kwargs: None,
+                in_flight={},
+            ),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback"
+        and run.get("parent_run_id") == request.id
+    ]
+    assert [run["message"] for run in callback_runs] == [assistant_text]
+
+
 def test_failed_run_records_error_and_enqueues_one_terminal_callback(
     tmp_path: Path,
     monkeypatch,
