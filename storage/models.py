@@ -338,10 +338,11 @@ messages = Table(
     Column("type", String, nullable=False, server_default="assistant"),
     Column("author_id", String, nullable=True),
     Column("author_name", Text, nullable=True),
-    # Origin of the message (user / agent / harness), distinct from the coarse
-    # ``author`` role — a Harness-triggered prompt is author='user' but
-    # source='harness'. ``author_name`` holds the display name (username /
-    # agent_name / task|watch), ``author_id`` the precise id.
+    # Origin of the message (user / agent / harness), distinct from authorship.
+    # Harness-triggered prompts use author/type/source='harness' so no automated
+    # input can be represented as human-authored. ``author_name`` holds the
+    # display name (username / agent_name / task|watch), ``author_id`` the precise
+    # id.
     Column("source", String, nullable=True),
     Column("native_message_id", String, nullable=True),
     Column("parent_native_message_id", String, nullable=True),
@@ -382,7 +383,8 @@ messages = Table(
         text("created_at desc"),
         text("id desc"),
         sqlite_where=text(
-            "session_id is not null and author = 'user' and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
+            "session_id is not null and ((author = 'user' and type = 'user') "
+            "or (author = 'harness' and type = 'harness'))"
         ),
     ),
     Index("ix_messages_scope_created", "scope_id", "created_at"),

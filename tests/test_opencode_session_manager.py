@@ -619,7 +619,14 @@ def test_opencode_saved_boundary_is_ignored_when_source_completed_after_anchor()
     server.create_session.assert_not_awaited()
 
 
-def test_opencode_saved_user_boundary_survives_source_completion_before_fork_starts() -> None:
+@pytest.mark.parametrize(
+    ("anchor_author", "anchor_type"),
+    [("user", "user"), ("harness", "harness")],
+)
+def test_opencode_saved_input_boundary_survives_source_completion_before_fork_starts(
+    anchor_author: str,
+    anchor_type: str,
+) -> None:
     sessions = SimpleNamespace(
         get_agent_session_id=Mock(return_value=None),
         ensure_agent_session_id=Mock(return_value="ses-fork"),
@@ -655,8 +662,8 @@ def test_opencode_saved_user_boundary_survives_source_completion_before_fork_sta
         "modules.agents.opencode.session.fork_source_state",
         return_value=SimpleNamespace(
             anchor_is_terminal_agent_output=False,
-            anchor_author="user",
-            anchor_type="user",
+            anchor_author=anchor_author,
+            anchor_type=anchor_type,
             has_messages_after_anchor=True,
             has_terminal_agent_output_after_anchor=True,
         ),

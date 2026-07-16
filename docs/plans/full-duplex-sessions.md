@@ -81,7 +81,8 @@ read-only compatibility alias for older clients, not the Session state model.
 
 ### Run outputs and callbacks
 
-The existing `agent_runs.result_payload_json` stores an idempotent output ledger:
+The existing `agent_runs.result_payload_json` stores an idempotent output ledger,
+while `agent_runs.result_text` stores only the terminal result:
 
 ```json
 {
@@ -97,15 +98,19 @@ The existing `agent_runs.result_payload_json` stores an idempotent output ledger
 }
 ```
 
-No visible wrapper text is added. Each new output can enqueue one callback turn
-immediately. Callback turns are deduplicated by structured Run lineage. Parent
-`callback_status` stays pending while the parent Run is active and settles once
-after the parent reaches its one idempotent terminal transition.
+No visible wrapper text is added. Intermediate output remains in the ledger and
+the originating Session; it does not enqueue callback work. After the parent Run
+reaches its one idempotent terminal transition, callback policy enqueues exactly
+one turn containing the terminal `result_text`. Callback turns are deduplicated
+by Run lineage. An explicit child Agent Run delivered to the callback Session
+satisfies that policy, so the automatic fallback does not echo the same report.
+Parent `callback_status` stays pending while the parent Run is active and settles
+once against that single delivery.
 
-If a Run fails or is canceled after forwarding partial outputs, its callback
-Session receives one additional terminal failure/cancellation Message. A
-successful Run with streamed outputs does not repeat them in a synthetic final
-summary.
+If a Run fails or is canceled after recording partial outputs, its callback
+Session receives one terminal failure/cancellation Message. A successful Run
+receives one terminal result Message; prior Activity or progress output is not
+copied into the callback Session.
 
 A terminal Run intent is retained in `result_payload_json` while a non-detached
 owned Activity remains active. A later Activity output can complete that Run
@@ -162,8 +167,8 @@ only that Turn, while the retry retains Run-completion authority. Recovered
 terminal Activities wait behind any output still owed by the same Run. Output
 containing only `<silent>` directives uses the same silent Run-settlement path
 as an empty summary. Activity output follows a durable handoff order: persist the
-Outbox snapshot, deliver and persist the Message, settle the Run and its callback
-outputs, then delete the snapshot. A failed snapshot write, Run write, or delete
+Outbox snapshot, deliver and persist the Message, settle the Run and its callback,
+then delete the snapshot. A failed snapshot write, Run write, or delete
 keeps the Activity active, queued, or claimed for an idempotent retry.
 
 ## Other backend protocol disposition
@@ -203,8 +208,8 @@ lifecycle.
   newer Turn remains active.
 - `MESSAGE-DELIVERY-004`: one Turn emits multiple output Messages and completes
   once.
-- `MESSAGE-DELIVERY-005`: one Run forwards multiple callback outputs and reaches
-  one idempotent terminal transition.
+- `MESSAGE-DELIVERY-005`: one Run retains multiple structured outputs, reaches
+  one idempotent terminal transition, and sends one terminal callback.
 
 Focused unit/contract tests cover Activity transitions, restart recovery,
 summary and no-summary policies, state-axis projection, structured provenance,

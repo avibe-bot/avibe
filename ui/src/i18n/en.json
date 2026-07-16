@@ -1043,6 +1043,7 @@
     },
     "search": {
       "roleYou": "You",
+      "roleAutomated": "Automated",
       "roleAgent": "Agent",
       "title": "Search",
       "entry": "Search",

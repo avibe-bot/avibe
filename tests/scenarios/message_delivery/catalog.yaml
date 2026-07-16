@@ -38,11 +38,11 @@ scenarios:
     layer: scenario
     test: tests/scenarios/message_delivery/test_message_delivery_scenarios.py::MessageDeliveryScenarioTests::test_one_turn_multiple_outputs_scenario_completes_once
   - id: MESSAGE-DELIVERY-005
-    name: One Run forwards multiple callback outputs and completes once
+    name: One Run retains multiple outputs but callbacks only its terminal result once
     status: covered
     kind: lifecycle
     layer: contract
-    test: tests/test_scheduled_tasks.py::test_agent_run_forwards_multiple_outputs_and_completes_once
+    test: tests/test_scheduled_tasks.py::test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result
   - id: MESSAGE-DELIVERY-006
     name: Every turn entry point reaches Show checkpoint lifecycle
     status: covered

@@ -151,6 +151,33 @@ def test_search_finds_cjk_term(isolated_state):
     assert match["snippet"]["match"] == "部署"
 
 
+def test_search_finds_harness_prompt_by_default(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness", "Automated")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "harness",
+            "inspect callback delivery",
+            "2026-06-01T10:00:00Z",
+            msg_type=messages_service.HARNESS_TYPE,
+            source="harness",
+        )
+
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query="callback")
+
+    match = result["sessions"][0]["matches"][0]
+    assert (match["author"], match["source"], match["type"]) == (
+        "harness",
+        "harness",
+        messages_service.HARNESS_TYPE,
+    )
+
+
 def test_search_excludes_im_platform_rows(isolated_state):
     """A ``result`` row on a non-avibe (IM) platform is excluded for the default
     platform='avibe' search — search is Workbench-scoped."""

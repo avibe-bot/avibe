@@ -16,6 +16,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
+from vibe.message_identity import HARNESS_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -278,13 +279,13 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
                 )
             else:
                 message_query = (
-                    message_query.where(messages.c.type.in_(("user", "pending")))
+                    message_query.where(messages.c.type.in_(("user", "pending", HARNESS_TYPE)))
                     .where(messages.c.created_at >= after)
                     .order_by(messages.c.created_at.asc(), messages.c.id.asc())
                     .limit(1)
                 )
             message_row = conn.execute(message_query).first()
-            if message_row is None or message_row.type not in {"user", "pending"}:
+            if message_row is None or message_row.type not in {"user", "pending", HARNESS_TYPE}:
                 return TurnCheckpointContext()
             return TurnCheckpointContext(
                 message=_read_message_text(message_row.content_text, message_row.content_json),

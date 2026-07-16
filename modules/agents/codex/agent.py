@@ -33,6 +33,7 @@ from modules.agents.codex.session import CodexSessionManager
 from modules.agents.codex.transport import CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
+from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
 
@@ -927,13 +928,13 @@ class CodexAgent(BaseAgent):
         source_state = fork_source_state(fork)
         if source_state.anchor_is_terminal_agent_output:
             return False
-        anchor_is_running_user = (
-            getattr(source_state, "anchor_author", None) == "user"
-            and getattr(source_state, "anchor_type", None) == "user"
+        anchor_is_running_input = is_input_turn(
+            getattr(source_state, "anchor_author", None),
+            getattr(source_state, "anchor_type", None),
         )
-        if getattr(source_state, "has_user_turn_after_anchor", False):
+        if getattr(source_state, "has_input_turn_after_anchor", False):
             return False
-        if anchor_is_running_user:
+        if anchor_is_running_input:
             if source_state.has_messages_after_anchor:
                 return True
             if bool(fork.get("native_turn_started")):

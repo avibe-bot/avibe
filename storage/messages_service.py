@@ -22,6 +22,7 @@ from sqlalchemy.engine import Connection
 
 from storage.db import escape_sql_like
 from storage.models import agent_sessions, messages, scope_settings, scopes
+from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 
 
 def _utc_now_iso() -> str:
@@ -129,17 +130,17 @@ def search_messages(
     *,
     query: str,
     platform: str = "avibe",
-    types: Iterable[str] = ("user", "result"),
+    types: Optional[Iterable[str]] = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
     Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
-    ``types`` (the user's prompts + the agent's rendered ``result`` replies — both
-    land on a message the chat actually renders, so a clicked result is always
-    jumpable). Archived sessions are excluded, as are messages under an archived
-    PROJECT — ``projects_service.archive_project`` disables a project by setting
+    ``types`` (human prompts + harness prompts + the agent's rendered ``result``
+    replies — all land on a message the chat actually renders, so a clicked result
+    is always jumpable). Archived sessions are excluded, as are messages under an
+    archived PROJECT — ``projects_service.archive_project`` disables a project by setting
     ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
     disabled state is the authoritative "archived project" signal here. A scope
     with no ``scope_settings`` row is treated as enabled (legacy / folder-less
@@ -160,7 +161,7 @@ def search_messages(
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
-    type_list = list(types)
+    type_list = list(types if types is not None else ("user", HARNESS_TYPE, "result"))
     effective_limit = min(max(int(limit), 1), 200)
 
     stmt = (
@@ -268,6 +269,9 @@ def append(
     # must be ``user`` (not ``assistant``), or the user+result transcript filter
     # would drop it. Typed callers (inbox/IM mirror) pass message_type explicitly.
     resolved_type = message_type or ("user" if author == "user" else "assistant")
+    if source == HARNESS_TYPE and author == "user" and resolved_type == "user":
+        author = HARNESS_TYPE
+        resolved_type = HARNESS_TYPE
 
     now = _utc_now_iso()
     payload = {
@@ -578,13 +582,14 @@ NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
 # gate, so what a page loads and what it receives over the stream are identical.
 # Excludes the agent's process log (``assistant`` / ``tool_call``) and ``system``
-# (which isn't persisted at all). Harness-triggered prompts are ``user``, so they
-# are included. ``show_page`` transcript marks are kept via a metadata-source
+# (which isn't persisted at all). Harness-triggered prompts have their own type
+# so they cannot be mistaken for human input. ``show_page`` transcript marks are
+# kept via a metadata-source
 # override in the fetch even though their row type is ``assistant``. ``error`` is a
 # terminal FAILED result (turned the dot red): shown in the conversation like any
 # terminal message, but the unread queries below stay ``result``-only so a failure
 # is not counted as an unread agent reply.
-TRANSCRIPT_TYPES = ("user", "result", "notify", "error")
+TRANSCRIPT_TYPES = ("user", HARNESS_TYPE, "result", "notify", "error")
 
 
 def enqueue_queued(
@@ -857,9 +862,9 @@ def list_inbox_sessions(
     session's most recent message of *any* author (the activity clock),
     descending. The preview text is the session's latest *agent* reply
     (distinct from the sort key). ``replied`` is True when the session is
-    *awaiting the agent* — the user's latest message is newer than the agent's
-    latest reply — so it stays set for the whole time the agent is working and
-    survives a reload, clearing only once the agent replies.
+    *awaiting the agent* — the latest human or harness input is newer than the
+    agent's latest reply — so it stays set for the whole time the agent is
+    working and survives a reload, clearing only once the agent replies.
 
     Keyset pagination via ``before`` (an opaque ``"<last_activity_at>|<session_id>"``
     cursor returned as ``next_cursor``).
@@ -871,6 +876,7 @@ def list_inbox_sessions(
         author: Optional[str] = None,
         types: Optional[tuple[str, ...]] = None,
         conversation_only: bool = False,
+        input_turn_only: bool = False,
     ) -> Any:
         msg = messages.alias()
         query = (
@@ -886,6 +892,15 @@ def list_inbox_sessions(
             query = query.where(msg.c.author == author)
         if types is not None:
             query = query.where(msg.c.type.in_(types))
+        if input_turn_only:
+            query = query.where(
+                or_(
+                    *(
+                        and_(msg.c.author == input_author, msg.c.type == input_type)
+                        for input_author, input_type in INPUT_TURN_AUTHOR_TYPES
+                    )
+                )
+            )
         if conversation_only:
             query = query.where(msg.c.type.notin_(NON_CONVERSATION_TYPES))
         return query.scalar_subquery()
@@ -897,8 +912,10 @@ def list_inbox_sessions(
     last_author = _latest_message_value("author", conversation_only=True)
     preview_id = _latest_message_value("id", types=("result", "notify", "error"))
     preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
-    last_user_at = _latest_message_value("created_at", author="user", conversation_only=True)
-    last_user_id = _latest_message_value("id", author="user", conversation_only=True)
+    last_input_at = _latest_message_value(
+        "created_at", conversation_only=True, input_turn_only=True
+    )
+    last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
 
     # Unread agent messages per session.
     m = messages
@@ -927,8 +944,8 @@ def list_inbox_sessions(
             unread_count_col,
             preview_id.label("preview_id"),
             preview_at.label("preview_at"),
-            last_user_at.label("last_user_at"),
-            last_user_id.label("last_user_id"),
+            last_input_at.label("last_input_at"),
+            last_input_id.label("last_input_id"),
         )
         .select_from(
             agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True).join(
@@ -984,23 +1001,23 @@ def list_inbox_sessions(
             except json.JSONDecodeError:
                 preview = ""
         unread = int(row["unread_count"] or 0)
-        # Awaiting the agent: the user's latest message is newer than the agent's
-        # latest reply. Persistent across a reload and stays set for the whole
-        # agent turn, unlike a "last author == user" check. ``created_at`` is
+        # Awaiting the agent: the latest human or harness input is newer than the
+        # agent's latest reply. Persistent across a reload and stays set for the whole
+        # agent turn, unlike a literal "last author" check. ``created_at`` is
         # second-resolution, so compare ``(created_at, id)`` tuples — the message
         # id carries a microsecond-clock prefix (see ``_new_message_id``), giving
         # the right order for a follow-up sent in the same second as the prior
         # reply.
-        last_user_at = row["last_user_at"]
-        last_user_id = row["last_user_id"]
+        last_input_at = row["last_input_at"]
+        last_input_id = row["last_input_id"]
         preview_at = row["preview_at"]
         preview_id = row["preview_id"]
         awaiting_reply = bool(
-            last_user_at is not None
+            last_input_at is not None
             and preview_at is not None
             and (
-                last_user_at > preview_at
-                or (last_user_at == preview_at and (last_user_id or "") > (preview_id or ""))
+                last_input_at > preview_at
+                or (last_input_at == preview_at and (last_input_id or "") > (preview_id or ""))
             )
         )
         sessions.append(

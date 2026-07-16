@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import type { MessageSearchMatch } from '../../../context/ApiContext';
 import { formatRelativeTime } from '../../../lib/relativeTime';
 import { Button } from '../../ui/button';
+import { messageSearchRole } from './messageSearchRole';
 import { Snippet } from './Snippet';
 
 type SearchResultRowProps = {
@@ -14,7 +15,7 @@ type SearchResultRowProps = {
   onSelect?: () => void;
 };
 
-// One matching message: a role chip (YOU / AGENT), the highlighted snippet, and
+// One matching message: a role chip, the highlighted snippet, and
 // a muted relative timestamp. Presentational + reusable by both the desktop
 // palette and the mobile page — navigation is wired by the consumer via
 // ``onSelect``.
@@ -27,7 +28,17 @@ type SearchResultRowProps = {
 // palette relies on that attribute to scroll the active row into view.
 export const SearchResultRow: React.FC<SearchResultRowProps> = ({ match, selected, onSelect }) => {
   const { t } = useTranslation();
-  const isUser = match.author === 'user';
+  const role = messageSearchRole(match);
+  const roleLabel = {
+    you: t('workbench.search.roleYou'),
+    automated: t('workbench.search.roleAutomated'),
+    agent: t('workbench.search.roleAgent'),
+  }[role];
+  const roleClass = {
+    you: 'bg-cyan-soft text-cyan',
+    automated: 'bg-violet-soft text-violet',
+    agent: 'bg-mint-soft text-mint',
+  }[role];
 
   return (
     <Button
@@ -45,12 +56,10 @@ export const SearchResultRow: React.FC<SearchResultRowProps> = ({ match, selecte
       <span
         className={clsx(
           'shrink-0 rounded-md px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider',
-          isUser
-            ? 'bg-cyan-soft text-cyan'
-            : 'bg-mint-soft text-mint',
+          roleClass,
         )}
       >
-        {isUser ? t('workbench.search.roleYou') : t('workbench.search.roleAgent')}
+        {roleLabel}
       </span>
       <span className="min-w-0 flex-1">
         <Snippet snippet={match.snippet} />

@@ -16,11 +16,13 @@ from typing import Any, Optional
 from config import paths
 from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
 from vibe.i18n import t
+from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error"}
 SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
+INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
 
 
 class SessionForkError(ValueError):
@@ -79,7 +81,7 @@ class ForkSourceState:
     latest_after_anchor_type: Optional[str] = None
     has_messages_after_anchor: bool = False
     has_terminal_agent_output_after_anchor: bool = False
-    has_user_turn_after_anchor: bool = False
+    has_input_turn_after_anchor: bool = False
     anchor_is_backend_failure: bool = False
 
     @property
@@ -96,8 +98,8 @@ class SourceMessageAnchor:
     message_type: Optional[str] = None
 
     @property
-    def is_running_user_turn(self) -> bool:
-        return self.author == "user" and self.message_type == "user"
+    def is_running_input_turn(self) -> bool:
+        return is_input_turn(self.author, self.message_type)
 
 
 def reserve_forked_session(
@@ -154,7 +156,7 @@ def reserve_forked_session(
                 )
             source_anchor = _latest_source_message_anchor(conn, str(row["id"]))
             source_has_active_run = _source_has_active_agent_run(conn, str(row["id"]))
-            inferred_running_turn = source_anchor.is_running_user_turn or (
+            inferred_running_turn = source_anchor.is_running_input_turn or (
                 source_backend == "opencode"
                 and source_has_active_run
             )
@@ -173,7 +175,7 @@ def reserve_forked_session(
                 if fork_point is not None:
                     opencode_fork_message_id, opencode_fork_empty_history = fork_point
                     opencode_boundary_from_active_run = bool(
-                        source_has_active_run and not source_anchor.is_running_user_turn
+                        source_has_active_run and not source_anchor.is_running_input_turn
                     )
                     effective_native_turn_started = True
             source_message_id = source_anchor.message_id
@@ -426,7 +428,9 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 .where(
                     messages.c.session_id == source_session_id,
                     or_(
-                        messages.c.type.in_(["user", *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]),
+                        messages.c.type.in_(
+                            [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
+                        ),
                         and_(
                             messages.c.type == "notify",
                             func.json_extract(messages.c.metadata_json, "$.event")
@@ -457,13 +461,17 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                     )
                 )
             )
-            has_user_turn_after_anchor = (
+            has_input_turn_after_anchor = (
                 conn.execute(
                     select(messages.c.id)
                     .where(
                         messages.c.session_id == source_session_id,
-                        messages.c.author == "user",
-                        messages.c.type == "user",
+                        or_(
+                            *(
+                                and_(messages.c.author == author, messages.c.type == message_type)
+                                for author, message_type in INPUT_TURN_AUTHOR_TYPES
+                            )
+                        ),
                         after_anchor,
                     )
                     .limit(1)
@@ -477,7 +485,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 latest_after_anchor_type=latest_after_anchor_type or None,
                 has_messages_after_anchor=latest_after_anchor is not None,
                 has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
-                has_user_turn_after_anchor=has_user_turn_after_anchor,
+                has_input_turn_after_anchor=has_input_turn_after_anchor,
                 anchor_is_backend_failure=is_backend_failure_notification(
                     anchor["type"],
                     _load_metadata(anchor["metadata_json"]),

@@ -150,8 +150,8 @@ class MessageHandler(BaseHandler):
             # Mirror the originating prompt into the workbench messages table
             # before we kick off the agent, so the transcript shows the turn
             # that produced the reply. Human turns are source='user'; harness
-            # turns (scheduled task / watch / webhook) are author='user' but
-            # source='harness' so the UI can mark who triggered them. Wrapped in
+            # turns (scheduled task / watch / webhook) use a first-class harness
+            # author/type so they cannot be mistaken for human input. Wrapped in
             # try/except inside the helper so a mirror failure can't break the turn.
             if source == self.TURN_SOURCE_HUMAN:
                 from core.message_mirror import mirror_inbound

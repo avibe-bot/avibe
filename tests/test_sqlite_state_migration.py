@@ -17,7 +17,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260707_0029"
+HEAD_REVISION = "20260716_0030"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -101,7 +101,7 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "ix_messages_inbox_agent_reply" in message_indexes
         assert "ix_messages_inbox_user_send" in message_indexes
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
-        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
+        assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
         assert "uq_vault_secrets_name_folded" in vault_secret_indexes
         assert "lower(name)" in _index_sql(conn, "uq_vault_secrets_name_folded").lower()
         assert "ix_vault_auth_factors_kind_rp" in vault_auth_factor_indexes
@@ -307,7 +307,7 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
     assert "ix_messages_inbox_user_send" in message_indexes
     with sqlite3.connect(db_path) as conn:
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
-        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
+        assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
     assert "ix_agent_sessions_scope_status_activity" in agent_session_indexes
 
 
@@ -338,7 +338,7 @@ def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> 
     assert "ix_agent_events_turn_sequence_id" in agent_event_indexes
 
 
-def test_run_migrations_rebuilds_inbox_indexes_for_harness_dedupe(tmp_path: Path) -> None:
+def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
     run_migrations(db_path, revision="20260610_0022")
@@ -352,7 +352,46 @@ def test_run_migrations_rebuilds_inbox_indexes_for_harness_dedupe(tmp_path: Path
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
-        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
+        assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
+
+
+def test_run_migrations_backfills_legacy_harness_prompt_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+
+    run_migrations(db_path, revision="20260707_0029")
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_harness")
+        _insert_agent_session(
+            conn,
+            row_id="ses_harness",
+            scope_id="scope_harness",
+            anchor="ses_harness",
+            workdir=None,
+            backend="codex",
+            native="",
+            last_active="2026-07-15T00:00:00Z",
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, source,
+                content_text, content_json, metadata_json, created_at, updated_at
+            ) values (
+                'msg_harness', 'scope_harness', 'ses_harness', 'avibe',
+                'user', 'user', 'harness', 'scheduled input', '{}', '{}',
+                '2026-07-15T00:00:00Z', '2026-07-15T00:00:00Z'
+            )
+            """
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "select author, type, source from messages where id = 'msg_harness'"
+        ).fetchone()
+    assert row == ("harness", "harness", "harness")
 
 
 def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> None:

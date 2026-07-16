@@ -953,13 +953,13 @@ export type WorkbenchMessage = {
   session_id: string | null;
   platform: string;
   author: 'user' | 'agent' | 'system' | string;
-  // First-class message type: 'user' | 'assistant' | 'tool_call' | 'notify' |
-  // 'result'. Distinct from the coarse author — the chat renders 'notify' as a
-  // terminal status marker, and the inbox previews 'result' only.
-  type: 'user' | 'assistant' | 'tool_call' | 'notify' | 'result' | string;
+  // First-class message type: 'user' | 'harness' | 'assistant' | 'tool_call' |
+  // 'notify' | 'result'. Distinct from the coarse author — the chat renders
+  // 'notify' as a terminal status marker, and the inbox previews 'result' only.
+  type: 'user' | 'harness' | 'assistant' | 'tool_call' | 'notify' | 'result' | string;
   // Origin of the message, distinct from the coarse ``author`` role: a
-  // harness-triggered prompt is author='user' but source='harness'. Drives the
-  // transcript's "Scheduled task" / "Watch" provenance tag.
+  // harness-triggered prompt uses author/type='harness'. Drives the transcript's
+  // "Scheduled task" / "Watch" provenance tag.
   source: 'user' | 'agent' | 'harness' | string | null;
   author_id: string | null;
   author_name: string | null;
@@ -984,14 +984,14 @@ export type MessageSnippet = {
   suffix: string;
 };
 
-// A single matching message within a session group. ``type`` is the coarse
-// chat role the row chip renders ('user' → YOU, otherwise AGENT); ``source``
-// carries provenance (harness/user/agent) like WorkbenchMessage.
+// A single matching message within a session group. The row chip derives its
+// role from author/type/source so harness prompts remain distinct from both
+// human input and agent output.
 export type MessageSearchMatch = {
   id: string;
   author: string;
   source: string | null;
-  type: 'user' | 'result' | string;
+  type: 'user' | 'harness' | 'result' | string;
   created_at: string;
   snippet: MessageSnippet;
 };

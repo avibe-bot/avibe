@@ -254,6 +254,63 @@ def test_error_terminal_in_transcript_but_not_unread(isolated_state):
     assert unread.get(scope_id, 0) == 0
 
 
+def test_harness_prompt_is_visible_but_not_treated_as_user_text(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "harness",
+            "scheduled input",
+            "2026-05-30T10:00:00Z",
+            msg_type=messages_service.HARNESS_TYPE,
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "user",
+            "human input",
+            "2026-05-30T10:00:01Z",
+            msg_type="user",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_harness",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
+        first_user = messages_service.first_user_text(conn, "ses_harness")
+
+    assert [message["type"] for message in transcript["messages"]] == ["harness", "user"]
+    assert first_user == "human input"
+
+
+def test_append_normalizes_legacy_harness_identity(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness_append")
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_harness_append",
+            platform="avibe",
+            author="user",
+            message_type="user",
+            source="harness",
+            text="scheduled input",
+        )
+
+    assert row["author"] == messages_service.HARNESS_TYPE
+    assert row["type"] == messages_service.HARNESS_TYPE
+    assert row["source"] == messages_service.HARNESS_TYPE
+
+
 def test_same_second_messages_order_by_insertion(isolated_state):
     """Rows sharing a (second-resolution) created_at still order by insertion in
     the transcript: the monotonic message id breaks the ``(created_at, id)`` tie,
@@ -631,6 +688,38 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
         row2 = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
     assert row2["replied"] is False
     assert row2["preview_text"] == "R2"
+
+
+def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_harness", "Automated")
+        _insert_msg(conn, scope_id, "ses_harness", "agent", "R1", "2026-05-30T10:00:00Z")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness",
+            "harness",
+            "scheduled follow-up",
+            "2026-05-30T10:01:00Z",
+            msg_type=messages_service.HARNESS_TYPE,
+        )
+
+    with engine.connect() as conn:
+        pending = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert pending["replied"] is True
+    assert pending["last_message_author"] == "harness"
+    assert pending["preview_text"] == "R1"
+
+    with engine.begin() as conn:
+        _insert_msg(conn, scope_id, "ses_harness", "agent", "R2", "2026-05-30T10:02:00Z")
+    with engine.connect() as conn:
+        completed = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert completed["replied"] is False
+    assert completed["preview_text"] == "R2"
 
 
 def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_state):
