@@ -188,17 +188,40 @@ read by ChatPage from `bootstrap.config.ui.show_agent_activity`.
 reads `messages` + `agent_events` via storage services; 404 on unknown session):
 
 - **summary** (no params) — one entry per turn with ≥1 activity row, no row text:
-  `{"groups": [{"id", "anchor_message_id", "status", "steps", "started_at",
-  "ended_at", "duration_ms"}]}`. Loaded once on chat open so past turns show a chip.
+  `{"groups": [{"id", "anchor_message_id", "anchor_position", "open", "status",
+  "steps", "started_at", "ended_at", "duration_ms"}]}`. Loaded once on chat open so
+  past turns show a chip.
 - **detail** (`?group_id=<id>`) — that one group plus `"rows": [{"id", "kind"
   (`assistant`|`tool_call`), "text", "created_at"}]`. The lazy expand; 404 on an
   unknown group id.
 
 `status ∈ done | failed | interrupted`. `id` is the group's first-activity-row id
-(stable key across summary/detail). `anchor_message_id` is the transcript message
-the chip renders above — the terminal reply for done/failed, the next turn's opening
-message for a history-interrupted turn, or `null` when the interrupted turn trails
-the transcript. Grouping logic lives in `storage/agent_activity_service.py`; the
+(stable key across summary/detail).
+
+**Anchoring invariant (corrected — was a P1 rendering bug, fixed post-#934).** A
+group is positioned relative to a transcript message that is **at or before the
+group's own end — never a future message**:
+
+- **done / failed** → `anchor_message_id` = the turn's terminal reply (`result` /
+  `error` / backend-failure `notify`), `anchor_position = "before"` (the chip hugs
+  the reply from above).
+- **interrupted** → `anchor_message_id` = the boundary immediately *before* the
+  turn's activity (its triggering user/harness message, tracked as
+  `last_boundary_id`), `anchor_position = "after"` (the chip sits just below the
+  trigger). It is NEVER anchored to the next turn's opener (a future message) and
+  NEVER to the transcript tail.
+- `open` = true only for the last un-terminated turn. The frontend promotes the
+  `open` group into the tail **live running card** while the turn is running;
+  otherwise it renders as an interrupted chip after its trigger. **The transcript
+  tail is reserved exclusively for the live card** — a settled/interrupted chip is
+  never placed there. `anchor_message_id` is `null` only in the degenerate
+  no-prior-message case (rendered at the top, never the tail).
+
+Original bug: interrupted turns anchored *forward* to the next turn's opening
+message; while that message did not yet exist (or was minted much later) the
+frontend fell back to the tail slot, so the "Interrupted" chip rendered below newer
+messages and even below the next turn's live card. The backward-anchor invariant
+fixes it at source. Grouping logic lives in `storage/agent_activity_service.py`; the
 low-level read is `agent_events_service.list_session_events`.
 
 ### (c) Timestamp-parsed turn-boundary grouping

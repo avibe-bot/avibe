@@ -93,10 +93,12 @@ describe('isActivityMessageType', () => {
 });
 
 describe('groupFromWire', () => {
-  it('maps snake_case wire fields to the camelCase group', () => {
+  it('maps snake_case wire fields (incl. anchor_position + open) to the group', () => {
     const group = groupFromWire({
       id: 'm_a1',
       anchor_message_id: 'm_r1',
+      anchor_position: 'before',
+      open: false,
       status: 'done',
       steps: 3,
       duration_ms: 83000,
@@ -104,20 +106,26 @@ describe('groupFromWire', () => {
       rows: [{ id: 'm_a1', kind: 'assistant', text: 'hi', created_at: '2026-06-01T10:00:01Z' }],
     });
     expect(group.anchorMessageId).toBe('m_r1');
+    expect(group.anchorPosition).toBe('before');
+    expect(group.open).toBe(false);
     expect(group.durationMs).toBe(83000);
     expect(group.rows).toHaveLength(1);
     expect(group.rows?.[0].kind).toBe('assistant');
   });
 
-  it('normalizes null anchor + missing duration/rows', () => {
+  it('maps an open interrupted group anchored after its trigger', () => {
     const group = groupFromWire({
       id: 'e_t1',
-      anchor_message_id: null,
+      anchor_message_id: 'm_u2',
+      anchor_position: 'after',
+      open: true,
       status: 'interrupted',
       steps: 1,
       duration_ms: null,
     });
-    expect(group.anchorMessageId).toBeNull();
+    expect(group.anchorMessageId).toBe('m_u2');
+    expect(group.anchorPosition).toBe('after');
+    expect(group.open).toBe(true);
     expect(group.durationMs).toBeNull();
     expect(group.rows).toBeUndefined();
   });

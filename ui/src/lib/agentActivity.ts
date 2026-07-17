@@ -11,15 +11,21 @@ export type ActivityRow = {
   created_at: string;
 };
 
-// A group is positioned in the transcript by ``anchorMessageId`` (the chip renders
-// directly above that message: the terminal reply for done/failed, the next turn's
-// opening message for a history-interrupted turn). ``null`` = trails the transcript
-// (the live running card, or an interrupted turn with no following message).
-// ``rows`` is present once loaded (live snapshot or lazy fetch); absent = summary
-// only (fetch on expand).
+// A group is positioned relative to a transcript message that is AT OR BEFORE the
+// group's own end (never a future message): done/failed anchor to their terminal
+// reply with ``anchorPosition: 'before'`` (the chip hugs the reply from above);
+// interrupted anchor to the boundary before their activity (the turn's trigger)
+// with ``anchorPosition: 'after'`` (the chip sits just below the trigger). ``open``
+// marks the last un-terminated turn — the ONLY group the frontend may promote into
+// the tail live card while it is still running; the transcript tail is otherwise
+// reserved exclusively for that live card. ``anchorMessageId`` is null only in the
+// degenerate no-prior-message case (rendered at the top, never the tail). ``rows``
+// is present once loaded (live snapshot or lazy fetch); absent = summary only.
 export type ActivityGroup = {
   id: string;
   anchorMessageId: string | null;
+  anchorPosition: 'before' | 'after';
+  open: boolean;
   status: ActivityStatus;
   steps: number;
   durationMs: number | null;
@@ -31,6 +37,8 @@ export type ActivityGroup = {
 export type TurnActivityGroupWire = {
   id: string;
   anchor_message_id: string | null;
+  anchor_position: 'before' | 'after';
+  open: boolean;
   status: ActivityStatus;
   steps: number;
   duration_ms: number | null;
@@ -42,6 +50,8 @@ export type TurnActivityGroupWire = {
 export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   id: wire.id,
   anchorMessageId: wire.anchor_message_id ?? null,
+  anchorPosition: wire.anchor_position === 'before' ? 'before' : 'after',
+  open: Boolean(wire.open),
   status: wire.status,
   steps: wire.steps,
   durationMs: wire.duration_ms ?? null,

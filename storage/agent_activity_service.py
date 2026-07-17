@@ -208,6 +208,8 @@ def _make_group(
     *,
     status: str,
     anchor_id: Optional[str],
+    anchor_position: str,
+    open_turn: bool,
     started_iso: Optional[str],
     ended_iso: Optional[str],
     include_rows: bool,
@@ -215,7 +217,15 @@ def _make_group(
     started = started_iso or pending[0]["created_at"]
     group: dict[str, Any] = {
         "id": pending[0]["id"],
+        # A group is positioned relative to a transcript message that is AT OR BEFORE
+        # the group's own end (never a future message): done/failed anchor to their
+        # terminal reply (rendered BEFORE it — hug the reply from above); interrupted
+        # anchor to the turn's trigger / the boundary before its activity (rendered
+        # AFTER it). ``open_turn`` marks the last un-terminated turn — the only group
+        # the frontend may promote into the tail live card while it is still running.
         "anchor_message_id": anchor_id,
+        "anchor_position": anchor_position,
+        "open": open_turn,
         "status": status,
         "steps": len(pending),
         "started_at": started,
@@ -239,6 +249,11 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
     groups: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
     turn_start_iso: Optional[str] = None
+    # Id of the most recent transcript-visible boundary (turn_start OR terminal). An
+    # interrupted turn anchors BACKWARD to this — the boundary immediately before its
+    # activity (its trigger) — so its chip is positioned by its OWN chronology and
+    # never attaches to a future message (the ordering bug).
+    last_boundary_id: Optional[str] = None
     for item in items:
         kind = item["kind"]
         if kind == "activity":
@@ -246,12 +261,15 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
         elif kind == "turn_start":
             if pending:
                 # Activity with no terminal before a new turn opened → interrupted;
-                # anchor the chip against the opening message of the next turn.
+                # anchor AFTER the boundary that preceded this activity (its trigger),
+                # NOT the next turn's opener. Not ``open`` — a later turn exists.
                 groups.append(
                     _make_group(
                         pending,
                         status="interrupted",
-                        anchor_id=item["id"],
+                        anchor_id=last_boundary_id,
+                        anchor_position="after",
+                        open_turn=False,
                         started_iso=turn_start_iso,
                         ended_iso=pending[-1]["created_at"],
                         include_rows=include_rows,
@@ -259,6 +277,7 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 )
                 pending = []
             turn_start_iso = item["created_at"]
+            last_boundary_id = item["id"]
         elif kind == "terminal":
             if pending:
                 groups.append(
@@ -266,6 +285,8 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                         pending,
                         status=_terminal_status(item["mtype"]),
                         anchor_id=item["id"],
+                        anchor_position="before",
+                        open_turn=False,
                         started_iso=turn_start_iso,
                         ended_iso=item["created_at"],
                         include_rows=include_rows,
@@ -273,14 +294,19 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 )
                 pending = []
             turn_start_iso = None
-        # kind == "ignore": leave pending + turn_start untouched
+            last_boundary_id = item["id"]
+        # kind == "ignore": leave pending + boundary + turn_start untouched
     if pending:
-        # Trailing interrupted turn (no following message): chip trails the transcript.
+        # The last un-terminated turn. Anchor AFTER its trigger (never the tail); the
+        # frontend renders it as an interrupted chip there, OR — while the turn is
+        # still running — promotes it into the tail live card (``open``).
         groups.append(
             _make_group(
                 pending,
                 status="interrupted",
-                anchor_id=None,
+                anchor_id=last_boundary_id,
+                anchor_position="after",
+                open_turn=True,
                 started_iso=turn_start_iso,
                 ended_iso=pending[-1]["created_at"],
                 include_rows=include_rows,

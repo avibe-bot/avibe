@@ -422,7 +422,10 @@ export const ChatPage: React.FC = () => {
       }
       if (sid !== sessionIdRef.current) return true;
       const fetched = (res.groups ?? []).map(groupFromWire);
-      const inflightIdx = running ? fetched.findIndex((g) => g.anchorMessageId === null) : -1;
+      // The last un-terminated turn is the ``open`` group. While a turn is running it
+      // IS that turn — promote it into the live card (re-hydrate) rather than render
+      // it as a chip; otherwise it renders as an interrupted chip after its trigger.
+      const inflightIdx = running ? fetched.findIndex((g) => g.open) : -1;
       const inflight = inflightIdx >= 0 ? fetched[inflightIdx] : null;
       const groups = inflight ? fetched.filter((_, i) => i !== inflightIdx) : fetched;
       // Settled groups are always safe to replace (storage is authoritative);
@@ -1637,19 +1640,28 @@ export const ChatPage: React.FC = () => {
     return urls;
   }, [messages]);
 
-  // Agent Activity chips are positioned by anchor message id; a null-anchor group
-  // is the one interrupted turn that trails the transcript.
+  // Agent Activity chips are positioned relative to a transcript message: 'before'
+  // it (done/failed, hugging the reply) or 'after' it (interrupted, below the
+  // trigger). Both keyed by anchor id → array (a message can have both, e.g. a done
+  // chip before it and an agent-initiated interrupted chip after it). A null anchor
+  // (degenerate no-prior-message case) renders at the TOP — never the tail, which
+  // belongs exclusively to the live running card.
   const activityByAnchor = useMemo(() => {
-    const map = new Map<string, ActivityGroup>();
+    const before = new Map<string, ActivityGroup[]>();
+    const after = new Map<string, ActivityGroup[]>();
+    const top: ActivityGroup[] = [];
     for (const group of activityGroups) {
-      if (group.anchorMessageId) map.set(group.anchorMessageId, group);
+      if (!group.anchorMessageId) {
+        top.push(group);
+        continue;
+      }
+      const map = group.anchorPosition === 'before' ? before : after;
+      const list = map.get(group.anchorMessageId);
+      if (list) list.push(group);
+      else map.set(group.anchorMessageId, [group]);
     }
-    return map;
+    return { before, after, top };
   }, [activityGroups]);
-  const trailingActivity = useMemo(
-    () => activityGroups.find((group) => group.anchorMessageId === null) ?? null,
-    [activityGroups],
-  );
   // Lazy-load a group's rows from the endpoint (history chips arrive as summary
   // only). On failure, record an error so the chip offers retry instead of showing
   // a misleading "no activity" empty state.
@@ -1832,8 +1844,9 @@ export const ChatPage: React.FC = () => {
           followingTailRef={followingTailRef}
           activity={{
             enabled: showAgentActivity,
-            byAnchor: activityByAnchor,
-            trailing: trailingActivity,
+            beforeAnchor: activityByAnchor.before,
+            afterAnchor: activityByAnchor.after,
+            topGroups: activityByAnchor.top,
             liveRows,
             liveStartedAt,
             cardExpanded: activityCardExpanded,
@@ -2453,8 +2466,9 @@ interface TranscriptProps {
   // transcript renders exactly as before — the ThinkingBubble and nothing else).
   activity?: {
     enabled: boolean;
-    byAnchor: Map<string, ActivityGroup>;
-    trailing: ActivityGroup | null;
+    beforeAnchor: Map<string, ActivityGroup[]>;
+    afterAnchor: Map<string, ActivityGroup[]>;
+    topGroups: ActivityGroup[];
     liveRows: ActivityRow[];
     liveStartedAt: number | null;
     cardExpanded: boolean;
@@ -2584,6 +2598,20 @@ const Transcript: React.FC<TranscriptProps> = ({
   const liveActive = !!activity?.enabled && activity.liveRows.length > 0;
   const showActivityCard = shouldShowRunningCard(!!activity?.enabled, working, activity?.liveRows.length ?? 0);
   const showThinking = working && !lastIsAgentTerminal && !liveActive;
+  // Render one settled-turn chip (before/after its anchor message, or at the top).
+  // Plain render helper (not a component) so it stays referentially simple.
+  const renderActivityChip = (group: ActivityGroup) =>
+    activity ? (
+      <ActivityChip
+        key={group.id}
+        group={group}
+        expanded={!!activity.expanded[group.id]}
+        loading={!!activity.loading[group.id]}
+        error={!!activity.error[group.id]}
+        onToggle={() => activity.onToggleGroup(group)}
+        onRetry={() => activity.onRetryGroup(group)}
+      />
+    ) : null;
   const empty = messages.length === 0 && !working;
 
   // Capture the topmost (partly) visible row as the restore anchor. Viewport-
@@ -2832,22 +2860,17 @@ const Transcript: React.FC<TranscriptProps> = ({
               <Loader2 className="size-4 animate-spin" />
             </div>
           )}
+          {/* Degenerate null-anchor groups render at the TOP (never the tail). */}
+          {activity?.enabled && activity.topGroups.map((group) => renderActivityChip(group))}
           {messages.map((message) => {
-            // Agent Activity chip for the turn whose reply (or next opening
-            // message) is THIS row — rendered directly above it.
-            const chip = activity?.enabled ? activity.byAnchor.get(message.id) : undefined;
+            // Agent Activity chips positioned relative to THIS row: 'before' it
+            // (done/failed, hugging the reply from above) and 'after' it (interrupted,
+            // just below the turn's trigger).
+            const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
+            const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
             return (
               <Fragment key={message.id}>
-                {chip && (
-                  <ActivityChip
-                    group={chip}
-                    expanded={!!activity!.expanded[chip.id]}
-                    loading={!!activity!.loading[chip.id]}
-                    error={!!activity!.error[chip.id]}
-                    onToggle={() => activity!.onToggleGroup(chip)}
-                    onRetry={() => activity!.onRetryGroup(chip)}
-                  />
-                )}
+                {before?.map((group) => renderActivityChip(group))}
                 <MessageRow
                   message={message}
                   session={session}
@@ -2855,9 +2878,12 @@ const Transcript: React.FC<TranscriptProps> = ({
                   onQuickReply={onQuickReply}
                   highlighted={message.id === highlightedId}
                 />
+                {after?.map((group) => renderActivityChip(group))}
               </Fragment>
             );
           })}
+          {/* The transcript TAIL is reserved exclusively for the live running card
+              (or the ThinkingBubble fallback) — never a settled/interrupted chip. */}
           {showActivityCard && activity ? (
             <ActivityCard
               rows={activity.liveRows}
@@ -2868,16 +2894,6 @@ const Transcript: React.FC<TranscriptProps> = ({
           ) : showThinking ? (
             <ThinkingBubble session={session} />
           ) : null}
-          {activity?.enabled && activity.trailing && (
-            <ActivityChip
-              group={activity.trailing}
-              expanded={!!activity.expanded[activity.trailing.id]}
-              loading={!!activity.loading[activity.trailing.id]}
-              error={!!activity.error[activity.trailing.id]}
-              onToggle={() => activity.onToggleGroup(activity.trailing!)}
-              onRetry={() => activity.onRetryGroup(activity.trailing!)}
-            />
-          )}
           {footer}
         </div>
       </div>

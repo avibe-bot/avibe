@@ -129,21 +129,32 @@ def test_done_failed_interrupted_and_trailing_groups(isolated_state):
     assert [g["status"] for g in groups] == ["done", "failed", "interrupted", "interrupted"]
 
     done = groups[0]
-    assert done["anchor_message_id"] == "m_r1"
+    assert done["anchor_message_id"] == "m_r1"  # own terminal
+    assert done["anchor_position"] == "before"  # chip hugs the reply from above
+    assert done["open"] is False
     assert done["steps"] == 2  # assistant + tool_call
     assert done["duration_ms"] == 3000  # 10:00:00 → 10:00:03 (turn start → terminal)
 
     failed = groups[1]
-    assert failed["anchor_message_id"] == "m_er3"
+    assert failed["anchor_message_id"] == "m_er3"  # own terminal
+    assert failed["anchor_position"] == "before"
+    assert failed["open"] is False
     assert failed["steps"] == 1
 
     interrupted = groups[2]
-    # Anchored at the NEXT turn's opening message (chip sits above it).
-    assert interrupted["anchor_message_id"] == "m_u5"
+    # Anchored AFTER its OWN trigger (m_u4), NOT the next turn's opener — never a
+    # future message. It is not the last turn, so not ``open``.
+    assert interrupted["anchor_message_id"] == "m_u4"
+    assert interrupted["anchor_position"] == "after"
+    assert interrupted["open"] is False
     assert interrupted["steps"] == 1
 
     trailing = groups[3]
-    assert trailing["anchor_message_id"] is None  # trails the transcript
+    # The last un-terminated turn: anchored AFTER its OWN trigger (m_u5), never null
+    # / the tail; ``open`` so the frontend may promote it into the live card.
+    assert trailing["anchor_message_id"] == "m_u5"
+    assert trailing["anchor_position"] == "after"
+    assert trailing["open"] is True
     assert trailing["steps"] == 1
 
     # ``id`` is the first activity row's id (stable key for lazy detail).
@@ -331,6 +342,110 @@ def test_show_page_user_marks_do_not_split_a_turn(isolated_state):
     assert [g["status"] for g in groups] == ["done"]
     assert groups[0]["anchor_message_id"] == "m_r"
     assert groups[0]["steps"] == 2
+
+
+def test_interrupted_followed_by_running_turn_anchors_to_own_trigger(isolated_state):
+    """(a) Interrupted turn followed by a still-RUNNING next turn — the P1 repro.
+    The interrupted chip must anchor AFTER its OWN trigger (above the newer turn),
+    NEVER forward to the next turn's opener nor to the tail."""
+    engine = create_sqlite_engine()
+    sid = "ses_ia"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u1", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q1", source="user")
+        _evt(conn, scope, sid, eid="e_1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash`")
+        _msg(conn, scope, sid, mid="m_r1", mtype="result", author="agent", created_at="2026-06-01T10:00:02Z", text="a1")
+        _msg(conn, scope, sid, mid="m_u2", mtype="user", author="user", created_at="2026-06-01T10:01:00Z", text="q2", source="user")
+        _evt(conn, scope, sid, eid="e_2", created_at="2026-06-01T10:01:01Z", text="🔧 `Read`")  # turn2 (interrupted)
+        _msg(conn, scope, sid, mid="m_u3", mtype="user", author="user", created_at="2026-06-01T10:02:00Z", text="q3", source="user")
+        _evt(conn, scope, sid, eid="e_3", created_at="2026-06-01T10:02:01Z", text="🔧 `Bash`")  # turn3 running (no terminal)
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [g["status"] for g in groups] == ["done", "interrupted", "interrupted"]
+    turn1, turn2, turn3 = groups
+    assert turn1["anchor_message_id"] == "m_r1" and turn1["anchor_position"] == "before"
+    # turn2 anchors to its OWN trigger (m_u2) — above m_u3, never the future opener.
+    assert turn2["anchor_message_id"] == "m_u2"
+    assert turn2["anchor_position"] == "after"
+    assert turn2["open"] is False
+    # turn3 is the open (running-candidate) turn: own trigger, open (→ live card).
+    assert turn3["anchor_message_id"] == "m_u3" and turn3["open"] is True
+
+
+def test_interrupted_followed_by_completed_turn_ordering(isolated_state):
+    """(b) Interrupted turn followed by a COMPLETED next turn — same ordering:
+    interrupted after its trigger, the next turn done at its own reply."""
+    engine = create_sqlite_engine()
+    sid = "ses_ib"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u2", mtype="user", author="user", created_at="2026-06-01T10:01:00Z", text="q2", source="user")
+        _evt(conn, scope, sid, eid="e_2", created_at="2026-06-01T10:01:01Z", text="🔧 `Read`")  # interrupted turn
+        _msg(conn, scope, sid, mid="m_u3", mtype="user", author="user", created_at="2026-06-01T10:02:00Z", text="q3", source="user")
+        _evt(conn, scope, sid, eid="e_3", created_at="2026-06-01T10:02:01Z", text="🔧 `Bash`")
+        _msg(conn, scope, sid, mid="m_r3", mtype="result", author="agent", created_at="2026-06-01T10:02:02Z", text="a3")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [g["status"] for g in groups] == ["interrupted", "done"]
+    interrupted, done = groups
+    assert interrupted["anchor_message_id"] == "m_u2"
+    assert interrupted["anchor_position"] == "after"
+    assert interrupted["open"] is False
+    assert done["anchor_message_id"] == "m_r3"
+    assert done["anchor_position"] == "before"
+    assert done["open"] is False
+
+
+def test_failed_turn_anchors_to_its_own_terminal(isolated_state):
+    """(c) A failed turn anchors to its OWN error terminal (rendered before it),
+    never forward — even when a later turn follows."""
+    engine = create_sqlite_engine()
+    sid = "ses_ic"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u1", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q1", source="user")
+        _evt(conn, scope, sid, eid="e_1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash`")
+        _msg(conn, scope, sid, mid="m_err", mtype="error", author="agent", created_at="2026-06-01T10:00:02Z", text="boom")
+        _msg(conn, scope, sid, mid="m_u2", mtype="user", author="user", created_at="2026-06-01T10:01:00Z", text="q2", source="user")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [g["status"] for g in groups] == ["failed"]
+    assert groups[0]["anchor_message_id"] == "m_err"  # own terminal, not the later m_u2
+    assert groups[0]["anchor_position"] == "before"
+    assert groups[0]["open"] is False
+
+
+def test_send_while_busy_override_interrupt_anchors_backward(isolated_state):
+    """(d) Owner's exact repro: quick-reply send then a second send OVERRIDES the
+    running turn. The overridden turn is interrupted; its chip must anchor after its
+    OWN trigger (above the override message + the new running turn), never forward to
+    the override message nor to the tail. Microsecond-encoded ids under tight
+    (same-second) override timing."""
+    engine = create_sqlite_engine()
+    sid = "ses_id"
+    base = 1_800_000_000_000_000
+    trig2 = _clock_id("msg", base + 0)  # turn2 trigger (quick-reply send)
+    over3 = _clock_id("msg", base + 2_000_000)  # override send → turn3 trigger
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid=trig2, mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q2", source="user")
+        _evt(conn, scope, sid, eid=_clock_id("evt", base + 1_000_000), created_at="2026-06-01T10:00:00Z", text="🔧 `Bash`")  # turn2 activity
+        _msg(conn, scope, sid, mid=over3, mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q3 override", source="user")
+        _evt(conn, scope, sid, eid=_clock_id("evt", base + 3_000_000), created_at="2026-06-01T10:00:01Z", text="🔧 `Read`")  # turn3 running
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [g["status"] for g in groups] == ["interrupted", "interrupted"]
+    turn2, turn3 = groups
+    # The overridden turn anchors to its OWN trigger, NOT the override message, NOT null.
+    assert turn2["anchor_message_id"] == trig2
+    assert turn2["anchor_message_id"] != over3
+    assert turn2["anchor_position"] == "after"
+    assert turn2["open"] is False
+    assert turn3["anchor_message_id"] == over3 and turn3["open"] is True
 
 
 def test_get_turn_group_unknown_id_returns_none(isolated_state):
