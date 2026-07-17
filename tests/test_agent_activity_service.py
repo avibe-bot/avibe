@@ -217,6 +217,38 @@ def test_same_second_tool_call_stays_in_completed_turn(isolated_state):
     assert groups[0]["steps"] == 1  # the tool_call belongs to THIS turn, not orphaned
 
 
+def _clock_id(prefix: str, micros: int) -> str:
+    """Realistic row id: ``<pfx>_<15-hex microsecond epoch><uuid8>`` (matches
+    messages_service / agent_events_service), so the grouping decodes emission order."""
+    return f"{prefix}_{micros:015x}{'0' * 8}"
+
+
+def test_back_to_back_turns_same_second_keep_done_status(isolated_state):
+    """Turn A's result and turn B's opener land in the SAME whole second. Ordering
+    by the id microsecond keeps A ``done`` (its result precedes B's opener) instead
+    of flipping A to ``interrupted`` anchored on B's prompt."""
+    engine = create_sqlite_engine()
+    sid = "ses_b2b"
+    base = 1_800_000_000_000_000  # arbitrary microsecond epoch
+    result_id = _clock_id("msg", base + 2_000_000)
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid=_clock_id("msg", base), mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q1", source="user")
+        _evt(conn, scope, sid, eid=_clock_id("evt", base + 1_000_000), created_at="2026-06-01T10:00:01Z", text="🔧 `Bash`")
+        # A's result and B's opener both at :02Z; the result was emitted ~1ms first.
+        _msg(conn, scope, sid, mid=result_id, mtype="result", author="agent", created_at="2026-06-01T10:00:02Z", text="answer 1")
+        _msg(conn, scope, sid, mid=_clock_id("msg", base + 2_001_000), mtype="user", author="user", created_at="2026-06-01T10:00:02Z", text="q2", source="user")
+        _evt(conn, scope, sid, eid=_clock_id("evt", base + 3_000_000), created_at="2026-06-01T10:00:03Z", text="🔧 `Read`")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+    groups = summary["groups"]
+    # A stays done (result precedes B's opener); B trails with its own tool call.
+    assert [g["status"] for g in groups] == ["done", "interrupted"]
+    assert groups[0]["anchor_message_id"] == result_id
+    assert groups[0]["steps"] == 1  # the Bash tool_call belongs to A, not orphaned to B
+
+
 def test_events_before_message_window_are_dropped(isolated_state):
     """An event that predates the scanned message window (its turn boundary was not
     fetched) must not be grouped, or it would anchor a bogus interrupted chip to the

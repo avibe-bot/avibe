@@ -339,6 +339,9 @@ export const ChatPage: React.FC = () => {
   // Pending "interrupted?" check scheduled on turn.end (see the SSE handler) — a
   // terminal reply can land just after turn.end, so we defer before deciding.
   const interruptedTimerRef = useRef<number | null>(null);
+  // Id of the most recent turn-opening (user/harness) message — the anchor for an
+  // interrupted turn that a new turn superseded before its grace window elapsed.
+  const lastTurnStartIdRef = useRef<string | null>(null);
   const setLiveRowsBoth = useCallback((next: ActivityRow[]) => {
     liveRowsRef.current = next;
     setLiveRows(next);
@@ -373,19 +376,44 @@ export const ChatPage: React.FC = () => {
 
   // ----- Agent Activity: live-turn bookkeeping (only exercised when the toggle
   // streams assistant/tool_call rows; a no-op otherwise). -----
+  // Snapshot the current live buffer as an "interrupted" group (a turn ended with
+  // un-consumed activity). ``anchorId`` = the next turn's opening message when a new
+  // turn already started, else null (the chip trails the transcript).
+  const flushInterruptedGroup = useCallback(
+    (anchorId: string | null) => {
+      const rows = liveRowsRef.current;
+      if (rows.length === 0) return;
+      const start = Date.parse(rows[0].created_at);
+      const end = Date.parse(rows[rows.length - 1].created_at);
+      const durationMs = Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+      setActivityGroups((prev) => [
+        ...prev,
+        { id: rows[0].id, anchorMessageId: anchorId, status: 'interrupted', steps: rows.length, durationMs, rows },
+      ]);
+      setLiveRowsBoth([]);
+      setLiveStartedAt(null);
+    },
+    [setLiveRowsBoth],
+  );
   // A live activity row arrived → append to the running buffer; a fresh buffer
-  // stamps the elapsed-clock start and cancels any pending "interrupted?" check.
+  // stamps the elapsed-clock start.
   const ingestActivityRow = useCallback(
     (msg: WorkbenchMessage) => {
       if (interruptedTimerRef.current !== null) {
+        // A previous turn ended and its interrupted decision is still pending, yet a
+        // NEW turn is already emitting (e.g. Stop then Send-now within the grace
+        // window). Close the previous turn as its OWN chip before buffering the new
+        // row so their rows don't merge into one group; anchor it on the new turn's
+        // opening message when known.
         window.clearTimeout(interruptedTimerRef.current);
         interruptedTimerRef.current = null;
+        flushInterruptedGroup(lastTurnStartIdRef.current);
       }
       const next = [...liveRowsRef.current, activityRowFromMessage(msg)];
       setLiveRowsBoth(next);
       if (next.length === 1) setLiveStartedAt(Date.now());
     },
-    [setLiveRowsBoth],
+    [setLiveRowsBoth, flushInterruptedGroup],
   );
   // Resync activity groups from durable storage. Used on load and on gap recovery
   // (reconcile): pulls done/failed chips for turns that completed while
@@ -688,11 +716,15 @@ export const ChatPage: React.FC = () => {
       setMessages(tailMessages);
       setOlderCursor(res.next_before_id ?? null);
       setHistoricalWindow(false);
+      // Returning to the live tail from a historical window: activity ingestion was
+      // suppressed while scrolled away, so resync groups from storage — a turn that
+      // finished in history still gets its chip without a full reload.
+      void refreshActivity(workingRef.current);
       return true;
     } catch {
       return false;
     }
-  }, [api, sessionId]);
+  }, [api, sessionId, refreshActivity]);
 
   // Persist the composer's unsent text server-side (debounced) so it survives a
   // reload / device switch. The send path clears it server-side; this only
@@ -880,6 +912,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(interruptedTimerRef.current);
       interruptedTimerRef.current = null;
     }
+    lastTurnStartIdRef.current = null;
     // Drop any pending grace-resync so it can't fire against the new session.
     if (graceResyncRef.current !== null) {
       window.clearTimeout(graceResyncRef.current);
@@ -928,8 +961,12 @@ export const ChatPage: React.FC = () => {
         // Agent Activity: a terminal reply closes the running turn into a chip
         // above it; a new user/harness turn re-anchors a trailing interrupted chip.
         if (showAgentActivityRef.current) {
-          if (isTerminalAgentMessage(msg)) finalizeLiveGroup(msg);
-          else if (msg.type === 'user' || msg.type === 'harness') reanchorTrailingActivity(msg.id);
+          if (isTerminalAgentMessage(msg)) {
+            finalizeLiveGroup(msg);
+          } else if (msg.type === 'user' || msg.type === 'harness') {
+            lastTurnStartIdRef.current = msg.id;
+            reanchorTrailingActivity(msg.id);
+          }
         }
         // Don't clear ``working`` from a result row here: with the queue, a
         // result can belong to an EARLIER turn while a newer queued turn is
@@ -963,24 +1000,10 @@ export const ChatPage: React.FC = () => {
             if (interruptedTimerRef.current !== null) window.clearTimeout(interruptedTimerRef.current);
             interruptedTimerRef.current = window.setTimeout(() => {
               interruptedTimerRef.current = null;
-              if (liveRowsRef.current !== snapshot || snapshot.length === 0) return;
-              const start = Date.parse(snapshot[0].created_at);
-              const end = Date.parse(snapshot[snapshot.length - 1].created_at);
-              const durationMs =
-                Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
-              setActivityGroups((prev) => [
-                ...prev,
-                {
-                  id: snapshot[0].id,
-                  anchorMessageId: null,
-                  status: 'interrupted',
-                  steps: snapshot.length,
-                  durationMs,
-                  rows: snapshot,
-                },
-              ]);
-              setLiveRowsBoth([]);
-              setLiveStartedAt(null);
+              // Still un-consumed — no terminal cleared it, no new turn replaced the
+              // buffer (both change its identity) — so it's a genuine interrupted
+              // turn trailing the transcript.
+              if (liveRowsRef.current === snapshot && snapshot.length > 0) flushInterruptedGroup(null);
             }, 600);
           }
           // The first turn binds the native; pick it up so the header's backend
@@ -1027,7 +1050,7 @@ export const ChatPage: React.FC = () => {
       },
     }, { reconnect: connectionEpoch > 0 });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, finalizeLiveGroup, reanchorTrailingActivity]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, finalizeLiveGroup, reanchorTrailingActivity, flushInterruptedGroup]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.

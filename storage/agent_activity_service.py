@@ -9,12 +9,14 @@ A *turn* is bounded by transcript markers rather than an id: it ends at the
 agent's terminal reply (``result`` / ``error`` / backend-failure ``notify``) or,
 when the user starts a new turn without one, is reported as ``interrupted``.
 Grouping is chronological because ``messages`` carries no ``turn_id`` (only
-``agent_events`` does). Both tables persist WHOLE-SECOND ``...Z`` timestamps, so a
-same-second tool call and the terminal reply that followed it tie on time; the
-merge therefore sorts by ``(parsed_timestamp, phase)`` where phase orders
-turn-start < activity < terminal, keeping a same-second tool event inside the
-completed turn instead of after its terminal. Timestamps are PARSED (not string-
-compared) so the sort stays correct even if a future writer changes precision.
+``agent_events`` does). Both tables persist WHOLE-SECOND ``...Z`` ``created_at``,
+which cannot order same-second rows — but both also mint ids with a MICROSECOND
+clock prefix (``<pfx>_<15-hex microsecond epoch><uuid8>``), so the merge sorts by
+that decoded microsecond, recovering the true emission order ACROSS tables (a fast
+turn's tool call before its same-second terminal; one turn's terminal before the
+next turn's same-second opener). A phase tiebreak (turn-start < activity <
+terminal) only applies when the microsecond can't be decoded (format drift), and
+the whole-second ``created_at`` still bounds the event scan.
 
 Each group is keyed by the id of its first activity row (stable across summary
 and detail reads). ``anchor_message_id`` is the transcript message the chip
@@ -98,11 +100,25 @@ def _terminal_status(msg_type: Any) -> str:
     return "done" if msg_type == "result" else "failed"
 
 
-# Same-timestamp tiebreak: a turn opens, then its activity runs, then it closes —
-# so at an equal (whole-second) timestamp order turn-start < activity < terminal.
-# This keeps a same-second tool call inside the completed turn rather than sorting
-# it after the terminal (which would orphan it to the next turn / an interrupted chip).
+# Fallback tiebreak only (used when a row's microsecond id prefix can't be decoded,
+# e.g. format drift): within a single turn the order is open → work → close.
 _PHASE_RANK = {"turn_start": 0, "activity": 1, "terminal": 2, "ignore": 3}
+
+
+def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
+    """The row's emission microsecond, decoded from the id's clock prefix.
+
+    Both tables mint ids as ``<pfx>_<15-hex microsecond epoch><uuid8>`` (see
+    ``messages_service`` / ``agent_events_service``), so this recovers the true
+    sub-second emission order ACROSS tables — which whole-second ``created_at``
+    cannot. Falls back to the parsed timestamp when an id doesn't match the format.
+    """
+    if row_id and len(row_id) >= 19 and row_id[3] == "_":
+        try:
+            return int(row_id[4:19], 16)
+        except ValueError:
+            pass
+    return int(ts.timestamp() * 1_000_000)
 
 
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
@@ -138,9 +154,11 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             kind = "activity"
         else:
             kind = "ignore"
+        mts = _parse_ts(msg.get("created_at"))
         items.append(
             {
-                "ts": _parse_ts(msg.get("created_at")),
+                "ts": mts,
+                "sort": _emit_micros(msg.get("id"), mts),
                 "rank": _PHASE_RANK[kind],
                 "created_at": msg.get("created_at"),
                 "kind": kind,
@@ -164,6 +182,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         items.append(
             {
                 "ts": event_ts,
+                "sort": _emit_micros(event.get("id"), event_ts),
                 "rank": _PHASE_RANK["activity"],
                 "created_at": event.get("created_at"),
                 "kind": "activity",
@@ -173,9 +192,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "text": event.get("text") if include_text else None,
             }
         )
-    # Sort by (timestamp, phase): whole-second ties resolve to turn-start < activity
-    # < terminal so a same-second tool call stays inside its completed turn.
-    items.sort(key=lambda item: (item["ts"], item["rank"]))
+    # Sort by decoded emission microsecond (true cross-table order); the phase rank
+    # is a fallback for undecodable ids, and the id a final deterministic tiebreak.
+    items.sort(key=lambda item: (item["sort"], item["rank"], item["id"]))
     return items
 
 
