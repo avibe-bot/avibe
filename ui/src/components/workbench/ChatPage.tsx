@@ -44,9 +44,14 @@ import { ActivityCard, ActivityChip } from './AgentActivityGroup';
 import {
   activityRowFromMessage,
   groupFromWire,
+  initialLiveActivity,
   isActivityMessageType,
+  liveActivityReducer,
   type ActivityGroup,
   type ActivityRow,
+  type LiveActivityEvent,
+  type LiveActivityState,
+  type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
 
 // While a turn is in flight, reconcile the working/Stop state against the
@@ -326,27 +331,39 @@ export const ChatPage: React.FC = () => {
   // so a lossy/gappy stream can never corrupt a settled chip. There is deliberately
   // NO client-side group reconstruction from the buffer.
   //  - ``activityGroups``: settled turns, set ONLY from the endpoint.
-  //  - ``liveRows``: the CURRENT running turn's rows (arrive via message.new); the
-  //    running card renders from these until the turn settles and the rebuild swaps
-  //    the card for the storage-derived chip.
+  //  - ``liveState``: the in-flight running-card buffer, a pure generation state
+  //    machine (see ``liveActivityReducer``). ``liveStateRef`` is the synchronous
+  //    source of truth; ``liveRows`` / ``liveStartedAt`` mirror it for rendering.
   const [showAgentActivity, setShowAgentActivity] = useState(false);
   const showAgentActivityRef = useRef(false);
   showAgentActivityRef.current = showAgentActivity;
   const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
+  const liveStateRef = useRef<LiveActivityState>(initialLiveActivity());
   const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
-  const liveRowsRef = useRef<ActivityRow[]>([]);
   const [liveStartedAt, setLiveStartedAt] = useState<number | null>(null);
   const [activityCardExpanded, setActivityCardExpanded] = useState(false);
   const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
   const [loadingActivity, setLoadingActivity] = useState<Record<string, boolean>>({});
+  // Groups whose lazy detail fetch failed — the chip shows a retry affordance
+  // instead of a misleading "no activity" empty state (transient endpoint failure).
+  const [activityError, setActivityError] = useState<Record<string, boolean>>({});
   // Coalesce settle-triggered refreshes: a settle burst (terminal + turn.end) runs
-  // one in-flight refresh + at most one trailing refresh, never N fetches.
+  // one in-flight refresh + at most one trailing refresh, never N fetches. A failed
+  // settle fetch schedules exactly one bounded retry (the next settle also rebuilds).
   const activityRefreshInFlightRef = useRef(false);
   const activityRefreshPendingRef = useRef(false);
   const activityRunningRef = useRef(false);
-  const setLiveRowsBoth = useCallback((next: ActivityRow[]) => {
-    liveRowsRef.current = next;
-    setLiveRows(next);
+  const activityRetryTimerRef = useRef<number | null>(null);
+  // Latest ``scheduleActivityRefresh`` (assigned below) so its own async resolution
+  // can re-enter for the trailing / retry pass without a definition cycle.
+  const scheduleActivityRefreshRef = useRef<(running: boolean, isRetry?: boolean) => void>(() => {});
+  // Advance the live-buffer state machine + mirror it into render state. The ref is
+  // updated synchronously so same-tick reads (generation, settled) are current.
+  const dispatchLive = useCallback((event: LiveActivityEvent) => {
+    const next = liveActivityReducer(liveStateRef.current, event);
+    liveStateRef.current = next;
+    setLiveRows(next.rows);
+    setLiveStartedAt(next.startedAt);
   }, []);
   // Bumped on resume (tab visible again / network back) to force the transcript
   // subscription effect to reopen a possibly-dead SSE stream — see the
@@ -378,74 +395,77 @@ export const ChatPage: React.FC = () => {
     setWorking(true);
   }, []);
 
-  // ----- Agent Activity: the live buffer feeds ONLY the in-flight running card.
-  // Settled groups come exclusively from the durable endpoint (see refreshActivity).
-  // A live activity row arrived → append to the running buffer; a fresh buffer
-  // stamps the elapsed-clock start.
+  // ----- Agent Activity: the live buffer feeds ONLY the in-flight running card, as
+  // a pure generation state machine (see liveActivityReducer). Settled groups come
+  // exclusively from the durable endpoint (refreshActivity). -----
   const ingestActivityRow = useCallback(
     (msg: WorkbenchMessage) => {
-      const next = [...liveRowsRef.current, activityRowFromMessage(msg)];
-      setLiveRowsBoth(next);
-      if (next.length === 1) setLiveStartedAt(Date.now());
+      dispatchLive({ type: 'row', row: activityRowFromMessage(msg), now: Date.now() });
     },
-    [setLiveRowsBoth],
+    [dispatchLive],
   );
-  // Rebuild ALL settled groups from durable storage — the single source of truth.
-  // ``running`` tells us whether the trailing (null-anchor) group is the in-flight
-  // turn (re-hydrate it into the running card, don't render it as a chip) or a
-  // settled interrupted turn (render it, and clear the now-stale live buffer).
+  // Rebuild ALL settled groups from durable storage — the single source of truth —
+  // for the generation ``issuedGen`` this refresh was scheduled for. Returns false
+  // when the fetch fails so the caller can schedule a bounded retry. The live buffer
+  // is only touched when the resolution is still for the CURRENT generation (a newer
+  // turn.start bumped it → a late resolution is a structural no-op).
   const refreshActivity = useCallback(
-    async (running: boolean) => {
+    async (running: boolean, issuedGen: number): Promise<boolean> => {
       const sid = sessionIdRef.current;
-      if (!sid || !showAgentActivityRef.current) return;
+      if (!sid || !showAgentActivityRef.current) return true;
+      let res: { groups: TurnActivityGroupWire[] };
       try {
-        const res = await api.getSessionActivity(sid);
-        if (sid !== sessionIdRef.current) return;
-        const fetched = (res.groups ?? []).map(groupFromWire);
-        const inflightIdx = running ? fetched.findIndex((g) => g.anchorMessageId === null) : -1;
-        const inflight = inflightIdx >= 0 ? fetched[inflightIdx] : null;
-        const groups = inflight ? fetched.filter((_, i) => i !== inflightIdx) : fetched;
-        // Preserve rows already in memory (lazy expands) across the replace so a
-        // resync doesn't force a re-fetch on the next expand.
-        setActivityGroups((prev) => {
-          const prevRows = new Map(prev.filter((g) => g.rows).map((g) => [g.id, g.rows] as const));
-          return groups.map((g) => (g.rows || !prevRows.has(g.id) ? g : { ...g, rows: prevRows.get(g.id) }));
-        });
-        if (inflight) {
-          // Still running: re-hydrate the card's rows from storage only if the live
-          // stream hasn't already filled them (don't clobber live rows).
-          if (liveRowsRef.current.length === 0) {
-            try {
-              const wire = await api.getSessionActivityGroup(sid, inflight.id);
-              if (sid !== sessionIdRef.current) return;
-              const rows = groupFromWire(wire).rows ?? [];
-              if (liveRowsRef.current.length === 0 && rows.length > 0) {
-                setLiveRowsBoth(rows);
-                const startMs = Date.parse(rows[0].created_at);
-                setLiveStartedAt(Number.isFinite(startMs) ? startMs : Date.now());
-              }
-            } catch {
-              /* re-hydrate is best-effort; live streaming still fills the card */
-            }
-          }
-        } else {
-          // No in-flight turn: the live buffer is stale (its turn settled and is now
-          // a storage-derived chip). Clear it so the finished card swaps to the chip
-          // and its rows can't leak into the next turn.
-          setLiveRowsBoth([]);
-          setLiveStartedAt(null);
-        }
+        res = await api.getSessionActivity(sid);
       } catch {
-        /* summary is best-effort */
+        return false; // transient failure → caller retries; a stale card is hidden by the working gate
       }
+      if (sid !== sessionIdRef.current) return true;
+      const fetched = (res.groups ?? []).map(groupFromWire);
+      const inflightIdx = running ? fetched.findIndex((g) => g.anchorMessageId === null) : -1;
+      const inflight = inflightIdx >= 0 ? fetched[inflightIdx] : null;
+      const groups = inflight ? fetched.filter((_, i) => i !== inflightIdx) : fetched;
+      // Settled groups are always safe to replace (storage is authoritative);
+      // preserve already-loaded rows so a resync doesn't force a re-fetch on expand.
+      setActivityGroups((prev) => {
+        const prevRows = new Map(prev.filter((g) => g.rows).map((g) => [g.id, g.rows] as const));
+        return groups.map((g) => (g.rows || !prevRows.has(g.id) ? g : { ...g, rows: prevRows.get(g.id) }));
+      });
+      if (inflight) {
+        // Still running: re-hydrate the card's rows only if the live stream hasn't
+        // already filled them (the reducer also drops a stale-generation rehydrate).
+        if (liveStateRef.current.rows.length === 0) {
+          try {
+            const wire = await api.getSessionActivityGroup(sid, inflight.id);
+            if (sid !== sessionIdRef.current) return true;
+            const rows = groupFromWire(wire).rows ?? [];
+            if (rows.length > 0) {
+              const startMs = Date.parse(rows[0].created_at);
+              dispatchLive({
+                type: 'rehydrate_for_gen',
+                gen: issuedGen,
+                rows,
+                startedAt: Number.isFinite(startMs) ? startMs : Date.now(),
+              });
+            }
+          } catch {
+            /* re-hydrate is best-effort; live streaming still fills the card */
+          }
+        }
+      } else {
+        // No in-flight turn: clear the finished buffer so the card swaps to its chip
+        // — but only if still the same generation (a newer turn's rows are kept).
+        dispatchLive({ type: 'clear_for_gen', gen: issuedGen });
+      }
+      return true;
     },
-    [api, setLiveRowsBoth],
+    [api, dispatchLive],
   );
   // Coalesce settle-triggered refreshes: one in-flight + at most one trailing (with
-  // the latest ``running``), never N fetches for a settle burst. No fetch when the
-  // toggle is off (default-off stays a strict no-op).
+  // the latest ``running`` and the current generation), never N fetches for a settle
+  // burst. On a transient fetch failure schedule exactly one bounded retry (the next
+  // settle also rebuilds). No fetch when the toggle is off (strict no-op).
   const scheduleActivityRefresh = useCallback(
-    (running: boolean) => {
+    (running: boolean, isRetry = false) => {
       if (!showAgentActivityRef.current) return;
       activityRunningRef.current = running;
       if (activityRefreshInFlightRef.current) {
@@ -453,19 +473,23 @@ export const ChatPage: React.FC = () => {
         return;
       }
       activityRefreshInFlightRef.current = true;
-      void refreshActivity(activityRunningRef.current).finally(() => {
+      const issuedGen = liveStateRef.current.gen;
+      void refreshActivity(activityRunningRef.current, issuedGen).then((ok) => {
         activityRefreshInFlightRef.current = false;
         if (activityRefreshPendingRef.current) {
           activityRefreshPendingRef.current = false;
-          activityRefreshInFlightRef.current = true;
-          void refreshActivity(activityRunningRef.current).finally(() => {
-            activityRefreshInFlightRef.current = false;
-          });
+          scheduleActivityRefreshRef.current(activityRunningRef.current, false);
+        } else if (ok === false && !isRetry && activityRetryTimerRef.current === null) {
+          activityRetryTimerRef.current = window.setTimeout(() => {
+            activityRetryTimerRef.current = null;
+            scheduleActivityRefreshRef.current(activityRunningRef.current, true);
+          }, 1500);
         }
       });
     },
     [refreshActivity],
   );
+  scheduleActivityRefreshRef.current = scheduleActivityRefresh;
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
   const [queue, setQueue] = useState<WorkbenchMessage[]>([]);
@@ -805,10 +829,10 @@ export const ChatPage: React.FC = () => {
       setOlderCursor(bootstrap.next_before_id ?? null);
       setHistoricalWindow(false);
       // Chat Activity chips for past turns: resync the per-turn summary (row text
-      // lazy-loads on expand). If a turn is in flight, refreshActivity re-hydrates
-      // the running card instead of showing it as interrupted.
+      // lazy-loads on expand). If a turn is in flight, the refresh re-hydrates the
+      // running card instead of showing it as interrupted.
       if (activityEnabled) {
-        void refreshActivity(bootstrap.turn_state.foreground === 'running');
+        scheduleActivityRefresh(bootstrap.turn_state.foreground === 'running');
       } else {
         setActivityGroups([]);
       }
@@ -830,7 +854,7 @@ export const ChatPage: React.FC = () => {
       // its own loading state into a premature not-found / error view (Codex P2).
       if (sessionId === sessionIdRef.current) setLoading(false);
     }
-  }, [api, sessionId, markWorking, refreshActivity]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -866,15 +890,21 @@ export const ChatPage: React.FC = () => {
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
     setInitialDraft(null);
-    // Clear all Agent Activity state so the previous session's groups / live rows
+    // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
-    setLiveRowsBoth([]);
+    liveStateRef.current = initialLiveActivity();
+    setLiveRows([]);
     setLiveStartedAt(null);
     setActivityCardExpanded(false);
     setExpandedActivity({});
     setLoadingActivity({});
+    setActivityError({});
     activityRefreshPendingRef.current = false;
+    if (activityRetryTimerRef.current !== null) {
+      window.clearTimeout(activityRetryTimerRef.current);
+      activityRetryTimerRef.current = null;
+    }
     // Drop any pending grace-resync so it can't fire against the new session.
     if (graceResyncRef.current !== null) {
       window.clearTimeout(graceResyncRef.current);
@@ -920,11 +950,11 @@ export const ChatPage: React.FC = () => {
           return;
         }
         appendMessage(msg);
-        // Agent Activity: a terminal reply settles the turn → rebuild groups from
-        // storage (chip, rows, status, duration all come from the endpoint, never
-        // the lossy live buffer). The running card stays up until the rebuild
-        // resolves, then swaps to the storage-derived chip.
+        // Agent Activity: a terminal reply settles the turn → mark the generation
+        // settled and rebuild groups from storage (chip, rows, status, duration all
+        // come from the endpoint, never the lossy live buffer).
         if (showAgentActivityRef.current && isTerminalAgentMessage(msg)) {
+          dispatchLive({ type: 'settle' });
           scheduleActivityRefresh(workingRef.current);
         }
         // Don't clear ``working`` from a result row here: with the queue, a
@@ -939,13 +969,10 @@ export const ChatPage: React.FC = () => {
         // reading already in flight can't clear this freshly-started turn.
         if (data.session_id === sessionIdRef.current) {
           setRuntimeState((current) => ({ ...current, in_flight: true, foreground: 'running' }));
-          // Agent Activity: a new turn begins → the previous turn's live buffer (if
-          // any) is now a settled turn owned by storage; clear it so the new turn's
-          // rows start fresh and can never merge with the previous turn's.
-          if (showAgentActivityRef.current) {
-            setLiveRowsBoth([]);
-            setLiveStartedAt(null);
-          }
+          // Agent Activity: a new turn begins → bump the generation (fresh empty
+          // buffer). Any stale rows from the previous turn become invisible by
+          // construction and can never merge with the new turn's rows.
+          if (showAgentActivityRef.current) dispatchLive({ type: 'turn_start' });
           markWorking();
         }
       },
@@ -957,12 +984,15 @@ export const ChatPage: React.FC = () => {
           setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle' }));
           workingRef.current = false;
           setWorking(false);
-          // Agent Activity: the turn settled (result / error / interrupt) → rebuild
-          // groups from storage. running=false so a trailing (no-terminal) turn is
-          // rendered as its interrupted chip and the finished card's stale buffer is
-          // cleared. Covers the interrupt case (no terminal message) structurally —
-          // no client-side snapshot/grace timer.
-          if (showAgentActivityRef.current) scheduleActivityRefresh(false);
+          // Agent Activity: the turn settled (result / error / interrupt) → mark the
+          // generation settled and rebuild from storage. running=false so a trailing
+          // (no-terminal) turn renders as its interrupted chip and the finished
+          // card's buffer clears — the interrupt case is covered structurally, with
+          // no client-side snapshot or grace timer.
+          if (showAgentActivityRef.current) {
+            dispatchLive({ type: 'settle' });
+            scheduleActivityRefresh(false);
+          }
           // The first turn binds the native; pick it up so the header's backend
           // lock engages without a reload. A failed first turn leaves no native
           // (the refresh confirms that), keeping the backend switchable so the
@@ -1007,7 +1037,7 @@ export const ChatPage: React.FC = () => {
       },
     }, { reconnect: connectionEpoch > 0 });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, scheduleActivityRefresh, setLiveRowsBoth]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1609,33 +1639,42 @@ export const ChatPage: React.FC = () => {
     () => activityGroups.find((group) => group.anchorMessageId === null) ?? null,
     [activityGroups],
   );
-  // Toggle a chip open/closed; lazy-load its rows on first expand (history chips
-  // arrive as summary only — live-completed groups already carry their rows).
+  // Lazy-load a group's rows from the endpoint (history chips arrive as summary
+  // only). On failure, record an error so the chip offers retry instead of showing
+  // a misleading "no activity" empty state.
+  const loadActivityDetail = useCallback(
+    (group: ActivityGroup) => {
+      if (!sessionId || loadingActivity[group.id]) return;
+      const sid = sessionId;
+      setLoadingActivity((prev) => ({ ...prev, [group.id]: true }));
+      setActivityError((prev) => (prev[group.id] ? { ...prev, [group.id]: false } : prev));
+      api
+        .getSessionActivityGroup(sid, group.id)
+        .then((wire) => {
+          if (sid !== sessionIdRef.current) return;
+          const full = groupFromWire(wire);
+          setActivityGroups((prev) =>
+            prev.map((g) => (g.id === group.id ? { ...g, rows: full.rows ?? [] } : g)),
+          );
+        })
+        .catch(() => {
+          if (sid === sessionIdRef.current) setActivityError((prev) => ({ ...prev, [group.id]: true }));
+        })
+        .finally(() => {
+          setLoadingActivity((prev) => ({ ...prev, [group.id]: false }));
+        });
+    },
+    [api, sessionId, loadingActivity],
+  );
+  // Toggle a chip open/closed; lazy-load its rows on first expand (live-completed
+  // groups already carry their rows, so no fetch there).
   const toggleActivityGroup = useCallback(
     (group: ActivityGroup) => {
       const willExpand = !expandedActivity[group.id];
       setExpandedActivity((prev) => ({ ...prev, [group.id]: willExpand }));
-      if (willExpand && !group.rows && !loadingActivity[group.id] && sessionId) {
-        const sid = sessionId;
-        setLoadingActivity((prev) => ({ ...prev, [group.id]: true }));
-        api
-          .getSessionActivityGroup(sid, group.id)
-          .then((wire) => {
-            if (sid !== sessionIdRef.current) return;
-            const full = groupFromWire(wire);
-            setActivityGroups((prev) =>
-              prev.map((g) => (g.id === group.id ? { ...g, rows: full.rows ?? [] } : g)),
-            );
-          })
-          .catch(() => {
-            /* leave rows undefined → chip shows the empty state; a re-expand retries */
-          })
-          .finally(() => {
-            setLoadingActivity((prev) => ({ ...prev, [group.id]: false }));
-          });
-      }
+      if (willExpand && !group.rows) loadActivityDetail(group);
     },
-    [api, sessionId, expandedActivity, loadingActivity],
+    [expandedActivity, loadActivityDetail],
   );
 
   if (!sessionId) {
@@ -1790,7 +1829,9 @@ export const ChatPage: React.FC = () => {
             onToggleCard: () => setActivityCardExpanded((v) => !v),
             expanded: expandedActivity,
             loading: loadingActivity,
+            error: activityError,
             onToggleGroup: toggleActivityGroup,
+            onRetryGroup: loadActivityDetail,
           }}
           footer={
             sessionId ? (
@@ -2409,7 +2450,9 @@ interface TranscriptProps {
     onToggleCard: () => void;
     expanded: Record<string, boolean>;
     loading: Record<string, boolean>;
+    error: Record<string, boolean>;
     onToggleGroup: (group: ActivityGroup) => void;
+    onRetryGroup: (group: ActivityGroup) => void;
   };
   // Rendered at the end of the scroll content, after the last message (e.g. the in-scroll
   // vault request cards). Part of the timeline, so it scrolls with the conversation.
@@ -2788,7 +2831,9 @@ const Transcript: React.FC<TranscriptProps> = ({
                     group={chip}
                     expanded={!!activity!.expanded[chip.id]}
                     loading={!!activity!.loading[chip.id]}
+                    error={!!activity!.error[chip.id]}
                     onToggle={() => activity!.onToggleGroup(chip)}
+                    onRetry={() => activity!.onRetryGroup(chip)}
                   />
                 )}
                 <MessageRow
@@ -2816,7 +2861,9 @@ const Transcript: React.FC<TranscriptProps> = ({
               group={activity.trailing}
               expanded={!!activity.expanded[activity.trailing.id]}
               loading={!!activity.loading[activity.trailing.id]}
+              error={!!activity.error[activity.trailing.id]}
               onToggle={() => activity.onToggleGroup(activity.trailing!)}
+              onRetry={() => activity.onRetryGroup(activity.trailing!)}
             />
           )}
           {footer}

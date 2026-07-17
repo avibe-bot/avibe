@@ -233,12 +233,22 @@ finished card swaps to the storage-derived chip (and its rows can't leak into th
 next turn). When a turn IS in flight, refresh re-hydrates the running card's rows
 from storage only if the live stream hasn't already filled them. Settle bursts are
 coalesced to one in-flight + at most one trailing fetch (`scheduleActivityRefresh`),
-and nothing fetches when the toggle is off. This structure closes the whole class
-of live-state edge cases (lossy/stale/partial buffer, interrupted anchoring,
-duration source) that iterative patching kept surfacing: the chip's steps, status,
-anchor, and duration always come from the well-tested backend grouping. Activity
-rows still live in a **separate store** (never the `messages` array), so they never
-count against `MAX_RETAINED_MESSAGES`. Show-Page `assistant` rows are excluded from
-live ingestion (they stay transcript rows). Presentation is `ActivityCard` /
-`ActivityChip` in `ui/src/components/workbench/AgentActivityGroup.tsx`; pure helpers
-+ wire mapping in `ui/src/lib/agentActivity.ts`.
+a transient fetch failure schedules exactly one bounded retry, and nothing fetches
+when the toggle is off. The live buffer is a pure **generation** state machine
+(`liveActivityReducer`, unit-tested): a monotonic generation bumps on every
+turn.start (and on the first agent-initiated row after a settle), so a stale buffer
+is invisible by construction and a late settle-refresh only clears/rehydrates its
+OWN generation — a newer turn's resolution is a structural no-op (no
+promise-cancellation or grace-timer bookkeeping). This structure closes the whole
+class of live-state edge cases (lossy/stale/partial buffer, interrupted anchoring,
+duration source, settle-vs-next-turn races) that iterative patching kept surfacing:
+the chip's steps, status, anchor, and duration always come from the well-tested
+backend grouping. Activity rows still live in a **separate store** (never the
+`messages` array), so they never count against `MAX_RETAINED_MESSAGES`. Show-Page
+transcript rows (`user` AND `assistant`, `metadata.source='show_page'`) are excluded
+from both the backend grouping (never turn openers / activity) and live ingestion.
+A lazy detail-fetch failure surfaces a retry affordance rather than a false "no
+activity". The activity-streaming flag cache is reset on config save so the toggle
+takes effect immediately. Presentation is `ActivityCard` / `ActivityChip` in
+`ui/src/components/workbench/AgentActivityGroup.tsx`; pure helpers + the live
+generation reducer + wire mapping in `ui/src/lib/agentActivity.ts`.

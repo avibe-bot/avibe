@@ -306,6 +306,33 @@ def test_duration_measured_from_turn_opener(isolated_state):
     assert summary["groups"][0]["duration_ms"] == 10_000
 
 
+def test_show_page_user_marks_do_not_split_a_turn(isolated_state):
+    """A Show-Page annotation persists as a user row mid-turn; it must NOT be treated
+    as a turn opener (which would mark the turn interrupted and orphan its terminal)."""
+    engine = create_sqlite_engine()
+    sid = "ses_spuser"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _evt(conn, scope, sid, eid="e_1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash`")
+        # A Show-Page user mark lands WHILE the turn is still producing activity.
+        _msg(
+            conn, scope, sid, mid="m_sp", mtype="user", author="user",
+            created_at="2026-06-01T10:00:02Z", text="pinned an element", source="user",
+            metadata={"source": "show_page"},
+        )
+        _evt(conn, scope, sid, eid="e_2", created_at="2026-06-01T10:00:03Z", text="🔧 `Read`")
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:04Z", text="answer")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+    groups = summary["groups"]
+    # One done group with BOTH tool calls — the Show-Page mark did not split it.
+    assert [g["status"] for g in groups] == ["done"]
+    assert groups[0]["anchor_message_id"] == "m_r"
+    assert groups[0]["steps"] == 2
+
+
 def test_get_turn_group_unknown_id_returns_none(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_none"

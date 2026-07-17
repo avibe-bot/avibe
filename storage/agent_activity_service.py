@@ -144,13 +144,16 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         mtype = msg.get("type")
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
+        # Show-Page annotations/intents persist as transcript rows (``user`` AND
+        # ``assistant``) with metadata.source='show_page'; they are display-only and
+        # must never act as a turn opener (would split an in-flight turn) nor as
+        # activity — always ignore them in the grouping.
+        show_page = metadata.get("source") == "show_page"
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
-        elif mtype in ("user", messages_service.HARNESS_TYPE):
+        elif mtype in ("user", messages_service.HARNESS_TYPE) and not show_page:
             kind = "turn_start"
-        elif mtype == "assistant" and metadata.get("source") != "show_page":
-            # Show-Page transcript marks are also stored as ``assistant`` rows but
-            # belong to the transcript, not the process log — never activity.
+        elif mtype == "assistant" and not show_page:
             kind = "activity"
         else:
             kind = "ignore"

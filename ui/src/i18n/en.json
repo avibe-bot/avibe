@@ -2370,6 +2370,7 @@
       "hideCall": "Hide details",
       "jumpToLatest": "Jump to latest",
       "loadFailed": "Couldn't load activity detail.",
+      "retry": "Retry",
       "empty": "No activity recorded for this turn."
     },
     "queue": {

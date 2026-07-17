@@ -2370,6 +2370,7 @@
       "hideCall": "收起详情",
       "jumpToLatest": "跳到最新",
       "loadFailed": "无法加载执行详情。",
+      "retry": "重试",
       "empty": "本轮没有执行过程记录。"
     },
     "queue": {

@@ -222,8 +222,10 @@ export const ActivityChip: React.FC<{
   group: ActivityGroup;
   expanded: boolean;
   loading: boolean;
+  error?: boolean;
   onToggle: () => void;
-}> = ({ group, expanded, loading, onToggle }) => {
+  onRetry?: () => void;
+}> = ({ group, expanded, loading, error, onToggle, onRetry }) => {
   const { t } = useTranslation();
   const StatusIcon =
     group.status === 'failed' ? AlertTriangle : group.status === 'interrupted' ? CircleSlash : CheckCircle2;
@@ -270,6 +272,21 @@ export const ActivityChip: React.FC<{
               </div>
             ) : group.rows && group.rows.length > 0 ? (
               <ActivityRows rows={group.rows} />
+            ) : error ? (
+              // A transient detail-fetch failure — show a retry, not a misleading
+              // "no activity", since the summary already counted steps.
+              <div className="flex items-center justify-between gap-2 px-1.5 py-2 text-[12px] text-muted">
+                <span>{t('chat.agentActivity.loadFailed')}</span>
+                {onRetry && (
+                  <button
+                    type="button"
+                    onClick={onRetry}
+                    className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-cyan transition-colors hover:bg-surface-2"
+                  >
+                    {t('chat.agentActivity.retry')}
+                  </button>
+                )}
+              </div>
             ) : (
               <div className="px-1.5 py-2 text-[12px] text-muted">{t('chat.agentActivity.empty')}</div>
             )}

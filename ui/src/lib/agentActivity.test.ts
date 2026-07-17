@@ -5,10 +5,13 @@ import {
   activityRowFromMessage,
   formatActivityDuration,
   groupFromWire,
+  initialLiveActivity,
   isActivityMessageType,
+  liveActivityReducer,
   parseToolName,
   toolIconKind,
   toolSummary,
+  type ActivityRow,
 } from './agentActivity';
 
 // ``format_toolcall`` stores one string: "🔧 `ToolName` `{json params}`".
@@ -116,5 +119,70 @@ describe('activityRowFromMessage', () => {
     expect(assistant).toEqual({ id: 'm1', kind: 'assistant', text: 'thinking', created_at: 't1' });
     const tool = activityRowFromMessage({ id: 'e1', type: 'tool_call', text: '🔧 `Bash`', created_at: 't2' } as WorkbenchMessage);
     expect(tool.kind).toBe('tool_call');
+  });
+});
+
+describe('liveActivityReducer (generation invariant)', () => {
+  const row = (id: string): ActivityRow => ({ id, kind: 'tool_call', text: id, created_at: `t-${id}` });
+
+  it('turn_start bumps the generation and clears the buffer', () => {
+    let s = initialLiveActivity();
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 1 });
+    s = liveActivityReducer(s, { type: 'turn_start' });
+    expect(s.gen).toBe(1);
+    expect(s.rows).toEqual([]);
+    expect(s.startedAt).toBeNull();
+  });
+
+  it('rows append within a generation; the first stamps startedAt', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 100 });
+    s = liveActivityReducer(s, { type: 'row', row: row('b'), now: 200 });
+    expect(s.rows.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(s.startedAt).toBe(100); // unchanged by the second row
+  });
+
+  it('a row after settle opens a new agent-initiated generation', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 1 });
+    s = liveActivityReducer(s, { type: 'settle' });
+    const genAfterSettle = s.gen;
+    s = liveActivityReducer(s, { type: 'row', row: row('b'), now: 5 });
+    expect(s.gen).toBe(genAfterSettle + 1);
+    expect(s.rows.map((r) => r.id)).toEqual(['b']); // fresh buffer, not merged with 'a'
+    expect(s.settled).toBe(false);
+  });
+
+  it('clear_for_gen only clears its own generation — a late refresh after the next turn is a no-op (#499)', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' }); // gen 1
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 1 });
+    const gen1 = s.gen;
+    s = liveActivityReducer(s, { type: 'settle' });
+    s = liveActivityReducer(s, { type: 'turn_start' }); // gen 2, buffer cleared
+    s = liveActivityReducer(s, { type: 'row', row: row('b'), now: 2 }); // gen 2's live row
+    // The gen-1 settle refresh resolves LATE:
+    const after = liveActivityReducer(s, { type: 'clear_for_gen', gen: gen1 });
+    expect(after.rows.map((r) => r.id)).toEqual(['b']); // gen 2's live row is NOT wiped
+    // The current-gen clear does clear it:
+    const cleared = liveActivityReducer(s, { type: 'clear_for_gen', gen: s.gen });
+    expect(cleared.rows).toEqual([]);
+  });
+
+  it('rehydrate_for_gen fills only an empty buffer of the current generation', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    const gen = s.gen;
+    const hydrated = liveActivityReducer(s, {
+      type: 'rehydrate_for_gen',
+      gen,
+      rows: [row('x'), row('y')],
+      startedAt: 50,
+    });
+    expect(hydrated.rows.map((r) => r.id)).toEqual(['x', 'y']);
+    // Does not clobber an already-filled buffer, nor a stale generation:
+    const withLive = liveActivityReducer(hydrated, { type: 'row', row: row('z'), now: 60 });
+    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('w')], startedAt: 70 });
+    expect(noClobber.rows.map((r) => r.id)).toEqual(['x', 'y', 'z']);
+    const staleGen = liveActivityReducer(hydrated, { type: 'rehydrate_for_gen', gen: gen - 1, rows: [row('w')], startedAt: 70 });
+    expect(staleGen.rows.map((r) => r.id)).toEqual(['x', 'y']);
   });
 });

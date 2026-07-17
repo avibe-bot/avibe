@@ -58,6 +58,75 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
   created_at: msg.created_at,
 });
 
+// ===== Live running-card buffer: a pure state machine (state, not timing) =====
+// The live buffer drives ONLY the in-flight running card; all SETTLED groups come
+// from the durable endpoint. Each turn is tagged with a monotonic GENERATION so
+// that a stale buffer is invisible by construction and a late settle-refresh is a
+// structural no-op for a newer turn:
+//   - the running card renders only while ``working`` AND ``rows`` are non-empty,
+//     and ``rows`` always belong to the current generation (cleared on every bump);
+//   - a settle refresh is issued for a generation and only clears/rehydrates the
+//     buffer when it resolves for that SAME generation (a newer turn bumped it → the
+//     resolution is dropped). This subsumes the "stale/late buffer" class without
+//     promise-cancellation or grace-timer bookkeeping.
+export type LiveActivityState = {
+  gen: number; // current turn generation (monotonic)
+  settled: boolean; // the current generation has settled (terminal / turn.end seen)
+  rows: ActivityRow[]; // current-generation buffer (empty ⇒ nothing to show)
+  startedAt: number | null; // elapsed-clock start for the running card
+};
+
+export const initialLiveActivity = (): LiveActivityState => ({
+  gen: 0,
+  settled: false,
+  rows: [],
+  startedAt: null,
+});
+
+export type LiveActivityEvent =
+  | { type: 'turn_start' }
+  | { type: 'row'; row: ActivityRow; now: number }
+  | { type: 'settle' }
+  | { type: 'clear_for_gen'; gen: number }
+  | { type: 'rehydrate_for_gen'; gen: number; rows: ActivityRow[]; startedAt: number };
+
+export const liveActivityReducer = (
+  state: LiveActivityState,
+  event: LiveActivityEvent,
+): LiveActivityState => {
+  switch (event.type) {
+    case 'turn_start':
+      // New turn → new generation with a fresh empty buffer (any stale rows from the
+      // previous generation are dropped by construction).
+      return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
+    case 'row':
+      if (state.settled) {
+        // First row after a settle with no turn.start = an agent-initiated new turn.
+        return { gen: state.gen + 1, settled: false, rows: [event.row], startedAt: event.now };
+      }
+      return {
+        ...state,
+        rows: [...state.rows, event.row],
+        startedAt: state.rows.length === 0 ? event.now : state.startedAt,
+      };
+    case 'settle':
+      return state.settled ? state : { ...state, settled: true };
+    case 'clear_for_gen':
+      // A settle refresh resolved with no in-flight turn: clear the finished buffer
+      // — but ONLY if still the same generation (a newer turn.start bumped gen, so
+      // this resolution is a stale no-op and must not wipe the new turn's rows).
+      return event.gen === state.gen ? { ...state, rows: [], startedAt: null } : state;
+    case 'rehydrate_for_gen':
+      // In-flight re-hydrate from storage, only if still the current generation and
+      // the live stream hasn't already filled the buffer.
+      return event.gen === state.gen && state.rows.length === 0
+        ? { ...state, rows: event.rows, startedAt: event.startedAt }
+        : state;
+    default:
+      return state;
+  }
+};
+
 export const isActivityMessageType = (type: string): boolean =>
   type === 'assistant' || type === 'tool_call';
 
