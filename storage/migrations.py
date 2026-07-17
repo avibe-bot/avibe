@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import logging
+import threading
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,11 @@ from storage.db import create_sqlite_engine, sqlite_url
 
 
 logger = logging.getLogger(__name__)
+
+# Alembic's EnvironmentContext installs module-level proxies while an upgrade
+# runs. Concurrent store initialization can otherwise tear down another
+# thread's proxy and surface errors such as KeyError("config").
+_MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
 LATEST_SCHEMA_REVISION = "20260622_0023"
@@ -143,6 +149,20 @@ def run_migrations(
 ) -> None:
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     guard_source_checkout_default_state_migration(target_db)
+    with _MIGRATION_LOCK:
+        _run_migrations_locked(
+            target_db,
+            revision=revision,
+            prune_backups_after_upgrade=prune_backups_after_upgrade,
+        )
+
+
+def _run_migrations_locked(
+    target_db: Path,
+    *,
+    revision: str,
+    prune_backups_after_upgrade: bool,
+) -> None:
     cfg = alembic_config(target_db)
     backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
     if backup_revisions is not None:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -131,6 +133,47 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_run_migrations_serializes_alembic_context(monkeypatch, tmp_path: Path) -> None:
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    calls: list[Path] = []
+
+    def fake_run_locked(
+        target_db: Path,
+        *,
+        revision: str,
+        prune_backups_after_upgrade: bool,
+    ) -> None:
+        assert revision == "head"
+        assert prune_backups_after_upgrade is True
+        calls.append(target_db)
+        if len(calls) == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            second_entered.set()
+
+    monkeypatch.setattr(migrations, "_run_migrations_locked", fake_run_locked)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(run_migrations, tmp_path / "first.sqlite")
+        assert first_entered.wait(2)
+        second = pool.submit(run_migrations, tmp_path / "second.sqlite")
+        try:
+            assert not second_entered.wait(0.1)
+        finally:
+            release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+    assert second_entered.is_set()
+    assert calls == [
+        (tmp_path / "first.sqlite").resolve(),
+        (tmp_path / "second.sqlite").resolve(),
+    ]
 
 
 def test_run_migrations_blocks_source_checkout_default_user_state(monkeypatch, tmp_path: Path) -> None:
