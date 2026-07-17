@@ -304,6 +304,10 @@ export const ChatPage: React.FC = () => {
   // ``working`` = a turn is in flight for this session (from our send, or any
   // other origin we observe). Drives the thinking bubble + the Send→Stop swap.
   const [working, setWorking] = useState(false);
+  // Mirror ``working`` into a ref so recovery paths (reconcile) can tell the
+  // activity resync whether a turn is still in flight without re-running on it.
+  const workingRef = useRef(working);
+  workingRef.current = working;
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>(emptyRuntimeState);
   // Global background-work banner toggle (spec req 2), persisted server-side.
   // Tri-state: null = not yet known → suppress the banner so a stored "off"
@@ -383,12 +387,63 @@ export const ChatPage: React.FC = () => {
     },
     [setLiveRowsBoth],
   );
+  // Resync activity groups from durable storage. Used on load and on gap recovery
+  // (reconcile): pulls done/failed chips for turns that completed while
+  // disconnected, and re-hydrates an in-flight turn's persisted rows into the live
+  // card rather than leaving a stale trailing "interrupted" chip.
+  const refreshActivity = useCallback(
+    async (running: boolean) => {
+      const sid = sessionIdRef.current;
+      if (!sid || !showAgentActivityRef.current) return;
+      try {
+        const res = await api.getSessionActivity(sid);
+        if (sid !== sessionIdRef.current) return;
+        const fetched = (res.groups ?? []).map(groupFromWire);
+        // The last un-terminated turn is a trailing (null-anchor) group. If a turn
+        // is in flight it IS that turn — don't show it as interrupted; re-hydrate
+        // its persisted rows into the live card so finalizeLiveGroup can snapshot
+        // the whole turn when the terminal reply lands.
+        const inflightIdx = running ? fetched.findIndex((g) => g.anchorMessageId === null) : -1;
+        const inflight = inflightIdx >= 0 ? fetched[inflightIdx] : null;
+        const groups = inflight ? fetched.filter((_, i) => i !== inflightIdx) : fetched;
+        // Preserve rows already in memory (live snapshots + lazy expands) across the
+        // replace so a resync doesn't force a re-fetch on the next expand.
+        setActivityGroups((prev) => {
+          const prevRows = new Map(prev.filter((g) => g.rows).map((g) => [g.id, g.rows] as const));
+          return groups.map((g) => (g.rows || !prevRows.has(g.id) ? g : { ...g, rows: prevRows.get(g.id) }));
+        });
+        if (inflight && liveRowsRef.current.length === 0) {
+          try {
+            const wire = await api.getSessionActivityGroup(sid, inflight.id);
+            if (sid !== sessionIdRef.current) return;
+            const rows = groupFromWire(wire).rows ?? [];
+            if (liveRowsRef.current.length === 0 && rows.length > 0) {
+              setLiveRowsBoth(rows);
+              const startMs = Date.parse(rows[0].created_at);
+              setLiveStartedAt(Number.isFinite(startMs) ? startMs : Date.now());
+            }
+          } catch {
+            /* re-hydrate is best-effort; live streaming still fills the card */
+          }
+        }
+      } catch {
+        /* summary is best-effort */
+      }
+    },
+    [api, setLiveRowsBoth],
+  );
   // The turn's terminal reply landed → snapshot the running buffer into a group
   // anchored above that reply (chip), and clear the live buffer.
   const finalizeLiveGroup = useCallback(
     (terminal: WorkbenchMessage) => {
       const rows = liveRowsRef.current;
-      if (rows.length === 0) return;
+      if (rows.length === 0) {
+        // No live buffer — e.g. a terminal recovered by reconcile after an SSE gap,
+        // or a page opened mid-turn without re-hydrated rows. Pull the completed
+        // group from durable storage instead of dropping the chip.
+        void refreshActivity(false);
+        return;
+      }
       const start = Date.parse(rows[0].created_at);
       const end = Date.parse(terminal.created_at);
       const durationMs = Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
@@ -404,7 +459,7 @@ export const ChatPage: React.FC = () => {
       setLiveRowsBoth([]);
       setLiveStartedAt(null);
     },
-    [setLiveRowsBoth],
+    [setLiveRowsBoth, refreshActivity],
   );
   // A new turn opened while an interrupted group trails the transcript → re-anchor
   // it above the new opening message (mirrors the history layout).
@@ -564,7 +619,12 @@ export const ChatPage: React.FC = () => {
     } catch {
       /* keep the current transcript; the next reconnect retries */
     }
-  }, [api, sessionId]);
+    // Resync activity too: reconcile recovers a missed terminal row via the merge
+    // above but never runs the live handler, so without this a recovered turn gets
+    // no done/failed chip (and a still-running turn re-hydrates its card) until a
+    // full reload. No-op when the toggle is off (guarded inside refreshActivity).
+    void refreshActivity(workingRef.current);
+  }, [api, sessionId, refreshActivity]);
 
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
@@ -745,19 +805,11 @@ export const ChatPage: React.FC = () => {
       setMessages((prev) => mergeById(bootstrap.messages, prev));
       setOlderCursor(bootstrap.next_before_id ?? null);
       setHistoricalWindow(false);
-      // Chat Activity chips for past turns: fetch the per-turn SUMMARY once (no row
-      // text — detail lazy-loads on expand). Best-effort; live turns fill in their
-      // own groups regardless.
+      // Chat Activity chips for past turns: resync the per-turn summary (row text
+      // lazy-loads on expand). If a turn is in flight, refreshActivity re-hydrates
+      // the running card instead of showing it as interrupted.
       if (activityEnabled) {
-        void api
-          .getSessionActivity(sessionId)
-          .then((res) => {
-            if (sessionId !== sessionIdRef.current) return;
-            setActivityGroups((res.groups ?? []).map(groupFromWire));
-          })
-          .catch(() => {
-            /* summary is best-effort; chips still appear as live turns complete */
-          });
+        void refreshActivity(bootstrap.turn_state.foreground === 'running');
       } else {
         setActivityGroups([]);
       }
@@ -779,7 +831,7 @@ export const ChatPage: React.FC = () => {
       // its own loading state into a premature not-found / error view (Codex P2).
       if (sessionId === sessionIdRef.current) setLoading(false);
     }
-  }, [api, sessionId, markWorking]);
+  }, [api, sessionId, markWorking, refreshActivity]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -853,8 +905,11 @@ export const ChatPage: React.FC = () => {
         // Agent Activity rows (assistant / tool_call) only reach the browser when
         // the toggle streams them (message_mirror). Route them to the running
         // buffer — never the transcript. ``isTranscriptMessage`` already excludes
-        // them, so the feature-off path is unchanged.
-        if (showAgentActivityRef.current && isActivityMessageType(msg.type)) {
+        // them, so the feature-off path is unchanged. Show-Page marks are ALSO
+        // ``assistant`` rows but are transcript-visible (isTranscriptMessage keeps
+        // them) — let them fall through so they render in the chat, not the panel.
+        const isShowPage = (msg.metadata as { source?: string } | null)?.source === 'show_page';
+        if (showAgentActivityRef.current && isActivityMessageType(msg.type) && !isShowPage) {
           if (!historicalWindowRef.current) ingestActivityRow(msg);
           return;
         }

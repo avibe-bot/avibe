@@ -195,6 +195,47 @@ def test_show_page_assistant_marks_are_not_activity(isolated_state):
     assert summary["groups"] == []
 
 
+def test_same_second_tool_call_stays_in_completed_turn(isolated_state):
+    """A fast turn emits a tool_call and its terminal result in the SAME whole
+    second (both tables store second precision). The phase tiebreak must keep the
+    tool call inside the done group, not orphan it after the terminal."""
+    engine = create_sqlite_engine()
+    sid = "ses_ss"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        # tool_call and result both at :05Z — the tie the fix resolves.
+        _evt(conn, scope, sid, eid="e_t", created_at="2026-06-01T10:00:05Z", text="🔧 `Bash`")
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:05Z", text="answer")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+    groups = summary["groups"]
+    assert len(groups) == 1
+    assert groups[0]["status"] == "done"
+    assert groups[0]["anchor_message_id"] == "m_r"
+    assert groups[0]["steps"] == 1  # the tool_call belongs to THIS turn, not orphaned
+
+
+def test_events_before_message_window_are_dropped(isolated_state):
+    """An event that predates the scanned message window (its turn boundary was not
+    fetched) must not be grouped, or it would anchor a bogus interrupted chip to the
+    first visible turn. Here the only event predates the oldest message."""
+    engine = create_sqlite_engine()
+    sid = "ses_win"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        # Event an hour before the oldest scanned message → outside the window.
+        _evt(conn, scope, sid, eid="e_old", created_at="2026-06-01T09:00:00Z", text="🔧 `Bash`")
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:01Z", text="answer")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+    # The stale pre-window event is dropped; the user+result turn has no activity.
+    assert summary["groups"] == []
+
+
 def test_get_turn_group_unknown_id_returns_none(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_none"

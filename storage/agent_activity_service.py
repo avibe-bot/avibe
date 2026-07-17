@@ -9,10 +9,12 @@ A *turn* is bounded by transcript markers rather than an id: it ends at the
 agent's terminal reply (``result`` / ``error`` / backend-failure ``notify``) or,
 when the user starts a new turn without one, is reported as ``interrupted``.
 Grouping is chronological because ``messages`` carries no ``turn_id`` (only
-``agent_events`` does); the two sources are merged by PARSED timestamps because
-they persist different ISO precisions (``messages`` microseconds + offset,
-``agent_events`` whole seconds + ``Z``), so a raw string sort would interleave
-them wrong.
+``agent_events`` does). Both tables persist WHOLE-SECOND ``...Z`` timestamps, so a
+same-second tool call and the terminal reply that followed it tie on time; the
+merge therefore sorts by ``(parsed_timestamp, phase)`` where phase orders
+turn-start < activity < terminal, keeping a same-second tool event inside the
+completed turn instead of after its terminal. Timestamps are PARSED (not string-
+compared) so the sort stays correct even if a future writer changes precision.
 
 Each group is keyed by the id of its first activity row (stable across summary
 and detail reads). ``anchor_message_id`` is the transcript message the chip
@@ -54,9 +56,9 @@ _RELEVANT_MESSAGE_TYPES = (
 def _parse_ts(value: Optional[str]) -> datetime:
     """Parse an ISO timestamp from either table into an aware UTC datetime.
 
-    ``messages`` writes ``...+00:00`` (microseconds); ``agent_events`` writes
-    ``...Z`` (whole seconds). Normalize the trailing ``Z`` and assume UTC when no
-    offset is present so both sort on one axis. Unparseable values sort first.
+    Both tables currently write ``...Z`` (whole seconds); normalize the trailing
+    ``Z`` and assume UTC when no offset is present, and tolerate a fractional /
+    offset form too (future-proofing). Unparseable values sort first.
     """
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
@@ -96,6 +98,13 @@ def _terminal_status(msg_type: Any) -> str:
     return "done" if msg_type == "result" else "failed"
 
 
+# Same-timestamp tiebreak: a turn opens, then its activity runs, then it closes —
+# so at an equal (whole-second) timestamp order turn-start < activity < terminal.
+# This keeps a same-second tool call inside the completed turn rather than sorting
+# it after the terminal (which would orphan it to the next turn / an interrupted chip).
+_PHASE_RANK = {"turn_start": 0, "activity": 1, "terminal": 2, "ignore": 3}
+
+
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items."""
@@ -132,6 +141,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         items.append(
             {
                 "ts": _parse_ts(msg.get("created_at")),
+                "rank": _PHASE_RANK[kind],
                 "created_at": msg.get("created_at"),
                 "kind": kind,
                 "id": msg.get("id"),
@@ -140,10 +150,21 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "text": msg.get("text") if include_text else None,
             }
         )
+    # Bound events to the scanned message window: in a long session the 500-message
+    # tail can start after some of the fetched events, and an event whose turn
+    # boundary was NOT fetched would otherwise be grouped as pending and anchored to
+    # the first visible turn — surfacing an earlier turn's tool calls above the wrong
+    # message. Drop events that predate the oldest scanned message (parsed compare,
+    # so the two tables' string forms never matter).
+    oldest_msg_ts = min((item["ts"] for item in items), default=None)
     for event in events:
+        event_ts = _parse_ts(event.get("created_at"))
+        if oldest_msg_ts is not None and event_ts < oldest_msg_ts:
+            continue
         items.append(
             {
-                "ts": _parse_ts(event.get("created_at")),
+                "ts": event_ts,
+                "rank": _PHASE_RANK["activity"],
                 "created_at": event.get("created_at"),
                 "kind": "activity",
                 "id": event.get("id"),
@@ -152,9 +173,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "text": event.get("text") if include_text else None,
             }
         )
-    # Stable sort: equal-timestamp ties keep insertion order (messages before
-    # events), which only affects cosmetic within-second row ordering.
-    items.sort(key=lambda item: item["ts"])
+    # Sort by (timestamp, phase): whole-second ties resolve to turn-start < activity
+    # < terminal so a same-second tool call stays inside its completed turn.
+    items.sort(key=lambda item: (item["ts"], item["rank"]))
     return items
 
 

@@ -2448,7 +2448,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return params?.cache === false ? getJson(path) : getCachedJson(path);
     },
     getSessionActivity: (sessionId) =>
-      getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/activity`),
+      // Uncached: this is also the gap-recovery resync path, so it must reflect
+      // durable state (not a stale read served after a missed message.new).
+      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/activity`),
     getSessionActivityGroup: (sessionId, groupId) =>
       getJson(
         `/api/sessions/${encodeURIComponent(sessionId)}/activity?group_id=${encodeURIComponent(groupId)}`,
