@@ -26,7 +26,7 @@ That leaves Avibe/Web UI contexts with no matching IM custom cwd. When there is
 no global default cwd, `get_cwd()` falls back to the Vibe Remote process cwd.
 If the service was launched from `/tmp/test`, a Workbench session can start its
 agent from `/tmp/test` even though the selected project is
-`/Users/cyh/vibe-remote-project`.
+`/workspace/avibe-project`.
 
 Some backends then bind their native session id back into the reserved
 `agent_sessions` row with `request.working_path`, which can persist the wrong

@@ -38,8 +38,8 @@
 
 ## 输出
 - 用 OpenAI 的 gpt-image-1 模型(images.generate API)生成
-- 保存到 /Users/cyh/vibe-remote-project/mascot/ 下,文件名分别是 cloud-tuanzi.png, mist-tuanzi.png, smoke-tuanzi.png
-- 完成后告诉我三张图的完整路径
+- 保存到仓库的 `assets/mascot/` 目录下,文件名分别是 cloud-tuanzi.png, mist-tuanzi.png, smoke-tuanzi.png
+- 完成后告诉我三张图的仓库相对路径
 
 如果 OPENAI_API_KEY 没有设置,请先检查环境(env | grep OPENAI 或 echo $OPENAI_API_KEY),并报告问题。如果 API key 可用就直接生成。
 

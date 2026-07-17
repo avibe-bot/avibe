@@ -115,7 +115,7 @@ class _StubController(Controller):
         return f"{getattr(context, 'platform', None) or 'test'}::{self._get_settings_key(context)}"
 
     def get_cwd(self, context: MessageContext) -> str:
-        return "/Users/cyh/avibe"
+        return "/Users/alice/avibe"
 
 
 class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -131,7 +131,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="claude",
                     agent_prefix="cc",
                     native_session_id="sess_abc",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=10.0,
@@ -286,7 +286,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
         codex_agent.prepare_resume_binding.assert_awaited_once_with(
             base_session_id="slack_169999.123",
             session_key="slack::C111",
-            working_path="/Users/cyh/avibe",
+            working_path="/Users/alice/avibe",
         )
 
     async def test_handle_resume_session_submission_prepares_claude_binding(self):
@@ -309,7 +309,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
         claude_agent.prepare_resume_binding.assert_awaited_once_with(
             base_session_id="slack_169999.123",
             session_key="slack::C111",
-            working_path="/Users/cyh/avibe",
+            working_path="/Users/alice/avibe",
         )
 
     async def test_handle_resume_session_submission_skips_resume_prepare_when_backend_has_no_hook(self):
@@ -474,7 +474,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="codex",
                     agent_prefix="cx",
                     native_session_id="thread_123",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=100.0,
@@ -501,7 +501,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
         trigger_id, sessions, channel_id, thread_id, host_ts = im_client.resume_calls[0]
         self.assertEqual((trigger_id, channel_id, thread_id, host_ts), ("TRIG", "CCHAN", "TS1", "TS1"))
         self.assertEqual([item.native_session_id for item in sessions], ["thread_123"])
-        self.assertEqual(ctrl.native_session_service.calls, [("/Users/cyh/avibe", 100)])
+        self.assertEqual(ctrl.native_session_service.calls, [("/Users/alice/avibe", 100)])
 
     async def test_handle_resume_in_existing_thread_is_rejected(self):
         # /resume is scope-level only: invoking it inside an existing thread must be
@@ -538,7 +538,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="opencode",
                     agent_prefix="oc",
                     native_session_id="oc_disabled",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=200.0,
@@ -549,7 +549,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="codex",
                     agent_prefix="cx",
                     native_session_id="cx_enabled",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=100.0,
@@ -608,7 +608,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="codex",
                     agent_prefix="cx",
                     native_session_id="session_telegram_123",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=100.0,
@@ -637,7 +637,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trigger_id, ctx)
         self.assertEqual((channel_id, thread_id, host_ts), ("TGCHAN", "MSG1", "MSG1"))
         self.assertEqual([item.native_session_id for item in sessions], ["session_telegram_123"])
-        self.assertEqual(ctrl.native_session_service.calls, [("/Users/cyh/avibe", 25)])
+        self.assertEqual(ctrl.native_session_service.calls, [("/Users/alice/avibe", 25)])
 
     async def test_command_handlers_handle_resume_wechat_lists_recent_sessions(self):
         settings = _StubSettingsManager()
@@ -651,7 +651,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="claude",
                     agent_prefix="cc",
                     native_session_id="claude-1",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=datetime(2026, 3, 27, 14, 32),
                     sort_ts=10.0,
@@ -662,7 +662,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="codex",
                     agent_prefix="cx",
                     native_session_id="codex-1",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=datetime(2026, 3, 27, 14, 10),
                     sort_ts=9.0,
@@ -700,7 +700,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="opencode",
                     agent_prefix="oc",
                     native_session_id="oc-1",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=10.0,
@@ -711,7 +711,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="claude",
                     agent_prefix="cc",
                     native_session_id="cc-2",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=9.0,
@@ -781,7 +781,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="opencode",
                     agent_prefix="oc",
                     native_session_id="oc_disabled",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=200.0,
@@ -792,7 +792,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
                     agent="codex",
                     agent_prefix="cx",
                     native_session_id="cx_enabled",
-                    working_path="/Users/cyh/avibe",
+                    working_path="/Users/alice/avibe",
                     created_at=None,
                     updated_at=None,
                     sort_ts=100.0,

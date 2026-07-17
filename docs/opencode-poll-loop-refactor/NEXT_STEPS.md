@@ -27,7 +27,7 @@
 
 **How to test:**
 ```bash
-cd /Users/cyh/avibe
+# Run from the Avibe repository root.
 git checkout refactor/unify-opencode-poll-loop
 
 # Install in editable mode

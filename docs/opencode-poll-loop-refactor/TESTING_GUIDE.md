@@ -50,7 +50,7 @@ This guide covers testing the refactored OpenCode agent poll loop that unifies q
 ### 1. Install Editable Version
 
 ```bash
-cd /Users/cyh/avibe
+# Run from the Avibe repository root.
 git checkout refactor/unify-opencode-poll-loop
 
 # Install in editable mode so changes take effect immediately

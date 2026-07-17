@@ -2794,13 +2794,13 @@ class BindReservedWorkbenchSessionTests(unittest.TestCase):
         agent = _FakeBaseAgent(SimpleNamespace(bind_agent_session_by_id=bind_by_id))
         ctx = self._ctx("ses_workbench")
         ctx.platform_specific["agent_run_target"] = {
-            "workdir": "/Users/cyh/vibe-remote-project",
+            "workdir": "/Users/alice/vibe-remote-project",
         }
 
         ret = agent._bind_reserved_workbench_session(ctx, "native-123", working_path="/tmp/test")
 
         self.assertEqual(ret, "ses_workbench")
-        self.assertEqual(calls["workdir"], "/Users/cyh/vibe-remote-project")
+        self.assertEqual(calls["workdir"], "/Users/alice/vibe-remote-project")
 
     def test_routing_subagent_does_not_bind_native_to_reserved_row(self):
         agent = _FakeBaseAgent(SimpleNamespace(bind_agent_session_by_id=lambda *a, **k: "ses_wb"))

@@ -37,8 +37,8 @@ Vibe Remote 是把 AI agent 接入 Slack/Discord/Telegram/飞书/微信的中间
 
 ## 输出
 为每张图都用一次内置 image_gen 工具调用。生成完成后,把三张图分别复制/移动到这三个路径(因为这是项目相关资产):
-- /Users/cyh/vibe-remote-project/mascot/cloud-tuanzi.png
-- /Users/cyh/vibe-remote-project/mascot/mist-tuanzi.png
-- /Users/cyh/vibe-remote-project/mascot/smoke-tuanzi.png
+- assets/mascot/cloud-tuanzi.png
+- assets/mascot/mist-tuanzi.png
+- assets/mascot/smoke-tuanzi.png
 
-最后告诉我三张图的最终路径。
+最后告诉我三张图的仓库相对路径。

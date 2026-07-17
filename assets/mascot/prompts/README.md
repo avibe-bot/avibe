@@ -10,9 +10,9 @@
 调用方式（每次都是 stdin 喂 prompt，否则 codex exec 会卡）：
 
 ```bash
-cat /tmp/vibey_origin_prompts/p4_full_9image_set.md \
+cat assets/mascot/prompts/P4_full_9image_set.md \
   | codex exec --json \
       --dangerously-bypass-approvals-and-sandbox \
       --skip-git-repo-check \
-      --cd /Users/cyh/vibe-remote-project -
+      --cd . -
 ```

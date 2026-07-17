@@ -1,12 +1,12 @@
 # P4 — full 9-image set: 6 emojis + 2 logos + 1 dark
 # Codex session: 14:14:18 (rollout-2026-05-03T14-14-18-019dec79-3024-7c52-9fbb-c8eb22e8e00b.jsonl)
 
-基于参考图 /Users/cyh/vibe-remote-project/mascot/cloud-tuanzi.png(白色蓬松圆滚滚的棉花糖云团 + 一对黑色圆豆豆眼 + 内部柔和的淡彩色光晕,温和友好,治愈系扁平卡通风格),需要出一整套衍生素材。
+基于参考图 `assets/mascot/cloud-tuanzi.png`(白色蓬松圆滚滚的棉花糖云团 + 一对黑色圆豆豆眼 + 内部柔和的淡彩色光晕,温和友好,治愈系扁平卡通风格),需要出一整套衍生素材。
 
 ## 操作流程
 1. 先用 view_image 加载参考图
 2. 然后用内置 image_gen(不需要 OPENAI_API_KEY,**不要用 CLI fallback**)逐张生成下面 9 张图
-3. 每张完成后,把内置工具默认输出位置的最新文件 cp 到 /Users/cyh/vibe-remote-project/mascot/ 下,使用我指定的文件名
+3. 每张完成后,把内置工具默认输出位置的最新文件复制到仓库的 `assets/mascot/` 目录下,使用我指定的文件名
 
 ## 必须保持的'云团子'识别点(所有衍生图都要保留)
 - 白色蓬松圆滚滚的棉花糖云形状,边缘卷曲
@@ -68,4 +68,4 @@
 - 整体氛围: ' 夜晚的温柔'
 
 ## 总输出
-9 张图都保存到 /Users/cyh/vibe-remote-project/mascot/ 下,文件名按上面给的。每张完成都立即 cp 到目标位置。最后给我一个完整路径列表。
+9 张图都保存到仓库的 `assets/mascot/` 目录下,文件名按上面给的。每张完成都立即复制到目标位置。最后给我一个仓库相对路径列表。

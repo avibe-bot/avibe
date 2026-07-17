@@ -178,8 +178,8 @@ Directory encoding rule:
 
 - absolute path with `/` replaced by `-`
 - example:
-  - `/Users/cyh/avibe`
-  - `-Users-cyh-vibe-remote`
+  - `/Users/alice/avibe`
+  - `-Users-alice-avibe`
 
 #### Metadata source
 
