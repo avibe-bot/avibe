@@ -2,6 +2,7 @@ import React, { createContext, useContext, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
+import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import type { DockDoc } from './DockContext';
 
@@ -576,6 +577,11 @@ export type ApiContextType = {
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
   listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null }>;
+  // Chat Activity panel (GET /api/sessions/<id>/activity): summary of turn groups
+  // for chips, and one group's rows for lazy expand. Only used when the
+  // ``ui.show_agent_activity`` toggle is on (see lib/agentActivity).
+  getSessionActivity: (sessionId: string) => Promise<{ groups: TurnActivityGroupWire[] }>;
+  getSessionActivityGroup: (sessionId: string, groupId: string) => Promise<TurnActivityGroupWire>;
   // Full-text search over message content across all sessions. Backed by the
   // non-cached GET /api/search/messages (the query string varies per keystroke,
   // so caching would only bloat the read cache). Results group matches by
@@ -2441,6 +2447,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = qs ? `${base}?${qs}` : base;
       return params?.cache === false ? getJson(path) : getCachedJson(path);
     },
+    getSessionActivity: (sessionId) =>
+      // Uncached: this is also the gap-recovery resync path, so it must reflect
+      // durable state (not a stale read served after a missed message.new).
+      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/activity`),
+    getSessionActivityGroup: (sessionId, groupId) =>
+      getJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/activity?group_id=${encodeURIComponent(groupId)}`,
+      ),
     searchMessages: (q, opts) => {
       const search = new URLSearchParams();
       search.set('q', q);

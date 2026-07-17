@@ -23,6 +23,7 @@ the live IM reply path.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -103,6 +104,82 @@ def _publish_session_message(row: Optional[dict]) -> None:
         bus.publish("message.new", row)
     except Exception:
         logger.debug("message_mirror: message.new publish failed", exc_info=True)
+
+
+# Streaming intermediate activity (interim ``assistant`` messages + ``tool_call``
+# trace) to an open Chat page is gated on ``config.ui.show_agent_activity`` (default
+# off). Reading the config parses a file, and this path runs once per agent emit —
+# many times per turn — so the flag is cached briefly, keyed by config path so a
+# fresh AVIBE_HOME (e.g. per-test) never reads a stale value. On any error the flag
+# is OFF: a config glitch degrades to today's strict no-op (no extra stream).
+_ACTIVITY_FLAG_TTL_SECONDS = 3.0
+_activity_flag_cache: dict[str, tuple[float, bool]] = {}
+
+
+def reset_activity_flag_cache() -> None:
+    """Drop the cached ``show_agent_activity`` flag (test hook / config-change)."""
+    _activity_flag_cache.clear()
+
+
+def _activity_streaming_enabled() -> bool:
+    try:
+        from config import paths
+
+        key = str(paths.get_config_path())
+    except Exception:
+        key = ""
+    now = time.monotonic()
+    cached = _activity_flag_cache.get(key)
+    if cached is not None and (now - cached[0]) < _ACTIVITY_FLAG_TTL_SECONDS:
+        return cached[1]
+    enabled = False
+    try:
+        from core.services import settings as settings_svc
+
+        enabled = bool(settings_svc.load_config_or_default().ui.show_agent_activity)
+    except Exception:
+        logger.debug("message_mirror: activity flag read failed", exc_info=True)
+        enabled = False
+    _activity_flag_cache[key] = (now, enabled)
+    return enabled
+
+
+def _publish_activity_event(event_row: Optional[dict]) -> None:
+    """Publish a session-scoped ``message.new`` for a ``tool_call`` trace event.
+
+    Tool-call rows live in ``agent_events`` (never in ``messages`` / the transcript),
+    so synthesize a ``messages``-shaped payload the Chat activity group can render
+    live. Called only when ``show_agent_activity`` is on; the payload carries its own
+    display data (no read-after-announce), so the browser never re-queries the row.
+    """
+    if not event_row or not event_row.get("session_id"):
+        return
+    payload = {
+        "id": event_row.get("id"),
+        "scope_id": event_row.get("scope_id"),
+        "session_id": event_row.get("session_id"),
+        "platform": event_row.get("platform") or "avibe",
+        "author": "agent",
+        "type": "tool_call",
+        "source": "agent",
+        "author_id": None,
+        "author_name": event_row.get("agent_name"),
+        "native_message_id": None,
+        "parent_native_message_id": None,
+        "text": event_row.get("text") or "",
+        "content": event_row.get("content") or {},
+        "metadata": event_row.get("metadata") or {},
+        "created_at": event_row.get("created_at"),
+        "updated_at": event_row.get("updated_at") or event_row.get("created_at"),
+        "delivered_at": None,
+        "read_at": None,
+    }
+    try:
+        from core.inbox_events import bus
+
+        bus.publish("message.new", payload)
+    except Exception:
+        logger.debug("message_mirror: activity tool_call publish failed", exc_info=True)
 
 
 def _session_row(conn, session_id: str) -> Optional[dict]:
@@ -208,6 +285,9 @@ def persist_agent_message(
         engine = get_cached_sqlite_engine()
         inbox_row = None
         appended_row = None
+        tool_event_row = None
+        message_type = None
+        is_tool_call = _is_tool_call_type(canonical_type)
         with engine.begin() as conn:
             if context.platform == "avibe":
                 # Inbox groups by the avibe session's project scope; never invent
@@ -234,9 +314,11 @@ def persist_agent_message(
             # session's agent (from the dispatch context). source_id (author_id)
             # is left to the agent-id wiring later; the session already carries it.
             agent_name, backend = _agent_provenance_from_context(context, session_row)
-            if _is_tool_call_type(canonical_type):
+            if is_tool_call:
                 turn_id, run_id = _trace_ids_from_context(context)
-                agent_events_service.append(
+                # Captured for the (gated) live activity publish after commit; the
+                # row itself is trace data in ``agent_events`` (never in ``messages``).
+                tool_event_row = agent_events_service.append(
                     conn,
                     scope_id=scope_id,
                     session_id=row_session_id,
@@ -251,59 +333,71 @@ def persist_agent_message(
                     turn_id=turn_id,
                     run_id=run_id,
                 )
-                return
-            message_type = _AGENT_TYPE_BY_CANONICAL.get(canonical_type or "", "assistant")
-            # Workbench Chat only: rewrite ``file://`` links in the persisted copy
-            # to same-origin media-proxy URLs so the browser renders agent images
-            # inline + files as download cards. IM rows keep the raw ``file://``
-            # (the dispatcher uploads those to the platform separately). Scoped to
-            # the user-visible result/notify rows so we don't mint tokens for the
-            # hidden intermediate assistant stream.
-            if context.platform == "avibe" and message_type in ("result", "notify", "error") and row_session_id:
-                try:
-                    from core.workbench_media import rewrite_agent_media
+            else:
+                message_type = _AGENT_TYPE_BY_CANONICAL.get(canonical_type or "", "assistant")
+                # Workbench Chat only: rewrite ``file://`` links in the persisted copy
+                # to same-origin media-proxy URLs so the browser renders agent images
+                # inline + files as download cards. IM rows keep the raw ``file://``
+                # (the dispatcher uploads those to the platform separately). Scoped to
+                # the user-visible result/notify rows so we don't mint tokens for the
+                # hidden intermediate assistant stream.
+                if context.platform == "avibe" and message_type in ("result", "notify", "error") and row_session_id:
+                    try:
+                        from core.workbench_media import rewrite_agent_media
 
-                    text = rewrite_agent_media(
-                        conn, scope_id=scope_id, session_id=row_session_id, text=text
-                    )
-                except Exception:
-                    logger.exception("persist_agent_message: media rewrite failed")
-            content: Optional[dict] = {"kind": canonical_type} if canonical_type else None
-            # Quick-reply buttons (avibe result): the trailing ``---\n[label]…``
-            # block was already parsed + stripped upstream; carry the labels in
-            # ``content`` so the workbench renders the button group (IM channels
-            # render their own native buttons from the same parse).
-            if quick_replies:
-                content = {**(content or {}), "quick_replies": list(quick_replies)}
-            appended_row = _append_quietly(
-                conn,
-                scope_id=scope_id,
-                session_id=row_session_id,
-                platform=context.platform,
-                author="agent",
-                source="agent",
-                author_name=agent_name,
-                message_type=message_type,
-                text=text,
-                metadata=metadata,
-                native_message_id=native_message_id,
-                parent_native_message_id=context.thread_id,
-                content=content,
-            )
-            # Recompute the session's inbox row so the realtime event can patch
-            # the browser without a refetch. avibe-only: the workbench inbox is
-            # scoped to avibe sessions (IM rows persist but aren't shown there).
-            if context.platform == "avibe" and session_id:
-                inbox_row = messages_service.get_inbox_session(conn, session_id)
+                        text = rewrite_agent_media(
+                            conn, scope_id=scope_id, session_id=row_session_id, text=text
+                        )
+                    except Exception:
+                        logger.exception("persist_agent_message: media rewrite failed")
+                content: Optional[dict] = {"kind": canonical_type} if canonical_type else None
+                # Quick-reply buttons (avibe result): the trailing ``---\n[label]…``
+                # block was already parsed + stripped upstream; carry the labels in
+                # ``content`` so the workbench renders the button group (IM channels
+                # render their own native buttons from the same parse).
+                if quick_replies:
+                    content = {**(content or {}), "quick_replies": list(quick_replies)}
+                appended_row = _append_quietly(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=row_session_id,
+                    platform=context.platform,
+                    author="agent",
+                    source="agent",
+                    author_name=agent_name,
+                    message_type=message_type,
+                    text=text,
+                    metadata=metadata,
+                    native_message_id=native_message_id,
+                    parent_native_message_id=context.thread_id,
+                    content=content,
+                )
+                # Recompute the session's inbox row so the realtime event can patch
+                # the browser without a refetch. avibe-only: the workbench inbox is
+                # scoped to avibe sessions (IM rows persist but aren't shown there).
+                if context.platform == "avibe" and session_id:
+                    inbox_row = messages_service.get_inbox_session(conn, session_id)
+        # tool_call rows never enter ``messages``/TRANSCRIPT_TYPES; when the Chat
+        # activity panel is enabled they fan out here as a synthesized
+        # ``message.new`` so an open Chat page shows the step live. Default off →
+        # no publish (strict no-op). Return None to preserve the tool_call contract.
+        if is_tool_call:
+            if context.platform == "avibe" and _activity_streaming_enabled():
+                _publish_activity_event(tool_event_row)
+            return None
         # Fan the row out to an open Chat page (session-scoped stream), then bump
         # the inbox card. Both ride the controller→browser bridge. Only publish
         # transcript-visible types so the live stream carries EXACTLY what the
-        # history fetch returns (assistant / tool_call process-log rows are
-        # persisted for debugging but neither streamed nor fetched) (user request).
+        # history fetch returns — EXCEPT interim ``assistant`` rows, which stream
+        # only when the Chat activity panel is enabled (they still stay out of the
+        # transcript + inbox; the activity group renders them separately).
         # avibe-only: IM rows now carry a session_id too, but the workbench Chat is
         # avibe-only, so keep the live fan-out scoped to avibe (an IM session has no
         # open Chat consumer; publishing it would be dead traffic).
-        if context.platform == "avibe" and message_type in messages_service.TRANSCRIPT_TYPES:
+        if context.platform == "avibe" and (
+            message_type in messages_service.TRANSCRIPT_TYPES
+            or (message_type == "assistant" and _activity_streaming_enabled())
+        ):
             _publish_session_message(appended_row)
         if inbox_row is not None:
             from core.inbox_events import bus

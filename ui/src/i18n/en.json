@@ -1728,6 +1728,8 @@
     "agentProgressStyleOff": "Off",
     "chatMessageFontSize": "Chat Message Font Size",
     "chatMessageFontSizeHint": "Font size for user and agent message bubbles in the Web UI chat",
+    "showAgentActivity": "Show Agent Activity",
+    "showAgentActivityHint": "Show the agent's intermediate steps — interim messages and tool calls — live in Web chat, collapsing to a one-line summary when the reply arrives. Web chat only; does not affect IM platforms. Default off.",
     "slackLinkPreviews": "Suppress Slack Link Previews",
     "slackLinkPreviewsHint": "Disable Slack URL and media preview cards for messages sent by Avibe",
     "allowedChannels": "Allowed Groups",
@@ -2354,6 +2356,24 @@
         "reconnecting": "Reconnecting",
         "disconnected": "Disconnected"
       }
+    },
+    "agentActivity": {
+      "running": "Running",
+      "step": "{{count}} step",
+      "steps": "{{count}} steps",
+      "label": "Activity",
+      "failed": "Failed · {{count}} steps",
+      "interrupted": "Interrupted · stopped at step {{count}}",
+      "expand": "Show activity",
+      "collapse": "Hide activity",
+      "showCall": "Show details",
+      "hideCall": "Hide details",
+      "jumpToLatest": "Jump to latest",
+      "loadFailed": "Couldn't load activity detail.",
+      "retry": "Retry",
+      "durationMin": "{{minutes}}m {{seconds}}s",
+      "durationSec": "{{seconds}}s",
+      "empty": "No activity recorded for this turn."
     },
     "queue": {
       "title": "Queued · {{count}}",

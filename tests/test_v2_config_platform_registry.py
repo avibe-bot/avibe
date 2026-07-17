@@ -268,6 +268,31 @@ def test_chat_message_font_size_is_clamped() -> None:
     assert config.ui.chat_message_font_size == 14
 
 
+def test_show_agent_activity_defaults_off_and_round_trips() -> None:
+    # Default off: absent from the ui payload → False, and serializes into the
+    # payload so the Web UI + ChatPage bootstrap can read it (like the font size).
+    payload = api.config_to_payload(_base_config())
+    assert payload["ui"]["show_agent_activity"] is False
+
+    payload["ui"]["show_agent_activity"] = True
+    config = V2Config.from_payload(payload)
+    assert config.ui.show_agent_activity is True
+    assert api.config_to_payload(config)["ui"]["show_agent_activity"] is True
+
+    # Non-bool values coerce to a real bool (config file hand-edit robustness).
+    payload["ui"]["show_agent_activity"] = 1
+    assert V2Config.from_payload(payload).ui.show_agent_activity is True
+
+    # String forms are parsed explicitly — ``bool("false")`` would be True, which
+    # must NOT enable streaming. Known truthy/falsey strings resolve correctly.
+    for truthy in ("true", "True", "1", "yes", "on"):
+        payload["ui"]["show_agent_activity"] = truthy
+        assert V2Config.from_payload(payload).ui.show_agent_activity is True, truthy
+    for falsey in ("false", "False", "0", "no", "off", ""):
+        payload["ui"]["show_agent_activity"] = falsey
+        assert V2Config.from_payload(payload).ui.show_agent_activity is False, falsey
+
+
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:
     config = _base_config()
     config.remote_access.vibe_cloud.enabled = True

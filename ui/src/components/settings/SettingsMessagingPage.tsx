@@ -486,6 +486,27 @@ export const SettingsMessagingPage: React.FC = () => {
             </div>
           }
         />
+
+        <SettingsRow
+          title={t('dashboard.showAgentActivity')}
+          description={t('dashboard.showAgentActivityHint')}
+          control={
+            <ToggleSwitch
+              enabled={Boolean(config.ui?.show_agent_activity)}
+              onClick={() => {
+                const next = !config.ui?.show_agent_activity;
+                // Same path as the font size: full ui in local state, minimal
+                // ``ui`` patch on the wire (save_config deep-merges, so other ui
+                // fields are preserved).
+                const nextConfig = {
+                  ...config,
+                  ui: { ...(config.ui || {}), show_agent_activity: next },
+                };
+                void persist(nextConfig, { ui: { show_agent_activity: next } });
+              }}
+            />
+          }
+        />
       </SettingsPanel>
 
       <SettingsPanel

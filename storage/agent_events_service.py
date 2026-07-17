@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
 from storage.models import agent_events
@@ -104,3 +105,33 @@ def append(
     }
     conn.execute(agent_events.insert().values(**payload))
     return _row_to_payload(payload)
+
+
+def list_session_events(
+    conn: Connection,
+    *,
+    session_id: str,
+    event_types: Optional[tuple[str, ...]] = None,
+    limit: Optional[int] = None,
+    newest_first: bool = False,
+) -> list[dict[str, Any]]:
+    """Return this session's ``agent_events`` as payload dicts, oldest first.
+
+    Backed by the ``ix_agent_events_session_created_id`` index. ``event_types``
+    filters by ``event_type`` (e.g. ``("tool_call",)``). ``newest_first`` fetches
+    the most-recent ``limit`` rows (then returns them oldest-first), so a bounded
+    scan still yields the recent tail — the result order is always chronological.
+    """
+    stmt = select(agent_events).where(agent_events.c.session_id == session_id)
+    if event_types:
+        stmt = stmt.where(agent_events.c.event_type.in_(tuple(event_types)))
+    if newest_first:
+        stmt = stmt.order_by(agent_events.c.created_at.desc(), agent_events.c.id.desc())
+    else:
+        stmt = stmt.order_by(agent_events.c.created_at, agent_events.c.id)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = [_row_to_payload(dict(row)) for row in conn.execute(stmt).mappings().all()]
+    if newest_first:
+        rows.reverse()
+    return rows

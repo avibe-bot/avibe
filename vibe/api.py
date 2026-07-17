@@ -877,6 +877,15 @@ def save_config(payload: dict) -> V2Config:
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store)
         config.save()
+        # The activity-streaming gate (ui.show_agent_activity) is cached in-process
+        # by the message mirror; a save that flips it must take effect immediately,
+        # not after the cache TTL. Reset it here (same process) — best-effort.
+        try:
+            from core.message_mirror import reset_activity_flag_cache
+
+            reset_activity_flag_cache()
+        except Exception:
+            pass
         _ensure_builtin_default_agents(config)
         return config
 

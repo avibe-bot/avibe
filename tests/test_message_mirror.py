@@ -473,6 +473,112 @@ def test_persist_agent_toolcall_avibe_writes_event_without_streaming(isolated_st
     assert event_row["content_text"] == "Tool input failed to parse"
 
 
+def test_persist_agent_toolcall_publishes_when_activity_enabled(isolated_state, monkeypatch):
+    """With ``show_agent_activity`` on, a ``tool_call`` fans out a synthesized
+    ``message.new`` (type='tool_call') so an open Chat page's activity panel shows
+    the step live — while still landing ONLY in ``agent_events`` (not ``messages``)
+    and never bumping the inbox."""
+    import core.message_mirror as mm
+    from core import inbox_events
+
+    monkeypatch.setattr(mm, "_activity_streaming_enabled", lambda: True)
+
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_ta", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_ta", scope_id=scope_id, agent_name="Atlas", agent_backend="claude",
+                agent_variant="default", session_anchor="anchor_ses_ta", native_session_id="",
+                status="active", metadata_json="{}", created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_ta", platform="avibe",
+        platform_specific={"agent_session_id": "ses_ta", "turn_token": "turn_9"},
+    )
+
+    async def scenario():
+        sub_id, queue = inbox_events.bus.subscribe()
+        events: dict[str, dict] = {}
+        try:
+            persist_agent_message(ctx, "tool_call", "🔧 `Bash` `{\"command\":\"ls\"}`")
+            evt = await asyncio.wait_for(queue.get(), timeout=1.0)
+            events[evt[0]] = evt[1]
+            # Only ONE event — no inbox bump for a trace row.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(queue.get(), timeout=0.1)
+        finally:
+            inbox_events.bus.unsubscribe(sub_id)
+        return events
+
+    events = asyncio.run(scenario())
+    assert "message.new" in events and "inbox.session.updated" not in events
+    msg = events["message.new"]
+    assert msg["type"] == "tool_call"
+    assert msg["session_id"] == "ses_ta"
+    assert msg["author"] == "agent"
+    assert msg["text"] == "🔧 `Bash` `{\"command\":\"ls\"}`"
+
+    # Still a trace event only — no messages row.
+    with engine.connect() as conn:
+        assert conn.execute(select(messages).where(messages.c.session_id == "ses_ta")).first() is None
+        assert conn.execute(select(agent_events).where(agent_events.c.session_id == "ses_ta")).first() is not None
+
+
+def test_persist_agent_assistant_publishes_when_activity_enabled(isolated_state, monkeypatch):
+    """With ``show_agent_activity`` on, an interim ``assistant`` row streams as
+    ``message.new`` (type='assistant') for the activity panel, but still does NOT
+    bump the inbox (process log, not a reply)."""
+    import core.message_mirror as mm
+    from core import inbox_events
+    from storage import messages_service
+
+    monkeypatch.setattr(mm, "_activity_streaming_enabled", lambda: True)
+
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_ia", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_ia", scope_id=scope_id, agent_backend="claude", agent_variant="default",
+                session_anchor="anchor_ses_ia", native_session_id="", status="active",
+                metadata_json="{}", created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_ia", platform="avibe",
+        platform_specific={"agent_session_id": "ses_ia"},
+    )
+
+    async def scenario():
+        sub_id, queue = inbox_events.bus.subscribe()
+        events: dict[str, dict] = {}
+        try:
+            persist_agent_message(ctx, "assistant", "thinking out loud")
+            evt = await asyncio.wait_for(queue.get(), timeout=1.0)
+            events[evt[0]] = evt[1]
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(queue.get(), timeout=0.1)
+        finally:
+            inbox_events.bus.unsubscribe(sub_id)
+        return events
+
+    events = asyncio.run(scenario())
+    assert "message.new" in events and "inbox.session.updated" not in events
+    assert events["message.new"]["type"] == "assistant"
+    assert events["message.new"]["text"] == "thinking out loud"
+
+    # Persisted as an assistant row (unchanged from the off case).
+    with engine.connect() as conn:
+        every = messages_service.list_session_messages(conn, session_id="ses_ia", types=("assistant",))
+    assert [m["type"] for m in every["messages"]] == ["assistant"]
+
+
 def test_persist_system_message_is_not_persisted(isolated_state):
     """A canonical ``system`` message (init banner / status line — generated by
     us, not the agent) is NOT persisted at all and publishes nothing (user

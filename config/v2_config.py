@@ -310,6 +310,11 @@ class UiConfig:
     setup_port: int = 5123
     open_browser: bool = True
     chat_message_font_size: int = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
+    # When true, the Web Chat renders each agent turn's intermediate activity
+    # (interim ``assistant`` messages + ``tool_call`` summaries) as a collapsible
+    # group, and the message mirror streams those rows live. Default off: a strict
+    # no-op — the live stream and transcript stay exactly as they are today.
+    show_agent_activity: bool = False
     trusted_public_origins: List[str] = field(default_factory=list)
     # Display name appended to the browser tab title ("Avibe - <name>"). When
     # blank the UI falls back to the read-only ``default_instance_name`` field
@@ -574,6 +579,13 @@ class V2Config:
             )
         except (TypeError, ValueError):
             ui.chat_message_font_size = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
+        # Accept real booleans; parse known string forms explicitly (a config file
+        # or API client may supply "false"/"0", and ``bool("false")`` is True).
+        raw_show_activity = ui.show_agent_activity
+        if isinstance(raw_show_activity, str):
+            ui.show_agent_activity = raw_show_activity.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            ui.show_agent_activity = bool(raw_show_activity)
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):
