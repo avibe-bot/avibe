@@ -246,8 +246,8 @@ Some references are likely mixed-purpose and need per-occurrence judgment:
 
 Scope: `vibe-remote` task worktree, `avibe-bot-backend`, and `avibe-docs`.
 Generated/build folders were excluded (`.git`, `node_modules`, `.next`, `dist`,
-`build`, `.venv`, `__pycache__`). The project-level `design.pen` and unrelated
-parallel worktrees were not counted in this text sweep.
+`build`, `.venv`, `__pycache__`). The shared `avibe-docs/design.pen` and
+unrelated parallel worktrees were not counted in this text sweep.
 
 Token totals:
 
