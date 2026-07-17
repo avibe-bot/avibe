@@ -77,6 +77,64 @@ def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
     assert calls == [False]
 
 
+def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path):
+    """GET /api/sessions/<id>/activity: summary (no params) lists turn groups;
+    ``?group_id=`` returns that group's rows; an unknown session is 404."""
+    import json as _json
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_events, agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    sid = "ses_ep"
+    with engine.begin() as conn:
+        scope = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_ep", now="2026-06-01T10:00:00Z")
+        conn.execute(agent_sessions.insert().values(
+            id=sid, scope_id=scope, agent_backend="claude", agent_variant="default",
+            session_anchor="anchor_ep", native_session_id="", status="active",
+            metadata_json="{}", created_at="2026-06-01T10:00:00Z", updated_at="2026-06-01T10:00:00Z",
+            last_active_at="2026-06-01T10:00:00Z",
+        ))
+
+        def _m(mid, mtype, author, ts, text):
+            conn.execute(messages.insert().values(
+                id=mid, scope_id=scope, session_id=sid, platform="avibe", author=author,
+                type=mtype, source=("user" if author == "user" else "agent"), content_text=text,
+                content_json="{}", metadata_json="{}", created_at=ts, updated_at=ts,
+            ))
+
+        _m("m_u", "user", "user", "2026-06-01T10:00:00.000000+00:00", "q")
+        _m("m_a", "assistant", "agent", "2026-06-01T10:00:01.000000+00:00", "thinking")
+        conn.execute(agent_events.insert().values(
+            id="e_t", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call",
+            visibility="trace", content_text="🔧 `Bash`", content_json=_json.dumps({"kind": "tool_call", "text": "🔧 `Bash`"}),
+            metadata_json="{}", source="agent", created_at="2026-06-01T10:00:02Z", updated_at="2026-06-01T10:00:02Z",
+        ))
+        _m("m_r", "result", "agent", "2026-06-01T10:00:03.000000+00:00", "answer")
+
+    client = app.test_client()
+
+    summary = client.get(f"/api/sessions/{sid}/activity")
+    assert summary.status_code == 200
+    groups = summary.get_json()["groups"]
+    assert len(groups) == 1
+    assert groups[0]["status"] == "done"
+    assert groups[0]["anchor_message_id"] == "m_r"
+    assert groups[0]["steps"] == 2
+    group_id = groups[0]["id"]
+
+    detail = client.get(f"/api/sessions/{sid}/activity?group_id={group_id}")
+    assert detail.status_code == 200
+    rows = detail.get_json()["rows"]
+    assert [r["kind"] for r in rows] == ["assistant", "tool_call"]
+
+    assert client.get(f"/api/sessions/{sid}/activity?group_id=nope").status_code == 404
+    assert client.get("/api/sessions/ses_missing/activity").status_code == 404
+
+
 def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
     from vibe import cli
 

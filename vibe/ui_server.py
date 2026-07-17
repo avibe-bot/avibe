@@ -6254,6 +6254,47 @@ def sessions_messages_list(session_id: str):
     return jsonify(result)
 
 
+@app.route("/api/sessions/<session_id>/activity", methods=["GET"])
+def sessions_activity(session_id: str):
+    """Turn-grouped agent activity for the Chat Activity panel.
+
+    Two modes on one route (mirrors the ``chat_message_font_size`` /
+    ``show_agent_activity`` display feature; the panel is a display-only view of
+    already-persisted rows — no gating here, the gate is the UI toggle):
+
+    * no query params → SUMMARY: ``{"groups": [{id, anchor_message_id, status,
+      steps, started_at, ended_at, duration_ms}, ...]}`` — one entry per turn that
+      produced ≥1 activity row, WITHOUT the row text. Loaded once when the Chat
+      opens so past turns can show their collapsed chip.
+    * ``?group_id=<id>`` → DETAIL: that one group plus ``"rows": [{id, kind,
+      text, created_at}, ...]`` (``kind`` is ``assistant`` | ``tool_call``) — the
+      lazy expand. 404 when the group id is unknown.
+
+    ``status`` ∈ ``done`` | ``failed`` | ``interrupted``. See
+    ``storage/agent_activity_service.py`` for the grouping contract and the
+    bounded-scan window.
+    """
+    from core.services import sessions as workbench_sessions_service
+    from storage import agent_activity_service
+
+    group_id = request.args.get("group_id") or None
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        try:
+            workbench_sessions_service.get_session(conn, session_id)
+        except LookupError as err:
+            return jsonify({"error": str(err)}), 404
+        if group_id:
+            group = agent_activity_service.get_turn_group(
+                conn, session_id=session_id, group_id=group_id
+            )
+            if group is None:
+                return jsonify({"error": "activity group not found"}), 404
+            return jsonify(group)
+        result = agent_activity_service.list_turn_groups(conn, session_id=session_id)
+    return jsonify(result)
+
+
 @app.route("/api/search/messages", methods=["GET"])
 def search_messages_list():
     """Global message-content search across Workbench sessions, grouped by session.
