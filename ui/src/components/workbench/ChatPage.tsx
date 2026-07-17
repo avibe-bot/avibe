@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
@@ -40,6 +40,14 @@ import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
+import { ActivityCard, ActivityChip } from './AgentActivityGroup';
+import {
+  activityRowFromMessage,
+  groupFromWire,
+  isActivityMessageType,
+  type ActivityGroup,
+  type ActivityRow,
+} from '../../lib/agentActivity';
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -302,6 +310,35 @@ export const ChatPage: React.FC = () => {
   // never flashes on first paint; resolves to the stored value (ON when absent),
   // or ON on a fetch error so a transient failure can't hide live work.
   const [bannerEnabled, setBannerEnabled] = useState<boolean | null>(null);
+  // Chat Agent Activity panel (config.ui.show_agent_activity). Default off = a
+  // strict no-op: the backend never streams assistant/tool_call rows and this UI
+  // never renders anything, so the transcript is byte-for-byte today's.
+  //  - ``activityGroups``: completed/interrupted turns (one per turn with ≥1
+  //    activity row), positioned by ``anchorMessageId`` (chip above that message;
+  //    ``null`` = trails the transcript). Populated on load (summary fetch) and as
+  //    live turns finish; ``rows`` filled on live-finish or lazy expand.
+  //  - ``liveRows``: the CURRENT running turn's rows (arrive via message.new while
+  //    ``working``); rendered in the running card, then snapshotted into a group
+  //    when the turn's terminal reply lands.
+  const [showAgentActivity, setShowAgentActivity] = useState(false);
+  const showAgentActivityRef = useRef(false);
+  showAgentActivityRef.current = showAgentActivity;
+  const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
+  const activityGroupsRef = useRef<ActivityGroup[]>([]);
+  activityGroupsRef.current = activityGroups;
+  const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
+  const liveRowsRef = useRef<ActivityRow[]>([]);
+  const [liveStartedAt, setLiveStartedAt] = useState<number | null>(null);
+  const [activityCardExpanded, setActivityCardExpanded] = useState(false);
+  const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
+  const [loadingActivity, setLoadingActivity] = useState<Record<string, boolean>>({});
+  // Pending "interrupted?" check scheduled on turn.end (see the SSE handler) — a
+  // terminal reply can land just after turn.end, so we defer before deciding.
+  const interruptedTimerRef = useRef<number | null>(null);
+  const setLiveRowsBoth = useCallback((next: ActivityRow[]) => {
+    liveRowsRef.current = next;
+    setLiveRows(next);
+  }, []);
   // Bumped on resume (tab visible again / network back) to force the transcript
   // subscription effect to reopen a possibly-dead SSE stream — see the
   // visibility effect below.
@@ -328,6 +365,55 @@ export const ChatPage: React.FC = () => {
     turnEpochRef.current += 1;
     workingSetAtRef.current = Date.now();
     setWorking(true);
+  }, []);
+
+  // ----- Agent Activity: live-turn bookkeeping (only exercised when the toggle
+  // streams assistant/tool_call rows; a no-op otherwise). -----
+  // A live activity row arrived → append to the running buffer; a fresh buffer
+  // stamps the elapsed-clock start and cancels any pending "interrupted?" check.
+  const ingestActivityRow = useCallback(
+    (msg: WorkbenchMessage) => {
+      if (interruptedTimerRef.current !== null) {
+        window.clearTimeout(interruptedTimerRef.current);
+        interruptedTimerRef.current = null;
+      }
+      const next = [...liveRowsRef.current, activityRowFromMessage(msg)];
+      setLiveRowsBoth(next);
+      if (next.length === 1) setLiveStartedAt(Date.now());
+    },
+    [setLiveRowsBoth],
+  );
+  // The turn's terminal reply landed → snapshot the running buffer into a group
+  // anchored above that reply (chip), and clear the live buffer.
+  const finalizeLiveGroup = useCallback(
+    (terminal: WorkbenchMessage) => {
+      const rows = liveRowsRef.current;
+      if (rows.length === 0) return;
+      const start = Date.parse(rows[0].created_at);
+      const end = Date.parse(terminal.created_at);
+      const durationMs = Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+      const group: ActivityGroup = {
+        id: rows[0].id,
+        anchorMessageId: terminal.id,
+        status: terminal.type === 'result' ? 'done' : 'failed',
+        steps: rows.length,
+        durationMs,
+        rows,
+      };
+      setActivityGroups((prev) => [...prev.filter((g) => g.anchorMessageId !== terminal.id), group]);
+      setLiveRowsBoth([]);
+      setLiveStartedAt(null);
+    },
+    [setLiveRowsBoth],
+  );
+  // A new turn opened while an interrupted group trails the transcript → re-anchor
+  // it above the new opening message (mirrors the history layout).
+  const reanchorTrailingActivity = useCallback((anchorMessageId: string) => {
+    setActivityGroups((prev) =>
+      prev.some((g) => g.anchorMessageId === null)
+        ? prev.map((g) => (g.anchorMessageId === null ? { ...g, anchorMessageId } : g))
+        : prev,
+    );
   }, []);
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
@@ -651,11 +737,30 @@ export const ChatPage: React.FC = () => {
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
+      const activityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
+      setShowAgentActivity(activityEnabled);
+      showAgentActivityRef.current = activityEnabled;
       // Merge (not replace) so a row that arrived over the stream during the
       // load isn't clobbered; the session-change reset keeps prior sessions out.
       setMessages((prev) => mergeById(bootstrap.messages, prev));
       setOlderCursor(bootstrap.next_before_id ?? null);
       setHistoricalWindow(false);
+      // Chat Activity chips for past turns: fetch the per-turn SUMMARY once (no row
+      // text — detail lazy-loads on expand). Best-effort; live turns fill in their
+      // own groups regardless.
+      if (activityEnabled) {
+        void api
+          .getSessionActivity(sessionId)
+          .then((res) => {
+            if (sessionId !== sessionIdRef.current) return;
+            setActivityGroups((res.groups ?? []).map(groupFromWire));
+          })
+          .catch(() => {
+            /* summary is best-effort; chips still appear as live turns complete */
+          });
+      } else {
+        setActivityGroups([]);
+      }
       setQueue(bootstrap.queued ?? []);
       setInitialDraft(bootstrap.draft?.text ?? '');
       setRuntimeState(bootstrap.turn_state);
@@ -710,6 +815,19 @@ export const ChatPage: React.FC = () => {
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
     setInitialDraft(null);
+    // Clear all Agent Activity state so the previous session's groups / live rows
+    // never leak into the new chat (refresh re-reads the toggle + summary).
+    setActivityGroups([]);
+    activityGroupsRef.current = [];
+    setLiveRowsBoth([]);
+    setLiveStartedAt(null);
+    setActivityCardExpanded(false);
+    setExpandedActivity({});
+    setLoadingActivity({});
+    if (interruptedTimerRef.current !== null) {
+      window.clearTimeout(interruptedTimerRef.current);
+      interruptedTimerRef.current = null;
+    }
     // Drop any pending grace-resync so it can't fire against the new session.
     if (graceResyncRef.current !== null) {
       window.clearTimeout(graceResyncRef.current);
@@ -732,6 +850,14 @@ export const ChatPage: React.FC = () => {
       // new chat (Codex P2).
       onMessageNew: (msg) => {
         if (msg.session_id !== sessionIdRef.current) return;
+        // Agent Activity rows (assistant / tool_call) only reach the browser when
+        // the toggle streams them (message_mirror). Route them to the running
+        // buffer — never the transcript. ``isTranscriptMessage`` already excludes
+        // them, so the feature-off path is unchanged.
+        if (showAgentActivityRef.current && isActivityMessageType(msg.type)) {
+          if (!historicalWindowRef.current) ingestActivityRow(msg);
+          return;
+        }
         if (!isTranscriptMessage(msg)) return;
         if (historicalWindowRef.current) return;
         // Reader scrolled up in an already-capped window: don't grow the DOM with a
@@ -744,6 +870,12 @@ export const ChatPage: React.FC = () => {
           return;
         }
         appendMessage(msg);
+        // Agent Activity: a terminal reply closes the running turn into a chip
+        // above it; a new user/harness turn re-anchors a trailing interrupted chip.
+        if (showAgentActivityRef.current) {
+          if (isTerminalAgentMessage(msg)) finalizeLiveGroup(msg);
+          else if (msg.type === 'user' || msg.type === 'harness') reanchorTrailingActivity(msg.id);
+        }
         // Don't clear ``working`` from a result row here: with the queue, a
         // result can belong to an EARLIER turn while a newer queued turn is
         // already running, so clearing on it would hide Stop on the live turn
@@ -766,6 +898,36 @@ export const ChatPage: React.FC = () => {
         if (data.session_id === sessionIdRef.current) {
           setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle' }));
           setWorking(false);
+          // Agent Activity: a turn.end with un-snapshotted live rows and no terminal
+          // reply = an interrupted turn (Stop/override). A terminal can still land
+          // just after turn.end, so defer; only convert to a trailing "Interrupted"
+          // chip if the buffer is untouched when the timer fires (a terminal clears
+          // it to [], a new turn replaces the array — both change identity).
+          if (showAgentActivityRef.current && liveRowsRef.current.length > 0) {
+            const snapshot = liveRowsRef.current;
+            if (interruptedTimerRef.current !== null) window.clearTimeout(interruptedTimerRef.current);
+            interruptedTimerRef.current = window.setTimeout(() => {
+              interruptedTimerRef.current = null;
+              if (liveRowsRef.current !== snapshot || snapshot.length === 0) return;
+              const start = Date.parse(snapshot[0].created_at);
+              const end = Date.parse(snapshot[snapshot.length - 1].created_at);
+              const durationMs =
+                Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+              setActivityGroups((prev) => [
+                ...prev,
+                {
+                  id: snapshot[0].id,
+                  anchorMessageId: null,
+                  status: 'interrupted',
+                  steps: snapshot.length,
+                  durationMs,
+                  rows: snapshot,
+                },
+              ]);
+              setLiveRowsBoth([]);
+              setLiveStartedAt(null);
+            }, 600);
+          }
           // The first turn binds the native; pick it up so the header's backend
           // lock engages without a reload. A failed first turn leaves no native
           // (the refresh confirms that), keeping the backend switchable so the
@@ -810,7 +972,7 @@ export const ChatPage: React.FC = () => {
       },
     }, { reconnect: connectionEpoch > 0 });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, finalizeLiveGroup, reanchorTrailingActivity]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1399,6 +1561,48 @@ export const ChatPage: React.FC = () => {
     return urls;
   }, [messages]);
 
+  // Agent Activity chips are positioned by anchor message id; a null-anchor group
+  // is the one interrupted turn that trails the transcript.
+  const activityByAnchor = useMemo(() => {
+    const map = new Map<string, ActivityGroup>();
+    for (const group of activityGroups) {
+      if (group.anchorMessageId) map.set(group.anchorMessageId, group);
+    }
+    return map;
+  }, [activityGroups]);
+  const trailingActivity = useMemo(
+    () => activityGroups.find((group) => group.anchorMessageId === null) ?? null,
+    [activityGroups],
+  );
+  // Toggle a chip open/closed; lazy-load its rows on first expand (history chips
+  // arrive as summary only — live-completed groups already carry their rows).
+  const toggleActivityGroup = useCallback(
+    (group: ActivityGroup) => {
+      const willExpand = !expandedActivity[group.id];
+      setExpandedActivity((prev) => ({ ...prev, [group.id]: willExpand }));
+      if (willExpand && !group.rows && !loadingActivity[group.id] && sessionId) {
+        const sid = sessionId;
+        setLoadingActivity((prev) => ({ ...prev, [group.id]: true }));
+        api
+          .getSessionActivityGroup(sid, group.id)
+          .then((wire) => {
+            if (sid !== sessionIdRef.current) return;
+            const full = groupFromWire(wire);
+            setActivityGroups((prev) =>
+              prev.map((g) => (g.id === group.id ? { ...g, rows: full.rows ?? [] } : g)),
+            );
+          })
+          .catch(() => {
+            /* leave rows undefined → chip shows the empty state; a re-expand retries */
+          })
+          .finally(() => {
+            setLoadingActivity((prev) => ({ ...prev, [group.id]: false }));
+          });
+      }
+    },
+    [api, sessionId, expandedActivity, loadingActivity],
+  );
+
   if (!sessionId) {
     return <ChatMissing onBack={goBack} />;
   }
@@ -1541,6 +1745,18 @@ export const ChatPage: React.FC = () => {
           onQuoteSelection={quoteSelectionToComposer}
           onAskInNewSession={askInNewSession}
           followingTailRef={followingTailRef}
+          activity={{
+            enabled: showAgentActivity,
+            byAnchor: activityByAnchor,
+            trailing: trailingActivity,
+            liveRows,
+            liveStartedAt,
+            cardExpanded: activityCardExpanded,
+            onToggleCard: () => setActivityCardExpanded((v) => !v),
+            expanded: expandedActivity,
+            loading: loadingActivity,
+            onToggleGroup: toggleActivityGroup,
+          }}
           footer={
             sessionId ? (
               <VaultChatRequests
@@ -2146,6 +2362,20 @@ interface TranscriptProps {
   // tail. Lifted so the retained-window trim (ChatPage.appendMessage) can tell
   // when dropping the oldest rows is safe (reader pinned to the bottom).
   followingTailRef: React.MutableRefObject<boolean>;
+  // Agent Activity panel state (undefined-safe: when ``enabled`` is false the
+  // transcript renders exactly as before — the ThinkingBubble and nothing else).
+  activity?: {
+    enabled: boolean;
+    byAnchor: Map<string, ActivityGroup>;
+    trailing: ActivityGroup | null;
+    liveRows: ActivityRow[];
+    liveStartedAt: number | null;
+    cardExpanded: boolean;
+    onToggleCard: () => void;
+    expanded: Record<string, boolean>;
+    loading: Record<string, boolean>;
+    onToggleGroup: (group: ActivityGroup) => void;
+  };
   // Rendered at the end of the scroll content, after the last message (e.g. the in-scroll
   // vault request cards). Part of the timeline, so it scrolls with the conversation.
   footer?: React.ReactNode;
@@ -2168,6 +2398,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   onQuoteSelection,
   onAskInNewSession,
   followingTailRef,
+  activity,
   footer,
 }) => {
   const { t } = useTranslation();
@@ -2257,7 +2488,11 @@ const Transcript: React.FC<TranscriptProps> = ({
   // an older Turn cannot clear Stop for a newer one.
   const lastIsAgentTerminal =
     messages.length > 0 && isTerminalAgentMessage(messages[messages.length - 1]);
-  const showThinking = working && !lastIsAgentTerminal;
+  // The running Activity card replaces the ThinkingBubble while a live turn has
+  // ≥1 activity row (feature on); otherwise the ThinkingBubble shows as today.
+  const liveActive = !!activity?.enabled && activity.liveRows.length > 0;
+  const showActivityCard = working && !lastIsAgentTerminal && liveActive;
+  const showThinking = working && !lastIsAgentTerminal && !liveActive;
   const empty = messages.length === 0 && !working;
 
   // Capture the topmost (partly) visible row as the restore anchor. Viewport-
@@ -2506,17 +2741,48 @@ const Transcript: React.FC<TranscriptProps> = ({
               <Loader2 className="size-4 animate-spin" />
             </div>
           )}
-          {messages.map((message) => (
-            <MessageRow
-              key={message.id}
-              message={message}
-              session={session}
-              messageFontSize={messageFontSize}
-              onQuickReply={onQuickReply}
-              highlighted={message.id === highlightedId}
+          {messages.map((message) => {
+            // Agent Activity chip for the turn whose reply (or next opening
+            // message) is THIS row — rendered directly above it.
+            const chip = activity?.enabled ? activity.byAnchor.get(message.id) : undefined;
+            return (
+              <Fragment key={message.id}>
+                {chip && (
+                  <ActivityChip
+                    group={chip}
+                    expanded={!!activity!.expanded[chip.id]}
+                    loading={!!activity!.loading[chip.id]}
+                    onToggle={() => activity!.onToggleGroup(chip)}
+                  />
+                )}
+                <MessageRow
+                  message={message}
+                  session={session}
+                  messageFontSize={messageFontSize}
+                  onQuickReply={onQuickReply}
+                  highlighted={message.id === highlightedId}
+                />
+              </Fragment>
+            );
+          })}
+          {showActivityCard && activity ? (
+            <ActivityCard
+              rows={activity.liveRows}
+              startedAtMs={activity.liveStartedAt}
+              expanded={activity.cardExpanded}
+              onToggleExpanded={activity.onToggleCard}
             />
-          ))}
-          {showThinking && <ThinkingBubble session={session} />}
+          ) : showThinking ? (
+            <ThinkingBubble session={session} />
+          ) : null}
+          {activity?.enabled && activity.trailing && (
+            <ActivityChip
+              group={activity.trailing}
+              expanded={!!activity.expanded[activity.trailing.id]}
+              loading={!!activity.loading[activity.trailing.id]}
+              onToggle={() => activity.onToggleGroup(activity.trailing!)}
+            />
+          )}
           {footer}
         </div>
       </div>

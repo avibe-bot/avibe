@@ -1728,6 +1728,8 @@
     "agentProgressStyleOff": "关闭",
     "chatMessageFontSize": "聊天消息字号",
     "chatMessageFontSizeHint": "Web UI 聊天页里用户和 Agent 消息气泡的文字大小",
+    "showAgentActivity": "显示 Agent 执行过程",
+    "showAgentActivityHint": "在 Web 聊天中实时显示 Agent 的中间步骤——中间消息与工具调用摘要，回复到达后自动折叠为一行摘要。仅 Web 聊天，不影响 IM 平台。默认关闭。",
     "slackLinkPreviews": "关闭 Slack 链接预览",
     "slackLinkPreviewsHint": "关闭 Avibe 发送到 Slack 的 URL 和媒体预览卡片",
     "allowedChannels": "允许的群组",
@@ -2354,6 +2356,21 @@
         "reconnecting": "重连中",
         "disconnected": "已断开"
       }
+    },
+    "agentActivity": {
+      "running": "正在执行",
+      "step": "{{count}} 步",
+      "steps": "{{count}} 步",
+      "label": "执行过程",
+      "failed": "执行失败 · {{count}} 步",
+      "interrupted": "已中断 · 第 {{count}} 步停止",
+      "expand": "展开执行过程",
+      "collapse": "收起执行过程",
+      "showCall": "展开详情",
+      "hideCall": "收起详情",
+      "jumpToLatest": "跳到最新",
+      "loadFailed": "无法加载执行详情。",
+      "empty": "本轮没有执行过程记录。"
     },
     "queue": {
       "title": "排队中 · {{count}}",
