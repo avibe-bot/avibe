@@ -7,6 +7,7 @@ import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { badgeVariants } from './ui/badge';
 import { cn } from '@/lib/utils';
+import { scheduleUpgradeReload } from '../lib/upgradeReload';
 
 // Dev / regression builds carry long versions like
 // `3.0.1.dev33+g1df6865a1.d20260608`. Collapse to the release core
@@ -91,9 +92,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       if (result.ok) {
         if (result.restarting) {
           setRestarting(true);
-          setTimeout(() => {
+          scheduleUpgradeReload(() => {
             window.location.reload();
-          }, 4000);
+          });
         } else {
           setTimeout(() => checkVersion(), 1000);
         }
