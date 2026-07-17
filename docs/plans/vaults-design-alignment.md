@@ -12,7 +12,7 @@ before merge.
 ## Source of truth
 
 `design.pen` (open via the `pencil` MCP tools, `filePath:
-/Users/cyh/vibe-remote-project/design.pen`). Exported reference PNGs are in
+/Users/cyh/vibe-remote-project/avibe-docs/design.pen`). Exported reference PNGs are in
 `/tmp/vault-design/`. For each surface, BOTH read the PNG and read the frame via
 `batch_get` (high `readDepth`, `resolveVariables: true`) to get exact copy,
 spacing, colors, radii. Map every value to a UI token/class; add a token if one

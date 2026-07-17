@@ -248,7 +248,7 @@ Source-of-truth rule:
 - source lives in `ui/`; build with `cd ui && npm run build`; `ui/dist/` is served by `vibe/ui_server.py`
 - reuse `ui/src/components/ui/` primitives first (`Button`, `Badge`, `Card`, `Input`, `Popover`, `Dialog`, etc.); extend via variants/sizes/props before creating new primitives
 - follow the reuse ladder for UI and shared backend logic: inventory existing patterns -> reuse -> extend -> promote near-duplicates -> create a reusable unit only when needed; extract on the third repeat
-- `design.pen` is the visual source of truth; map spacing, type, radius, color, and shadow to exact tokens/classes, add missing tokens instead of hardcoding, and verify against the exported frame when visual fidelity matters
+- `../avibe-docs/design.pen` is the visual source of truth; map spacing, type, radius, color, and shadow to exact tokens/classes, add missing tokens instead of hardcoding, and verify against the exported frame when visual fidelity matters
 - installed `vibe` uses packaged UI assets, not raw repo `ui/dist/`; for packaged CLI/UI preview, build UI and reinstall from a normal wheel, not `uv tool install --force --editable .`
 - do not run editable installs against system Python, and do not restart local `vibe` for UI checks unless the user explicitly requests that local-service workflow
 
