@@ -223,16 +223,22 @@ tool-call events that predate the oldest scanned message are dropped — otherwi
 event whose turn boundary was cut off would anchor a bogus chip to the first
 visible turn.
 
-Frontend: activity rows are held in a **separate turn-keyed store**, never the
-`messages` array, so they never count against `MAX_RETAINED_MESSAGES` or evict
-conversation rows. The live running turn buffers rows from `message.new`; on the
-terminal reply it snapshots into a chip anchored above that reply; on `turn.end`
-with an un-consumed buffer (deferred ~600ms to absorb a late terminal) it becomes a
-trailing "Interrupted" chip. `refreshActivity` resyncs groups from the endpoint on
-load and on SSE gap recovery (`reconcile`) — so a turn whose terminal was missed
-still gets its chip, and opening mid-turn **re-hydrates** the running turn's
-persisted rows into the live card instead of showing it as interrupted. Show-Page
-`assistant` rows are excluded from live ingestion too (they stay transcript rows).
-Presentation is `ActivityCard` / `ActivityChip` in
-`ui/src/components/workbench/AgentActivityGroup.tsx`; pure helpers + wire mapping in
-`ui/src/lib/agentActivity.ts`.
+Frontend (single-source-of-truth model — the durable endpoint owns all SETTLED
+groups; the live SSE buffer drives ONLY the in-flight running card). The live
+buffer never leaves that card: there is deliberately no client-side group
+reconstruction. On every settle signal — a terminal `message.new`, `turn.end`, SSE
+reconnect, or visibilitychange — `refreshActivity` rebuilds `activityGroups` from
+`GET /activity` and, when no in-flight turn remains, clears the live buffer so the
+finished card swaps to the storage-derived chip (and its rows can't leak into the
+next turn). When a turn IS in flight, refresh re-hydrates the running card's rows
+from storage only if the live stream hasn't already filled them. Settle bursts are
+coalesced to one in-flight + at most one trailing fetch (`scheduleActivityRefresh`),
+and nothing fetches when the toggle is off. This structure closes the whole class
+of live-state edge cases (lossy/stale/partial buffer, interrupted anchoring,
+duration source) that iterative patching kept surfacing: the chip's steps, status,
+anchor, and duration always come from the well-tested backend grouping. Activity
+rows still live in a **separate store** (never the `messages` array), so they never
+count against `MAX_RETAINED_MESSAGES`. Show-Page `assistant` rows are excluded from
+live ingestion (they stay transcript rows). Presentation is `ActivityCard` /
+`ActivityChip` in `ui/src/components/workbench/AgentActivityGroup.tsx`; pure helpers
++ wire mapping in `ui/src/lib/agentActivity.ts`.

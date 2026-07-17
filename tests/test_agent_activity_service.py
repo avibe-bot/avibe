@@ -268,6 +268,44 @@ def test_events_before_message_window_are_dropped(isolated_state):
     assert summary["groups"] == []
 
 
+def test_same_second_pre_window_event_dropped_by_id(isolated_state):
+    """A tool event in the SAME whole second as the oldest scanned message, but
+    emitted BEFORE it (smaller microsecond id), is outside the window and must be
+    dropped — the whole-second cutoff alone would wrongly keep it."""
+    engine = create_sqlite_engine()
+    sid = "ses_winid"
+    base = 1_800_000_000_000_000
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        # Event emitted a millisecond BEFORE the oldest message, same second.
+        _evt(conn, scope, sid, eid=_clock_id("evt", base + 1_000), created_at="2026-06-01T10:00:00Z", text="🔧 `Bash`")
+        _msg(conn, scope, sid, mid=_clock_id("msg", base + 5_000), mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _msg(conn, scope, sid, mid=_clock_id("msg", base + 10_000), mtype="result", author="agent", created_at="2026-06-01T10:00:00Z", text="answer")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+    # The pre-window event is dropped → the user+result turn has no activity.
+    assert summary["groups"] == []
+
+
+def test_duration_measured_from_turn_opener(isolated_state):
+    """The chip duration spans the turn opener → terminal (what the history endpoint
+    reports), not first-activity → terminal — so live and reloaded chips agree."""
+    engine = create_sqlite_engine()
+    sid = "ses_dur"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _evt(conn, scope, sid, eid="e_t", created_at="2026-06-01T10:00:05Z", text="🔧 `Bash`")  # first activity 5s in
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:10Z", text="answer")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+    assert len(summary["groups"]) == 1
+    # 10s opener→terminal, NOT 5s first-activity→terminal.
+    assert summary["groups"][0]["duration_ms"] == 10_000
+
+
 def test_get_turn_group_unknown_id_returns_none(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_none"

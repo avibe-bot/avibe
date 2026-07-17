@@ -172,17 +172,19 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     # tail can start after some of the fetched events, and an event whose turn
     # boundary was NOT fetched would otherwise be grouped as pending and anchored to
     # the first visible turn — surfacing an earlier turn's tool calls above the wrong
-    # message. Drop events that predate the oldest scanned message (parsed compare,
-    # so the two tables' string forms never matter).
-    oldest_msg_ts = min((item["ts"] for item in items), default=None)
+    # message. Compare by the decoded microsecond sort key (not just the whole
+    # second), so a same-second event emitted BEFORE the oldest scanned message is
+    # dropped too.
+    oldest_msg_sort = min((item["sort"] for item in items), default=None)
     for event in events:
         event_ts = _parse_ts(event.get("created_at"))
-        if oldest_msg_ts is not None and event_ts < oldest_msg_ts:
+        event_sort = _emit_micros(event.get("id"), event_ts)
+        if oldest_msg_sort is not None and event_sort < oldest_msg_sort:
             continue
         items.append(
             {
                 "ts": event_ts,
-                "sort": _emit_micros(event.get("id"), event_ts),
+                "sort": event_sort,
                 "rank": _PHASE_RANK["activity"],
                 "created_at": event.get("created_at"),
                 "kind": "activity",
