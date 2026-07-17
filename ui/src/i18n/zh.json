@@ -2371,6 +2371,8 @@
       "jumpToLatest": "跳到最新",
       "loadFailed": "无法加载执行详情。",
       "retry": "重试",
+      "durationMin": "{{minutes}} 分 {{seconds}} 秒",
+      "durationSec": "{{seconds}} 秒",
       "empty": "本轮没有执行过程记录。"
     },
     "queue": {

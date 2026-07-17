@@ -2371,6 +2371,8 @@
       "jumpToLatest": "Jump to latest",
       "loadFailed": "Couldn't load activity detail.",
       "retry": "Retry",
+      "durationMin": "{{minutes}}m {{seconds}}s",
+      "durationSec": "{{seconds}}s",
       "empty": "No activity recorded for this turn."
     },
     "queue": {

@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
 import {
+  activityDurationParts,
   activityRowFromMessage,
-  formatActivityDuration,
   groupFromWire,
   initialLiveActivity,
   isActivityMessageType,
   liveActivityReducer,
   parseToolName,
+  shouldShowRunningCard,
   toolIconKind,
   toolSummary,
   type ActivityRow,
@@ -55,21 +56,30 @@ describe('toolIconKind', () => {
   });
 });
 
-describe('formatActivityDuration', () => {
-  it('formats sub-minute durations in seconds', () => {
-    expect(formatActivityDuration(3200)).toBe('3.2s');
-    expect(formatActivityDuration(1800)).toBe('1.8s');
-    expect(formatActivityDuration(12000)).toBe('12s');
+describe('activityDurationParts', () => {
+  it('splits into whole-second minutes/seconds (units applied via i18n)', () => {
+    expect(activityDurationParts(45000)).toEqual({ minutes: 0, seconds: 45 });
+    expect(activityDurationParts(83000)).toEqual({ minutes: 1, seconds: 23 });
+    expect(activityDurationParts(600000)).toEqual({ minutes: 10, seconds: 0 });
   });
 
-  it('formats minute-plus durations as "Xm Ys"', () => {
-    expect(formatActivityDuration(83000)).toBe('1m 23s');
-    expect(formatActivityDuration(600000)).toBe('10m 0s');
+  it('returns null for null/negative', () => {
+    expect(activityDurationParts(null)).toBeNull();
+    expect(activityDurationParts(-5)).toBeNull();
   });
+});
 
-  it('returns empty string for null/negative', () => {
-    expect(formatActivityDuration(null)).toBe('');
-    expect(formatActivityDuration(-5)).toBe('');
+describe('shouldShowRunningCard', () => {
+  const rows = [{ id: 'a', kind: 'tool_call', text: 'x', created_at: 't' }] as ActivityRow[];
+  it('renders only while enabled AND working AND the buffer is non-empty', () => {
+    expect(shouldShowRunningCard(true, true, rows.length)).toBe(true);
+    expect(shouldShowRunningCard(false, true, rows.length)).toBe(false);
+    expect(shouldShowRunningCard(true, true, 0)).toBe(false);
+  });
+  it('hides a stale buffer by construction once working goes false (R5: idle-recovered turn)', () => {
+    // A dropped turn.end recovered by the idle poll clears ``working`` while the
+    // buffer still holds the finished turn's rows — the card must not linger.
+    expect(shouldShowRunningCard(true, false, rows.length)).toBe(false);
   });
 });
 

@@ -90,6 +90,18 @@ export type LiveActivityEvent =
   | { type: 'clear_for_gen'; gen: number }
   | { type: 'rehydrate_for_gen'; gen: number; rows: ActivityRow[]; startedAt: number };
 
+// The running card is a PURE FUNCTION of (working, current-generation buffer): it
+// shows only while a turn is in flight AND the buffer is non-empty. The buffer is
+// always the CURRENT generation when non-empty (the reducer clears it on every
+// bump), so a stale buffer left by a failed/late refresh is invisible by
+// construction the moment ``working`` goes false — no separate generation check
+// is needed at the render site.
+export const shouldShowRunningCard = (
+  enabled: boolean,
+  working: boolean,
+  liveRowCount: number,
+): boolean => enabled && working && liveRowCount > 0;
+
 export const liveActivityReducer = (
   state: LiveActivityState,
   event: LiveActivityEvent,
@@ -173,15 +185,13 @@ export const toolIconKind = (toolName: string): ToolIconKind => {
   return 'wrench';
 };
 
-// "1m 23s" for ≥60s, "3.2s" below — matches the design chip metadata (mono).
-export const formatActivityDuration = (ms: number | null | undefined): string => {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
-  const totalSeconds = ms / 1000;
-  if (totalSeconds < 60) {
-    // Whole seconds read cleaner once we're past a couple seconds.
-    return totalSeconds < 10 ? `${totalSeconds.toFixed(1)}s` : `${Math.round(totalSeconds)}s`;
-  }
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.round(totalSeconds % 60);
-  return `${minutes}m ${seconds}s`;
+// Duration as {minutes, seconds} (null when unavailable). The unit text is applied
+// by the component through i18n (AGENTS.md: no hardcoded user-facing units), so the
+// zh chip renders localized units rather than a hardcoded "1m 23s".
+export const activityDurationParts = (
+  ms: number | null | undefined,
+): { minutes: number; seconds: number } | null => {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = Math.round(ms / 1000);
+  return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
 };

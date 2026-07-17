@@ -20,7 +20,7 @@ import clsx from 'clsx';
 
 import { Markdown } from '../ui/markdown';
 import {
-  formatActivityDuration,
+  activityDurationParts,
   parseToolName,
   toolIconKind,
   toolSummary,
@@ -236,7 +236,12 @@ export const ActivityChip: React.FC<{
   } else if (group.status === 'interrupted') {
     label = t('chat.agentActivity.interrupted', { count: group.steps });
   } else {
-    const duration = formatActivityDuration(group.durationMs);
+    const parts = activityDurationParts(group.durationMs);
+    const duration = parts
+      ? parts.minutes > 0
+        ? t('chat.agentActivity.durationMin', { minutes: parts.minutes, seconds: parts.seconds })
+        : t('chat.agentActivity.durationSec', { seconds: parts.seconds })
+      : '';
     label = `${t('chat.agentActivity.label')} · ${stepLabel(t, group.steps)}${duration ? ` · ${duration}` : ''}`;
   }
 

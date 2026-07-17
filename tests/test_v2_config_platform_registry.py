@@ -283,6 +283,15 @@ def test_show_agent_activity_defaults_off_and_round_trips() -> None:
     payload["ui"]["show_agent_activity"] = 1
     assert V2Config.from_payload(payload).ui.show_agent_activity is True
 
+    # String forms are parsed explicitly — ``bool("false")`` would be True, which
+    # must NOT enable streaming. Known truthy/falsey strings resolve correctly.
+    for truthy in ("true", "True", "1", "yes", "on"):
+        payload["ui"]["show_agent_activity"] = truthy
+        assert V2Config.from_payload(payload).ui.show_agent_activity is True, truthy
+    for falsey in ("false", "False", "0", "no", "off", ""):
+        payload["ui"]["show_agent_activity"] = falsey
+        assert V2Config.from_payload(payload).ui.show_agent_activity is False, falsey
+
 
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:
     config = _base_config()

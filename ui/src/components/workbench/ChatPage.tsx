@@ -47,6 +47,7 @@ import {
   initialLiveActivity,
   isActivityMessageType,
   liveActivityReducer,
+  shouldShowRunningCard,
   type ActivityGroup,
   type ActivityRow,
   type LiveActivityEvent,
@@ -783,7 +784,17 @@ export const ChatPage: React.FC = () => {
       if (turnEpochRef.current !== epochAtRequest) return;
       const sinceSet = Date.now() - workingSetAtRef.current;
       if (sinceSet > WORKING_SETTLE_GRACE_MS) {
+        workingRef.current = false;
         setWorking(false);
+        // Agent Activity: the idle poll recovering a dropped terminal/turn.end is a
+        // FIFTH settle signal (same contract as terminal message.new / turn.end /
+        // reconnect / visibility) — mark the generation settled and rebuild from
+        // storage so the finished turn gets its chip and the stale buffer clears.
+        // The card is already hidden by the working gate; this produces the chip.
+        if (showAgentActivityRef.current) {
+          dispatchLive({ type: 'settle' });
+          scheduleActivityRefresh(false);
+        }
       } else if (graceResyncRef.current === null) {
         // Idle INSIDE the grace: either the registration gap (don't clear) or a
         // quick turn that already finished and whose turn.end we missed (a
@@ -797,7 +808,7 @@ export const ChatPage: React.FC = () => {
     } catch {
       /* controller unreachable — leave the indicator as-is */
     }
-  }, [api, sessionId, markWorking]);
+  }, [api, sessionId, markWorking, dispatchLive, scheduleActivityRefresh]);
 
   // Keep a ref to the latest syncTurnState so the grace-resync timer can call the
   // current closure without baking it into a dependency cycle.
@@ -2566,11 +2577,12 @@ const Transcript: React.FC<TranscriptProps> = ({
   // an older Turn cannot clear Stop for a newer one.
   const lastIsAgentTerminal =
     messages.length > 0 && isTerminalAgentMessage(messages[messages.length - 1]);
-  // The running Activity card replaces the ThinkingBubble while the live buffer has
-  // ≥1 row (feature on). The card stays up through settle — the buffer is cleared
-  // only when the storage rebuild resolves — so the card→chip swap has no empty gap.
+  // The running Activity card replaces the ThinkingBubble. It renders only while a
+  // turn is in flight (``working``) AND the live buffer is non-empty and current-gen
+  // (round-4 clause). Gating on ``working`` makes a stale buffer — e.g. one left by
+  // a dropped turn.end that the idle poll recovered — invisible by construction.
   const liveActive = !!activity?.enabled && activity.liveRows.length > 0;
-  const showActivityCard = liveActive;
+  const showActivityCard = shouldShowRunningCard(!!activity?.enabled, working, activity?.liveRows.length ?? 0);
   const showThinking = working && !lastIsAgentTerminal && !liveActive;
   const empty = messages.length === 0 && !working;
 

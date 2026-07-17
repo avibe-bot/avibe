@@ -579,7 +579,13 @@ class V2Config:
             )
         except (TypeError, ValueError):
             ui.chat_message_font_size = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
-        ui.show_agent_activity = bool(ui.show_agent_activity)
+        # Accept real booleans; parse known string forms explicitly (a config file
+        # or API client may supply "false"/"0", and ``bool("false")`` is True).
+        raw_show_activity = ui.show_agent_activity
+        if isinstance(raw_show_activity, str):
+            ui.show_agent_activity = raw_show_activity.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            ui.show_agent_activity = bool(raw_show_activity)
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):

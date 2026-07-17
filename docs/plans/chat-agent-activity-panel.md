@@ -224,13 +224,16 @@ event whose turn boundary was cut off would anchor a bogus chip to the first
 visible turn.
 
 Frontend (single-source-of-truth model — the durable endpoint owns all SETTLED
-groups; the live SSE buffer drives ONLY the in-flight running card). The live
-buffer never leaves that card: there is deliberately no client-side group
-reconstruction. On every settle signal — a terminal `message.new`, `turn.end`, SSE
-reconnect, or visibilitychange — `refreshActivity` rebuilds `activityGroups` from
-`GET /activity` and, when no in-flight turn remains, clears the live buffer so the
-finished card swaps to the storage-derived chip (and its rows can't leak into the
-next turn). When a turn IS in flight, refresh re-hydrates the running card's rows
+groups; the live SSE buffer drives ONLY the in-flight running card). The running
+card is a pure function of ``working`` AND the current-generation buffer
+(`shouldShowRunningCard`) — so a stale buffer is invisible the moment ``working``
+goes false. The live buffer never leaves that card: there is deliberately no
+client-side group reconstruction. On every settle signal — a terminal
+`message.new`, `turn.end`, SSE reconnect, visibilitychange, OR the `/turn-state`
+idle poll recovering a dropped terminal (the fifth signal, same contract) —
+`refreshActivity` rebuilds `activityGroups` from `GET /activity` and, when no
+in-flight turn remains, clears the live buffer so the finished card swaps to the
+storage-derived chip (and its rows can't leak into the next turn). When a turn IS in flight, refresh re-hydrates the running card's rows
 from storage only if the live stream hasn't already filled them. Settle bursts are
 coalesced to one in-flight + at most one trailing fetch (`scheduleActivityRefresh`),
 a transient fetch failure schedules exactly one bounded retry, and nothing fetches
