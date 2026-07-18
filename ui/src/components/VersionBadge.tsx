@@ -155,17 +155,19 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               {t(isSourceBuild ? 'dashboard.buildAndVersion' : 'dashboard.versionAndUpdate')}
             </span>
             <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted hover:text-foreground"
-                onClick={checkVersion}
-                disabled={checking || restarting}
-                aria-label={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
-                title={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
-              >
-                <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
-              </Button>
+              {!isSourceBuild && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted hover:text-foreground"
+                  onClick={checkVersion}
+                  disabled={checking || restarting}
+                  aria-label={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
+                  title={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
+                >
+                  <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
