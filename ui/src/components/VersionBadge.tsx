@@ -1,7 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useApi, type VersionInfo, type UpgradeResult } from '../context/ApiContext';
-import { Download, X, RefreshCw, Check, AlertCircle } from 'lucide-react';
+import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal } from 'lucide-react';
 import clsx from 'clsx';
 import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
@@ -108,7 +108,16 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   const hasUpdate = versionInfo?.has_update === true;
   const currentVersion = versionInfo?.current || '...';
-  const displayVersion = shortenVersion(currentVersion);
+  const isSourceBuild = versionInfo?.build?.kind === 'source';
+  const sourceRevision = versionInfo?.build?.revision;
+  const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
+  const displayVersion = isSourceBuild ? shortSourceRevision : shortenVersion(currentVersion);
+  const refreshLabel = checking
+    ? t('dashboard.checking')
+    : t(isSourceBuild ? 'dashboard.refreshBuildInfo' : 'dashboard.checkUpdate');
+  const badgeTitle = isSourceBuild
+    ? `${t('dashboard.sourceRevision')}: ${sourceRevision || t('dashboard.unknownRevision')}${versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}`
+    : `v${currentVersion}`;
 
   return (
     <div className="relative" ref={popupRef}>
@@ -120,9 +129,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           badgeVariants({ variant: hasUpdate ? 'warning' : 'secondary' }),
           'relative cursor-pointer rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         )}
-        title={`v${currentVersion}`}
+        title={badgeTitle}
       >
-        v{displayVersion}
+        {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
+        {displayVersion}
         {hasUpdate && (
           <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold animate-pulse" />
         )}
@@ -144,7 +154,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         >
           {/* Header */}
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <span className="text-sm font-medium text-foreground">{t('dashboard.versionAndUpdate')}</span>
+            <span className="text-sm font-medium text-foreground">
+              {t(isSourceBuild ? 'dashboard.buildAndVersion' : 'dashboard.versionAndUpdate')}
+            </span>
             <div className="flex items-center gap-1">
               <Button
                 variant="ghost"
@@ -152,8 +164,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 className="h-7 w-7 text-muted hover:text-foreground"
                 onClick={checkVersion}
                 disabled={checking || restarting}
-                aria-label={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
-                title={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
+                aria-label={refreshLabel}
+                title={refreshLabel}
               >
                 <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
               </Button>
@@ -171,14 +183,26 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
           {/* Content */}
           <div className="space-y-3 p-4">
-            {/* Current Version */}
+            {isSourceBuild && (
+              <div className="flex items-start justify-between gap-3 text-sm">
+                <span className="shrink-0 text-muted">{t('dashboard.sourceRevision')}</span>
+                <span className="max-w-[10rem] break-all text-right font-mono font-medium text-foreground">
+                  {sourceRevision || t('dashboard.unknownRevision')}
+                  {versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}
+                </span>
+              </div>
+            )}
+
+            {/* Current package version */}
             <div className="flex items-center justify-between text-sm">
-              <span className="text-muted">{t('dashboard.currentVersion')}</span>
-              <span className="font-mono font-medium text-foreground">{currentVersion}</span>
+              <span className="text-muted">
+                {t(isSourceBuild ? 'dashboard.packageVersion' : 'dashboard.currentVersion')}
+              </span>
+              <span className="max-w-[10rem] break-all text-right font-mono font-medium text-foreground">{currentVersion}</span>
             </div>
 
             {/* Latest Version */}
-            {versionInfo?.latest && (
+            {!isSourceBuild && versionInfo?.latest && (
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted">{t('dashboard.latestVersion')}</span>
                 <span className="font-mono font-medium text-foreground">{versionInfo.latest}</span>
@@ -186,7 +210,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
 
             {/* Update Status */}
-            {hasUpdate ? (
+            {!isSourceBuild && (hasUpdate ? (
               <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold">
                 <AlertCircle size={16} className="shrink-0" />
                 <span>
@@ -206,7 +230,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 <AlertCircle size={16} className="shrink-0" />
                 <span>{t('dashboard.checkFailed')}</span>
               </div>
-            ) : null}
+            ) : null)}
 
             {/* Upgrade Result */}
             {upgradeResult && (
@@ -234,7 +258,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
 
             {/* Auto Update Toggle */}
-            {autoUpdate !== null && (
+            {!isSourceBuild && autoUpdate !== null && (
               <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
                 <div className="min-w-0">
                   <div className="text-sm text-foreground">{t('dashboard.autoUpdate')}</div>

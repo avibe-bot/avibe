@@ -46,6 +46,7 @@ from vibe.opencode_config import (
     load_first_opencode_user_config,
     set_jsonc_top_level_string_property,
 )
+from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     build_upgrade_plan,
     get_latest_version_info,
@@ -5002,19 +5003,26 @@ def _runtime_process_was_running() -> bool:
 
 
 def get_version_info() -> dict:
-    """Get current version and check for updates.
+    """Get package version, deployed build identity, and available updates.
 
     Returns:
         {
             "current": str,
             "latest": str | None,
             "has_update": bool,
-            "error": str | None
+            "error": str | None,
+            "build": {"kind": "package" | "source", ...}
         }
     """
     from vibe import __version__
 
-    return get_latest_version_info(__version__)
+    build = get_build_identity()
+    if build.kind == "source":
+        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
+    else:
+        result = get_latest_version_info(__version__)
+    result["build"] = build.as_dict()
+    return result
 
 
 def do_upgrade(auto_restart: bool = True) -> dict:

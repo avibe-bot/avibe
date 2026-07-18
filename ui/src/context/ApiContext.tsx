@@ -1372,6 +1372,11 @@ export type VersionInfo = {
   latest: string | null;
   has_update: boolean;
   error: string | null;
+  build?: {
+    kind: 'package' | 'source';
+    revision?: string;
+    dirty?: boolean;
+  };
 };
 
 export type UpgradeResult = {

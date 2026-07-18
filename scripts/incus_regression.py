@@ -506,6 +506,7 @@ def regression_service_unit() -> str:
         Environment=HOME={SERVICE_HOME}
         Environment=AVIBE_HOME=
         Environment=VIBE_DEPLOYMENT_ENV=regression
+        Environment=VIBE_BUILD_METADATA_PATH={METADATA_PATH}
         Environment=AVIBE_ALLOW_DEV_STATE_MIGRATION=1
         Environment=VIBE_INTERNAL_DISPATCH_SOCKET=/tmp/vibe_remote/dispatch.sock
         Environment=PYTHONUNBUFFERED=1
