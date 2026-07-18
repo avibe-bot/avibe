@@ -166,6 +166,16 @@ def test_worktree_target_slug_includes_path_hash(monkeypatch: pytest.MonkeyPatch
     assert target.host_port == 15234
 
 
+def test_explicit_worktree_slug_round_trips_generated_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_root = Path("/tmp/regression-source-identity")
+    monkeypatch.setattr(incus_regression, "branch_name", lambda _repo_root: "fix/regression-source-identity")
+
+    generated = incus_regression.worktree_slug(repo_root)
+
+    assert len(generated) == 33
+    assert incus_regression.worktree_slug(repo_root, generated) == generated
+
+
 def test_remote_worktree_target_skips_local_port_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(incus_regression, "branch_name", lambda repo_root: "feature/demo")
     monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: (_ for _ in ()).throw(AssertionError("should not preflight remote ports")))
@@ -1043,6 +1053,72 @@ def test_cleanup_stale_deletes_missing_worktree_mapping(tmp_path: Path, monkeypa
     assert exit_code == 0
     assert ["incus", "--project", "avr-wt-old", "delete", "avibe-wt-old", "--force"] in commands
     payload = json.loads((runtime / "worktrees.json").read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {}
+
+
+def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runtime = repo / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    slug = "fix-regression-source-id-3200ccd6"
+    project = f"avr-wt-{slug}"
+    instance = f"avibe-wt-{slug}"
+    mapping_path = runtime / "worktrees.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "worktrees": {
+                    slug: {
+                        "path": str(tmp_path / "missing"),
+                        "project": project,
+                        "instance": instance,
+                        "host_port": 15205,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands = []
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        def run(self, command, *, check=True, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda _repo_root, _env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+
+    exit_code = incus_regression.cmd_delete(
+        argparse.Namespace(
+            target="worktree",
+            slug=slug,
+            env_file=None,
+            host_port=None,
+            ui_host="127.0.0.1",
+            ui_port=5123,
+            worktree_port_start=15200,
+            worktree_port_end=15399,
+            dry_run=False,
+            remote=None,
+            yes=True,
+        )
+    )
+
+    assert exit_code == 0
+    assert commands == [
+        ["incus", "--project", project, "delete", instance, "--force"],
+        ["incus", "project", "delete", project],
+    ]
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == {}
 
 

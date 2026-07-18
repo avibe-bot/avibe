@@ -298,7 +298,7 @@ def slugify(value: str) -> str:
     slug = re.sub(r"-+", "-", slug)
     if not slug or not slug[0].isalpha():
         slug = f"wt-{slug}" if slug else "wt"
-    return slug[:32].strip("-")
+    return slug[:40].strip("-")
 
 
 def worktree_slug(repo_root: Path, explicit: str | None = None) -> str:
