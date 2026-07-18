@@ -158,12 +158,20 @@ export const ActivityCard: React.FC<{
   }, [rows.length, expanded, following]);
 
   // Measure whether the compact body has hit the cap (content clamped) — drives the
-  // top fade so it only appears once older rows are actually clipped.
+  // top fade so it only appears once older rows are actually clipped. A ResizeObserver
+  // ties the gate to ACTUAL layout, so it also tracks resizes that don't change
+  // ``rows.length``: a tool row expanding its stored call text, a late-loading image,
+  // or a width change reflowing an assistant markdown row.
   useLayoutEffect(() => {
     if (expanded) return;
     const el = compactBodyRef.current;
-    if (el) setCompactAtCap(el.offsetHeight >= COMPACT_CAP_PX);
-  }, [rows.length, expanded]);
+    if (!el) return;
+    const measure = () => setCompactAtCap(el.offsetHeight >= COMPACT_CAP_PX);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [expanded]);
 
   const elapsedMs = Math.max(0, nowMs - (startedAtMs ?? mountedAt));
   const mm = Math.floor(elapsedMs / 60000);
