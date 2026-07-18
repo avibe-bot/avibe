@@ -25,6 +25,7 @@ from config import paths
 from config.v2_config import UpdateConfig
 from config.v2_settings import _infer_channel_platform, _infer_user_platform, _split_scoped_key
 from modules.im import InlineButton, InlineKeyboard, MessageContext
+from vibe.build_identity import get_build_identity
 from vibe.i18n import t as i18n_t
 from vibe.upgrade import (
     PACKAGE_NAME,
@@ -67,6 +68,8 @@ def _fetch_pypi_version_sync() -> Dict[str, Any]:
 
     current = __version__
     result = {"current": current, "latest": None, "has_update": False, "error": None}
+    if get_build_identity().kind == "source":
+        return result
 
     try:
         url = get_update_metadata_url()

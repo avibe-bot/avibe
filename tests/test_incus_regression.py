@@ -244,6 +244,7 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "name: avibe" in data
     assert "Description=Avibe regression service" in data
     assert "Environment=VIBE_DEPLOYMENT_ENV=regression" in data
+    assert "Environment=VIBE_BUILD_METADATA_PATH=/var/lib/avibe-regression/metadata.json" in data
     assert "Environment=AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in data
     assert "EnvironmentFile=-/etc/avibe-regression.env" in data
     assert "ExecStart=/opt/avibe/venv/bin/python scripts/incus_regression_supervisor.py" in data
