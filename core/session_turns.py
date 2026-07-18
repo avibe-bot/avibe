@@ -150,6 +150,17 @@ def _parse_queue_timestamp(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
+def _run_metadata_holds_workbench_queue(value: Any) -> bool:
+    try:
+        metadata = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        isinstance(metadata, dict)
+        and metadata.get("workbench_queue_holds_run") is True
+    )
+
+
 def _scheduled_provenance(row: dict) -> Optional[dict]:
     metadata = row.get("metadata") or {}
     provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
@@ -1151,15 +1162,19 @@ class SessionTurnManager:
                     continue
                 with self._sqlite_engine().connect() as conn:
                     queue_rows = messages_service.list_queued(conn, queued_session_id)
-                    referenced_run_ids: list[str] = []
-                    for row in queue_rows:
-                        provenance = _scheduled_provenance(row) or {}
-                        spec = provenance.get("platform_specific") or {}
-                        if not isinstance(spec, dict) or spec.get("task_trigger_kind") != "agent_run":
-                            continue
-                        for run_id in _scheduled_row_execution_ids(row):
-                            if run_id not in referenced_run_ids:
-                                referenced_run_ids.append(run_id)
+                    if not queue_rows:
+                        continue
+                    head_provenance = _scheduled_provenance(queue_rows[0]) or {}
+                    head_spec = head_provenance.get("platform_specific") or {}
+                    if (
+                        not isinstance(head_spec, dict)
+                        or head_spec.get("task_trigger_kind") != "agent_run"
+                    ):
+                        continue
+                    head_segment = _collect_scheduled_segment(queue_rows)
+                    referenced_run_ids = _scheduled_segment_execution_ids(
+                        head_segment
+                    )
                     if not referenced_run_ids:
                         continue
                     run_rows = list(
@@ -1185,6 +1200,7 @@ class SessionTurnManager:
                     str(row["id"])
                     for row in queued_rows
                     if str(row["id"]) in referenced_run_ids
+                    and _run_metadata_holds_workbench_queue(row["metadata_json"])
                 }
                 if not live_references:
                     continue

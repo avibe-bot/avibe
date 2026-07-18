@@ -7,7 +7,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -136,6 +136,19 @@ class BaseAgent(ABC):
         The concise status bubble uses this to flip its footer to ⚠️.
         """
         return None
+
+    def capture_backend_liveness(
+        self,
+        context: Any,
+    ) -> Callable[[], Optional[bool]]:
+        """Capture the liveness authority for the runtime accepting this turn.
+
+        Backends whose runtime identity can be replaced while a turn is still
+        settling must override this and bind the concrete process/task
+        generation. The default preserves the conservative legacy probe.
+        """
+
+        return lambda: self.backend_alive(context)
 
     def mark_runtime_turn_started(self, context: Any) -> None:
         """Mark the current gated turn as accepted by the backend runtime.

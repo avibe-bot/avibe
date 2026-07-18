@@ -1703,6 +1703,90 @@ def test_restart_does_not_auto_send_pure_user_queue(monkeypatch, tmp_path) -> No
     engine.dispose()
 
 
+def test_restart_does_not_flush_user_queue_ahead_of_held_agent_run(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """HFR-004 safety: recovery cannot bypass a stopped user-owned queue head."""
+
+    from core.session_turns import (
+        SCHEDULED_PROVENANCE_KEY,
+        SessionTurnManager,
+        capture_scheduled_provenance,
+    )
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    successor = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="held successor",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    )
+    queued_context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{successor.id}",
+        platform_specific={
+            "task_execution_id": successor.id,
+            "task_trigger_kind": "agent_run",
+            "vibe_agent_name": "codex",
+            "source_kind": "cli",
+        },
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="kept after explicit stop",
+        )
+        messages_service.append(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text="held successor",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
+                    queued_context
+                )
+            },
+            native_message_id=f"agent_run:{successor.id}",
+        )
+
+    controller = SimpleNamespace()
+    manager = SessionTurnManager(
+        controller,
+        build_context=lambda _session_id: MessageContext(
+            user_id="workbench",
+            channel_id=session_id,
+            platform="avibe",
+        ),
+    )
+    controller.session_turns = manager
+
+    assert asyncio.run(manager.recover_persisted_agent_run_queue()) == []
+    assert session_id not in manager.in_flight
+    assert request_store.get_run(successor.id)["status"] == "queued"
+    with engine.connect() as conn:
+        assert [
+            row["text"]
+            for row in messages_service.list_queued(conn, session_id)
+        ] == ["kept after explicit stop", "held successor"]
+    engine.dispose()
+
+
 def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypatch) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_hook_send(session_key="slack::channel::C123", prompt="send digest")

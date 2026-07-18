@@ -144,7 +144,6 @@ class ClaudeAgent(BaseAgent):
             message = self._prepare_message_with_files(request)
 
             await client.query(message, session_id=runtime_session_key)
-            self.mark_runtime_turn_started(context)
             if (
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
@@ -158,6 +157,7 @@ class ClaudeAgent(BaseAgent):
                         composite_key=runtime_session_key,
                     )
                 )
+            self.mark_runtime_turn_started(context)
             turn_registered = True
             logger.info(f"Sent message to Claude for session {runtime_session_key}")
 
@@ -246,6 +246,16 @@ class ClaudeAgent(BaseAgent):
         if task is None:
             return None
         return not task.done()
+
+    def capture_backend_liveness(self, context) -> Callable[[], Optional[bool]]:
+        """Bind liveness to the receiver task generation accepting this turn."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        task = self.receiver_tasks.get(key) if key else None
+        if task is None:
+            return lambda: None
+        return lambda: not task.done()
 
     async def _handle_question_callback(self, request: AgentRequest) -> None:
         """Handle question-related callbacks (button clicks, modal submissions).

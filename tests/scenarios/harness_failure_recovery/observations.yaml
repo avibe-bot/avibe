@@ -46,3 +46,20 @@ observations:
       SIGKILL at 05:05:53.727Z failed owner Run 91962dcd8f50 through the shared
       terminal path, then successor ef4b716f05e1 started once, completed once,
       recorded one output, and emptied the persisted queue.
+  - id: HFR-OBS-006
+    date: 2026-07-18
+    source: deterministic ownership-generation fault injection
+    result: confirmed
+    detail: >-
+      A replacement runtime under the same cwd or session key can be alive
+      while the transport or receiver task that accepted an older turn is
+      dead. Recovery and diagnostics must therefore use the liveness probe
+      captured from the concrete accepted generation.
+  - id: HFR-OBS-007
+    date: 2026-07-18
+    source: deterministic mixed-queue fault injection
+    result: confirmed
+    detail: >-
+      A user queue row preserved by explicit Stop can precede a held Agent Run
+      row. Startup recovery must not call the generic FIFO flush until the
+      eligible held Agent Run segment itself is at the queue head.

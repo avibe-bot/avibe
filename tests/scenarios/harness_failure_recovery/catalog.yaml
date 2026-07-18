@@ -3,6 +3,7 @@ capability:
   id: harness_failure_recovery
   name: Harness per-Session failure recovery
   canonical_tests:
+    - tests/test_agent_backend_alive.py
     - tests/test_agent_service.py
     - tests/test_scheduled_tasks.py
   shared_harness: []
@@ -18,7 +19,7 @@ scenarios:
     backend: shared
     test: tests/test_agent_service.py::test_agent_service_releases_gate_when_exception_terminal_emit_fails
   - id: HFR-002
-    name: accepted backend death releases owner and dispatches successor once
+    name: accepted backend generation death releases owner and dispatches successor once
     status: covered
     kind: failure_recovery
     layer: scenario
@@ -32,7 +33,7 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_drain_requests_requeues_cancelled_task_run
   - id: HFR-004
-    name: restart recovers stale running rows and persisted queue
+    name: restart recovers held run queues without flushing user-owned queue heads
     status: covered
     kind: restart
     layer: scenario

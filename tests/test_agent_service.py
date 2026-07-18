@@ -1225,6 +1225,64 @@ def test_agent_service_recovers_accepted_turn_when_owned_backend_dies() -> None:
     asyncio.run(_run())
 
 
+def test_agent_service_recovery_uses_the_accepted_backend_generation() -> None:
+    """HFR-002: a replacement runtime cannot hide the accepted owner's death."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        recovered = asyncio.Event()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+
+        class _GenerationAgent(_RuntimeAgent):
+            def __init__(self) -> None:
+                super().__init__()
+                self.current = SimpleNamespace(alive=True)
+
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+
+            def backend_alive(self, _context):
+                return self.current.alive
+
+            def capture_backend_liveness(self, _context):
+                accepted = self.current
+                return lambda: accepted.alive
+
+        agent = _GenerationAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.005
+        service._liveness_failure_grace_seconds = 0.005
+
+        async def _emit(context, *_args, **_kwargs):
+            service.release_runtime_turn(context)
+            recovered.set()
+
+        controller.emit_agent_message = _emit
+        first = _request("first")
+        second = _request("second")
+        await service.handle_message("claude", first)
+        accepted = agent.current
+        successor = asyncio.create_task(service.handle_message("claude", second))
+        await asyncio.sleep(0)
+
+        agent.current = SimpleNamespace(alive=True)
+        accepted.alive = False
+        try:
+            await asyncio.wait_for(recovered.wait(), timeout=0.5)
+            await asyncio.wait_for(successor, timeout=0.5)
+            assert agent.started == ["first", "second"]
+            assert service.backend_alive(second.context) is True
+        finally:
+            if not successor.done():
+                successor.cancel()
+                await asyncio.gather(successor, return_exceptions=True)
+            service.release_runtime_turn(second.context)
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("liveness", [True, None])
 def test_agent_service_never_steals_live_or_unknown_long_running_owner(liveness) -> None:
     """HFR-005/HFR-006: age alone never releases a live or unknown owner."""

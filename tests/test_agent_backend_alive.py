@@ -56,6 +56,17 @@ class ClaudeBackendAliveTests(unittest.TestCase):
         agent = self._agent({"k1": _Task(done=False)})
         self.assertIsNone(agent.backend_alive(_ctx(None)))
 
+    def test_captured_probe_stays_bound_to_receiver_generation(self):
+        accepted = _Task(done=False)
+        agent = self._agent({"k1": accepted})
+        probe = agent.capture_backend_liveness(_ctx("k1"))
+
+        accepted._done = True
+        agent.receiver_tasks["k1"] = _Task(done=False)
+
+        self.assertIs(agent.backend_alive(_ctx("k1")), True)
+        self.assertIs(probe(), False)
+
 
 class CodexBackendAliveTests(unittest.TestCase):
     def _agent(self, *, cwd_for_session, transports):
@@ -95,6 +106,27 @@ class CodexBackendAliveTests(unittest.TestCase):
     def test_no_base_session_is_unknown(self):
         agent = self._agent(cwd_for_session={"b1": "/repo"}, transports={})
         self.assertIsNone(agent.backend_alive(self._ctx_base(None)))
+
+    def test_captured_probe_stays_bound_to_transport_generation(self):
+        accepted = types.SimpleNamespace(
+            is_alive=True,
+            has_pending_notifications=False,
+        )
+        agent = self._agent(
+            cwd_for_session={"b1": "/repo"},
+            transports={"/repo": accepted},
+        )
+        context = self._ctx_base("b1")
+        probe = agent.capture_backend_liveness(context)
+
+        accepted.is_alive = False
+        agent._transports["/repo"] = types.SimpleNamespace(
+            is_alive=True,
+            has_pending_notifications=False,
+        )
+
+        self.assertIs(agent.backend_alive(context), True)
+        self.assertIs(probe(), False)
 
 
 class AgentServiceBackendAliveTests(unittest.TestCase):

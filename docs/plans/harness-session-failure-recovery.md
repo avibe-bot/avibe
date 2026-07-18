@@ -47,15 +47,20 @@ semantics.
 - Token identity, not PID or age, guards recovery. A released or superseded
   token makes the supervisor a no-op, preventing PID reuse and late-result
   races from affecting a newer turn.
+- Capture backend liveness at acceptance against the concrete transport or
+  receiver-task generation that owns the turn. A replacement runtime for the
+  same cwd/session key cannot make the old accepted owner appear alive.
 - Extend the existing Session FSM projection with authoritative live ownership:
   owner source/run id, acquired time, backend, acceptance, and backend liveness.
   `vibe runs show` may attach this live projection; it is diagnostic only and is
   not a second recovery source.
-- On controller boot, re-enter only persisted Workbench queue rows that name a
-  still-queued Agent Run. A per-Session recovery lock makes this idempotent.
+- On controller boot, re-enter only when the queue head is a persisted
+  Workbench-held row that names a still-queued Agent Run. A per-Session
+  recovery lock makes this idempotent.
   If an older scheduler-owned Run is queued, defer to it; its normal terminal
-  or synchronous completion then asks the FSM to recover the successor. Pure
-  user queues remain untouched, preserving the explicit Stop contract.
+  or synchronous completion then asks the FSM to recover the successor. A
+  user-owned queue head remains untouched even if a held Agent Run is behind
+  it, preserving the explicit Stop contract.
 - Codex liveness remains positive while an already-read notification is queued
   or being delivered, so recovery cannot overtake a delayed normal terminal.
 

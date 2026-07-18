@@ -8,7 +8,7 @@ import os
 import shlex
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from config import paths
 from config.v2_config import (
@@ -117,6 +117,10 @@ class CodexAgent(BaseAgent):
         transport = self._transports.get(cwd)
         if transport is None:
             return None
+        return self._transport_alive(transport)
+
+    @staticmethod
+    def _transport_alive(transport: CodexTransport) -> Optional[bool]:
         try:
             return bool(
                 transport.is_alive
@@ -124,6 +128,20 @@ class CodexAgent(BaseAgent):
             )
         except Exception:
             return None
+
+    def capture_backend_liveness(
+        self,
+        context: Any,
+    ) -> Callable[[], Optional[bool]]:
+        """Bind liveness to the app-server generation that accepted the turn."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        base_session_id = str(payload.get("turn_base_session_id") or "").strip()
+        cwd = self._session_mgr.get_cwd(base_session_id) if base_session_id else None
+        transport = self._transports.get(cwd) if cwd else None
+        if transport is None:
+            return lambda: None
+        return lambda: self._transport_alive(transport)
 
     async def handle_message(self, request: AgentRequest) -> None:
         """Process a user message by routing it through app-server.
