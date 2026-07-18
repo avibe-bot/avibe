@@ -319,6 +319,10 @@ def test_probe_failures_are_nonfatal_and_redacted(caplog) -> None:
     assert payload["dns_error_class"] == "probe_error"
     assert "raw launchctl" not in caplog.text
     assert "resolved address" not in caplog.text
+    diagnostic_record = next(
+        record for record in caplog.records if record.getMessage().startswith("macos_session_diagnostic ")
+    )
+    assert diagnostic_record.levelno == logging.WARNING
     assert threads[0].started is True
 
 

@@ -406,6 +406,7 @@ class MacOSSessionMonitor:
             context.gui_domain_available is not True
             or context.asid_match is False
             or snapshot.dns.state == "failed"
+            or snapshot.dns.error_class is not None
             or any(
                 error is not None
                 for error in (
