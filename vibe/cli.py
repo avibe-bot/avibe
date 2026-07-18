@@ -4295,11 +4295,40 @@ def cmd_runs_show(args):
     if run is None:
         _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
         return 1
-    payload_fields = {"run": _run_payload(run)}
+    run_payload = _run_payload(run)
+    session_runtime = _live_session_runtime_for_run(run_payload)
+    if session_runtime is not None:
+        run_payload["session_runtime"] = session_runtime
+    payload_fields = {"run": run_payload}
     if run_default_notice:
         payload_fields["run_default_notice"] = run_default_notice
     _print_cli_payload("agent_run", **payload_fields)
     return 0
+
+
+def _live_session_runtime_for_run(run: dict) -> dict | None:
+    """Attach authoritative controller ownership to an active Session Run."""
+
+    if normalize_run_status(run.get("status")) not in {"queued", "running"}:
+        return None
+    session_id = _run_session_id(run)
+    if not session_id:
+        return None
+    from vibe import internal_client
+
+    try:
+        result = asyncio.run(internal_client.turn_state(session_id))
+    except internal_client.InternalServerTimeout:
+        return {"available": False, "reason": "controller_probe_timeout"}
+    except internal_client.InternalServerUnavailable:
+        return {"available": False, "reason": "controller_unavailable"}
+    except Exception:
+        logger.debug("Failed to inspect live Session owner for Run %s", run.get("id"), exc_info=True)
+        return {"available": False, "reason": "controller_probe_failed"}
+    body = result.get("body") if isinstance(result, dict) else None
+    if result.get("status_code") != 200 or not isinstance(body, dict):
+        return {"available": False, "reason": "controller_probe_rejected"}
+    return {"available": True, **body}
 
 
 def _run_type(run: dict | None) -> str:

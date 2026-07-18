@@ -627,6 +627,19 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
 
 
+def list_queued_session_ids(conn: Connection) -> list[str]:
+    """Session ids with persisted queue rows, ordered by their oldest row."""
+
+    query = (
+        select(messages.c.session_id)
+        .where(messages.c.session_id.is_not(None))
+        .where(messages.c.type == QUEUED_TYPE)
+        .group_by(messages.c.session_id)
+        .order_by(func.min(messages.c.created_at), func.min(messages.c.id))
+    )
+    return [str(session_id) for session_id in conn.execute(query).scalars() if session_id]
+
+
 def pop_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     """Claim the session's queued messages: read them (oldest first), then delete
     them in the SAME transaction, so the rows are returned exactly once. Empty

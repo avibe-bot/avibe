@@ -1419,6 +1419,7 @@ def test_recover_processing_drops_completed_requests(tmp_path: Path) -> None:
 
 
 def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
+    """HFR-003: cancellation requeues the claim and releases its Session slot."""
     path = tmp_path / "scheduled_tasks.json"
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     store = ScheduledTaskStore(path)
@@ -1455,6 +1456,9 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
             pass
         else:
             raise AssertionError("expected CancelledError on the execution task")
+        await asyncio.sleep(0)
+        assert request.id not in service._inflight_executions
+        assert "key:slack::channel::C123" not in service._inflight_sessions
 
     asyncio.run(_exercise())
 
@@ -1466,6 +1470,237 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
     assert (request_store.pending_dir / f"{request.id}.json").exists()
     assert not (request_store.processing_dir / f"{request.id}.json").exists()
     assert not (request_store.completed_dir / f"{request.id}.json").exists()
+
+
+def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatch, tmp_path) -> None:
+    """HFR-004: a crash-held row restarts queued and each successor runs once."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    first = request_store.enqueue_agent_run(
+        session_id="ses-restart",
+        session_key="avibe::project::proj-restart",
+        message="first",
+        agent_name="codex",
+    )
+    second = request_store.enqueue_agent_run(
+        session_id="ses-restart",
+        session_key="avibe::project::proj-restart",
+        message="second",
+        agent_name="codex",
+    )
+    assert request_store.claim(first.id) is not None
+    assert request_store.get_run(first.id)["status"] == "running"
+
+    restarted_store = TaskExecutionStore()
+    controller = SimpleNamespace(platform_settings_managers={})
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=restarted_store,
+    )
+    assert [request.id for request in restarted_store.list_pending()] == [first.id, second.id]
+
+    async def _exercise() -> None:
+        started: list[str] = []
+        release_first = asyncio.Event()
+
+        async def _execute(request):
+            started.append(request.id)
+            if request.id == first.id:
+                await release_first.wait()
+            restarted_store.complete(request, ok=True)
+
+        service._execute_claimed_request = _execute  # type: ignore[method-assign]
+        await service._drain_requests()
+        await asyncio.sleep(0)
+        assert started == [first.id]
+        assert restarted_store.get_run(second.id)["status"] == "queued"
+
+        release_first.set()
+        first_task = service._inflight_executions[first.id]
+        await first_task
+        await asyncio.sleep(0)
+        await service._drain_requests()
+        second_task = service._inflight_executions[second.id]
+        await second_task
+        assert started == [first.id, second.id]
+
+    asyncio.run(_exercise())
+    assert restarted_store.get_run(first.id)["status"] == "succeeded"
+    assert restarted_store.get_run(second.id)["status"] == "succeeded"
+
+
+def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settles(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """HFR-004: durable queue ownership resumes once an older Run is terminal."""
+
+    from core.session_turns import (
+        SCHEDULED_PROVENANCE_KEY,
+        SessionTurnManager,
+        capture_scheduled_provenance,
+    )
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    older = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="older recovered owner",
+        agent_name="codex",
+    )
+    successor = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="persisted successor",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    )
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+
+    queued_context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{successor.id}",
+        platform_specific={
+            "task_execution_id": successor.id,
+            "task_trigger_kind": "agent_run",
+            "vibe_agent_name": "codex",
+            "source_kind": "cli",
+        },
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        messages_service.append(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text="persisted successor",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
+                    queued_context
+                )
+            },
+            native_message_id=f"agent_run:{successor.id}",
+        )
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.session_turns = SessionTurnManager(
+                self,
+                build_context=self._build_context,
+            )
+            self.statuses: list[tuple[str, str]] = []
+
+        @staticmethod
+        def _build_context(target_session_id):
+            assert target_session_id == session_id
+            return MessageContext(
+                user_id="scheduled",
+                channel_id=session_id,
+                platform="avibe",
+                platform_specific={
+                    "agent_session_id": session_id,
+                    "agent_session_target": {"agent_backend": "codex"},
+                },
+            )
+
+        def set_agent_status(self, target_session_id, status) -> None:
+            self.statuses.append((target_session_id, status))
+
+    controller = _Controller()
+    started: list[str] = []
+
+    async def _dispatch(_controller, context, _text, **_kwargs):
+        run_id = str((context.platform_specific or {}).get("task_execution_id") or "")
+        started.append(run_id)
+        sqlite_store.record_run_output(
+            run_id,
+            output_id="terminal",
+            text="recovered once",
+            terminal_status="succeeded",
+        )
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn", _dispatch)
+
+    async def _exercise() -> None:
+        # The older scheduler-owned Run keeps its original FIFO position.
+        assert await controller.session_turns.recover_persisted_agent_run_queue() == []
+        assert started == []
+        with engine.connect() as conn:
+            assert len(messages_service.list_queued(conn, session_id)) == 1
+
+        request_store.complete(older, ok=True)
+        assert await controller.session_turns.recover_persisted_agent_run_queue(
+            session_id
+        ) == [session_id]
+        for _ in range(100):
+            if session_id not in controller.session_turns.in_flight:
+                break
+            await asyncio.sleep(0.005)
+
+        assert started == [successor.id]
+        assert request_store.get_run(successor.id)["status"] == "succeeded"
+        with engine.connect() as conn:
+            assert messages_service.list_queued(conn, session_id) == []
+
+        assert await controller.session_turns.recover_persisted_agent_run_queue(
+            session_id
+        ) == []
+        assert started == [successor.id]
+
+    asyncio.run(_exercise())
+    engine.dispose()
+
+
+def test_restart_does_not_auto_send_pure_user_queue(monkeypatch, tmp_path) -> None:
+    """HFR-004 safety: startup recovery is limited to durable Agent Run rows."""
+
+    from core.session_turns import SessionTurnManager
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="kept after explicit stop",
+        )
+
+    controller = SimpleNamespace()
+    manager = SessionTurnManager(
+        controller,
+        build_context=lambda _session_id: MessageContext(
+            user_id="workbench",
+            channel_id=session_id,
+            platform="avibe",
+        ),
+    )
+    controller.session_turns = manager
+
+    assert asyncio.run(manager.recover_persisted_agent_run_queue()) == []
+    with engine.connect() as conn:
+        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+            "kept after explicit stop"
+        ]
+    engine.dispose()
 
 
 def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypatch) -> None:
@@ -1784,6 +2019,10 @@ def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path:
 
     gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
     controller = _avibe_controller_double(gate=gate, handle_scheduled_message=_handle_scheduled_message)
+    recover_queue = AsyncMock(return_value=[])
+    controller.session_turns = SimpleNamespace(
+        recover_persisted_agent_run_queue=recover_queue,
+    )
     service = ScheduledTaskService(
         controller=controller,
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
@@ -1797,6 +2036,7 @@ def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path:
     assert stored[run_ids[1]]["status"] == "succeeded"
     assert stored[run_ids[0]]["completed_at"] is not None
     assert stored[run_ids[1]]["completed_at"] is not None
+    recover_queue.assert_awaited_once_with(session_id)
 
 
 def test_recover_processing_rebuilds_coalesced_metadata_without_queue_rows(
@@ -4513,3 +4753,208 @@ def test_execute_request_avibe_falls_back_when_no_gate(monkeypatch, tmp_path) ->
 
     assert error is None
     assert handler_calls == [("run the digest", "avibe")], "no gate → direct scheduled path"
+
+
+def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """HFR-002: one dead accepted owner releases every shared ownership layer."""
+
+    from core.internal_server import create_app
+    from core.message_output import terminal_output_for
+    from core.session_turns import SessionTurnManager, emit_matches_active_turn
+    from modules.agents.base import AgentRequest
+    from modules.agents.service import AgentService
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    first = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="first",
+        agent_name="worker",
+    )
+    second = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="second",
+        agent_name="worker",
+    )
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+
+    class _Controller:
+        primary_platform = "avibe"
+
+        def __init__(self) -> None:
+            self.session_turns = SessionTurnManager(self)
+            self.session_turn_gate = None
+            self.agent_service = AgentService(self)
+            self.platform_settings_managers = {}
+            self.im_clients = {"avibe": SimpleNamespace()}
+            self.statuses: list[tuple[str, str]] = []
+            self.terminal_transitions: list[str] = []
+
+        @staticmethod
+        def _get_session_key(context) -> str:
+            return f"avibe::{context.channel_id}"
+
+        @staticmethod
+        def _session_id_from_context(context) -> str | None:
+            payload = getattr(context, "platform_specific", None) or {}
+            value = payload.get("agent_session_id")
+            return str(value) if value else None
+
+        def get_turn_sink(self, session_key):
+            return self.session_turns.get_turn_sink(session_key)
+
+        def register_turn_sink(self, session_key, **kwargs) -> None:
+            self.session_turns.register_turn_sink(session_key, **kwargs)
+
+        def pop_turn_sink(self, session_key, done_event=None) -> None:
+            self.session_turns.pop_turn_sink(session_key, done_event)
+
+        def mark_turn_complete(self, context) -> None:
+            sink = self.get_turn_sink(self._get_session_key(context))
+            if sink is not None and emit_matches_active_turn(sink, context):
+                sink["done_event"].set()
+
+        def set_agent_status(self, target_session_id, status) -> None:
+            self.statuses.append((target_session_id, status))
+
+        def backend_alive(self, context):
+            return self.agent_service.backend_alive(context)
+
+        def get_im_client_for_context(self, _context):
+            return SimpleNamespace(
+                should_use_thread_for_reply=lambda: True,
+                should_use_thread_for_dm_session=lambda: False,
+            )
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            *,
+            output,
+            is_error=False,
+            terminal_error=None,
+            **_kwargs,
+        ):
+            assert message_type == "result"
+            if not self.agent_service.emit_matches_runtime_turn(context):
+                return None
+            self.session_turns.on_terminal_result(context, is_error=is_error)
+            run_id = str((context.platform_specific or {}).get("task_execution_id") or "")
+            result = sqlite_store.record_run_output(
+                run_id,
+                output_id="terminal",
+                text=text,
+                terminal_status=("failed" if is_error else "succeeded") if output.settles_run else None,
+                error=terminal_error,
+                provenance=output.provenance(context),
+            )
+            if result["terminal_transition"]:
+                self.terminal_transitions.append(run_id)
+            self.mark_turn_complete(context)
+            self.agent_service.release_runtime_turn(context)
+            self.session_turns.on_terminal_delivery_complete(context)
+            return None
+
+    controller = _Controller()
+
+    class _AcceptedBackend:
+        name = "claude"
+
+        def __init__(self) -> None:
+            self.first_alive = True
+            self.started: list[str] = []
+
+        @staticmethod
+        def runtime_turn_key(request) -> str:
+            return request.composite_session_id
+
+        def backend_alive(self, context):
+            run_id = str((context.platform_specific or {}).get("task_execution_id") or "")
+            return self.first_alive if run_id == first.id else True
+
+        async def handle_message(self, request) -> None:
+            run_id = str((request.context.platform_specific or {}).get("task_execution_id") or "")
+            self.started.append(run_id)
+            controller.agent_service.mark_runtime_turn_started(request.context)
+            if run_id == second.id:
+                await controller.emit_agent_message(
+                    request.context,
+                    "result",
+                    "second completed",
+                    output=terminal_output_for(request),
+                )
+
+    backend = _AcceptedBackend()
+    controller.agent_service.register(backend)
+    controller.agent_service._liveness_probe_interval_seconds = 0.005
+    controller.agent_service._liveness_failure_grace_seconds = 0.005
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        del parsed_session_key
+        await controller.agent_service.handle_message(
+            "claude",
+            AgentRequest(
+                context=context,
+                message=message,
+                working_path=str(tmp_path),
+                base_session_id=session_id,
+                composite_session_id=f"{session_id}:{tmp_path}",
+                session_key=controller._get_session_key(context),
+            ),
+        )
+
+    controller.message_handler = SimpleNamespace(
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    create_app(controller)
+    scheduled = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _wait_for(predicate, *, timeout=1.0) -> None:
+        async def _poll() -> None:
+            while not predicate():
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(_poll(), timeout=timeout)
+
+    async def _exercise() -> None:
+        await scheduled._drain_requests()
+        await _wait_for(lambda: backend.started == [first.id])
+        await _wait_for(lambda: first.id not in scheduled._inflight_executions)
+
+        await scheduled._drain_requests()
+        await _wait_for(
+            lambda: request_store.get_run(second.id)["metadata"].get(
+                "workbench_queue_holds_run"
+            )
+            is True
+        )
+        state = controller.session_turns.turn_state(session_id)
+        assert state["owner"]["run_id"] == first.id
+        assert state["pending_input_count"] == 1
+        assert request_store.get_run(first.id)["status"] == "running"
+        assert request_store.get_run(second.id)["status"] == "queued"
+
+        backend.first_alive = False
+        await _wait_for(lambda: request_store.get_run(second.id)["status"] == "succeeded")
+        await _wait_for(lambda: session_id not in controller.session_turns.in_flight)
+
+        assert backend.started == [first.id, second.id]
+        assert controller.terminal_transitions == [first.id, second.id]
+        assert request_store.get_run(first.id)["status"] == "failed"
+        assert request_store.get_run(first.id)["error"] == (
+            "backend_runtime_exited_before_terminal"
+        )
+        assert request_store.get_run(second.id)["result_text"] == "second completed"
+        assert controller.session_turns.turn_state(session_id)["pending_input_count"] == 0
+
+    asyncio.run(_exercise())

@@ -2455,6 +2455,21 @@ class ScheduledTaskService:
                         session_id=session_id,
                     )
                 await self._drain_callbacks()
+                if request.request_type == "agent_run" and session_id:
+                    manager = getattr(self.controller, "session_turns", None)
+                    recover_queue = getattr(
+                        manager,
+                        "recover_persisted_agent_run_queue",
+                        None,
+                    )
+                    if callable(recover_queue):
+                        try:
+                            await recover_queue(session_id)
+                        except Exception:
+                            logger.exception(
+                                "Failed to recover persisted Agent Run queue for session=%s",
+                                session_id,
+                            )
 
     async def _execute_task(
         self,

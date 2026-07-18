@@ -12,7 +12,7 @@ from core.session_activities import (
     SessionActivityRegistry,
     activity_completion_output,
 )
-from core.session_turns import SessionTurnManager
+from core.session_turns import SessionTurnManager, Turn
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.session_activities import SQLiteSessionActivityStore
@@ -351,6 +351,48 @@ def test_turn_state_composes_foreground_inbox_activity_and_connection_axes():
     assert state["pending_input_count"] == 1
     assert state["connection"] == "connected"
     assert [item["id"] for item in state["background_activities"]] == ["task-1"]
+
+
+def test_turn_state_reports_authoritative_live_owner_diagnostics():
+    """HFR-002: queued Run diagnosis comes from the live Session owner."""
+
+    context = SimpleNamespace(
+        platform_specific={
+            "task_trigger_kind": "agent_run",
+            "task_execution_id": "run-owner",
+            "agent_runtime_turn_key": "session:/repo",
+            "agent_session_target": {"agent_backend": "codex"},
+        }
+    )
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            activities=SessionActivityRegistry(),
+            runtime_turn_started=lambda candidate: candidate is context,
+        ),
+        backend_alive=lambda candidate: False if candidate is context else None,
+    )
+    manager = SessionTurnManager(controller=controller)
+    manager._engine = SimpleNamespace(begin=lambda: nullcontext(object()))
+    manager.in_flight["ses-1"] = Turn(
+        task=SimpleNamespace(done=lambda: False),
+        context=context,
+        started_at="2026-07-18T04:31:26+00:00",
+    )
+
+    with mock.patch("core.session_turns.messages_service.list_queued", return_value=[{"id": "queued-1"}]):
+        state = manager.turn_state("ses-1")
+
+    assert state["in_flight"] is True
+    assert state["backend"] == "codex"
+    assert state["owner"] == {
+        "source": "agent_run",
+        "acquired_at": "2026-07-18T04:31:26+00:00",
+        "run_id": "run-owner",
+        "run_ids": ["run-owner"],
+        "runtime_key": "session:/repo",
+        "native_turn_started": True,
+        "backend_alive": False,
+    }
 
 
 def test_activity_restart_recovers_connection_and_interrupts_live_work(tmp_path: Path):

@@ -8,6 +8,19 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: harness_failure_recovery
+    name: Harness per-Session failure recovery
+    status: active
+    catalog: tests/scenarios/harness_failure_recovery/catalog.yaml
+    observations: tests/scenarios/harness_failure_recovery/observations.yaml
+    scenario_tests:
+      - tests/test_agent_service.py
+      - tests/test_scheduled_tasks.py
+    unit_or_contract_tests:
+      - tests/test_cli_task_command.py
+      - tests/test_cli_pagination.py
+      - tests/test_codex_transport.py
+      - tests/test_internal_server.py
   - id: auth_setup
     name: IM-driven backend auth recovery
     status: active

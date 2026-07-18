@@ -559,6 +559,18 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
     import uvicorn
 
     app = create_app(controller)
+    manager = getattr(controller, "session_turns", None)
+    recover_queue = getattr(manager, "recover_persisted_agent_run_queue", None)
+    if callable(recover_queue):
+        try:
+            recovered = await recover_queue()
+            if recovered:
+                logger.info(
+                    "Recovered persisted Workbench Agent Run queues for %s",
+                    ",".join(recovered),
+                )
+        except Exception:
+            logger.exception("Failed to recover persisted Workbench Agent Run queues")
     config = uvicorn.Config(
         app,
         log_config=None,

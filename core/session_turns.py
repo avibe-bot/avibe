@@ -31,7 +31,8 @@ from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USE
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
-from storage.models import messages
+from storage.background import normalize_run_status
+from storage.models import agent_runs, messages
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
 from vibe.i18n import t as i18n_t
@@ -40,6 +41,10 @@ if TYPE_CHECKING:
     from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -545,6 +550,7 @@ class Turn:
 
     task: asyncio.Task
     context: "MessageContext"
+    started_at: str = ""
     flush_on_cancel: bool = False
     stop_no_flush: bool = False
 
@@ -579,6 +585,7 @@ class SessionTurnManager:
         self.in_flight: dict[str, Turn] = {}
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
+        self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         # The live streaming turn sink per SESSION KEY (avibe/web-Chat only; IM/CLI
         # turns register none). Each is ``{on_chunk, done_event, turn_token}`` — the
         # turn's stream callback + completion event + correlation token. Keyed by
@@ -813,7 +820,11 @@ class SessionTurnManager:
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
         if isinstance(session_id, str) and session_id:
-            self.in_flight[session_id] = Turn(task=task, context=context)
+            self.in_flight[session_id] = Turn(
+                task=task,
+                context=context,
+                started_at=_utc_now_iso(),
+            )
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside
             # its UPDATE predicate, so writing ``running`` synchronously here —
@@ -1105,12 +1116,125 @@ class SessionTurnManager:
                     return False
         return True
 
+    async def recover_persisted_agent_run_queue(
+        self,
+        session_id: Optional[str] = None,
+    ) -> list[str]:
+        """Resume durable Workbench Agent Run queues after their owner vanished.
+
+        ``workbench_queue_holds_run`` rows are deliberately invisible to the
+        scheduler because the Session FSM owns their FIFO position. A process
+        restart drops the in-memory owner and therefore must re-enter that FSM.
+        Recovery is evidence-based: only a persisted queue row that references
+        a still-queued Agent Run is eligible. An older, scheduler-owned queued
+        Run defers recovery until that Run reaches its normal synchronous or
+        terminal path, preserving FIFO across restart.
+        """
+
+        if self._build_context is None:
+            return []
+        if session_id:
+            session_ids = [session_id]
+        else:
+            with self._sqlite_engine().connect() as conn:
+                session_ids = messages_service.list_queued_session_ids(conn)
+
+        recovered: list[str] = []
+        for queued_session_id in session_ids:
+            lock = self._queue_recovery_locks.setdefault(
+                queued_session_id,
+                asyncio.Lock(),
+            )
+            async with lock:
+                entry = self.in_flight.get(queued_session_id)
+                if entry is not None and not entry.task.done():
+                    continue
+                with self._sqlite_engine().connect() as conn:
+                    queue_rows = messages_service.list_queued(conn, queued_session_id)
+                    referenced_run_ids: list[str] = []
+                    for row in queue_rows:
+                        provenance = _scheduled_provenance(row) or {}
+                        spec = provenance.get("platform_specific") or {}
+                        if not isinstance(spec, dict) or spec.get("task_trigger_kind") != "agent_run":
+                            continue
+                        for run_id in _scheduled_row_execution_ids(row):
+                            if run_id not in referenced_run_ids:
+                                referenced_run_ids.append(run_id)
+                    if not referenced_run_ids:
+                        continue
+                    run_rows = list(
+                        conn.execute(
+                            select(
+                                agent_runs.c.id,
+                                agent_runs.c.created_at,
+                                agent_runs.c.status,
+                                agent_runs.c.metadata_json,
+                            )
+                            .where(agent_runs.c.session_id == queued_session_id)
+                            .where(agent_runs.c.run_type == "agent_run")
+                            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                        ).mappings()
+                    )
+
+                queued_rows = [
+                    row
+                    for row in run_rows
+                    if normalize_run_status(row["status"]) == "queued"
+                ]
+                live_references = {
+                    str(row["id"])
+                    for row in queued_rows
+                    if str(row["id"]) in referenced_run_ids
+                }
+                if not live_references:
+                    continue
+
+                first_reference_at = min(
+                    (
+                        parsed
+                        for row in queued_rows
+                        if str(row["id"]) in live_references
+                        and (parsed := _parse_queue_timestamp(row["created_at"]))
+                        is not None
+                    ),
+                    default=None,
+                )
+                defer_to_scheduler = False
+                for row in queued_rows:
+                    run_id = str(row["id"])
+                    if run_id in live_references:
+                        continue
+                    try:
+                        metadata = json.loads(row["metadata_json"] or "{}")
+                    except (TypeError, ValueError):
+                        metadata = {}
+                    if isinstance(metadata, dict) and metadata.get(
+                        "workbench_queue_holds_run"
+                    ):
+                        continue
+                    created_at = _parse_queue_timestamp(row["created_at"])
+                    if (
+                        first_reference_at is None
+                        or created_at is None
+                        or created_at <= first_reference_at
+                    ):
+                        defer_to_scheduler = True
+                        break
+                if defer_to_scheduler:
+                    continue
+
+                if await self.flush_queue(queued_session_id):
+                    recovered.append(queued_session_id)
+        return recovered
+
     def turn_state(self, session_id: str) -> dict:
         """Compose orthogonal foreground, inbox, Activity, and connection facts."""
         entry = self.in_flight.get(session_id)
         active = entry is not None and not entry.task.done()
         native_turn_started = False
         backend = ""
+        backend_alive: Optional[bool] = None
+        owner: dict[str, Any] | None = None
         if active and entry is not None:
             payload = getattr(entry.context, "platform_specific", None) or {}
             target = payload.get("agent_session_target")
@@ -1120,6 +1244,30 @@ class SessionTurnManager:
             started = getattr(service, "runtime_turn_started", None)
             if callable(started):
                 native_turn_started = started(entry.context) is True
+            probe = getattr(self.controller, "backend_alive", None) if self.controller is not None else None
+            if native_turn_started and callable(probe):
+                try:
+                    backend_alive = probe(entry.context)
+                except Exception:
+                    logger.debug("turn_state: backend liveness probe failed", exc_info=True)
+            coalesced = payload.get("coalesced_queue")
+            owner_run_ids = (
+                [str(value) for value in coalesced.get("execution_ids", []) if str(value or "").strip()]
+                if isinstance(coalesced, dict) and isinstance(coalesced.get("execution_ids"), list)
+                else []
+            )
+            owner_run_id = str(payload.get("task_execution_id") or "").strip()
+            if owner_run_id and owner_run_id not in owner_run_ids:
+                owner_run_ids.insert(0, owner_run_id)
+            owner = {
+                "source": str(payload.get("task_trigger_kind") or payload.get("turn_source") or "human"),
+                "acquired_at": entry.started_at or None,
+                "run_id": owner_run_id or None,
+                "run_ids": owner_run_ids,
+                "runtime_key": str(payload.get("agent_runtime_turn_key") or "").strip() or None,
+                "native_turn_started": native_turn_started,
+                "backend_alive": backend_alive,
+            }
         pending_input_count = 0
         harness_activities: list[dict[str, Any]] = []
         try:
@@ -1170,6 +1318,8 @@ class SessionTurnManager:
         }
         if backend:
             result["backend"] = backend
+        if owner is not None:
+            result["owner"] = owner
         return result
 
     async def release_for_backend_refresh(
@@ -1498,7 +1648,11 @@ class SessionTurnManager:
             # roll the sink back so it doesn't leak, and skip FSM registration.
             self.pop_turn_sink(session_key, done)
             return False
-        self.in_flight[session_id] = Turn(task=task, context=context)
+        self.in_flight[session_id] = Turn(
+            task=task,
+            context=context,
+            started_at=_utc_now_iso(),
+        )
         bus.publish("turn.start", {"session_id": session_id})
         if self._pop_context_flag(context, _SHOW_CHECKPOINT_DEFERRED_START_KEY):
             self._begin_show_checkpoint(context)

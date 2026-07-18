@@ -178,6 +178,58 @@ def test_runs_show_defaults_to_caller_run(monkeypatch, tmp_path, capsys) -> None
     }
 
 
+def test_runs_show_attaches_live_session_owner_for_queued_run(monkeypatch, tmp_path, capsys) -> None:
+    """HFR-002: CLI diagnosis names the authoritative live Session owner."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-queued",
+                "request_type": "agent_run",
+                "status": "queued",
+                "agent_name": "helper",
+                "agent_backend": "codex",
+                "session_id": "ses-alpha",
+                "message": "queued successor",
+                "created_at": "2026-07-18T04:31:27+00:00",
+                "updated_at": "2026-07-18T04:31:27+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    async def _turn_state(session_id):
+        assert session_id == "ses-alpha"
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "in_flight": True,
+                "owner": {
+                    "source": "agent_run",
+                    "run_id": "run-owner",
+                    "acquired_at": "2026-07-18T04:31:26+00:00",
+                    "native_turn_started": True,
+                    "backend_alive": True,
+                },
+            },
+        }
+
+    monkeypatch.setattr("vibe.internal_client.turn_state", _turn_state)
+    args = cli.build_parser().parse_args(["runs", "show", "run-queued"])
+
+    assert cli.cmd_runs_show(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    runtime = payload["run"]["session_runtime"]
+    assert runtime["available"] is True
+    assert runtime["owner"]["run_id"] == "run-owner"
+    assert runtime["owner"]["backend_alive"] is True
+
+
 def test_runs_show_requires_run_without_caller(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)

@@ -1,0 +1,72 @@
+version: 1
+capability:
+  id: harness_failure_recovery
+  name: Harness per-Session failure recovery
+  canonical_tests:
+    - tests/test_agent_service.py
+    - tests/test_scheduled_tasks.py
+  shared_harness: []
+status_legend:
+  covered: deterministic scenario or contract coverage exists
+  manual: validated in the local Incus black-box environment
+scenarios:
+  - id: HFR-001
+    name: failure before backend acceptance releases ownership
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_agent_service.py::test_agent_service_releases_gate_when_exception_terminal_emit_fails
+  - id: HFR-002
+    name: accepted backend death releases owner and dispatches successor once
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_dead_accepted_owner_converges_run_session_and_persisted_fifo
+  - id: HFR-003
+    name: canceled scheduler execution requeues its claimed Run
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_drain_requests_requeues_cancelled_task_run
+  - id: HFR-004
+    name: restart recovers stale running rows and persisted queue
+    status: covered
+    kind: restart
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settles
+  - id: HFR-005
+    name: live long-running owner is never stolen by age
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_service.py::test_agent_service_never_steals_live_or_unknown_long_running_owner
+  - id: HFR-006
+    name: transient or unknown liveness does not release ownership
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_service.py::test_agent_service_requires_dead_backend_after_grace_before_recovery
+  - id: HFR-007
+    name: late terminal cannot release or settle a successor
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_agent_service.py::test_late_terminal_from_recovered_owner_cannot_release_successor
+  - id: HFR-008
+    name: cancel and restart remain idempotent
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_failed_run_records_error_and_enqueues_one_terminal_callback
+manual_evidence:
+  - local Incus backend process death after prompt acceptance
+  - local Incus controller restart with persisted queued successor
+plan: docs/plans/harness-session-failure-recovery.md

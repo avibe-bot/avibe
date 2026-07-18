@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -10,6 +11,7 @@ import pytest
 from core.message_output import terminal_turn_output
 from core.session_activities import SessionActivityRegistry
 from modules.agents.service import AgentService
+from modules.agents.codex.transport import CodexTransport
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.session_activities import SQLiteSessionActivityStore
@@ -1137,6 +1139,8 @@ def test_agent_service_schedules_terminal_tidy_on_cancellation() -> None:
 
 
 def test_agent_service_releases_gate_when_exception_terminal_emit_fails() -> None:
+    """HFR-001: pre-accept failure releases ownership even if terminal emit fails."""
+
     async def _run():
         controller = _Controller()
 
@@ -1157,5 +1161,279 @@ def test_agent_service_releases_gate_when_exception_terminal_emit_fails() -> Non
             raise AssertionError("backend exception should escape")
 
         assert not service._turn_gates["session:/repo"].lock.locked()
+
+    asyncio.run(_run())
+
+
+def test_agent_service_recovers_accepted_turn_when_owned_backend_dies() -> None:
+    """A dead accepted backend must release the runtime FIFO without a timeout."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        recovered = asyncio.Event()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+
+        class _AcceptedThenDeadAgent(_RuntimeAgent):
+            def __init__(self) -> None:
+                super().__init__()
+                self.alive = True
+
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+
+            def backend_alive(self, _context):
+                return self.alive
+
+        agent = _AcceptedThenDeadAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.01
+        service._liveness_failure_grace_seconds = 0.02
+
+        async def _emit(context, message_type, text, **kwargs):
+            assert message_type == "result"
+            assert text == ""
+            assert kwargs["is_error"] is True
+            assert kwargs["level"] == "silent"
+            assert kwargs["terminal_error"] == "backend_runtime_exited_before_terminal"
+            service.release_runtime_turn(context)
+            recovered.set()
+
+        controller.emit_agent_message = _emit
+
+        first = _request("first")
+        second = _request("second")
+        await service.handle_message("claude", first)
+        assert service._turn_gates["session:/repo"].lock.locked()
+
+        successor = asyncio.create_task(service.handle_message("claude", second))
+        await asyncio.sleep(0)
+        assert agent.started == ["first"]
+
+        agent.alive = False
+        try:
+            await asyncio.wait_for(recovered.wait(), timeout=0.5)
+            await asyncio.wait_for(successor, timeout=0.5)
+            assert agent.started == ["first", "second"]
+        finally:
+            if not successor.done():
+                successor.cancel()
+                await asyncio.gather(successor, return_exceptions=True)
+            service.release_runtime_turn(second.context)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("liveness", [True, None])
+def test_agent_service_never_steals_live_or_unknown_long_running_owner(liveness) -> None:
+    """HFR-005/HFR-006: age alone never releases a live or unknown owner."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        controller.emit_agent_message = AsyncMock(side_effect=AssertionError("live owner was stolen"))
+
+        class _LongRunningAgent(_RuntimeAgent):
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+
+            def backend_alive(self, _context):
+                return liveness
+
+        agent = _LongRunningAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.005
+        service._liveness_failure_grace_seconds = 0.005
+
+        first = _request("first")
+        second = _request("second")
+        await service.handle_message("claude", first)
+        successor = asyncio.create_task(service.handle_message("claude", second))
+        try:
+            await asyncio.sleep(0.06)
+            assert agent.started == ["first"]
+            assert not successor.done()
+            controller.emit_agent_message.assert_not_awaited()
+
+            service.release_runtime_turn(first.context)
+            await asyncio.wait_for(successor, timeout=0.5)
+            assert agent.started == ["first", "second"]
+        finally:
+            if not successor.done():
+                successor.cancel()
+                await asyncio.gather(successor, return_exceptions=True)
+            service.release_runtime_turn(second.context)
+
+    asyncio.run(_run())
+
+
+def test_agent_service_requires_dead_backend_after_grace_before_recovery() -> None:
+    """HFR-006: a transient false probe cannot release the accepted owner."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        controller.emit_agent_message = AsyncMock(side_effect=AssertionError("false blip stole the owner"))
+
+        class _FlappingAgent(_RuntimeAgent):
+            alive = True
+
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+
+            def backend_alive(self, _context):
+                return self.alive
+
+        agent = _FlappingAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.005
+        service._liveness_failure_grace_seconds = 0.04
+
+        request = _request("first")
+        await service.handle_message("claude", request)
+        agent.alive = False
+        await asyncio.sleep(0.015)
+        agent.alive = True
+        await asyncio.sleep(0.06)
+
+        assert service._turn_gates["session:/repo"].lock.locked()
+        assert service.runtime_turn_started(request.context) is True
+        controller.emit_agent_message.assert_not_awaited()
+        service.release_runtime_turn(request.context)
+
+    asyncio.run(_run())
+
+
+def test_late_terminal_from_recovered_owner_cannot_release_successor() -> None:
+    """HFR-007: token identity makes dead-owner recovery and late results idempotent."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        recovered = asyncio.Event()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+
+        class _RecoveringAgent(_RuntimeAgent):
+            alive = True
+
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+
+            def backend_alive(self, _context):
+                return self.alive
+
+        agent = _RecoveringAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.005
+        service._liveness_failure_grace_seconds = 0.005
+        terminal_calls = 0
+
+        async def _emit(context, *_args, **_kwargs):
+            nonlocal terminal_calls
+            terminal_calls += 1
+            service.release_runtime_turn(context)
+            recovered.set()
+
+        controller.emit_agent_message = _emit
+        first = _request("first")
+        second = _request("second")
+        await service.handle_message("claude", first)
+        first_token = first.context.platform_specific["agent_runtime_turn_token"]
+        successor = asyncio.create_task(service.handle_message("claude", second))
+        agent.alive = False
+        try:
+            await asyncio.wait_for(recovered.wait(), timeout=0.5)
+            agent.alive = True
+            await asyncio.wait_for(successor, timeout=0.5)
+            gate = service._turn_gates["session:/repo"]
+            successor_token = gate.token
+            assert successor_token and successor_token != first_token
+
+            # The old context still carries the old token. A delayed result's
+            # normal release hook must not touch the successor owner.
+            service.release_runtime_turn(first.context)
+            assert gate.token == successor_token
+            assert gate.lock.locked()
+            assert terminal_calls == 1
+        finally:
+            if not successor.done():
+                successor.cancel()
+                await asyncio.gather(successor, return_exceptions=True)
+            service.release_runtime_turn(second.context)
+
+    asyncio.run(_run())
+
+
+def test_real_child_exit_after_acceptance_recovers_runtime_fifo() -> None:
+    """HFR-002: an owned OS child exit drives the same shared recovery path."""
+
+    async def _run() -> None:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        transport = CodexTransport(binary=sys.executable, cwd="/")
+        transport._process = process
+        transport._reader_task = asyncio.create_task(transport._reader_loop())
+
+        controller = _Controller()
+        recovered = asyncio.Event()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+
+        class _ProcessBackedAgent(_RuntimeAgent):
+            name = "codex"
+
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+
+            def backend_alive(self, _context):
+                return transport.is_alive
+
+        agent = _ProcessBackedAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.005
+        service._liveness_failure_grace_seconds = 0.005
+        terminal_calls = 0
+
+        async def _emit(context, *_args, **_kwargs):
+            nonlocal terminal_calls
+            terminal_calls += 1
+            service.release_runtime_turn(context)
+            recovered.set()
+
+        controller.emit_agent_message = _emit
+        first = _request("first", runtime_key="codex:/repo")
+        second = _request("second", runtime_key="codex:/repo")
+        successor = None
+        try:
+            await service.handle_message("codex", first)
+            successor = asyncio.create_task(service.handle_message("codex", second))
+            process.kill()
+            await process.wait()
+            await transport._reader_task
+
+            await asyncio.wait_for(recovered.wait(), timeout=0.5)
+            await asyncio.wait_for(successor, timeout=0.5)
+            assert agent.started == ["first", "second"]
+            assert terminal_calls == 1
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            if successor is not None and not successor.done():
+                successor.cancel()
+                await asyncio.gather(successor, return_exceptions=True)
+            service.release_runtime_turn(second.context)
 
     asyncio.run(_run())

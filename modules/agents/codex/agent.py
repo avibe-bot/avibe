@@ -118,7 +118,10 @@ class CodexAgent(BaseAgent):
         if transport is None:
             return None
         try:
-            return bool(transport.is_alive)
+            return bool(
+                transport.is_alive
+                or getattr(transport, "has_pending_notifications", False)
+            )
         except Exception:
             return None
 

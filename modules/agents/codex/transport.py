@@ -49,6 +49,7 @@ class CodexTransport:
         # Ordered notification queue
         self._notify_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         self._notify_task: Optional[asyncio.Task[None]] = None
+        self._notify_inflight = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -166,6 +167,12 @@ class CodexTransport:
     @property
     def is_initialized(self) -> bool:
         return self._initialized and self.is_alive
+
+    @property
+    def has_pending_notifications(self) -> bool:
+        """Whether an already-read notification can still deliver a terminal."""
+
+        return self._notify_inflight > 0 or not self._notify_queue.empty()
 
     @property
     def pid(self) -> Optional[int]:
@@ -328,11 +335,14 @@ class CodexTransport:
         try:
             while True:
                 method, params = await self._notify_queue.get()
+                self._notify_inflight += 1
                 try:
                     assert self._notification_cb is not None
                     await self._notification_cb(method, params)
                 except Exception:
                     logger.exception("Error in notification handler for %s", method)
+                finally:
+                    self._notify_inflight -= 1
         except asyncio.CancelledError:
             return
 

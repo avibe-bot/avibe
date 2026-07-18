@@ -1,0 +1,48 @@
+version: 1
+capability: harness_failure_recovery
+observations:
+  - id: HFR-OBS-001
+    date: 2026-07-18
+    source: deterministic pre-fix fault injection
+    result: confirmed
+    detail: >-
+      After backend acceptance, a definitive backend_alive false result was
+      observable but had no lifecycle consumer. The AgentService runtime gate
+      remained locked and a same-runtime successor timed out waiting. The
+      scheduler execution and its per-session reservation had already returned.
+  - id: HFR-OBS-002
+    date: 2026-07-18
+    source: code-path trace
+    result: confirmed
+    detail: >-
+      A silent terminal result is the existing shared idempotent convergence
+      point: it settles the Run, signals the Session sink, releases the runtime
+      token, flushes the persisted Workbench queue, and enables callback drain.
+  - id: HFR-OBS-003
+    date: 2026-07-18
+    source: local Incus pre-fix controller restart
+    result: confirmed
+    detail: >-
+      Session sesswwbh4da32 lost its in-memory owner on restart. Owner Run
+      fae757453b2b became terminal, while successor 3838c93fbfaa remained queued
+      with its Workbench queue row for more than twelve minutes. No running Run
+      or live Session owner remained. The scheduler correctly excluded the held
+      Run, but the restarted Session FSM never re-entered its durable queue.
+  - id: HFR-OBS-004
+    date: 2026-07-18
+    source: local Incus post-fix controller restart
+    result: passed
+    detail: >-
+      With state preserved, boot recovered Session sesswwbh4da32 at
+      05:21:14Z. The exact successor Run 3838c93fbfaa started once, completed
+      once with HFR915_RR_SECOND_DONE, recorded one output, and emptied the
+      queue.
+  - id: HFR-OBS-005
+    date: 2026-07-18
+    source: local Incus Codex process-group kill
+    result: passed
+    detail: >-
+      Session ses7dr38p3qsp owned Codex PGID 8205 after prompt acceptance.
+      SIGKILL at 05:05:53.727Z failed owner Run 91962dcd8f50 through the shared
+      terminal path, then successor ef4b716f05e1 started once, completed once,
+      recorded one output, and emptied the persisted queue.
