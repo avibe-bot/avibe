@@ -186,6 +186,9 @@ The Incus runner separates slow-changing dependencies from fast-changing source:
 - **Service**: Avibe runs under `avibe-regression.service` as user `avibe`.
 - **Home**: `/home/avibe/.avibe` is the active product state home;
   `/home/avibe/.vibe_remote` is a compatibility symlink.
+- **Build identity**: the version badge and `/api/version` report the commit
+  recorded by the latest source sync separately from install-time package
+  metadata. Source targets do not use that package metadata for update prompts.
 - **Show Runtime**: every successful update runs `vibe runtime prepare --strict`
   and then verifies `vibe runtime status --json`.
 
