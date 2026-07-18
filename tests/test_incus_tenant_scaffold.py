@@ -65,6 +65,20 @@ def test_cloud_init_configures_vibe_user_service_and_ui():
     assert "owner: root:root" in data
 
 
+def test_default_config_ui_is_field_complete():
+    """Fresh-tenant scaffold must emit every ``UiConfig`` field, not a hand-listed
+    subset — so a recently-added ui key is present (with its default) rather than
+    absent from the provisioned config."""
+    from dataclasses import fields
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from config.v2_config import UiConfig
+
+    ui = incus_tenant.default_config(tenant_spec())["ui"]
+    missing = {f.name for f in fields(UiConfig)} - set(ui)
+    assert not missing, f"incus_tenant default_config ui dropped fields: {missing}"
+
+
 def test_profile_yaml_sets_resources_and_devices():
     data = incus_tenant.profile_yaml(tenant_spec(cpus="4", memory="8GiB", disk="80GiB"))
 

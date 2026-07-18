@@ -18,9 +18,15 @@ import socket
 import subprocess
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
+
+# Repo root on sys.path so ``config`` resolves whether this runs from an
+# installed venv or directly from a checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from config.v2_config import UiConfig  # noqa: E402
 
 
 PROJECT_PREFIX = "vr-"
@@ -215,7 +221,9 @@ def default_config(spec: TenantSpec) -> dict:
             "codex": {"enabled": "codex" in enabled, "cli_path": "codex"},
         },
         "gateway": None,
-        "ui": {"setup_host": "0.0.0.0", "setup_port": spec.ui_port, "open_browser": False},
+        # Full ``UiConfig`` default set + only the tenant bind overrides, so no
+        # ui field is dropped when a new key is added (see prepare_regression).
+        "ui": {**asdict(UiConfig()), "setup_host": "0.0.0.0", "setup_port": spec.ui_port, "open_browser": False},
         "remote_access": {"provider": "vibe_cloud", "vibe_cloud": {}},
         "update": {},
         "ack_mode": "typing",

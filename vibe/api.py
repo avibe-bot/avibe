@@ -1009,6 +1009,10 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             "opencode": config.agents.opencode.__dict__,
             "claude": _agent_payload(config.agents.claude.__dict__, include_secrets=include_secrets),
             "codex": _agent_payload(config.agents.codex.__dict__, include_secrets=include_secrets),
+            # Mirror ``V2Config.save`` — avault must be emitted here too, or every
+            # UI save (which uses this payload as the deep-merge base) silently
+            # resets ``agents.avault.cli_path`` to the dataclass default.
+            "avault": config.agents.avault.__dict__,
         },
         "gateway": _project_secret_fields(
             config.gateway.__dict__ if config.gateway else None,
