@@ -898,7 +898,6 @@ def test_copy_cleanup_never_chmods_symlink_target(tmp_path, monkeypatch):
     locked = source / "locked"
     locked.mkdir(parents=True)
     (locked / "external-link").symlink_to(external)
-    locked.chmod(0o500)
     destination = tmp_path / "destination"
 
     def fail_publish(*_args, **_kwargs):
@@ -906,13 +905,17 @@ def test_copy_cleanup_never_chmods_symlink_target(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fs, "_publish_staged_copy", fail_publish)
 
-    with pytest.raises(FileBrowserError) as exc:
-        fs.copy_path(str(source), str(destination))
+    locked.chmod(0o500)
+    try:
+        with pytest.raises(FileBrowserError) as exc:
+            fs.copy_path(str(source), str(destination))
 
-    assert exc.value.code == "fs_error"
-    assert external.stat().st_mode & 0o777 == 0o600
-    assert not destination.exists()
-    assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
+        assert exc.value.code == "fs_error"
+        assert external.stat().st_mode & 0o777 == 0o600
+        assert not destination.exists()
+        assert not list(tmp_path.glob(f"{fs._COPY_TEMP_PREFIX}*"))
+    finally:
+        locked.chmod(0o700)
 
 
 def test_copy_file_size_cap_rejects_before_staging(tmp_path, monkeypatch):
