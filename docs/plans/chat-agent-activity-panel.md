@@ -278,3 +278,16 @@ activity". The activity-streaming flag cache is reset on config save so the togg
 takes effect immediately. Presentation is `ActivityCard` / `ActivityChip` in
 `ui/src/components/workbench/AgentActivityGroup.tsx`; pure helpers + the live
 generation reducer + wire mapping in `ui/src/lib/agentActivity.ts`.
+
+**Compact running-card height (refined UX, design.pen State A updated).** The
+compact viewport height is **min(content, 3-row cap ≈ 110px)** — NOT a constant
+reserved height. Below the cap the body is exactly content-tall and grows downward
+as rows arrive (natural, like any new message at the transcript tail), so a 1–2 row
+turn shows no blank space above the content. Only once content reaches the cap does
+it become the constant-height viewport: clamped height, newest rows pinned to the
+bottom (`justify-end` + `overflow-hidden` clipping the top), older rows fading up
+(the top gradient renders ONLY at the cap). The cap is a CSS `max-height`; a small
+layout measurement (`offsetHeight >= cap`) gates the fade, so the height behavior
+itself is CSS-driven — not unit-testable under jsdom, which does no layout. Expanded
+mode is unchanged: `max-h-[40vh]` + internal scroll already fits content up to its
+cap. Tail auto-follow (the Transcript scroller) is untouched.

@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -119,6 +119,11 @@ const ActivityRows: React.FC<{ rows: ActivityRow[] }> = ({ rows }) => (
 
 // ===== Running card (states A/B): compact fixed-height viewport that never grows,
 // or an expanded ~40vh internal scroller that auto-follows the tail. =====
+// Compact running-card viewport cap ≈ 3 rows. The body height is min(content, cap):
+// it grows downward from a single row (no reserved blank space) and only becomes a
+// constant-height, bottom-following, top-fading viewport once content reaches the cap.
+const COMPACT_CAP_PX = 110;
+
 export const ActivityCard: React.FC<{
   rows: ActivityRow[];
   startedAtMs: number | null;
@@ -132,6 +137,11 @@ export const ActivityCard: React.FC<{
   const [mountedAt] = useState(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
+  // Compact body reached its cap → clamp to the cap + show the top "older rows
+  // fading up" gradient. Below the cap the body is exactly content-tall (no fade,
+  // no blank space).
+  const compactBodyRef = useRef<HTMLDivElement>(null);
+  const [compactAtCap, setCompactAtCap] = useState(false);
 
   // Tick the elapsed clock once a second while mounted (the card only mounts
   // while a live turn is running).
@@ -146,6 +156,14 @@ export const ActivityCard: React.FC<{
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [rows.length, expanded, following]);
+
+  // Measure whether the compact body has hit the cap (content clamped) — drives the
+  // top fade so it only appears once older rows are actually clipped.
+  useLayoutEffect(() => {
+    if (expanded) return;
+    const el = compactBodyRef.current;
+    if (el) setCompactAtCap(el.offsetHeight >= COMPACT_CAP_PX);
+  }, [rows.length, expanded]);
 
   const elapsedMs = Math.max(0, nowMs - (startedAtMs ?? mountedAt));
   const mm = Math.floor(elapsedMs / 60000);
@@ -201,14 +219,21 @@ export const ActivityCard: React.FC<{
             )}
           </div>
         ) : (
-          // Compact: a fixed ~110px viewport, content pinned to the bottom so the
-          // newest rows show and older rows are clipped + faded upward. The box
-          // never grows → no transcript reflow.
-          <div className="relative h-[110px] overflow-hidden">
-            <div className="flex h-full flex-col justify-end px-1.5 py-1.5">
-              <ActivityRows rows={rows} />
-            </div>
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-8 bg-gradient-to-b from-background to-transparent" />
+          // Compact: body height = min(content, cap). Below the cap it is exactly
+          // content-tall and grows downward as rows arrive (natural, like any new
+          // message at the transcript tail) — no reserved blank space. At the cap it
+          // clamps to a constant viewport with the newest rows pinned to the bottom
+          // (justify-end) and older rows clipped + faded up. ``overflow-hidden`` clips
+          // the top overflow; the tail auto-follow lives in the Transcript scroller.
+          <div
+            ref={compactBodyRef}
+            className="relative flex flex-col justify-end overflow-hidden px-1.5 py-1.5"
+            style={{ maxHeight: COMPACT_CAP_PX }}
+          >
+            <ActivityRows rows={rows} />
+            {compactAtCap && (
+              <div className="pointer-events-none absolute inset-x-0 top-0 h-8 bg-gradient-to-b from-background to-transparent" />
+            )}
           </div>
         )}
       </div>
