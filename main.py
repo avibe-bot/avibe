@@ -10,6 +10,7 @@ from typing import Any
 
 from config.paths import ensure_data_dirs, get_logs_dir
 from vibe.logging_config import APPLICATION_LOG_BACKUP_COUNT, APPLICATION_LOG_MAX_BYTES
+from vibe.macos_session_diagnostics import start_macos_session_diagnostics
 from vibe.runtime import (
     ServiceAlreadyRunningError,
     acquire_service_instance_lock,
@@ -120,9 +121,19 @@ def _log_shutdown_intent(logger: logging.Logger, signum: int) -> None:
     logger.info("Accepted managed shutdown intent: %s", intent)
 
 
+def _stop_macos_session_diagnostics(monitor: Any) -> None:
+    if monitor is None:
+        return
+    try:
+        monitor.stop()
+    except Exception:
+        logging.getLogger(__name__).debug("macOS session diagnostics cleanup failed")
+
+
 def main():
     """Main entry point"""
     lock_acquired = False
+    macos_session_diagnostics = None
     try:
         acquire_service_instance_lock()
         lock_acquired = True
@@ -146,9 +157,11 @@ def main():
             shutdown_intent_required(),
             os.environ.get("VIBE_REQUIRE_SHUTDOWN_INTENT"),
         )
-        from core.process_diagnostics import log_process_snapshot
+        macos_session_diagnostics = start_macos_session_diagnostics(logger)
+        if sys.platform != "darwin":
+            from core.process_diagnostics import log_process_snapshot
 
-        log_process_snapshot(logger, "service-start")
+            log_process_snapshot(logger, "service-start")
         report = prepare_sqlite_state(config)
         logger.info(
             "SQLite state ready: imported=%s db_path=%s backup_path=%s",
@@ -176,6 +189,7 @@ def main():
                 logger.info("Shutting down after signal %s", signum)
             except Exception:
                 pass
+            _stop_macos_session_diagnostics(macos_session_diagnostics)
             try:
                 controller.cleanup_sync()
             except Exception as cleanup_err:
@@ -190,6 +204,7 @@ def main():
         try:
             controller.run()
         finally:
+            _stop_macos_session_diagnostics(macos_session_diagnostics)
             release_service_instance_lock()
         
     except ServiceAlreadyRunningError as e:
@@ -200,6 +215,8 @@ def main():
             release_service_instance_lock()
         logging.error(f"Failed to start: {e}")
         sys.exit(1)
+    finally:
+        _stop_macos_session_diagnostics(macos_session_diagnostics)
 
 
 if __name__ == "__main__":
