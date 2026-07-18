@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import ast
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.v2_config import V2Config
+from config.v2_config import UiConfig, V2Config
 from vibe import api
 
 
@@ -746,3 +747,94 @@ def test_wizard_platform_selection_preserves_credential_drafts_on_continue():
     assert "await onSave(nextData);" in source
     assert "onNext(nextData);" in source
     assert "onNext(selectionData);" not in source
+
+
+# ---------------------------------------------------------------------------
+# Config field-completeness (guards the "partial save silently drops a field"
+# class of bug). ``save_config`` deep-merges the incoming payload onto
+# ``config_to_payload(load_config())`` as its base; any field the base payload
+# omits is lost whenever a save does not itself re-send that field. So every
+# persisted config field MUST appear in both serializers.
+# ---------------------------------------------------------------------------
+
+
+def test_config_to_payload_includes_avault_agent():
+    """Regression: ``config_to_payload`` dropped ``agents.avault`` entirely, so
+    every UI save reset ``agents.avault.cli_path`` to the dataclass default."""
+    config = V2Config.from_payload(_full_config_payload())
+    config.agents.avault.cli_path = "/opt/managed/avault"
+
+    payload = api.config_to_payload(config)
+
+    assert "avault" in payload["agents"]
+    assert payload["agents"]["avault"]["cli_path"] == "/opt/managed/avault"
+
+
+def test_save_config_preserves_avault_cli_path_on_unrelated_partial_save(monkeypatch, tmp_path):
+    """A partial UI save (e.g. toggling ``show_duration``) must NOT reset a
+    previously-persisted ``agents.avault.cli_path`` (set by ``vibe runtime
+    prepare`` -> ``_persist_avault_cli_path``)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    full = _full_config_payload()
+    full["agents"]["avault"] = {"cli_path": "/opt/managed/avault"}
+    created = api.save_config(full)
+    assert created.agents.avault.cli_path == "/opt/managed/avault"
+
+    updated = api.save_config({"show_duration": False})
+
+    assert updated.agents.avault.cli_path == "/opt/managed/avault"
+    assert api.config_to_payload(updated)["agents"]["avault"]["cli_path"] == "/opt/managed/avault"
+
+
+def test_save_config_preserves_ui_fields_on_unrelated_partial_save(monkeypatch, tmp_path):
+    """The owner-facing scenario: after enabling ``show_agent_activity`` (and a
+    custom font size / instance name), an unrelated partial save must keep them.
+    Guards the ``ui`` sub-block of the deep-merge base."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    full = _full_config_payload()
+    full["ui"] = {
+        **full["ui"],
+        "show_agent_activity": True,
+        "chat_message_font_size": 20,
+        "instance_name": "OwnerBox",
+    }
+    created = api.save_config(full)
+    assert created.ui.show_agent_activity is True
+
+    updated = api.save_config({"show_duration": False})
+
+    assert updated.ui.show_agent_activity is True
+    assert updated.ui.chat_message_font_size == 20
+    assert updated.ui.instance_name == "OwnerBox"
+
+
+def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path):
+    """Mechanism guard for the whole class: both full-config serializers
+    (``V2Config.save`` on disk and ``config_to_payload``, the save merge base)
+    must emit every persisted field — top-level, every ``UiConfig`` sub-field,
+    and every agent backend. A newly-added field hand-listed into only one
+    serializer (or neither) fails here, so it cannot silently drop on save."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    config = api.save_config(_full_config_payload())
+
+    ui_field_names = {f.name for f in fields(UiConfig)}
+    # ``platform_configs`` is the internal per-platform aggregate; it is emitted
+    # under each platform's own key, not as a top-level ``platform_configs`` key.
+    top_level = {f.name for f in fields(V2Config)} - {"platform_configs"}
+    agents = {"opencode", "claude", "codex", "avault"}
+
+    def _assert_complete(label: str, payload: dict) -> None:
+        assert top_level <= set(payload), f"{label} top-level missing: {top_level - set(payload)}"
+        assert ui_field_names <= set(payload["ui"]), f"{label} ui missing: {ui_field_names - set(payload['ui'])}"
+        assert agents <= set(payload["agents"]), f"{label} agents missing: {agents - set(payload['agents'])}"
+
+    _assert_complete("config_to_payload", api.config_to_payload(config))
+
+    import json
+
+    from config import paths
+
+    _assert_complete("V2Config.save", json.loads(paths.get_config_path().read_text(encoding="utf-8")))
