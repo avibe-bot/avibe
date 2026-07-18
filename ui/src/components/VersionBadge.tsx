@@ -112,6 +112,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
   const displayVersion = isSourceBuild ? shortSourceRevision : shortenVersion(currentVersion);
+  const refreshLabel = checking
+    ? t('dashboard.checking')
+    : t(isSourceBuild ? 'dashboard.refreshBuildInfo' : 'dashboard.checkUpdate');
   const badgeTitle = isSourceBuild
     ? `${t('dashboard.sourceRevision')}: ${sourceRevision || t('dashboard.unknownRevision')}${versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}`
     : `v${currentVersion}`;
@@ -155,19 +158,17 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               {t(isSourceBuild ? 'dashboard.buildAndVersion' : 'dashboard.versionAndUpdate')}
             </span>
             <div className="flex items-center gap-1">
-              {!isSourceBuild && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted hover:text-foreground"
-                  onClick={checkVersion}
-                  disabled={checking || restarting}
-                  aria-label={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
-                  title={checking ? t('dashboard.checking') : t('dashboard.checkUpdate')}
-                >
-                  <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
-                </Button>
-              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-muted hover:text-foreground"
+                onClick={checkVersion}
+                disabled={checking || restarting}
+                aria-label={refreshLabel}
+                title={refreshLabel}
+              >
+                <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"

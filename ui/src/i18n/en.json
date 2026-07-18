@@ -1747,6 +1747,7 @@
     "currentVersion": "Current Version",
     "packageVersion": "Package Version",
     "sourceRevision": "Source Revision",
+    "refreshBuildInfo": "Refresh Build Information",
     "unknownRevision": "unknown",
     "dirtySource": "dirty",
     "latestVersion": "Latest Version",
