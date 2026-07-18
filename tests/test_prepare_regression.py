@@ -572,23 +572,6 @@ def test_prepare_reset_all_clears_workdir(tmp_path: Path, monkeypatch: pytest.Mo
     assert not (workdir / "drop.txt").exists()
 
 
-def test_build_config_payload_ui_is_field_complete():
-    """A reset/reseed rebuilds config.json via ``_build_config_payload``. It must
-    emit every ``UiConfig`` field, not a hand-listed subset — otherwise any
-    recently-added ui key (show_agent_activity, chat_message_font_size, ...) is
-    silently dropped from the seeded config."""
-    import sys
-    from dataclasses import fields
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config.v2_config import UiConfig
-
-    module = _load_module()
-    ui = module._build_config_payload()["ui"]
-    missing = {f.name for f in fields(UiConfig)} - set(ui)
-    assert not missing, f"_build_config_payload ui dropped fields: {missing}"
-
-
 def test_prepare_ignores_default_backend_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     module = _load_module()
     _set_required_env(monkeypatch)

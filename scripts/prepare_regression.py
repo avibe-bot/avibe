@@ -13,14 +13,7 @@ import os
 import shutil
 import sqlite3
 import sys
-from dataclasses import asdict
 from pathlib import Path
-
-# Repo root on sys.path so ``config`` resolves whether this script runs from the
-# installed venv or directly from a checkout.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from config.v2_config import UiConfig  # noqa: E402
 
 
 PLATFORM_DEFS = {
@@ -220,13 +213,7 @@ def _build_config_payload() -> dict:
             },
         },
         "gateway": None,
-        # Start from the full ``UiConfig`` default set so every ui field is
-        # present (incl. recently-added keys like ``show_agent_activity`` /
-        # ``chat_message_font_size``); only the regression-specific bind fields
-        # are overridden. Hand-listing a subset here silently drops any field
-        # not in the list on reset/reseed.
         "ui": {
-            **asdict(UiConfig()),
             "setup_host": _ui_host(),
             "setup_port": 5123,
             "open_browser": False,
