@@ -630,15 +630,17 @@ def _harness_banner_item(
     since: str,
     updated_at: str,
     backend: str = "",
+    schedule_type: str | None = None,
 ) -> dict[str, Any]:
     """Shape one harness row like a serialized background activity.
 
     The banner unions these with process-local backend activities
     (``core/session_activities.SessionActivity.to_dict``), so a harness item
     carries every key an existing ``background_activities`` consumer already
-    reads, plus the unified ``item_kind`` / ``label`` / ``since`` fields the
-    banner uses to render and route each row. Nothing here is written back into
-    the registry — the row is derived fresh on every runtime-state build.
+    reads, plus the unified ``item_kind`` / ``label`` / ``since`` /
+    ``schedule_type`` fields the banner uses to render and route each row.
+    Nothing here is written back into the registry — the row is derived fresh
+    on every runtime-state build.
     """
     return {
         "id": item_id,
@@ -657,10 +659,11 @@ def _harness_banner_item(
         "started_at": since,
         "updated_at": updated_at or since,
         "completed_at": None,
-        # Unified background-work banner fields (spec: kind / label / since).
+        # Unified background-work banner fields.
         "item_kind": item_kind,
         "label": label,
         "since": since,
+        "schedule_type": schedule_type,
     }
 
 
@@ -678,7 +681,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
       session dispatched and is waiting on).
 
     Each row is shaped like a serialized background activity plus the unified
-    ``item_kind`` / ``label`` / ``since`` fields (see ``_harness_banner_item``).
+    banner fields (see ``_harness_banner_item``).
     """
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -696,6 +699,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 run_definitions.c.name,
                 run_definitions.c.prompt,
                 run_definitions.c.message,
+                run_definitions.c.schedule_type,
                 run_definitions.c.created_at,
                 run_definitions.c.updated_at,
             )
@@ -720,6 +724,11 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
         else:
             continue
         since = str(row["created_at"] or "")
+        schedule_type = (
+            str(row["schedule_type"] or "").strip() or None
+            if item_kind == "task"
+            else None
+        )
         items.append(
             _harness_banner_item(
                 item_id=f"{item_kind}:{row['id']}",
@@ -729,6 +738,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 label=label,
                 since=since,
                 updated_at=str(row["updated_at"] or since),
+                schedule_type=schedule_type,
             )
         )
 

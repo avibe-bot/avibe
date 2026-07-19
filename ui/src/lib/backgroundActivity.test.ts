@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { SessionActivityState } from '../context/ApiContext';
 import {
   activityItemKind,
+  activityKindI18nKey,
   harnessItemNativeId,
   harnessNavPath,
   isHarnessActivity,
@@ -40,6 +41,22 @@ describe('activityItemKind', () => {
     expect(activityItemKind({ item_kind: undefined })).toBe('backend_activity');
     // An unexpected value still degrades to a backend activity row.
     expect(activityItemKind({ item_kind: 'mystery' as never })).toBe('backend_activity');
+  });
+});
+
+describe('activityKindI18nKey', () => {
+  it('classifies one-shot and recurring tasks from schedule_type', () => {
+    expect(activityKindI18nKey({ item_kind: 'task', schedule_type: 'at' })).toBe('taskOneShot');
+    expect(activityKindI18nKey({ item_kind: 'task', schedule_type: 'cron' })).toBe(
+      'taskRecurring',
+    );
+  });
+
+  it('does not infer recurrence from labels or other activity kinds', () => {
+    expect(activityKindI18nKey({ item_kind: 'task', schedule_type: null })).toBe('task');
+    expect(activityKindI18nKey({ item_kind: 'watch' })).toBe('watch');
+    expect(activityKindI18nKey({ item_kind: 'agent_run' })).toBe('agentRun');
+    expect(activityKindI18nKey({ item_kind: 'backend_activity' })).toBe('backendActivity');
   });
 });
 

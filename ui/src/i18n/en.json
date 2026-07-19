@@ -2148,8 +2148,8 @@
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
-      "title": "Background-work banner",
-      "description": "Show in-progress background work at the bottom of chats."
+      "title": "Background task banner",
+      "description": "Show in-progress background tasks at the bottom of chats."
     },
     "sessionFilter": {
       "chip": "Only: this session {{id}}",
@@ -2344,9 +2344,9 @@
       "zoomOut": "Zoom out"
     },
     "activities": {
-      "running": "Background work · {{count}}",
+      "running": "Background tasks · {{count}}",
       "delivering": "Delivering background output · {{count}}",
-      "toggle": "Toggle background work",
+      "toggle": "Toggle background tasks",
       "manageInHarness": "Manage in Harness",
       "openHarness": "Open in Harness · {{kind}}",
       "status": {
@@ -2355,7 +2355,9 @@
       "kind": {
         "backendActivity": "Background task",
         "watch": "Watch",
-        "task": "Scheduled task",
+        "task": "Task",
+        "taskOneShot": "One-time",
+        "taskRecurring": "Recurring",
         "agentRun": "Agent run"
       },
       "connection": {

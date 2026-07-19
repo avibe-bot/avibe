@@ -2148,8 +2148,8 @@
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
-      "title": "后台工作横幅",
-      "description": "在会话底部显示进行中的后台工作。"
+      "title": "后台任务横幅",
+      "description": "在会话底部显示进行中的后台任务。"
     },
     "sessionFilter": {
       "chip": "仅看:本会话 {{id}}",
@@ -2344,9 +2344,9 @@
       "zoomOut": "缩小"
     },
     "activities": {
-      "running": "后台工作 · {{count}}",
+      "running": "后台任务 · {{count}}",
       "delivering": "正在投递后台输出 · {{count}}",
-      "toggle": "展开后台工作",
+      "toggle": "展开后台任务",
       "manageInHarness": "在 Harness 中管理",
       "openHarness": "在 Harness 中打开 · {{kind}}",
       "status": {
@@ -2354,8 +2354,10 @@
       },
       "kind": {
         "backendActivity": "后台任务",
-        "watch": "监视",
-        "task": "定时任务",
+        "watch": "监听",
+        "task": "任务",
+        "taskOneShot": "一次性",
+        "taskRecurring": "周期性",
         "agentRun": "Agent 运行"
       },
       "connection": {

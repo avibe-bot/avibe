@@ -93,6 +93,7 @@ def test_each_harness_source_contributes_one_row(tmp_path: Path):
         definition_type="scheduled",
         name="nightly report",
         session_id="ses-1",
+        schedule_type="cron",
     )
     _insert_run(
         engine,
@@ -110,13 +111,44 @@ def test_each_harness_source_contributes_one_row(tmp_path: Path):
     assert set(by_kind) == {"watch", "task", "agent_run"}
     assert by_kind["watch"]["id"] == "watch:watch-1"
     assert by_kind["watch"]["label"] == "deploy watch"
+    assert by_kind["watch"]["schedule_type"] is None
     assert by_kind["task"]["id"] == "task:task-1"
     assert by_kind["task"]["label"] == "nightly report"
+    assert by_kind["task"]["schedule_type"] == "cron"
     assert by_kind["agent_run"]["id"] == "agent_run:run-1"
     assert by_kind["agent_run"]["label"] == "worker: audit the contract"
+    assert by_kind["agent_run"]["schedule_type"] is None
     # ``since`` and a stable id are present on every unified item.
     assert all(item["since"] == _NOW for item in items)
     assert all(item["id"] for item in items)
+
+
+def test_task_schedule_type_comes_from_the_durable_definition(tmp_path: Path):
+    engine, _ = _make_engine(tmp_path)
+    _insert_definition(
+        engine,
+        id="task-once",
+        definition_type="scheduled",
+        name="title says every day but is one-shot",
+        session_id="ses-1",
+        schedule_type="at",
+    )
+    _insert_definition(
+        engine,
+        id="task-recurring",
+        definition_type="scheduled",
+        name="title says one-off but is recurring",
+        session_id="ses-1",
+        schedule_type="cron",
+    )
+
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-1")
+
+    assert {item["id"]: item["schedule_type"] for item in items} == {
+        "task:task-once": "at",
+        "task:task-recurring": "cron",
+    }
 
 
 def test_task_label_falls_back_to_prompt_when_unnamed(tmp_path: Path):

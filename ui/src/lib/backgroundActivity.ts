@@ -15,6 +15,22 @@ export function activityItemKind(
   return kind && HARNESS_ITEM_KINDS.includes(kind) ? kind : 'backend_activity';
 }
 
+// Task recurrence is an explicit durable field (`at` / `cron`). Keep this
+// mapping independent of task names so display text can never misclassify a
+// user-authored label that happens to mention scheduling words.
+export function activityKindI18nKey(
+  item: Pick<SessionActivityState, 'item_kind' | 'schedule_type'>,
+): string {
+  const kind = activityItemKind(item);
+  if (kind === 'task') {
+    if (item.schedule_type === 'at') return 'taskOneShot';
+    if (item.schedule_type === 'cron') return 'taskRecurring';
+  }
+  if (kind === 'backend_activity') return 'backendActivity';
+  if (kind === 'agent_run') return 'agentRun';
+  return kind;
+}
+
 // Harness rows (watch / task / delegated run) navigate to the Harness surface;
 // backend activities keep their current non-navigating behavior.
 export function isHarnessActivity(item: Pick<SessionActivityState, 'item_kind'>): boolean {

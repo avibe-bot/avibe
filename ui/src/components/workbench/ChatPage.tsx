@@ -17,7 +17,13 @@ import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { activityItemKind, harnessNavPath, resolveActivityLabel, sortBackgroundActivities } from '../../lib/backgroundActivity';
+import {
+  activityItemKind,
+  activityKindI18nKey,
+  harnessNavPath,
+  resolveActivityLabel,
+  sortBackgroundActivities,
+} from '../../lib/backgroundActivity';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -1985,14 +1991,6 @@ const ACTIVITY_ITEM_TINT: Record<SessionActivityItemKind, string> = {
   agent_run: 'bg-violet/15 text-violet',
 };
 
-// item_kind (snake_case wire value) -> chat.activities.kind.* i18n leaf.
-const ACTIVITY_ITEM_I18N: Record<SessionActivityItemKind, string> = {
-  backend_activity: 'backendActivity',
-  watch: 'watch',
-  task: 'task',
-  agent_run: 'agentRun',
-};
-
 // One expanded popover row: colored kind icon box + two-line label / subtitle.
 // Backend activities are display-only with a colored status word (no landing
 // page); harness rows navigate to their Harness surface on click.
@@ -2003,7 +2001,7 @@ const ActivityRow: React.FC<{
   const { t } = useTranslation();
   const kind = activityItemKind(item);
   const Icon = ACTIVITY_ITEM_ICON[kind];
-  const kindLabel = t(`chat.activities.kind.${ACTIVITY_ITEM_I18N[kind]}`);
+  const kindLabel = t(`chat.activities.kind.${activityKindI18nKey(item)}`);
   const label = resolveActivityLabel(item, kindLabel);
   const relative = formatRelativeTime(item.since ?? item.started_at, t);
   const isHarness = kind !== 'backend_activity';
@@ -2073,7 +2071,7 @@ const ActivityStrip: React.FC<{
 
   const first = active[0];
   const firstLabel = first
-    ? resolveActivityLabel(first, t(`chat.activities.kind.${ACTIVITY_ITEM_I18N[activityItemKind(first)]}`))
+    ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
     : '';
   const connectionVisible =
     active.length > 0 &&
