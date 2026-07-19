@@ -1136,14 +1136,23 @@ def _is_trusted_tailscale_peer(peer_address: ipaddress._BaseAddress) -> bool:
     payload = _tailscale_whois(peer_address)
     trusted = False
     if payload is not None:
-        machine = payload.get("Machine") or payload.get("machine") or {}
+        # Modern `tailscale whois --json` nests the peer record under "Node"
+        # (where "Machine" is just the machine-key string); older builds used a
+        # top-level "Machine" object. Accept a dict from either shape.
+        machine = payload.get("Machine") or payload.get("machine")
+        if not isinstance(machine, dict):
+            machine = payload.get("Node") or payload.get("node") or {}
         if isinstance(machine, dict):
             addresses = set()
             for raw_address in _json_list(machine, "Addresses", "addresses"):
+                # "Node" payloads list addresses as host CIDRs ("100.64.0.2/32");
+                # older "Machine" payloads used bare IPs.
                 try:
-                    addresses.add(ipaddress.ip_address(str(raw_address)))
+                    interface = ipaddress.ip_interface(str(raw_address))
                 except ValueError:
                     continue
+                if interface.network.prefixlen == interface.network.max_prefixlen:
+                    addresses.add(interface.ip)
             allowed_networks = []
             for raw_network in _json_list(machine, "AllowedIPs", "allowedIPs", "allowedIps"):
                 try:
