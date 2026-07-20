@@ -19,7 +19,7 @@ from storage.db import create_sqlite_engine, sqlite_url
 logger = logging.getLogger(__name__)
 
 INITIAL_REVISION = "20260501_0001"
-LATEST_SCHEMA_REVISION = "20260622_0023"
+LATEST_SCHEMA_REVISION = "20260720_0030"
 REMOVE_LEGACY_DEFAULT_AGENT_REVISION = "20260530_0008"
 ALLOW_DEV_STATE_MIGRATION_ENV = "AVIBE_ALLOW_DEV_STATE_MIGRATION"
 INITIAL_TABLES = {
@@ -52,6 +52,8 @@ HEAD_TABLES = INITIAL_TABLES | {
     "vault_audit",
     "vault_auth_factors",
     "vault_operation_challenges",
+    "resource_access_policies",
+    "resource_access_groups",
 }
 PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
@@ -104,6 +106,17 @@ HEAD_ONLY_REQUIRED_COLUMNS = {
     "vault_grants": {"agent_ready", "agent_ready_at"},
     "vault_auth_factors": {"credential_id", "public_key", "alg", "sign_count"},
     "vault_operation_challenges": {"challenge_hash", "rp_id", "origin", "expires_at", "consumed_at"},
+    "resource_access_policies": {
+        "organization_id",
+        "owner_user_id",
+        "owner_email",
+        "access_level",
+        "policy_revision",
+        "last_applied_control_plane_revision",
+        "created_by_user_id",
+        "updated_by_user_id",
+    },
+    "resource_access_groups": {"organization_id", "group_id"},
 }
 UNRELEASED_OLD_INITIAL_TABLES = [
     "session_messages",
@@ -671,6 +684,23 @@ def _ensure_vault_authz_indexes(conn: sqlite3.Connection, tables: set[str]) -> N
         )
 
 
+def _ensure_resource_access_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
+    if "resource_access_policies" in tables:
+        conn.execute(
+            "create index if not exists ix_resource_access_policies_org_level "
+            "on resource_access_policies (organization_id, access_level, resource_kind)"
+        )
+        conn.execute(
+            "create index if not exists ix_resource_access_policies_owner "
+            "on resource_access_policies (owner_user_id, resource_kind)"
+        )
+    if "resource_access_groups" in tables:
+        conn.execute(
+            "create index if not exists ix_resource_access_groups_group "
+            "on resource_access_groups (organization_id, group_id, resource_kind)"
+        )
+
+
 def _delete_historical_message_tool_calls(conn: sqlite3.Connection, tables: set[str]) -> None:
     if "messages" not in tables:
         return
@@ -699,6 +729,7 @@ def _ensure_head_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
     _ensure_messages_query_indexes(conn, tables)
     _ensure_agent_events_indexes(conn, tables)
     _ensure_vault_authz_indexes(conn, tables)
+    _ensure_resource_access_indexes(conn, tables)
 
 
 def _missing_head_schema_description(conn: sqlite3.Connection, tables: set[str]) -> str:

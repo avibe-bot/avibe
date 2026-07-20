@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DDL,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -455,6 +457,57 @@ web_push_subscriptions = Table(
     UniqueConstraint("endpoint", name="uq_web_push_subscriptions_endpoint"),
     Index("ix_web_push_subscriptions_user_enabled", "user_key", "enabled"),
     Index("ix_web_push_subscriptions_user_device", "user_key", "device_id"),
+)
+
+# Resource ACLs are local enforcement state. The hosted control plane receives
+# only safe metadata and desired revisions; it never stores local resource
+# content or secret values.
+resource_access_policies = Table(
+    "resource_access_policies",
+    metadata,
+    Column("resource_kind", String, primary_key=True),
+    Column("resource_id", String, primary_key=True),
+    Column("organization_id", String, nullable=True),
+    Column("owner_user_id", String, nullable=True),
+    Column("owner_email", String, nullable=True),
+    Column("access_level", String, nullable=False, server_default=text("'private'")),
+    Column("created_by_user_id", String, nullable=True),
+    Column("updated_by_user_id", String, nullable=True),
+    Column("policy_revision", Integer, nullable=False, server_default=text("0")),
+    Column("last_applied_control_plane_revision", Integer, nullable=True),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    CheckConstraint(
+        "resource_kind in ('agent', 'vault_secret', 'skill', 'show_page')",
+        name="ck_resource_access_policies_kind",
+    ),
+    CheckConstraint(
+        "access_level in ('public', 'scope', 'private')",
+        name="ck_resource_access_policies_access_level",
+    ),
+    Index(
+        "ix_resource_access_policies_org_level",
+        "organization_id",
+        "access_level",
+        "resource_kind",
+    ),
+    Index("ix_resource_access_policies_owner", "owner_user_id", "resource_kind"),
+)
+
+resource_access_groups = Table(
+    "resource_access_groups",
+    metadata,
+    Column("resource_kind", String, primary_key=True),
+    Column("resource_id", String, primary_key=True),
+    Column("group_id", String, primary_key=True),
+    Column("organization_id", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    ForeignKeyConstraint(
+        ["resource_kind", "resource_id"],
+        ["resource_access_policies.resource_kind", "resource_access_policies.resource_id"],
+        ondelete="CASCADE",
+    ),
+    Index("ix_resource_access_groups_group", "organization_id", "group_id", "resource_kind"),
 )
 
 # Vaults — secret management for agents.
