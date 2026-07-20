@@ -1364,6 +1364,10 @@ type VibeShowRuntimeConfig = {
   eventsPath?: string
   streamPath?: string
   writeToken?: string
+  annotation?: {
+    authenticated: boolean
+    mePath: string
+  }
 }
 
 declare global {

@@ -8432,12 +8432,16 @@ def _public_show_referer_matches(share_id: str) -> bool:
 
 def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload)
-    sanitized.pop("id", None)
-    sanitized.pop("dispatch", None)
-    for key in ("payload", "annotation"):
+    for key in ("id", "dispatch", "sessionId", "session_id"):
+        sanitized.pop(key, None)
+    for key in ("payload", "annotation", "mark"):
         nested = sanitized.get(key)
         if isinstance(nested, dict):
-            sanitized[key] = {nested_key: value for nested_key, value in nested.items() if nested_key != "dispatch"}
+            sanitized[key] = {
+                nested_key: value
+                for nested_key, value in nested.items()
+                if nested_key not in {"dispatch", "sessionId", "session_id"}
+            }
     return sanitized
 
 

@@ -84,10 +84,12 @@ class ShowSessionEventStore:
         actor = _actor_for_event(event_type)
         event_payload = _normalize_event_payload(event_type, payload)
         if actor == "human":
-            event_payload["author"] = _normalize_human_author(author)
+            event_payload.pop("author", None)
         anchor = _event_anchor(event_type, payload, event_payload)
         scope = _event_scope(event_type, event_payload)
         transcript_text = _format_transcript_text(event_type, event_payload, anchor)
+        if actor == "human":
+            event_payload["author"] = _normalize_human_author(author)
         event_id = _event_id(payload, event_payload)
         created_at = _utc_now_iso()
 

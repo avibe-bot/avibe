@@ -751,6 +751,9 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert 'eventsPath: injected.eventsPath ?? "__show/events"' in main_tsx
     assert 'streamPath: injected.streamPath ?? "__show/events?stream=1"' in main_tsx
     assert 'writeToken: injected.writeToken ?? readCookie("vibe_show_event_token")' in main_tsx
+    assert "annotation?: {" in main_tsx
+    assert "authenticated: boolean" in main_tsx
+    assert "mePath: string" in main_tsx
     # The runtime-owned shell just renders <App/>; routing is NOT moved into
     # main.tsx/index.html, so adding a page never requires touching the shell.
     assert 'import App from "./App"' in main_tsx

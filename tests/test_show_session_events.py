@@ -168,6 +168,31 @@ def test_show_event_store_records_remote_human_author_in_event_and_message(isola
     }
 
 
+def test_show_event_store_keeps_remote_author_out_of_intent_fallback_text(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.intent.submitted",
+                "payload": {
+                    "intent": "choose",
+                    "author": {"kind": "user", "email": "spoofed@example.com"},
+                },
+            },
+            author={"kind": "user", "email": "alex@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert event["payload"]["author"] == {"kind": "user", "email": "alex@example.com"}
+    assert "alex@example.com" not in event["transcript_text"]
+    assert "spoofed@example.com" not in event["transcript_text"]
+    assert '"author"' not in event["transcript_text"]
+
+
 def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
     from vibe.ui_server import _show_event_requests_dispatch
 
