@@ -189,8 +189,12 @@ export const ChatPage: React.FC = () => {
   const [annotateOpen, setAnnotateOpen] = useState(false);
   // postMessage bridge to the Show Page iframe: sends annotation control
   // messages and derives the header control's state from the overlay's state
-  // broadcasts (contract §3). Keyed off showPageUrl so a re-point resets state.
-  const annotation = useShowPageAnnotation(showPageUrl);
+  // broadcasts (contract §3). Keyed off showPageMode+showPageUrl (null while the
+  // iframe is hidden) so leaving Show Page mode resets state to unknown — else
+  // closing then reopening the SAME session's page (showPageUrl unchanged) would
+  // show the stale enabled/mode and could send control messages to the freshly
+  // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
+  const annotation = useShowPageAnnotation(showPageMode ? showPageUrl : null);
   useEffect(() => {
     // ChatPage is reused across :sessionId — clear all show-page state so the
     // next chat starts in chat view with a live (not stuck-busy) toggle.
