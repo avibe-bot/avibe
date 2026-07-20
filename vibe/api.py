@@ -9595,6 +9595,12 @@ async def _get_opencode_providers_async() -> dict:
 
     auth_index = auth_raw if isinstance(auth_raw, dict) else {}
 
+    try:
+        default_agent = server.get_default_agent_from_config()
+        runtime_agent_model = server.get_agent_model_from_config(default_agent)
+    except Exception:  # noqa: BLE001
+        runtime_agent_model = None
+
     # Resolve the user-configured default provider. ``None`` means
     # the user has not picked one — the UI surfaces that as "no
     # default selected" so clicking a provider actually persists the
@@ -9786,10 +9792,16 @@ async def _get_opencode_providers_async() -> dict:
             if isinstance(raw_default, str):
                 default_model = raw_default
         preferred_model = resolve_opencode_configured_default_model(
-            configured_default_model,
+            runtime_agent_model,
             default_provider=default_provider,
             provider_id=pid,
         )
+        if not preferred_model:
+            preferred_model = resolve_opencode_configured_default_model(
+                configured_default_model,
+                default_provider=default_provider,
+                provider_id=pid,
+            )
         if preferred_model:
             preferred_model = resolve_opencode_model_id(
                 config_raw,

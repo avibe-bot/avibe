@@ -579,6 +579,8 @@ class _FakeOpencodeServer:
         self.inactive_calls: list[str] = []
         self.message_sent = False
         self.recent_error: str | None = None
+        self.default_agent = "build"
+        self.agent_model: str | None = None
 
     async def get_provider_auth(self):
         return self.auth_map
@@ -610,6 +612,12 @@ class _FakeOpencodeServer:
 
     async def get_provider_api_diagnostic(self, provider_id, model_id):
         return None
+
+    def get_default_agent_from_config(self):
+        return self.default_agent
+
+    def get_agent_model_from_config(self, agent_name):
+        return self.agent_model if agent_name == self.default_agent else None
 
     async def start_provider_oauth(self, provider_id, *, method, prompt_answers):
         self.start_calls.append((provider_id, method, prompt_answers))
@@ -825,6 +833,57 @@ def test_opencode_provider_test_prefers_configured_agent_default_model(
     assert fake.prompt_calls[-1]["model"] == {
         "providerID": "openai",
         "modelID": "gpt-5.4",
+    }
+
+
+def test_opencode_provider_test_prefers_runtime_agent_model(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.agent_model = "openai/gpt-5.4-runtime"
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {
+                    "gpt-5.3-chat-latest": {},
+                    "gpt-5.4": {},
+                    "gpt-5.4-runtime": {},
+                },
+            }
+        ],
+        "default": {"openai": "gpt-5.3-chat-latest"},
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "OK"}],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(
+        service,
+        "_resolve_backend_config",
+        lambda backend: SimpleNamespace(
+            default_provider="openai",
+            default_model="gpt-5.4",
+        )
+        if backend == "opencode"
+        else None,
+    )
+
+    result = _run(service.test_opencode_provider("openai"))
+
+    assert result["ok"] is True
+    assert result["model"] == "gpt-5.4-runtime"
+    assert fake.prompt_calls[-1]["model"] == {
+        "providerID": "openai",
+        "modelID": "gpt-5.4-runtime",
     }
 
 

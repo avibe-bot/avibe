@@ -982,10 +982,16 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("available_models", "configured_model"),
+    ("available_models", "configured_model", "runtime_model", "expected_model"),
     [
-        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, "gpt-5.4"),
-        ({"gpt-5.3-chat-latest": {}}, "gpt-5.4-new"),
+        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, "gpt-5.4", None, "gpt-5.4"),
+        ({"gpt-5.3-chat-latest": {}}, "gpt-5.4-new", None, "gpt-5.4-new"),
+        (
+            {"gpt-5.3-chat-latest": {}, "gpt-5.4": {}, "gpt-5.4-runtime": {}},
+            "gpt-5.4",
+            "openai/gpt-5.4-runtime",
+            "gpt-5.4-runtime",
+        ),
     ],
 )
 def test_opencode_provider_catalog_prefers_configured_agent_default_model(
@@ -993,6 +999,8 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(
     tmp_path,
     available_models,
     configured_model,
+    runtime_model,
+    expected_model,
 ):
     class _FakeServer:
         async def get_providers(self):
@@ -1018,6 +1026,12 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(
         async def close_http_session(self, *, loop=None):
             pass
 
+        def get_default_agent_from_config(self):
+            return "build"
+
+        def get_agent_model_from_config(self, agent_name):
+            return runtime_model if agent_name == "build" else None
+
     async def _fake_get_server():
         return _FakeServer()
 
@@ -1039,7 +1053,7 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(
     result = asyncio.run(api.get_opencode_providers_async())
 
     provider = next(provider for provider in result["providers"] if provider["id"] == "openai")
-    assert provider["default_model"] == configured_model
+    assert provider["default_model"] == expected_model
 
 
 def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
