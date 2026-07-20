@@ -4,13 +4,18 @@ import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   activityDurationParts,
   activityRowFromMessage,
+  filterActivityRows,
+  genericChips,
   groupFromWire,
   initialLiveActivity,
   isActivityMessageType,
   liveActivityReducer,
+  parseToolCall,
   parseToolName,
   shouldShowRunningCard,
   toolIconKind,
+  toolParams,
+  toolRecipe,
   toolSummary,
   type ActivityRow,
 } from './agentActivity';
@@ -53,6 +58,164 @@ describe('toolIconKind', () => {
     expect(toolIconKind('WebSearch')).toBe('web');
     expect(toolIconKind('Task')).toBe('agent');
     expect(toolIconKind('SomethingElse')).toBe('wrench');
+  });
+});
+
+describe('parseToolCall (tier gating: extract name + JSON args, or null)', () => {
+  it('extracts args from each backend shape', () => {
+    // Claude (Capitalized, file_path)
+    expect(parseToolCall('🔧 `Bash` `{"command":"pdftotext report.pdf"}`').args).toEqual({
+      command: 'pdftotext report.pdf',
+    });
+    // Codex bundles result fields into bash args
+    expect(
+      parseToolCall('🔧 `bash` `{"command":"ls","status":"completed","exit_code":0,"output":"a"}`').args,
+    ).toEqual({ command: 'ls', status: 'completed', exit_code: 0, output: 'a' });
+    // OpenCode (lowercase, path)
+    expect(parseToolCall('🔧 `read` `{"path":"foo.py"}`').args).toEqual({ path: 'foo.py' });
+    expect(parseToolCall('🔧 `Bash` `{"command":"x"}`').name).toBe('Bash');
+  });
+
+  it('yields args:null (→ tier 3) for no-params / malformed / non-object / oversized / restore-path', () => {
+    expect(parseToolCall('🔧 `TodoWrite`').args).toBeNull(); // no params
+    expect(parseToolCall('🔧 `Bash` `{"command":}`').args).toBeNull(); // malformed JSON
+    expect(parseToolCall('🔧 `Bash` `[1,2,3]`').args).toBeNull(); // JSON but not an object
+    expect(parseToolCall('`bash`: `ls -la`').args).toBeNull(); // OpenCode restore path (no JSON)
+    const huge = `🔧 \`Bash\` \`{"command":"${'x'.repeat(20001)}"}\``;
+    expect(parseToolCall(huge).args).toBeNull(); // oversized → raw
+  });
+
+  it('never throws on arbitrary garbage (exception → tier 3)', () => {
+    expect(() => parseToolCall('')).not.toThrow();
+    expect(() => parseToolCall('not a tool call at all')).not.toThrow();
+    expect(parseToolCall('🔧 `X` `{"a":"\\u00e4' /* truncated */).args).toBeNull();
+  });
+});
+
+describe('toolRecipe (tier 1: known-tool recipes, backend-agnostic)', () => {
+  it('bash/shell family → command (Claude/Codex/OpenCode)', () => {
+    expect(toolRecipe('Bash', { command: 'pwd' })).toEqual({ kind: 'command', command: 'pwd' });
+    expect(toolRecipe('bash', { command: 'ls', status: 'completed', exit_code: 0 })).toEqual({
+      kind: 'command',
+      command: 'ls',
+    });
+  });
+
+  it('read/list family → dir muted + basename (probes file_path → path → file)', () => {
+    expect(toolRecipe('Read', { file_path: '研报/中金_CATL_2026展望.pdf' })).toEqual({
+      kind: 'read',
+      dir: '研报/',
+      base: '中金_CATL_2026展望.pdf',
+    });
+    expect(toolRecipe('read', { path: 'notes.md' })).toEqual({ kind: 'read', dir: '', base: 'notes.md' });
+    expect(toolRecipe('LS', { path: '/tmp/dir/' })).toEqual({ kind: 'read', dir: '/tmp/', base: 'dir' });
+  });
+
+  it('edit/write/apply → fileop with an operation derived from name or Codex type', () => {
+    expect(toolRecipe('Write', { file_path: 'new.txt', content: 'x' })).toEqual({
+      kind: 'fileop',
+      dir: '',
+      base: 'new.txt',
+      op: 'create',
+    });
+    expect(toolRecipe('Edit', { file_path: 'a.ts', old_string: 'a', new_string: 'b' })).toMatchObject({
+      kind: 'fileop',
+      op: 'modify',
+    });
+    expect(toolRecipe('file_change', { file: 'x.py', type: 'created' })).toMatchObject({ op: 'create' });
+    expect(toolRecipe('file_change', { file: 'x.py', type: 'deleted' })).toMatchObject({ op: 'delete' });
+    expect(toolRecipe('file_change', { file: 'x.py', type: 'modified' })).toMatchObject({ op: 'modify' });
+  });
+
+  it('web/search/fetch/grep → quoted query or URL', () => {
+    expect(toolRecipe('WebSearch', { query: 'CATL 2026' })).toEqual({ kind: 'query', text: 'CATL 2026' });
+    expect(toolRecipe('WebFetch', { url: 'https://x.com', prompt: 'p' })).toEqual({
+      kind: 'query',
+      text: 'https://x.com',
+    });
+    expect(toolRecipe('Grep', { pattern: 'consolidated' })).toEqual({ kind: 'query', text: 'consolidated' });
+  });
+
+  it('task/agent → description', () => {
+    expect(toolRecipe('Task', { description: 'read two reports', prompt: '…' })).toEqual({
+      kind: 'text',
+      text: 'read two reports',
+    });
+  });
+
+  it('returns null for unknown tools and for a known tool missing its primary arg (→ tier 2/3)', () => {
+    expect(toolRecipe('custom_tool', { path: '/tmp/x.csv', rows: 1200 })).toBeNull();
+    expect(toolRecipe('Bash', { description: 'no command here' })).toBeNull();
+    expect(toolRecipe('Read', {})).toBeNull();
+  });
+});
+
+describe('genericChips (tier 2: unknown tool, JSON parses)', () => {
+  it('shows up to 3 short scalar params + an overflow count for the rest', () => {
+    const { chips, overflow } = genericChips({
+      path: '/tmp/x.csv',
+      rows: 1200,
+      format: 'csv',
+      mode: 'r',
+      note: 'extra',
+    });
+    expect(chips).toEqual([
+      { key: 'path', value: '/tmp/x.csv' },
+      { key: 'rows', value: '1200' },
+      { key: 'format', value: 'csv' },
+    ]);
+    expect(overflow).toBe(2);
+  });
+
+  it('truncates long values and counts non-scalar params as overflow', () => {
+    const { chips, overflow } = genericChips({ big: 'y'.repeat(100), obj: { a: 1 }, ok: 'v' });
+    expect(chips.find((c) => c.key === 'big')?.value.endsWith('…')).toBe(true);
+    expect(chips.some((c) => c.key === 'obj')).toBe(false); // object is not chip-worthy
+    expect(overflow).toBe(1); // the object param
+  });
+});
+
+describe('toolParams (D: inline detail kv table)', () => {
+  it('orders kv, flags long/multiline as block, humanizes timeout ms', () => {
+    const params = toolParams({
+      command: 'pdftotext -layout report.pdf -',
+      workdir: '.',
+      timeout: 70000,
+    });
+    expect(params.map((p) => p.key)).toEqual(['command', 'workdir', 'timeout']);
+    expect(params.find((p) => p.key === 'workdir')).toEqual({ key: 'workdir', value: '.', block: false });
+    expect(params.find((p) => p.key === 'timeout')?.value).toBe('70000 (70s)');
+    expect(toolParams({ patch: 'line1\nline2' })[0].block).toBe(true);
+  });
+});
+
+describe('filterActivityRows (B: eye toggle filters tool rows only)', () => {
+  const rows: ActivityRow[] = [
+    { id: 'a1', kind: 'assistant', text: 'narration', created_at: 't1' },
+    { id: 't1', kind: 'tool_call', text: '🔧 `Bash` `{"command":"ls"}`', created_at: 't2' },
+    { id: 't2', kind: 'tool_call', text: '🔧 `Read` `{"file_path":"x"}`', created_at: 't3' },
+  ];
+
+  it('shows everything when tools are enabled', () => {
+    expect(filterActivityRows(rows, true)).toEqual({ visible: rows, hiddenTools: 0 });
+  });
+
+  it('hides tool rows but keeps assistant narration, counting the hidden tools', () => {
+    const { visible, hiddenTools } = filterActivityRows(rows, false);
+    expect(visible.map((r) => r.id)).toEqual(['a1']);
+    expect(hiddenTools).toBe(2);
+  });
+
+  it('everything filtered when there is no narration (drives the placeholder)', () => {
+    const toolsOnly = rows.filter((r) => r.kind === 'tool_call');
+    const { visible, hiddenTools } = filterActivityRows(toolsOnly, false);
+    expect(visible).toEqual([]);
+    expect(hiddenTools).toBe(2);
+  });
+
+  it('never hides assistant rows even with tools off', () => {
+    const narrationOnly = rows.filter((r) => r.kind === 'assistant');
+    expect(filterActivityRows(narrationOnly, false)).toEqual({ visible: narrationOnly, hiddenTools: 0 });
   });
 });
 
@@ -187,7 +350,7 @@ describe('liveActivityReducer (generation invariant)', () => {
   });
 
   it('rehydrate_for_gen fills only an empty buffer of the current generation', () => {
-    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    const s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
     const gen = s.gen;
     const hydrated = liveActivityReducer(s, {
       type: 'rehydrate_for_gen',

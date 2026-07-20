@@ -293,6 +293,27 @@ def test_show_agent_activity_defaults_off_and_round_trips() -> None:
         assert V2Config.from_payload(payload).ui.show_agent_activity is False, falsey
 
 
+def test_show_tool_calls_defaults_on_and_round_trips() -> None:
+    # Default ON: absent from the ui payload → True (unlike show_agent_activity), and
+    # serializes so the Web UI + ChatPage bootstrap read it (display-only filter).
+    payload = api.config_to_payload(_base_config())
+    assert payload["ui"]["show_tool_calls"] is True
+
+    payload["ui"]["show_tool_calls"] = False
+    config = V2Config.from_payload(payload)
+    assert config.ui.show_tool_calls is False
+    assert api.config_to_payload(config)["ui"]["show_tool_calls"] is False
+
+    # String forms parse explicitly — ``bool("false")`` would be True, which must NOT
+    # keep tool rows visible when the user hid them.
+    for truthy in ("true", "True", "1", "yes", "on"):
+        payload["ui"]["show_tool_calls"] = truthy
+        assert V2Config.from_payload(payload).ui.show_tool_calls is True, truthy
+    for falsey in ("false", "False", "0", "no", "off", ""):
+        payload["ui"]["show_tool_calls"] = falsey
+        assert V2Config.from_payload(payload).ui.show_tool_calls is False, falsey
+
+
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:
     config = _base_config()
     config.remote_access.vibe_cloud.enabled = True

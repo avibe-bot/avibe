@@ -315,6 +315,12 @@ class UiConfig:
     # group, and the message mirror streams those rows live. Default off: a strict
     # no-op — the live stream and transcript stay exactly as they are today.
     show_agent_activity: bool = False
+    # When true (default), the Activity panel renders tool-call rows; when false,
+    # only assistant narration rows show. Pure display filter — step counts,
+    # durations, and data collection are unaffected. Independent of
+    # ``show_agent_activity`` (which gates the whole panel); this only filters rows
+    # within it. Default on so the panel keeps today's full detail unless hidden.
+    show_tool_calls: bool = True
     trusted_public_origins: List[str] = field(default_factory=list)
     # Display name appended to the browser tab title ("Avibe - <name>"). When
     # blank the UI falls back to the read-only ``default_instance_name`` field
@@ -586,6 +592,14 @@ class V2Config:
             ui.show_agent_activity = raw_show_activity.strip().lower() in ("1", "true", "yes", "on")
         else:
             ui.show_agent_activity = bool(raw_show_activity)
+        # ``show_tool_calls`` defaults true; a string "false"/"0" must coerce to False
+        # (``bool("false")`` is True) — same parse as above, applied when a string form
+        # is supplied; a missing key keeps the ``UiConfig`` default (True).
+        raw_show_tools = ui.show_tool_calls
+        if isinstance(raw_show_tools, str):
+            ui.show_tool_calls = raw_show_tools.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            ui.show_tool_calls = bool(raw_show_tools)
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):

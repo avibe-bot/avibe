@@ -205,3 +205,160 @@ export const activityDurationParts = (
   const totalSeconds = Math.round(ms / 1000);
   return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
 };
+
+// ===== Tool-call summary v2 (A/D): 3-tier degrade, frontend-only parse =====
+// ``ActivityRow.text`` for a tool call is the backend ``format_toolcall`` STRING —
+// ``🔧 `ToolName` `{compact json}` `` (base_formatter.py). Tool names and arg keys
+// differ per backend (Claude Capitalized `file_path`/`command`; Codex `bash`/
+// `file_change` with `file`+`type`; OpenCode lowercase `file_path||path`; an
+// OpenCode restore path emits `` `name`: `arg` `` with no JSON), which is why we
+// degrade: tier 1 known-tool recipes → tier 2 generic kv chips → tier 3 raw text.
+// Everything here is a PURE function of the row text; any parse failure/oversize
+// yields ``args: null`` (→ tier 3), and the component wraps calls in try/catch so
+// an unexpected shape can never blank a row.
+
+// A parsed params object is only trusted below this size (compact JSON is tiny;
+// anything larger is treated as oversized → tier 3 raw).
+const MAX_TOOL_PARAMS_BYTES = 20000;
+
+export type ParsedToolCall = {
+  name: string;
+  args: Record<string, unknown> | null; // parsed JSON object, or null → tier 3
+  raw: string; // full original row text (tier-3 render + JSON-dialog fallback)
+};
+
+// Extract the tool name + the embedded compact-JSON params object (when present and
+// parseable) from a ``format_toolcall`` string. Never throws.
+export const parseToolCall = (text: string): ParsedToolCall => {
+  const raw = text || '';
+  const name = parseToolName(raw);
+  let args: Record<string, unknown> | null = null;
+  try {
+    let firstLine = raw.split('\n')[0].replace(TOOL_GLYPH, '').trim();
+    // Drop the leading tool-name token (backtick-wrapped or bare word).
+    const nameToken = firstLine.match(/^`[^`]+`\s*/);
+    firstLine = nameToken ? firstLine.slice(nameToken[0].length) : firstLine.replace(/^\S+\s*/, '');
+    firstLine = firstLine.trim();
+    // Unwrap a single surrounding backtick pair (format_toolcall wraps the JSON).
+    const wrapped = firstLine.match(/^`([\s\S]*)`$/);
+    const candidate = (wrapped ? wrapped[1] : firstLine).trim();
+    if (candidate.startsWith('{') && candidate.length <= MAX_TOOL_PARAMS_BYTES) {
+      const parsed: unknown = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        args = parsed as Record<string, unknown>;
+      }
+    }
+  } catch {
+    args = null;
+  }
+  return { name, args, raw };
+};
+
+const splitPath = (p: string): { dir: string; base: string } => {
+  const clean = p.replace(/\/+$/, '');
+  const idx = clean.lastIndexOf('/');
+  return idx >= 0 ? { dir: clean.slice(0, idx + 1), base: clean.slice(idx + 1) } : { dir: '', base: clean };
+};
+
+export type FileOp = 'create' | 'modify' | 'delete';
+
+// Tier-1 render intents (keyed on known tool-name prefix + expected arg presence).
+export type ToolRecipe =
+  | { kind: 'command'; command: string } // bash/shell → ``$ <command>``
+  | { kind: 'read'; dir: string; base: string } // read/list → dir muted + base bold
+  | { kind: 'fileop'; dir: string; base: string; op: FileOp } // edit/write → base + op badge
+  | { kind: 'query'; text: string } // web/search/fetch → quoted query / URL
+  | { kind: 'text'; text: string }; // task/agent → description
+
+const asStr = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
+
+const fileOpFrom = (name: string, args: Record<string, unknown>): FileOp => {
+  const type = (asStr(args.type) || '').toLowerCase();
+  if (/^(creat|add)/.test(type)) return 'create';
+  if (/^(delet|remov)/.test(type)) return 'delete';
+  if (/^(modif|edit|updat|chang)/.test(type)) return 'modify';
+  if (name.startsWith('write') || name.startsWith('create')) return 'create';
+  if (name.startsWith('delete') || name.startsWith('remove')) return 'delete';
+  return 'modify'; // edit/update/apply/patch/notebook default
+};
+
+// Known-tool recipe (tier 1). Returns null for unknown tools or a known tool whose
+// expected primary arg is absent → the caller falls back to tier 2 (generic chips).
+// Backend-agnostic: name matching is case-insensitive and by PREFIX, and paths probe
+// ``file_path`` → ``path`` → ``file`` to cover Claude/OpenCode/Codex divergence.
+export const toolRecipe = (name: string, args: Record<string, unknown>): ToolRecipe | null => {
+  const n = (name || '').trim().toLowerCase();
+  const starts = (prefixes: string[]) => prefixes.some((p) => n.startsWith(p));
+  const path = asStr(args.file_path) ?? asStr(args.filePath) ?? asStr(args.path) ?? asStr(args.file);
+  const command = asStr(args.command) ?? asStr(args.cmd);
+
+  if (starts(['bash', 'shell', 'exec', 'run', 'sh', 'zsh', 'terminal', 'command'])) {
+    return command != null ? { kind: 'command', command } : null;
+  }
+  if (starts(['write', 'edit', 'create', 'update', 'apply', 'patch', 'notebook', 'multiedit', 'file_change', 'filechange'])) {
+    return path != null ? { kind: 'fileop', ...splitPath(path), op: fileOpFrom(n, args) } : null;
+  }
+  if (starts(['read', 'cat', 'open', 'view', 'list', 'ls', 'glob', 'find'])) {
+    return path != null ? { kind: 'read', ...splitPath(path) } : null;
+  }
+  if (starts(['web', 'fetch', 'http', 'browse', 'url', 'search', 'grep'])) {
+    const query = asStr(args.query) ?? asStr(args.url) ?? asStr(args.pattern);
+    return query != null ? { kind: 'query', text: query } : null;
+  }
+  if (starts(['task', 'agent', 'mcp', 'sub', 'delegate'])) {
+    const desc = asStr(args.description) ?? asStr(args.prompt);
+    return desc != null ? { kind: 'text', text: desc } : null;
+  }
+  return null;
+};
+
+export type ToolChip = { key: string; value: string };
+
+const truncateValue = (s: string, max = 48): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+
+// A chip-worthy value is a single-line scalar (string/number/bool). Length does NOT
+// disqualify — long values are shown truncated (per spec); only multiline strings and
+// objects/arrays are excluded (they still count toward the overflow tally).
+const isChipScalar = (v: unknown): boolean =>
+  (typeof v === 'string' && !v.includes('\n')) || typeof v === 'number' || typeof v === 'boolean';
+
+// Tier-2 generic chips: up to ``max`` scalar params (long values truncated) + an
+// overflow count for every remaining param (including the non-chip-worthy ones).
+export const genericChips = (
+  args: Record<string, unknown>,
+  max = 3,
+): { chips: ToolChip[]; overflow: number } => {
+  const entries = Object.entries(args);
+  const chips: ToolChip[] = [];
+  for (const [key, value] of entries) {
+    if (chips.length >= max) break;
+    if (isChipScalar(value)) chips.push({ key, value: truncateValue(String(value)) });
+  }
+  return { chips, overflow: Math.max(0, entries.length - chips.length) };
+};
+
+// B: tool-row visibility filter. Assistant narration ALWAYS shows; only tool_call
+// rows are hidden. Pure so the component's placeholder logic is unit-testable and the
+// step counts (which use the unfiltered length) stay independent of display.
+export const filterActivityRows = (
+  rows: ActivityRow[],
+  showToolCalls: boolean,
+): { visible: ActivityRow[]; hiddenTools: number } => {
+  if (showToolCalls) return { visible: rows, hiddenTools: 0 };
+  const visible = rows.filter((r) => r.kind !== 'tool_call');
+  return { visible, hiddenTools: rows.length - visible.length };
+};
+
+export type ToolParam = { key: string; value: string; block: boolean };
+
+// Full ordered kv params for the inline detail table (D). Long/multiline values are
+// flagged ``block`` (rendered as a wrapping code block); ``timeout`` in ms is
+// humanized inline (e.g. ``70000`` → ``70000 (70s)``) mirroring the design.
+export const toolParams = (args: Record<string, unknown>): ToolParam[] =>
+  Object.entries(args).map(([key, value]) => {
+    let text = typeof value === 'string' ? value : JSON.stringify(value);
+    if (key === 'timeout' && typeof value === 'number' && value >= 1000) {
+      text = `${value} (${Math.round(value / 1000)}s)`;
+    }
+    return { key, value: text, block: text.includes('\n') || text.length > 60 };
+  });
