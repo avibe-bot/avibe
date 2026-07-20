@@ -593,6 +593,7 @@ class OpenCodeServerManager:
         )
         if not isinstance(response_error, dict):
             response_error = response_payload if isinstance(response_payload, dict) else {}
+        response_code = str(response_error.get("code") or "").strip()
         response_type = str(response_error.get("type") or "").strip()
         status_code = str(error.get("statusCode") or "").strip()
 
@@ -607,7 +608,7 @@ class OpenCodeServerManager:
         message = cls._redact_diagnostic_text(message)
 
         details = name
-        qualifiers = [value for value in (code, response_type) if value]
+        qualifiers = [value for value in (code, response_code, response_type) if value]
         if status_code:
             qualifiers.append(f"HTTP {status_code}")
         if qualifiers:

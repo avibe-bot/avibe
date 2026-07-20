@@ -1742,7 +1742,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                                     'Model "gpt-5.3-chat-latest" is not supported by '
                                     "any configured account in this group"
                                 ),
-                                "type": "model_not_found",
+                                "code": "model_not_found",
+                                "type": "invalid_request_error",
                             }
                         }
                     ),
@@ -1760,7 +1761,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             summary,
-            "AI_APICallError (model_not_found; HTTP 404) while calling "
+            "AI_APICallError (model_not_found; invalid_request_error; HTTP 404) while calling "
             'https://relay.example/v1/responses: Model "gpt-5.3-chat-latest" is not '
             "supported by any configured account in this group",
         )

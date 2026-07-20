@@ -981,7 +981,19 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
     assert entry["user_managed"] is False
 
 
-def test_opencode_provider_catalog_prefers_configured_agent_default_model(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("available_models", "configured_model"),
+    [
+        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, "gpt-5.4"),
+        ({"gpt-5.3-chat-latest": {}}, "gpt-5.4-new"),
+    ],
+)
+def test_opencode_provider_catalog_prefers_configured_agent_default_model(
+    monkeypatch,
+    tmp_path,
+    available_models,
+    configured_model,
+):
     class _FakeServer:
         async def get_providers(self):
             return {
@@ -997,10 +1009,7 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(monkey
                 "providers": [
                     {
                         "id": "openai",
-                        "models": {
-                            "gpt-5.3-chat-latest": {},
-                            "gpt-5.4": {},
-                        },
+                        "models": available_models,
                     }
                 ],
                 "default": {"openai": "gpt-5.3-chat-latest"},
@@ -1021,7 +1030,7 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(monkey
             agents=SimpleNamespace(
                 opencode=SimpleNamespace(
                     default_provider="openai",
-                    default_model="gpt-5.4",
+                    default_model=configured_model,
                 )
             )
         ),
@@ -1030,7 +1039,7 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(monkey
     result = asyncio.run(api.get_opencode_providers_async())
 
     provider = next(provider for provider in result["providers"] if provider["id"] == "openai")
-    assert provider["default_model"] == "gpt-5.4"
+    assert provider["default_model"] == configured_model
 
 
 def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(

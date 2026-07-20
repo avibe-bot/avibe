@@ -9796,8 +9796,7 @@ async def _get_opencode_providers_async() -> dict:
                 pid,
                 preferred_model,
             )
-            if preferred_model in model_ids:
-                default_model = preferred_model
+            default_model = preferred_model
 
         out_providers.append(
             {
