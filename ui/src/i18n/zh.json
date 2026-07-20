@@ -2251,6 +2251,17 @@
     "showPage": {
       "open": "可视化",
       "backToChat": "回聊天",
+      "annotate": {
+        "toggle": "标注",
+        "smart": "Smart",
+        "screenshot": "截图",
+        "smartDesc": "点选元素 · 选文字 · 框选区域",
+        "screenshotDesc": "框选区域 · 多条编号评论",
+        "closeAnnotation": "关闭标注",
+        "modeTitle": "标注模式",
+        "rememberHint": "记住上次选择",
+        "unavailable": "标注暂不可用"
+      },
       "title": "Show Page",
       "prompt": "Please visualize this session as a Show Page.",
       "share": "分享",

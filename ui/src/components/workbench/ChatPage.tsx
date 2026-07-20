@@ -29,6 +29,8 @@ import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
+import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
+import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnotation';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import { InstallHint } from '../InstallHint';
 import { Button } from '../ui/button';
@@ -60,6 +62,15 @@ import {
   type LiveActivityState,
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
+
+// The chat host marks its Show Page iframe with ``vibe-embed=1`` (annotation
+// contract §6) so the in-page overlay switches to embedded mode — floating
+// toolbar hidden, controlled via postMessage from the header control. Applied
+// wherever the iframe src is composed (first open + visibility re-point).
+const SHOW_PAGE_EMBED_PARAM = 'vibe-embed=1';
+function embedShowPageSrc(path: string): string {
+  return path.includes('?') ? `${path}&${SHOW_PAGE_EMBED_PARAM}` : `${path}?${SHOW_PAGE_EMBED_PARAM}`;
+}
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -173,6 +184,13 @@ export const ChatPage: React.FC = () => {
   // document so the (non-modal) popover dismisses, without modal-blocking the
   // sibling header buttons (which would then need two taps).
   const [shareOpen, setShareOpen] = useState(false);
+  // True while the mobile annotation mode-picker popover is open. Like the share
+  // popover it floats over the iframe, so it also makes the iframe inert.
+  const [annotateOpen, setAnnotateOpen] = useState(false);
+  // postMessage bridge to the Show Page iframe: sends annotation control
+  // messages and derives the header control's state from the overlay's state
+  // broadcasts (contract §3). Keyed off showPageUrl so a re-point resets state.
+  const annotation = useShowPageAnnotation(showPageUrl);
   useEffect(() => {
     // ChatPage is reused across :sessionId — clear all show-page state so the
     // next chat starts in chat view with a live (not stuck-busy) toggle.
@@ -1286,9 +1304,11 @@ export const ChatPage: React.FC = () => {
       if (res?.ok) {
         // Public pages are served under /p/<share_id>/; private under /show/<id>/.
         setShowPageUrl(
-          res.visibility === 'public' && res.share_id
-            ? `/p/${encodeURIComponent(res.share_id)}/`
-            : `/show/${encodeURIComponent(sid)}/`,
+          embedShowPageSrc(
+            res.visibility === 'public' && res.share_id
+              ? `/p/${encodeURIComponent(res.share_id)}/`
+              : `/show/${encodeURIComponent(sid)}/`,
+          ),
         );
         setShowPageMode(true);
         // First open (or a prior prompt that failed to send) asks the agent to
@@ -1317,7 +1337,7 @@ export const ChatPage: React.FC = () => {
   // so it never stays on a route that now 404s.
   const handleShowPagePayload = useCallback((next: ShowPageLinkInfo) => {
     const path = localPath(next);
-    if (path) setShowPageUrl(path);
+    if (path) setShowPageUrl(embedShowPageSrc(path));
   }, []);
 
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
@@ -1796,6 +1816,8 @@ export const ChatPage: React.FC = () => {
           onToggleShowPage={toggleShowPage}
           onShowPageVisibilityChange={handleShowPagePayload}
           onShareOpenChange={setShareOpen}
+          annotation={annotation}
+          onAnnotateOpenChange={setAnnotateOpen}
         />
 
       {showPageMode && showPageUrl && (
@@ -1813,11 +1835,16 @@ export const ChatPage: React.FC = () => {
         // isolation isn't the security boundary anyway. We still drop the exotic
         // capabilities the page never needs (top navigation, pointer lock, etc.).
         <iframe
+          ref={annotation.iframeRef}
+          onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
           src={showPageUrl}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
-          className={clsx('min-h-0 w-full flex-1 border-0 bg-background', shareOpen && 'pointer-events-none')}
+          className={clsx(
+            'min-h-0 w-full flex-1 border-0 bg-background',
+            (shareOpen || annotateOpen) && 'pointer-events-none',
+          )}
         />
       )}
 
@@ -2251,9 +2278,11 @@ interface ChatHeaderBarProps {
   onToggleShowPage: () => void;
   onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
   onShareOpenChange?: (open: boolean) => void;
+  annotation: AnnotationBridge;
+  onAnnotateOpenChange?: (open: boolean) => void;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2338,9 +2367,20 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             the page + prompts the agent. It shows its label on desktop and stays
             icon-only on mobile. In Show Page mode a Share control sits beside the
             back-to-chat button. */}
-        {/* Back-to-chat (or Visualize when in chat) stays leftmost; the Share
-            control sits to its right, only while the Show Page is open. */}
+        {/* In Show Page mode the order is: annotation control · back-to-chat ·
+            Share. The annotation control sits immediately left of back-to-chat;
+            the Share control stays rightmost. In chat mode only the Visualize
+            toggle shows. */}
         <div className="ml-auto flex items-center gap-1.5">
+          {showPageMode && (
+            <ShowPageAnnotateControl
+              state={annotation.state}
+              onEnable={annotation.enable}
+              onDisable={annotation.disable}
+              onSetMode={annotation.setMode}
+              onPopoverOpenChange={onAnnotateOpenChange}
+            />
+          )}
           <Button
             type="button"
             variant={showPageMode ? 'secondary' : 'ghost'}

@@ -2251,6 +2251,17 @@
     "showPage": {
       "open": "Visualize",
       "backToChat": "Back to chat",
+      "annotate": {
+        "toggle": "Annotate",
+        "smart": "Smart",
+        "screenshot": "Screenshot",
+        "smartDesc": "Click elements · select text · box a region",
+        "screenshotDesc": "Box a region · numbered comments",
+        "closeAnnotation": "Turn off annotation",
+        "modeTitle": "Annotation mode",
+        "rememberHint": "Remembers last choice",
+        "unavailable": "Annotation not available yet"
+      },
       "title": "Show Page",
       "prompt": "Please visualize this session as a Show Page.",
       "share": "Share",
