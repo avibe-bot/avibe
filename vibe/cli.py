@@ -10647,7 +10647,7 @@ def cmd_show_annotate(args):
                 help_command="vibe show annotate --help",
             )
 
-        page = page_store.ensure(session_id)
+        page, _created = page_store.ensure_active(session_id)
         if args.annotation_on:
             control = {"action": "enable", **({"mode": args.mode} if args.mode else {})}
         elif args.annotation_off:

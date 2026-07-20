@@ -64,10 +64,11 @@ def _stub_runtime_prepare_dependencies(
 def test_public_show_write_token_is_share_scoped_and_distinct(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    first = show_public_event_write_token("share-one")
+    first = show_public_event_write_token("share-one", "ses-one")
 
-    assert first == show_public_event_write_token("share-one")
-    assert first != show_public_event_write_token("share-two")
+    assert first == show_public_event_write_token("share-one", "ses-one")
+    assert first != show_public_event_write_token("share-two", "ses-one")
+    assert first != show_public_event_write_token("share-one", "ses-two")
     assert first != show_event_write_token("share-one")
 
 
@@ -2325,9 +2326,35 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
 
 
 def test_show_annotate_cli_posts_single_enable_event_to_live_ui(monkeypatch, tmp_path, capsys):
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses123",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_ses123",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
     captured = {}
 
@@ -2441,6 +2468,66 @@ def test_show_annotate_cli_rejects_off_with_mode(monkeypatch, tmp_path, capsys):
 
     assert cli.cmd_show(args) == 1
     assert json.loads(capsys.readouterr().err)["code"] == "invalid_arguments"
+
+
+@pytest.mark.parametrize(
+    ("session_id", "status", "expected_code"),
+    [
+        ("ses-missing", None, "session_not_found"),
+        ("ses-archived", "archived", "session_archived"),
+    ],
+)
+def test_show_annotate_cli_does_not_create_page_for_unwritable_session(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    session_id,
+    status,
+    expected_code,
+):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_pages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+
+    engine = create_sqlite_engine()
+    if status is not None:
+        now = messages_service._utc_now_iso()
+        with engine.begin() as conn:
+            scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=session_id,
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_variant="default",
+                    session_anchor="anchor_" + session_id,
+                    native_session_id="",
+                    status=status,
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+
+    args = cli.build_parser().parse_args(
+        ["show", "annotate", "--session-id", session_id, "--on", "--json"]
+    )
+
+    assert cli.cmd_show(args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == expected_code
+    with engine.connect() as conn:
+        assert conn.execute(select(show_pages.c.session_id)).first() is None
 
 
 def test_show_event_defaults_to_caller_session(monkeypatch, tmp_path, capsys):

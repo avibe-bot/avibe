@@ -1740,7 +1740,7 @@ def test_public_show_me_accepts_valid_workbench_session(monkeypatch, tmp_path):
     assert response.get_json() == {
         "authenticated": True,
         "canAnnotate": True,
-        "writeToken": show_public_event_write_token(share_id),
+        "writeToken": show_public_event_write_token(share_id, "ses123"),
     }
     assert response.get_json()["writeToken"] != show_event_write_token("ses123")
 
@@ -1761,7 +1761,7 @@ def test_public_show_me_treats_no_oauth_local_access_as_authenticated(monkeypatc
     assert response.get_json() == {
         "authenticated": True,
         "canAnnotate": True,
-        "writeToken": show_public_event_write_token(share_id),
+        "writeToken": show_public_event_write_token(share_id, "ses123"),
     }
 
 
@@ -2423,13 +2423,14 @@ def _public_show_write_headers(
     *,
     origin: str = "https://alex.avibe.bot",
     token_share_id: str | None = None,
+    token_session_id: str = "ses123",
     referer_share_id: str | None = None,
 ) -> dict[str, str]:
     return {
         "Origin": origin,
         "Referer": f"{origin}/p/{referer_share_id or share_id}/",
         "Content-Type": "application/json",
-        "X-Vibe-Show-Token": show_public_event_write_token(token_share_id or share_id),
+        "X-Vibe-Show-Token": show_public_event_write_token(token_share_id or share_id, token_session_id),
     }
 
 
@@ -2539,6 +2540,30 @@ def test_public_show_page_events_reject_cross_share_token(monkeypatch, tmp_path)
         environ_base=_remote_peer(),
         headers=_public_show_write_headers(share_id, token_share_id="other-share"),
         json={"type": "human.annotation.created", "annotation": {"comment": "Wrong token."}},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "show_event_write_forbidden"
+
+
+def test_public_show_page_events_reject_token_from_previous_share_owner(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers=_public_show_write_headers(share_id, token_session_id="ses-previous"),
+        json={"type": "human.annotation.created", "annotation": {"comment": "Stale token."}},
     )
 
     assert response.status_code == 403

@@ -8411,12 +8411,12 @@ def _show_event_write_authorized(session_id: str) -> bool:
     return hmac.compare_digest(token, expected)
 
 
-def _public_show_event_write_authorized(share_id: str) -> bool:
+def _public_show_event_write_authorized(share_id: str, session_id: str) -> bool:
     token = request.headers.get(SHOW_EVENT_WRITE_TOKEN_HEADER)
     if not token:
         return False
     try:
-        expected = show_public_event_write_token(share_id)
+        expected = show_public_event_write_token(share_id, session_id)
     except Exception:
         return False
     return hmac.compare_digest(token, expected)
@@ -9561,7 +9561,9 @@ async def serve_public_show_page(share_id, asset_path):
             author = _show_request_author(public=True)
             return _show_me_response(
                 author,
-                write_token=show_public_event_write_token(share_id) if author is not None else None,
+                write_token=(
+                    show_public_event_write_token(share_id, page.session_id) if author is not None else None
+                ),
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method == "GET":
@@ -9573,7 +9575,7 @@ async def serve_public_show_page(share_id, asset_path):
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
             if not _public_show_referer_matches(share_id):
                 return jsonify({"ok": False, "code": "public_show_events_origin_mismatch"}), 403
-            if not _public_show_event_write_authorized(share_id):
+            if not _public_show_event_write_authorized(share_id, page.session_id):
                 return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
             payload = _sanitize_public_show_event_payload(_show_events_payload_from_request())
             if str(payload.get("type") or "").strip() not in HUMAN_EVENT_TYPES:

@@ -127,13 +127,14 @@ def show_event_write_token(session_id: str) -> str:
     ).hexdigest()
 
 
-def show_public_event_write_token(share_id: str) -> str:
-    value = (share_id or "").strip()
-    if not value:
+def show_public_event_write_token(share_id: str, session_id: str) -> str:
+    share_value = (share_id or "").strip()
+    if not share_value:
         raise ShowPageError("A public share ID is required.", code="missing_share_id")
+    session_value = validate_session_id(session_id)
     return hmac.new(
         _load_or_create_show_event_secret().encode("utf-8"),
-        f"public-share:{value}".encode("utf-8"),
+        f"public-share:{share_value}:session:{session_value}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
 
