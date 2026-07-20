@@ -4,6 +4,10 @@ import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
+import {
+  eventSourceErrorConnectionState,
+  type WorkbenchEventConnectionState,
+} from '../lib/workbenchEventConnection';
 import type { DockDoc } from './DockContext';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
@@ -914,6 +918,7 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 
 export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
+  onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   onSessionActivity?: (data: { session_id: string; scope_id: string | null; event: string; title?: string | null }) => void;
@@ -1769,6 +1774,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
   const eventBridgeConnectedRef = useRef(false);
+  const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('disconnected');
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -1868,6 +1874,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const setWorkbenchEventConnectionState = (state: WorkbenchEventConnectionState) => {
+    if (eventConnectionStateRef.current === state) return;
+    eventConnectionStateRef.current = state;
+    dispatchToWorkbenchHandlers((handlers) => handlers.onConnectionState?.(state));
+  };
+
   const parseWorkbenchEnvelope = <T,>(raw: string): WorkbenchEventEnvelope<T> | null => {
     try {
       return JSON.parse(raw) as WorkbenchEventEnvelope<T>;
@@ -1892,7 +1904,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const source = new EventSource('/api/events');
     eventSourceRef.current = source;
+    setWorkbenchEventConnectionState('reconnecting');
+    source.onopen = () => {
+      if (eventSourceRef.current !== source) return;
+      setWorkbenchEventConnectionState('connected');
+    };
     source.addEventListener('connected', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
@@ -1902,6 +1920,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         if (sourceKind === 'controller') {
           eventBridgeConnectedRef.current = true;
+          setWorkbenchEventConnectionState('connected');
           dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: true }));
         }
       } catch (err) {
@@ -2038,17 +2057,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     });
     source.addEventListener('workbench.events.bridge.status', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
       eventBridgeConnectedRef.current = envelope.data.connected;
+      setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'disconnected');
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onEventBridgeStatus?.(envelope.data);
       });
     });
     source.onerror = (err) => {
+      if (eventSourceRef.current !== source) return;
       eventConnectionRef.current = null;
       eventBridgeConnectedRef.current = false;
+      setWorkbenchEventConnectionState(eventSourceErrorConnectionState(source.readyState));
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
     };
@@ -2716,6 +2739,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     connectWorkbenchEvents: (handlers, options) => {
       eventHandlersRef.current.add(handlers);
       ensureWorkbenchEventSource(options);
+      queueMicrotask(() => {
+        if (eventHandlersRef.current.has(handlers)) {
+          handlers.onConnectionState?.(eventConnectionStateRef.current);
+        }
+      });
       if (
         eventConnectionRef.current &&
         (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)

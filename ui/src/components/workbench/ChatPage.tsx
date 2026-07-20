@@ -27,6 +27,7 @@ import {
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
+import type { WorkbenchEventConnectionState } from '../../lib/workbenchEventConnection';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
@@ -321,6 +322,8 @@ export const ChatPage: React.FC = () => {
   const workingRef = useRef(working);
   workingRef.current = working;
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>(emptyRuntimeState);
+  const [realtimeConnection, setRealtimeConnection] =
+    useState<WorkbenchEventConnectionState>('connected');
   // Global background-work banner toggle (spec req 2), persisted server-side.
   // Tri-state: null = not yet known → suppress the banner so a stored "off"
   // never flashes on first paint; resolves to the stored value (ON when absent),
@@ -1066,6 +1069,7 @@ export const ChatPage: React.FC = () => {
         void syncTurnState();
         void refreshSessionRowUntilNativeBound();
       },
+      onConnectionState: setRealtimeConnection,
       onError: () => {
         // Browser EventSource auto-reconnects; keep the page usable.
       },
@@ -1889,7 +1893,12 @@ export const ChatPage: React.FC = () => {
             ) : null
           }
         />
-        <ActivityStrip state={runtimeState} sessionId={sessionId ?? ''} enabled={bannerEnabled === true} />
+        <ActivityStrip
+          state={runtimeState}
+          sessionId={sessionId ?? ''}
+          enabled={bannerEnabled === true}
+          connection={realtimeConnection}
+        />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         {sessionId && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
@@ -2073,7 +2082,8 @@ const ActivityStrip: React.FC<{
   state: SessionRuntimeState;
   sessionId: string;
   enabled: boolean;
-}> = ({ state, sessionId, enabled }) => {
+  connection: WorkbenchEventConnectionState;
+}> = ({ state, sessionId, enabled, connection }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -2091,7 +2101,7 @@ const ActivityStrip: React.FC<{
     : '';
   const connectionVisible =
     active.length > 0 &&
-    (state.connection === 'reconnecting' || state.connection === 'disconnected');
+    (connection === 'reconnecting' || connection === 'disconnected');
   const expandable = active.length > 0;
   const navigateTo = (path: string) => {
     setOpen(false);
@@ -2104,7 +2114,7 @@ const ActivityStrip: React.FC<{
       role="status"
       aria-live="polite"
       className={clsx(
-        'min-h-7 min-w-0 max-w-[420px] gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
+        'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
@@ -2123,8 +2133,11 @@ const ActivityStrip: React.FC<{
             {firstLabel ? ` · ${firstLabel}` : ''}
           </span>
           {connectionVisible ? (
-            <span className="shrink-0 border-l border-border-strong pl-2 text-gold">
-              {t(`chat.activities.connection.${state.connection}`)}
+            <span
+              className="shrink-0 border-l border-border-strong pl-2 text-gold"
+              title={t(`chat.activities.connection.${connection}Title`)}
+            >
+              {t(`chat.activities.connection.${connection}`)}
             </span>
           ) : null}
           {expandable ? (
@@ -2147,7 +2160,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 aria-label={t('chat.activities.toggle')}
-                className="block max-w-full rounded-full outline-none focus-visible:ring-2 focus-visible:ring-mint/40"
+                className="block w-fit max-w-[min(420px,100%)] rounded-full outline-none focus-visible:ring-2 focus-visible:ring-mint/40"
               >
                 {pill}
               </button>
