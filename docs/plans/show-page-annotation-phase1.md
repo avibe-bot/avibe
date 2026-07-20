@@ -163,17 +163,32 @@ payload.author = { kind: "user" | "local", email?: string }
   write time.
 - Private `/show/<sid>/__show/events` POST: unchanged token requirement
   (`X-Vibe-Show-Token`), now additionally records `author`.
-- Public `/p/<share>/__show/events` POST: **allowed** when the request carries
-  a valid workbench OAuth session (same cookie/validation path as the
-  workbench); otherwise `403 public_show_events_login_required`. No
-  `writeToken` required on the public path; CSRF is covered by SameSite
-  cookie plus a required custom header (`X-Vibe-Show-Client: overlay` — value
-  checked for presence, mirrors the private header pattern).
+- Public `/p/<share>/__show/events` POST (**revised 2026-07-20 v2** after the
+  Lane A security finding — all public shares are same-origin, so a cookie +
+  static custom header can be forged by any same-origin page script against
+  any other share). Requirements, all three:
+  1. a valid workbench OAuth session (unchanged), AND
+  2. `X-Vibe-Show-Token` carrying the **share-scoped write token** issued by
+     `GET /p/<share>/__show/me` (see below) — an HMAC bound to this share,
+     distinct from the private session token, AND
+  3. a `Referer` whose path starts with `/p/<share>/`; missing or mismatched
+     → `403 public_show_events_origin_mismatch`.
+  Anonymous / no-session → `403 public_show_events_login_required`. The
+  `X-Vibe-Show-Client` header requirement is DROPPED (superseded by the
+  token).
 - New endpoint on both surfaces: `GET <basePath>__show/me` →
-  `{ authenticated: boolean, canAnnotate: boolean }` (private surface: always
-  `true/true`; public surface: depends on OAuth session; anonymous GET is
-  allowed and returns `false/false`).
+  `{ authenticated: boolean, canAnnotate: boolean, writeToken?: string }`.
+  `writeToken` is present iff `canAnnotate` is true: on the public surface it
+  is the share-scoped token above; on the private surface it equals the
+  session write token (uniform overlay logic: injected token ?? me.writeToken).
+  Anonymous GET is allowed and returns `false/false` without a token.
 - GET/stream visibility is unchanged (public stays redacted read-only).
+- **Accepted residual risk (recorded, not fixed in Phase 1)**: pages under
+  one origin are one browser trust domain — a page could `window.open` a
+  sibling page and drive its DOM/overlay. This matches the existing
+  same-origin Show Page trust model (issue #577 decision: all page content is
+  authored by this machine's agent). Revisit with origin isolation only if
+  third-party-authored content ever becomes renderable.
 
 ### 6. Chat iframe host marker
 
@@ -214,8 +229,11 @@ depend on the UI package — CONTRIBUTING boundary).
    `standalone` (FAB + toolbar) per `vibe-embed=1` detection.
 3. Control plane: window API (contract §2), postMessage listener/broadcaster
    (§3), SSE `system.annotation.control` handling (§4), mode memory
-   (localStorage key in §2), auth gating via `__show/me` (§5) — hide FAB /
-   show "login required" hint when `canAnnotate` is false.
+   (localStorage key in §2), auth gating via `__show/me` (§5 v2) — hide FAB /
+   show "login required" hint when `canAnnotate` is false. Write token
+   resolution is uniform: injected `__AVIBE_SHOW__.writeToken` ??
+   `me.writeToken`; every event POST sends it via `X-Vibe-Show-Token` on both
+   surfaces.
 4. Bootstrap entry served by the runtime (contract "Bootstrap module"):
    mounts overlay automatically, resilient to user-page errors, no scaffold
    edits, works for existing session workspaces.
@@ -236,10 +254,14 @@ needed — prefer payload-level author, no schema change), `tests/**`,
 1. Extend HTML injection: annotation bootstrap `<script module>` on private
    **and** public Show Page HTML; config gains `annotation` block (§1); public
    config carries no `writeToken`.
-2. `GET __show/me` on both surfaces (§5).
-3. Public events POST: login-gated acceptance (§5), `403
-   public_show_events_login_required` for anonymous, CSRF header presence
-   check, author recording. Private POST: author recording added.
+2. `GET __show/me` on both surfaces (§5 v2), including the share-scoped
+   `writeToken` issuance when `canAnnotate` is true.
+3. Public events POST (§5 v2): OAuth session + share-scoped
+   `X-Vibe-Show-Token` + Referer path-prefix check. Anonymous →
+   `public_show_events_login_required`; missing/mismatched Referer →
+   `public_show_events_origin_mismatch`; bad token →
+   `show_event_write_forbidden`. Author recording on all accepted writes;
+   private POST: author recording added.
 4. New event type `system.annotation.control` (§4): accepted, persisted,
    SSE-published, empty transcript, never dispatched.
 5. CLI `vibe show annotate` (§4) following existing `vibe show mark` patterns
@@ -299,7 +321,10 @@ Do not touch `vibe/**`, `core/**`, `tests/**`.
 5. Public `/p/<share>/`: anonymous — markers/read-only visible, no compose
    affordance, POST rejected (`public_show_events_login_required`); after
    logging into the workbench in the same browser — annotation works and the
-   recorded author identity matches the logged-in email.
+   recorded author identity matches the logged-in email. Negative cases: a
+   POST replaying the OAuth cookie against a DIFFERENT share (wrong
+   share-scoped token or wrong Referer path) is rejected
+   (`show_event_write_forbidden` / `public_show_events_origin_mismatch`).
 6. Esc exits annotation mode; while active, page controls do not fire; after
    disable, the page behaves exactly as before injection.
 7. Gates: runtime `npm run check`; avibe `ruff check` + focused pytest;

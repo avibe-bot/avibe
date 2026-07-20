@@ -44,6 +44,7 @@ from core.show_pages import (
     SHOW_PAGE_ICON_MAX_UPLOAD_BYTES,
     show_cli_event_token,
     show_event_write_token,
+    show_public_event_write_token,
 )
 from core.show_session_events import HUMAN_EVENT_TYPES, show_event_payload_session_mismatch
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
@@ -8410,6 +8411,36 @@ def _show_event_write_authorized(session_id: str) -> bool:
     return hmac.compare_digest(token, expected)
 
 
+def _public_show_event_write_authorized(share_id: str) -> bool:
+    token = request.headers.get(SHOW_EVENT_WRITE_TOKEN_HEADER)
+    if not token:
+        return False
+    try:
+        expected = show_public_event_write_token(share_id)
+    except Exception:
+        return False
+    return hmac.compare_digest(token, expected)
+
+
+def _public_show_referer_matches(share_id: str) -> bool:
+    referer = request.headers.get("Referer")
+    if not referer:
+        return False
+    expected_path = f"/p/{quote(share_id, safe='')}/"
+    return urlsplit(referer).path.startswith(expected_path)
+
+
+def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    sanitized.pop("id", None)
+    sanitized.pop("dispatch", None)
+    for key in ("payload", "annotation"):
+        nested = sanitized.get(key)
+        if isinstance(nested, dict):
+            sanitized[key] = {nested_key: value for nested_key, value in nested.items() if nested_key != "dispatch"}
+    return sanitized
+
+
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     from vibe import remote_access
 
@@ -8432,9 +8463,12 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     return {"kind": "local"}
 
 
-def _show_me_response(author: dict[str, str] | None):
+def _show_me_response(author: dict[str, str] | None, *, write_token: str | None = None):
     authenticated = author is not None
-    response = jsonify({"authenticated": authenticated, "canAnnotate": authenticated})
+    payload = {"authenticated": authenticated, "canAnnotate": authenticated}
+    if authenticated and write_token:
+        payload["writeToken"] = write_token
+    response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Vary"] = "Cookie"
     return response
@@ -8446,6 +8480,7 @@ def _show_event_response_from_payload(
     *,
     author: dict[str, str] | None = None,
     public: bool = False,
+    allow_dispatch: bool = True,
 ):
     if show_event_payload_session_mismatch(session_id, payload):
         return (
@@ -8467,7 +8502,8 @@ def _show_event_response_from_payload(
         store.close()
 
     _publish_show_session_event(event_payload)
-    _dispatch_show_event_if_requested(event_payload)
+    if allow_dispatch:
+        _dispatch_show_event_if_requested(event_payload)
     return jsonify({"ok": True, "event": _show_event_response_payload(event_payload, public=public)}), 201
 
 
@@ -8896,6 +8932,7 @@ async def _show_page_runtime_response(
     external_prefix: str | None = None,
     inject_show_config: bool = False,
     show_authenticated: bool = False,
+    show_config_session_id: str | None = None,
 ):
     from core.show_runtime import get_show_runtime_manager
 
@@ -8967,11 +9004,13 @@ async def _show_page_runtime_response(
         base_path = f"{external_prefix.rstrip('/')}/" if external_prefix else f"/show/{quote(session_id, safe='')}/"
         content = _inject_show_runtime_config(
             content,
-            session_id,
+            show_config_session_id or session_id,
             base_path=base_path,
             authenticated=show_authenticated,
             include_write_token=external_prefix is None,
         )
+        if external_prefix:
+            response_headers["Referrer-Policy"] = "same-origin"
         _mark_show_runtime_document_no_store(response_headers)
     elif _is_show_page_entry_asset(asset_path) and 200 <= proxied.status_code < 300:
         # The entry document is per-session/per-share dynamic (it embeds the import map
@@ -9299,16 +9338,21 @@ def _inject_show_runtime_config(
         include_write_token=include_write_token,
     )
     bootstrap = f'<script type="module" src="{base_path}__show/annotation.js"></script>'
-    injected = f"{script}\n    {bootstrap}"
     module_match = _SHOW_RUNTIME_MODULE_SCRIPT_RE.search(html)
     if module_match:
-        html = f"{html[: module_match.start()]}{injected}\n    {html[module_match.start() :]}"
+        html = f"{html[: module_match.start()]}{script}\n    {html[module_match.start() :]}"
     elif "</head>" in html:
-        html = html.replace("</head>", f"{injected}\n  </head>", 1)
+        html = html.replace("</head>", f"{script}\n  </head>", 1)
     elif "</body>" in html:
-        html = html.replace("</body>", f"{injected}\n  </body>", 1)
+        html = html.replace("</body>", f"{script}\n  </body>", 1)
     else:
-        html = f"{injected}\n{html}"
+        html = f"{script}\n{html}"
+    if "</body>" in html:
+        html = html.replace("</body>", f"{bootstrap}\n  </body>", 1)
+    elif "</html>" in html:
+        html = html.replace("</html>", f"{bootstrap}\n</html>", 1)
+    else:
+        html = f"{html}\n{bootstrap}"
     return html.encode("utf-8")
 
 
@@ -9431,7 +9475,10 @@ async def serve_private_show_page(session_id, asset_path):
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
-            return _show_me_response({"kind": "local"})
+            return _show_me_response(
+                {"kind": "local"},
+                write_token=show_event_write_token(page.session_id),
+            )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
@@ -9507,16 +9554,24 @@ async def serve_public_show_page(share_id, asset_path):
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
-            return _show_me_response(_show_request_author(public=True))
+            author = _show_request_author(public=True)
+            return _show_me_response(
+                author,
+                write_token=show_public_event_write_token(share_id) if author is not None else None,
+            )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method == "GET":
                 return await _show_events_response(page.session_id, public=True)
             if request.method != "POST":
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
             author = _show_request_author(public=True)
-            if author is None or not str(request.headers.get("X-Vibe-Show-Client") or "").strip():
+            if author is None:
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
-            payload = _show_events_payload_from_request()
+            if not _public_show_referer_matches(share_id):
+                return jsonify({"ok": False, "code": "public_show_events_origin_mismatch"}), 403
+            if not _public_show_event_write_authorized(share_id):
+                return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
+            payload = _sanitize_public_show_event_payload(_show_events_payload_from_request())
             if str(payload.get("type") or "").strip() not in HUMAN_EVENT_TYPES:
                 return (
                     jsonify(
@@ -9533,6 +9588,7 @@ async def serve_public_show_page(share_id, asset_path):
                 payload,
                 author=author,
                 public=True,
+                allow_dispatch=False,
             )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):
@@ -9549,6 +9605,7 @@ async def serve_public_show_page(share_id, asset_path):
                     external_prefix=f"/p/{quote(share_id, safe='')}",
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=_show_request_author(public=True) is not None,
+                    show_config_session_id=share_id,
                 )
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):

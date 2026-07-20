@@ -14,7 +14,9 @@ from core.show_pages import (
     _extract_icon_path,
     ensure_show_page_dir,
     show_cli_event_token,
+    show_event_write_token,
     show_page_payload,
+    show_public_event_write_token,
 )
 from storage.pagination import PageRequest
 from vibe import cli
@@ -57,6 +59,16 @@ def _stub_runtime_prepare_dependencies(
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
     return calls
+
+
+def test_public_show_write_token_is_share_scoped_and_distinct(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    first = show_public_event_write_token("share-one")
+
+    assert first == show_public_event_write_token("share-one")
+    assert first != show_public_event_write_token("share-two")
+    assert first != show_event_write_token("share-one")
 
 
 def test_show_without_subcommand_prints_help(capsys):
@@ -732,6 +744,7 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert "declare global" in main_tsx
     assert "const injected: VibeShowRuntimeConfig = globalThis.__AVIBE_SHOW__ ?? {}" in main_tsx
     assert "globalThis.__AVIBE_SHOW__ = {" in main_tsx
+    assert "...injected," in main_tsx
     assert main_tsx.index("const injected: VibeShowRuntimeConfig") < main_tsx.index("globalThis.__AVIBE_SHOW__ = {")
     assert "sessionId: injected.sessionId ??" in main_tsx
     assert "basePath: injected.basePath ??" in main_tsx
