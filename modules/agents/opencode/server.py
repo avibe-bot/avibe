@@ -580,17 +580,38 @@ class OpenCodeServerManager:
         code = str(cause.get("code") or error.get("code") or "").strip()
         url = cls._safe_url(error.get("url") or cause.get("path"))
 
+        response_payload: object = error.get("responseBody")
+        if isinstance(response_payload, str):
+            try:
+                response_payload = json.loads(response_payload)
+            except (TypeError, ValueError):
+                response_payload = None
+        response_error = (
+            response_payload.get("error")
+            if isinstance(response_payload, dict)
+            else None
+        )
+        if not isinstance(response_error, dict):
+            response_error = response_payload if isinstance(response_payload, dict) else {}
+        response_type = str(response_error.get("type") or "").strip()
+        status_code = str(error.get("statusCode") or "").strip()
+
         message = ""
         data = error.get("data")
         if isinstance(data, dict):
             message = str(data.get("message") or "").strip()
         if not message:
             message = str(error.get("message") or "").strip()
+        if not message:
+            message = str(response_error.get("message") or "").strip()
         message = cls._redact_diagnostic_text(message)
 
         details = name
-        if code:
-            details += f" ({code})"
+        qualifiers = [value for value in (code, response_type) if value]
+        if status_code:
+            qualifiers.append(f"HTTP {status_code}")
+        if qualifiers:
+            details += f" ({'; '.join(dict.fromkeys(qualifiers))})"
         if url:
             details += f" while calling {url}"
         if message and message not in details:

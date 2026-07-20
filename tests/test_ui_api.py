@@ -981,6 +981,58 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
     assert entry["user_managed"] is False
 
 
+def test_opencode_provider_catalog_prefers_configured_agent_default_model(monkeypatch, tmp_path):
+    class _FakeServer:
+        async def get_providers(self):
+            return {
+                "all": [{"id": "openai", "name": "OpenAI"}],
+                "connected": ["openai"],
+            }
+
+        async def get_provider_auth(self):
+            return {}
+
+        async def get_available_models(self, directory):
+            return {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "models": {
+                            "gpt-5.3-chat-latest": {},
+                            "gpt-5.4": {},
+                        },
+                    }
+                ],
+                "default": {"openai": "gpt-5.3-chat-latest"},
+            }
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    async def _fake_get_server():
+        return _FakeServer()
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(
+        api,
+        "load_config",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(
+                opencode=SimpleNamespace(
+                    default_provider="openai",
+                    default_model="gpt-5.4",
+                )
+            )
+        ),
+    )
+
+    result = asyncio.run(api.get_opencode_providers_async())
+
+    provider = next(provider for provider in result["providers"] if provider["id"] == "openai")
+    assert provider["default_model"] == "gpt-5.4"
+
+
 def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
     monkeypatch, tmp_path
 ):

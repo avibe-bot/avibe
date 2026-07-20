@@ -578,6 +578,7 @@ class _FakeOpencodeServer:
         self.active_calls: list[str] = []
         self.inactive_calls: list[str] = []
         self.message_sent = False
+        self.recent_error: str | None = None
 
     async def get_provider_auth(self):
         return self.auth_map
@@ -605,7 +606,7 @@ class _FakeOpencodeServer:
         self.abort_calls.append((session_id, directory))
 
     async def get_recent_session_error(self, session_id, since=None):
-        return None
+        return self.recent_error
 
     async def get_provider_api_diagnostic(self, provider_id, model_id):
         return None
@@ -776,6 +777,132 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
     assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
     assert fake.inactive_calls == ["sess_probe"]
+
+
+def test_opencode_provider_test_prefers_configured_agent_default_model(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {
+                    "gpt-5.3-chat-latest": {},
+                    "gpt-5.4": {},
+                },
+            }
+        ],
+        "default": {"openai": "gpt-5.3-chat-latest"},
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "OK"}],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(
+        service,
+        "_resolve_backend_config",
+        lambda backend: SimpleNamespace(
+            default_provider="openai",
+            default_model="gpt-5.4",
+        )
+        if backend == "opencode"
+        else None,
+    )
+
+    result = _run(service.test_opencode_provider("openai"))
+
+    assert result["ok"] is True
+    assert result["model"] == "gpt-5.4"
+    assert fake.prompt_calls[-1]["model"] == {
+        "providerID": "openai",
+        "modelID": "gpt-5.4",
+    }
+
+
+def test_opencode_provider_test_surfaces_non_retryable_log_error_before_timeout(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {"gpt-5.3-chat-latest": {}},
+            }
+        ]
+    }
+    fake.recent_error = (
+        "AI_APICallError (model_not_found) while calling "
+        'https://relay.example/v1/responses: Model "gpt-5.3-chat-latest" is not supported'
+    )
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+
+    result = _run(
+        service.test_opencode_provider(
+            "openai",
+            model="gpt-5.3-chat-latest",
+            timeout=0.1,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "model_not_found"
+    assert result["model"] == "gpt-5.3-chat-latest"
+    assert "not supported" in result["detail"]
+    assert result["duration_ms"] < 100
+    assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
+    assert fake.inactive_calls == ["sess_probe"]
+
+
+def test_opencode_provider_test_classifies_log_error_for_empty_terminal(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {"gpt-5.3-chat-latest": {}},
+            }
+        ]
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "unknown",
+            },
+            "parts": [],
+        }
+    ]
+    fake.recent_error = (
+        "AI_APICallError (model_not_found; HTTP 404): "
+        'Model "gpt-5.3-chat-latest" is not supported'
+    )
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+
+    result = _run(
+        service.test_opencode_provider(
+            "openai",
+            model="gpt-5.3-chat-latest",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "model_not_found"
+    assert result["model"] == "gpt-5.3-chat-latest"
+    assert "not supported" in result["detail"]
 
 
 def test_opencode_provider_test_fails_on_empty_terminal_message(
