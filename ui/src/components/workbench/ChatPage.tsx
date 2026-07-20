@@ -27,7 +27,6 @@ import {
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
-import type { WorkbenchEventConnectionState } from '../../lib/workbenchEventConnection';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
@@ -322,8 +321,7 @@ export const ChatPage: React.FC = () => {
   const workingRef = useRef(working);
   workingRef.current = working;
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>(emptyRuntimeState);
-  const [realtimeConnection, setRealtimeConnection] =
-    useState<WorkbenchEventConnectionState>('connected');
+  const [eventStreamConnected, setEventStreamConnected] = useState(false);
   // Global background-work banner toggle (spec req 2), persisted server-side.
   // Tri-state: null = not yet known → suppress the banner so a stored "off"
   // never flashes on first paint; resolves to the stored value (ON when absent),
@@ -387,10 +385,6 @@ export const ChatPage: React.FC = () => {
     setLiveRows(next.rows);
     setLiveStartedAt(next.startedAt);
   }, []);
-  // Bumped on resume (tab visible again / network back) to force the transcript
-  // subscription effect to reopen a possibly-dead SSE stream — see the
-  // visibility effect below.
-  const [connectionEpoch, setConnectionEpoch] = useState(0);
   // Lifecycle guards for ``syncTurnState``'s clear-on-idle (Codex P2):
   //  - ``turnEpochRef`` bumps every time a turn STARTS (local send / send-now /
   //    observed ``turn.start``). syncTurnState captures it before its request and
@@ -1069,13 +1063,18 @@ export const ChatPage: React.FC = () => {
         void syncTurnState();
         void refreshSessionRowUntilNativeBound();
       },
-      onConnectionState: setRealtimeConnection,
-      onError: () => {
-        // Browser EventSource auto-reconnects; keep the page usable.
+      onConnectionState: (state) => {
+        const connected = state === 'connected';
+        setEventStreamConnected(connected);
+        if (!connected) void syncTurnState();
       },
-    }, { reconnect: connectionEpoch > 0 });
+      onError: () => {
+        // ApiContext owns the explicit retry loop; keep the page usable while
+        // the turn-state fallback below reconciles durable activity data.
+      },
+    });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1083,32 +1082,21 @@ export const ChatPage: React.FC = () => {
   // catch up to durable storage.
   useEffect(() => {
     if (!sessionId) return;
-    const onVisible = () => {
+    const resync = () => {
       if (document.visibilityState !== 'visible') return;
       // A suspended tab can drop the reply AND the turn.end, so recover all
       // three: missed rows, the queue, and the working/Stop state (Codex P2).
       void reconcile();
       void refreshQueue();
       void syncTurnState();
-      // The immediate reconcile above only catches up to NOW; if the socket
-      // itself is dead (iOS can leave EventSource in a zombie OPEN state that
-      // never auto-reconnects), it would be the last update until the next
-      // resume. Reopen the stream so live events keep flowing while the page
-      // stays foregrounded — the reopen's onConnected re-runs reconcile
-      // (idempotent).
-      setConnectionEpoch((e) => e + 1);
     };
-    document.addEventListener('visibilitychange', onVisible);
-    // Network flaps (mobile handoff, sleep/wake) can kill the stream without a
-    // visibility change; reopen it on ``online`` too (only while foregrounded —
-    // a background resume is handled by visibilitychange).
-    const onOnline = () => {
-      if (document.visibilityState === 'visible') setConnectionEpoch((e) => e + 1);
-    };
-    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', resync);
+    window.addEventListener('online', resync);
+    window.addEventListener('focus', resync);
     return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', resync);
+      window.removeEventListener('online', resync);
+      window.removeEventListener('focus', resync);
     };
   }, [sessionId, reconcile, refreshQueue, syncTurnState]);
 
@@ -1130,13 +1118,14 @@ export const ChatPage: React.FC = () => {
       runtimeState.background_activities.length > 0 ||
       runtimeState.pending_activity_output_count > 0 ||
       runtimeState.connection === 'reconnecting';
-    if (!working && !hasBackgroundState) return;
+    const needsStreamFallback = !eventStreamConnected;
+    if (!working && !hasBackgroundState && !needsStreamFallback) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       void syncTurnState();
-    }, hasBackgroundState ? ACTIVITY_RECONCILE_INTERVAL_MS : WORKING_RECONCILE_INTERVAL_MS);
+    }, hasBackgroundState || needsStreamFallback ? ACTIVITY_RECONCILE_INTERVAL_MS : WORKING_RECONCILE_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [working, runtimeState.background_activities.length, runtimeState.pending_activity_output_count, runtimeState.connection, syncTurnState]);
+  }, [working, runtimeState.background_activities.length, runtimeState.pending_activity_output_count, runtimeState.connection, eventStreamConnected, syncTurnState]);
 
   const sendMessage = useCallback(
     async (
@@ -1897,7 +1886,6 @@ export const ChatPage: React.FC = () => {
           state={runtimeState}
           sessionId={sessionId ?? ''}
           enabled={bannerEnabled === true}
-          connection={realtimeConnection}
         />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         {sessionId && pendingApprovals.length > 0 ? (
@@ -2082,8 +2070,7 @@ const ActivityStrip: React.FC<{
   state: SessionRuntimeState;
   sessionId: string;
   enabled: boolean;
-  connection: WorkbenchEventConnectionState;
-}> = ({ state, sessionId, enabled, connection }) => {
+}> = ({ state, sessionId, enabled }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -2099,9 +2086,6 @@ const ActivityStrip: React.FC<{
   const firstLabel = first
     ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
     : '';
-  const connectionVisible =
-    active.length > 0 &&
-    (connection === 'reconnecting' || connection === 'disconnected');
   const expandable = active.length > 0;
   const navigateTo = (path: string) => {
     setOpen(false);
@@ -2132,14 +2116,6 @@ const ActivityStrip: React.FC<{
               : t('chat.activities.delivering', { count: pendingOutputs })}
             {firstLabel ? ` · ${firstLabel}` : ''}
           </span>
-          {connectionVisible ? (
-            <span
-              className="shrink-0 border-l border-border-strong pl-2 text-gold"
-              title={t(`chat.activities.connection.${connection}Title`)}
-            >
-              {t(`chat.activities.connection.${connection}`)}
-            </span>
-          ) : null}
           {expandable ? (
             <ChevronDown
               className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-180')}

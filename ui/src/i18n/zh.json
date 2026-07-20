@@ -2361,12 +2361,6 @@
         "taskOneShot": "一次性",
         "taskRecurring": "周期性",
         "agentRun": "Agent 运行"
-      },
-      "connection": {
-        "reconnecting": "重连中…",
-        "reconnectingTitle": "实时更新正在重连——后台任务仍在运行，连接恢复后将自动继续更新。",
-        "disconnected": "已断开",
-        "disconnectedTitle": "实时更新连接已断开——后台任务仍在运行，网络恢复后自动重连。"
       }
     },
     "agentActivity": {

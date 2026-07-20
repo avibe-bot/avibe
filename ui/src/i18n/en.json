@@ -2361,12 +2361,6 @@
         "taskOneShot": "One-time",
         "taskRecurring": "Recurring",
         "agentRun": "Agent run"
-      },
-      "connection": {
-        "reconnecting": "Reconnecting...",
-        "reconnectingTitle": "Live updates are reconnecting - background tasks are still running and updates will resume automatically.",
-        "disconnected": "Disconnected",
-        "disconnectedTitle": "Live updates are disconnected - background tasks are still running and will reconnect automatically when the network recovers."
       }
     },
     "agentActivity": {

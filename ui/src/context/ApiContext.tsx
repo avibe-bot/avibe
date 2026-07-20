@@ -1,11 +1,11 @@
-import React, { createContext, useContext, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
-  eventSourceErrorConnectionState,
+  WorkbenchEventReconnectLoop,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './DockContext';
@@ -610,7 +610,7 @@ export type ApiContextType = {
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; cache?: boolean }) => Promise<InboxFeedResult>;
-  connectWorkbenchEvents: (handlers: WorkbenchEventHandlers, options?: { reconnect?: boolean }) => () => void;
+  connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -1774,7 +1774,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
   const eventBridgeConnectedRef = useRef(false);
-  const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('disconnected');
+  const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
+  const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
+  const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const stopWorkbenchEventsRef = useRef<() => void>(() => {});
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -1889,26 +1892,51 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const closeWorkbenchEventSource = () => {
-    eventSourceRef.current?.close();
+  const closeActiveWorkbenchEventSource = () => {
+    const source = eventSourceRef.current;
     eventSourceRef.current = null;
+    source?.close();
     eventConnectionRef.current = null;
     eventBridgeConnectedRef.current = false;
   };
 
-  const ensureWorkbenchEventSource = (options?: { reconnect?: boolean }) => {
-    if (options?.reconnect) {
-      closeWorkbenchEventSource();
-    }
-    if (eventSourceRef.current) return;
+  function reconnectWorkbenchEventSource(): void {
+    if (eventHandlersRef.current.size === 0) return;
+    closeActiveWorkbenchEventSource();
+    openWorkbenchEventSource();
+  }
 
-    const source = new EventSource('/api/events');
+  function getWorkbenchEventReconnectLoop(): WorkbenchEventReconnectLoop {
+    if (!eventReconnectLoopRef.current) {
+      eventReconnectLoopRef.current = new WorkbenchEventReconnectLoop({
+        reconnect: reconnectWorkbenchEventSource,
+        isVisible: () => document.visibilityState === 'visible',
+      });
+    }
+    return eventReconnectLoopRef.current;
+  }
+
+  function openWorkbenchEventSource(): void {
+    if (
+      eventSourceRef.current ||
+      eventHandlersRef.current.size === 0 ||
+      document.visibilityState !== 'visible'
+    ) return;
+
+    let source: EventSource;
+    try {
+      source = new EventSource('/api/events');
+    } catch (err) {
+      setWorkbenchEventConnectionState('reconnecting');
+      getWorkbenchEventReconnectLoop().failed();
+      const event = err instanceof Event ? err : new Event('error');
+      dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(event));
+      return;
+    }
+
     eventSourceRef.current = source;
     setWorkbenchEventConnectionState('reconnecting');
-    source.onopen = () => {
-      if (eventSourceRef.current !== source) return;
-      setWorkbenchEventConnectionState('connected');
-    };
+    getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
       if (eventSourceRef.current !== source) return;
       try {
@@ -1928,6 +1956,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         eventConnectionRef.current = null;
       }
       if (eventConnectionRef.current) {
+        getWorkbenchEventReconnectLoop().streamOpened();
         const connected = eventConnectionRef.current;
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
       }
@@ -2060,8 +2089,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (eventSourceRef.current !== source) return;
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
+      getWorkbenchEventReconnectLoop().streamOpened();
       eventBridgeConnectedRef.current = envelope.data.connected;
-      setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'disconnected');
+      setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'reconnecting');
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onEventBridgeStatus?.(envelope.data);
@@ -2069,13 +2099,48 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
-      eventConnectionRef.current = null;
-      eventBridgeConnectedRef.current = false;
-      setWorkbenchEventConnectionState(eventSourceErrorConnectionState(source.readyState));
+      closeActiveWorkbenchEventSource();
+      setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
+      getWorkbenchEventReconnectLoop().failed();
     };
+  }
+
+  const ensureWorkbenchEventSource = () => {
+    getWorkbenchEventReconnectLoop();
+    openWorkbenchEventSource();
   };
+
+  const stopWorkbenchEventSource = () => {
+    closeActiveWorkbenchEventSource();
+    eventReconnectLoopRef.current?.stop();
+    eventReconnectLoopRef.current = null;
+    setWorkbenchEventConnectionState('reconnecting');
+  };
+  stopWorkbenchEventsRef.current = stopWorkbenchEventSource;
+
+  const wakeWorkbenchEvents = () => {
+    if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
+    setWorkbenchEventConnectionState('reconnecting');
+    getWorkbenchEventReconnectLoop().wake();
+  };
+  wakeWorkbenchEventsRef.current = wakeWorkbenchEvents;
+
+  useEffect(() => {
+    const wakeIfVisible = () => {
+      if (document.visibilityState === 'visible') wakeWorkbenchEventsRef.current();
+    };
+    document.addEventListener('visibilitychange', wakeIfVisible);
+    window.addEventListener('online', wakeIfVisible);
+    window.addEventListener('focus', wakeIfVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', wakeIfVisible);
+      window.removeEventListener('online', wakeIfVisible);
+      window.removeEventListener('focus', wakeIfVisible);
+      stopWorkbenchEventsRef.current();
+    };
+  }, []);
 
   const requestJson = async (
     path: string,
@@ -2736,9 +2801,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs');
     },
     getHarnessRun: (runId) => getCachedJson(`/api/harness/runs/${encodeURIComponent(runId)}`),
-    connectWorkbenchEvents: (handlers, options) => {
+    connectWorkbenchEvents: (handlers) => {
       eventHandlersRef.current.add(handlers);
-      ensureWorkbenchEventSource(options);
+      ensureWorkbenchEventSource();
       queueMicrotask(() => {
         if (eventHandlersRef.current.has(handlers)) {
           handlers.onConnectionState?.(eventConnectionStateRef.current);
@@ -2768,7 +2833,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return () => {
         eventHandlersRef.current.delete(handlers);
         if (eventHandlersRef.current.size === 0) {
-          closeWorkbenchEventSource();
+          stopWorkbenchEventSource();
         }
       };
     },

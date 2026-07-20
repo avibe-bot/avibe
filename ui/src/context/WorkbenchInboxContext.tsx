@@ -56,8 +56,8 @@ const appendPage = (prev: InboxSession[], page: InboxSession[]): InboxSession[] 
 
 /** Provider that owns the Inbox state shared across WorkbenchSidebar + InboxPage.
  *
- *  Connects to ``/api/events`` (reopening the stream on resume — see the resync
- *  effect) and updates the per-session feed in place: ``inbox.session.updated``
+ *  Connects to ``/api/events`` and updates the per-session feed in place:
+ *  ``inbox.session.updated``
  *  upserts + re-sorts a card (the realtime "bump to top"), ``inbox.unread.changed``
  *  refreshes the unread map after a mark-read elsewhere. Each (re)connect also
  *  does a full ``refresh()`` so events missed while the socket was down (the
@@ -79,10 +79,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  // Bumped on resume (tab visible again / network back) to force the SSE
-  // connection effect to tear down the (possibly dead) stream and reopen it.
-  // See the resync effect below for why a frozen mobile PWA needs this.
-  const [connectionEpoch, setConnectionEpoch] = useState(0);
   // Mirror the cursor into a ref so ``loadMore`` can read the latest value
   // without re-creating its identity (and the context value) on every page.
   const cursorRef = useRef<string | null>(null);
@@ -92,9 +88,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const inboxSessionsRef = useRef<InboxSession[]>([]);
   inboxSessionsRef.current = inboxSessions;
   // Only the very first mount does the destructive first-page refresh; every
-  // later effect rerun — an ``api`` identity change (e.g. a locale switch, which
-  // ApiProvider documents as rebuilding the value) or a resume-driven
-  // connectionEpoch bump — reconciles the loaded window instead, so a non-resume
+  // later effect rerun — such as an ``api`` identity change after a locale switch
+  // — reconciles the loaded window instead, so a non-resume
   // rerun never collapses a multi-page feed back to page one.
   const initialFetched = useRef(false);
 
@@ -189,8 +184,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   useEffect(() => {
     // First mount loads page one; every later rerun reconciles the loaded window
-    // instead — whether the rerun is a resume-driven connectionEpoch bump or just
-    // an ``api`` identity change (e.g. a locale switch rebuilding the value) — so
+    // instead when an ``api`` identity change rebuilds the value — so
     // a non-resume rerun never collapses a multi-page feed back to page one. The
     // broker fans events out live with no replay (sse_broker.py ``/api/events``),
     // so anything missed while the socket was down must be re-read; plain HTTP,
@@ -230,37 +224,32 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         });
       },
       onError: (err) => {
-        // Browser EventSource auto-reconnects on transient drops; the
-        // visibility/online resync below covers what it can't — a frozen mobile
-        // tab whose socket died without ever firing a clean error. Keep this a
-        // log, not a crash, so the workbench stays usable.
+        // ApiContext owns the explicit reconnect loop. Keep this a log, not a
+        // crash, so the workbench stays usable during the HTTP fallback.
         console.debug('[inbox] sse error', err);
       },
-    }, { reconnect: connectionEpoch > 0 });
+    });
     return disconnect;
-  }, [api, refresh, reconcile, connectionEpoch, applyUnreadMap]);
+  }, [api, refresh, reconcile, applyUnreadMap]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
-  // frozen and its SSE socket dropped, and the broker never replays the gap; on
-  // iOS the stream frequently does NOT auto-reconnect (it can sit in a zombie
-  // OPEN state that never fires onerror), so neither the live handlers nor the
-  // refresh above re-fire on their own. Bump the connection epoch when the tab
-  // becomes visible again or the network returns: the effect above tears the
-  // dead stream down, reopens it, and re-reads the feed + unread map — so the
-  // inbox cards and sidebar dots catch up to messages that arrived while away.
-  // StatusContext (runtime status) and ChatPage (transcript) already resync on
-  // visibility; the inbox feed was the surface missing it.
+  // frozen and its SSE socket dropped, and the broker never replays the gap;
+  // iOS can leave EventSource in a zombie OPEN state without onerror. ApiContext
+  // reopens the shared stream on visibility, online, and focus; independently
+  // reconcile the durable feed here so missed events never gate data freshness.
   useEffect(() => {
     const resync = () => {
-      if (document.visibilityState === 'visible') setConnectionEpoch((e) => e + 1);
+      if (document.visibilityState === 'visible') void reconcile();
     };
     document.addEventListener('visibilitychange', resync);
     window.addEventListener('online', resync);
+    window.addEventListener('focus', resync);
     return () => {
       document.removeEventListener('visibilitychange', resync);
       window.removeEventListener('online', resync);
+      window.removeEventListener('focus', resync);
     };
-  }, []);
+  }, [reconcile]);
 
   const totalUnread = useMemo(
     () => Object.values(unreadBySession).reduce((sum, n) => sum + (n || 0), 0),
