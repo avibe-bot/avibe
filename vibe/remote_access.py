@@ -907,8 +907,14 @@ def _sync_one_organization(
             # does not identify an exact valid revision.
             rejected += 1
             continue
+        release_scopes: list[dict[str, str]] = []
         try:
             with engine.begin() as connection:
+                previous_policy = resource_access_service.get_resource_policy(
+                    resource_kind,
+                    resource_id,
+                    connection=connection,
+                )
                 outcome = resource_access_service.apply_control_plane_intent(
                     connection,
                     organization_id=organization,
@@ -918,6 +924,23 @@ def _sync_one_organization(
                     access_level=access_level,
                     group_ids=group_ids,
                 )
+                if resource_kind == "vault_secret" and outcome["status"] == "applied":
+                    from storage import vault_service
+
+                    if vault_service.resource_policy_narrowed(previous_policy, outcome["policy"]):
+                        revoked_rows = vault_service.revoke_active_grants_for_secret_resource(
+                            connection,
+                            resource_id,
+                        )
+                        release_scopes = vault_service.agent_release_scopes_after_rows(connection, revoked_rows)
+            if release_scopes:
+                try:
+                    api.release_vault_agent_scopes(
+                        release_scopes,
+                        reason="resource-access-policy-narrowed",
+                    )
+                except Exception:
+                    logger.warning("failed to release narrowed Vault grant scopes", exc_info=True)
             if outcome["status"] == "stale":
                 skipped += 1
                 continue

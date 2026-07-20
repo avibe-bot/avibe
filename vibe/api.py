@@ -1450,6 +1450,12 @@ class VaultApiError(ValueError):
         self.status = status
 
 
+def _vault_secret_access_forbidden(exc: Exception) -> VaultApiError:
+    """Translate the storage-layer Vault ACL denial into the REST contract."""
+
+    return VaultApiError(str(exc), code="resource_access_forbidden", status=403)
+
+
 def _publish_vaults_updated(
     *,
     scope: str,
@@ -1921,6 +1927,8 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
@@ -2079,6 +2087,8 @@ def create_vault_agent_binding(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -2200,6 +2210,8 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             signed_context = _signed_operation_context(context, key)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     return {"ok": True, "context": signed_context, "envelope": envelope_payload}
@@ -2773,6 +2785,8 @@ def request_vault_access(payload: dict) -> dict:
     except vault_service.SecretNotFoundError as exc:
         missing_name = name or str(exc)
         raise VaultApiError(f"secret '{missing_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
@@ -2832,6 +2846,8 @@ def request_vault_sign(payload: dict) -> dict:
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
@@ -3285,6 +3301,7 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
         except (
             vault_service.SecretNotFoundError,
+            vault_service.VaultSecretAccessError,
             vault_service.RequestNotFoundError,
             vault_service.InvalidRequestError,
             vault_service.InvalidGrantError,
@@ -3293,6 +3310,8 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = []
     if isinstance(preflight_error, vault_service.SecretNotFoundError):
         raise VaultApiError(f"secret '{preflight_error}' not found", code="secret_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.VaultSecretAccessError):
+        raise _vault_secret_access_forbidden(preflight_error) from preflight_error
     if isinstance(preflight_error, vault_service.RequestNotFoundError):
         raise VaultApiError(f"request '{preflight_error}' not found", code="request_not_found", status=404) from preflight_error
     if isinstance(preflight_error, vault_service.InvalidRequestError):
@@ -3361,6 +3380,8 @@ def create_vault_grant(payload: dict) -> dict:
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
@@ -3924,6 +3945,8 @@ def vault_sign(payload: dict) -> dict:
                     key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
