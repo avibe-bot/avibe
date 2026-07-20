@@ -91,21 +91,30 @@ def _duration_ms(started_iso: Optional[str], ended_iso: Optional[str]) -> Option
 def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     """Whether an agent message legally CLOSES a turn.
 
-    A turn ends with a user-visible ``result``/``error``/``notify`` reply, OR — when
-    it produced nothing visible (a ``<silent>``-stripped/empty final or a reply-less
-    bookkeeping turn) — the invisible ``silent`` marker persisted at the delivery
-    chokepoint. All are terminals; only cancel/Stop (no terminal at all) stays
-    ``interrupted``. Note ``notify`` is now terminal in EVERY form (a notify-only turn
-    is a legal completion), not just the ``backend_failure`` diagnostic.
+    Terminals: a visible ``result``/``error`` reply, a ``backend_failure`` ``notify``
+    diagnostic, OR — when the turn produced nothing user-visible (a ``<silent>``-
+    stripped/empty final, or a reply-less bookkeeping turn) — the invisible ``silent``
+    marker persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
+    stays ``interrupted``.
+
+    A PLAIN ``notify`` is deliberately NOT terminal: agents emit mid-turn notify rows
+    that explicitly do not end the turn (e.g. Claude's model-refusal fallback), so
+    treating every notify as terminal would split one turn into two groups. A genuine
+    notify-only COMPLETION is instead closed by the ``silent`` marker (its turn still
+    emits an empty final result at the chokepoint), not by the notify row.
     """
     if author != "agent":
         return False
-    return msg_type in ("result", "error", "notify", messages_service.SILENT_TYPE)
+    if msg_type in ("result", "error", messages_service.SILENT_TYPE):
+        return True
+    if msg_type == "notify" and (metadata or {}).get("event") == "backend_failure":
+        return True
+    return False
 
 
 def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
-    """done for a normal completion (result / silent-marker / plain notify); failed
-    for an ``error`` or a ``backend_failure`` notify."""
+    """done for a normal completion (result / silent marker); failed for an ``error``
+    or a ``backend_failure`` notify."""
     if msg_type == "error":
         return "failed"
     if msg_type == "notify" and (metadata or {}).get("event") == "backend_failure":

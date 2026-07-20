@@ -494,21 +494,29 @@ def test_silent_completion_marks_turn_done(isolated_state):
     assert g["steps"] == 2
 
 
-def test_notify_only_turn_is_done(isolated_state):
-    """A turn ending with only a ``notify`` (a legal reply-less completion) → done,
-    anchored to the visible notify itself."""
+def test_midturn_notify_does_not_split_or_close_a_turn(isolated_state):
+    """A plain (non-backend-failure) ``notify`` is NOT terminal: agents emit mid-turn
+    notify rows that keep the turn going (e.g. Claude's model-refusal fallback). It must
+    not close the pending group or split the turn — the turn still closes on its real
+    terminal, keeping all steps in ONE group. (A genuine notify-only completion is
+    closed by the silent marker instead — see test_silent_completion_marks_turn_done.)"""
     engine = create_sqlite_engine()
     sid = "ses_notify"
     with engine.begin() as conn:
         scope = _seed_session(conn, session_id=sid)
         _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
         _evt(conn, scope, sid, eid="e_n1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"x\"}`")
-        _msg(conn, scope, sid, mid="m_n1", mtype="notify", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="heads up")
+        _msg(conn, scope, sid, mid="m_n1", mtype="notify", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="refusal fallback")
+        _evt(conn, scope, sid, eid="e_n2", created_at="2026-06-01T10:00:03Z", text="🔧 `Read` `{\"file_path\":\"y\"}`")
+        _msg(conn, scope, sid, mid="m_r1", mtype="result", author="agent", created_at="2026-06-01T10:00:04.000000+00:00", text="answer")
 
     with engine.connect() as conn:
         groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    # ONE done group spanning both tool steps — the mid-turn notify neither closed nor
+    # split it; the turn closed on its real terminal.
     assert [g["status"] for g in groups] == ["done"]
-    assert groups[0]["anchor_message_id"] == "m_n1"
+    assert groups[0]["steps"] == 2
+    assert groups[0]["anchor_message_id"] == "m_r1"
     assert groups[0]["anchor_position"] == "before"
 
 

@@ -690,6 +690,29 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
     assert row2["preview_text"] == "R2"
 
 
+def test_list_inbox_sessions_silent_completion_clears_awaiting(isolated_state):
+    """A turn that completes with only the INVISIBLE ``silent`` marker still counts as
+    the agent having replied — ``replied`` (awaiting) clears — while the preview text
+    stays the last VISIBLE reply (silent is not a preview type)."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_sil", "Silent")
+        _insert_msg(conn, scope_id, "ses_sil", "user", "first", "2026-05-30T10:00:00Z")
+        _insert_msg(conn, scope_id, "ses_sil", "agent", "R1", "2026-05-30T10:01:00Z")  # visible reply
+        # turn 2: user follows up; the agent runs and finishes SILENTLY (marker only).
+        _insert_msg(conn, scope_id, "ses_sil", "user", "second", "2026-05-30T10:05:00Z")
+        _insert_msg(
+            conn, scope_id, "ses_sil", "agent", "", "2026-05-30T10:07:00Z",
+            read=False, msg_type=messages_service.SILENT_TYPE,
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+    assert row["replied"] is False  # the silent completion answered the follow-up
+    assert row["preview_text"] == "R1"  # preview stays the last VISIBLE reply
+
+
 def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:

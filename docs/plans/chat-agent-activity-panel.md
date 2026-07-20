@@ -381,46 +381,65 @@ and rendered a gold "Interrupted · stopped at step N" chip. Nothing was interru
 | Ending | Grouping status |
 | --- | --- |
 | visible `result` reply | `done` |
-| plain `notify` (reply-less completion) | `done` |
-| **invisible `silent` marker** (silent-stripped / empty final) | `done` |
+| **invisible `silent` marker** (silent-stripped / empty final, or reply-less completion) | `done` |
 | `error`, or `backend_failure` `notify` | `failed` |
-| cancel / Stop — **no terminal at all** | `interrupted` |
+| cancel / Stop, or no terminal at all | `interrupted` |
+
+A **plain `notify` is NOT terminal** — agents emit mid-turn notify rows that keep the
+turn going (e.g. Claude's model-refusal fallback), so treating every notify as terminal
+would split one turn into two. A genuine notify-only COMPLETION is closed by the
+`silent` marker instead (its turn still emits an empty final result at the chokepoint).
 
 **Invisible `silent` marker.** When a turn completes NORMALLY with nothing
 user-visible to send, the delivery chokepoint
-(`MessageDispatcher.emit_agent_message`, the `mutates_turn_lifecycle` branch, gated
-`not is_error`) persists ONE `messages` row of a **dedicated `type='silent'`** via
+(`MessageDispatcher.emit_agent_message`, the `mutates_turn_lifecycle` branch) persists
+ONE `messages` row of a **dedicated `type='silent'`** via
 `message_mirror.persist_silent_completion_marker` → `messages_service.append`
 (bypassing the empty-text guard, the `message.new` publish, and the inbox recompute —
-no live UI churn). A **dedicated type** (not the originally-sketched `result` +
-`content.kind='silent'`) was chosen after finding the read layer is **allowlist**-
-based: `type='silent'` is auto-excluded from the transcript (`TRANSCRIPT_TYPES`),
-inbox preview (`result/notify/error`), unread, web-push and the live-publish gate with
-ZERO new guards — mirroring the existing invisible-type precedent
-(`pending`/`queued`/`draft`/`harness_dedupe`). The single denylist site
-(`NON_CONVERSATION_TYPES`) gains `silent` so the marker never bumps the inbox activity
-clock / last-author. (A `result`-typed marker would have leaked into ~8 allowlist read
-paths, each needing a `content.kind != 'silent'` guard.) The `ix_messages_inbox_activity`
-partial index is intentionally left as a valid **superset** predicate — a silent row it
-still covers is filtered by the query, and SQLite keeps using the index since the query
-predicate is a subset; no migration needed for the rare marker rows.
+no live UI churn). **Gate: `level != "silent" and not is_error`.** This is the
+load-bearing distinction: the real user-stop paths (codex/claude/opencode) emit a
+terminal `result` with `level="silent"` and `is_error=False`, so `not is_error` ALONE
+would wrongly mark a stop as done — a stop must stay `interrupted`. A genuine
+`<silent>`-block/empty completion is `level="normal"` with an empty body; backend
+failures arrive `level="silent"` (after a visible notify) and are excluded too.
+
+A **dedicated type** (not the originally-sketched `result` + `content.kind='silent'`)
+was chosen after finding the read layer is **allowlist**-based: `type='silent'` is
+auto-excluded from the transcript (`TRANSCRIPT_TYPES`), inbox preview, unread, web-push
+and the live-publish gate with ZERO new guards — mirroring the invisible-type precedent
+(`pending`/`queued`/`draft`/`harness_dedupe`). (A `result`-typed marker would have
+leaked into ~8 allowlist reads.) Teaching the rest of the system about the new type:
+- **`NON_CONVERSATION_TYPES`** gains `silent` — the marker never bumps the inbox
+  activity clock / last-author.
+- **Inbox awaiting/replied** compares `last_input_at` against a terminal timestamp that
+  INCLUDES `silent` (not the visible-only `preview_*`), so a silently-completed turn is
+  no longer stuck showing "awaiting the agent"; the preview TEXT stays the last visible
+  reply.
+- **`ix_messages_inbox_activity`** partial-index predicate adds `silent` (models.py +
+  migrations.py + alembic `20260721_0031`) — a stricter `NOT IN` query predicate does
+  NOT reuse a looser partial index on SQLite, so the predicates must match or inbox
+  refreshes fall back to scans.
+- **Session fork** treats `silent` as terminal in BOTH the anchor query
+  (`_latest_source_message_anchor`, else the anchor falls back to the input row and the
+  completed turn is trimmed/rolled back as if running) and `TERMINAL_AGENT_OUTPUT_TYPES`.
 
 **Grouping.** `agent_activity_service` adds `silent` to `_RELEVANT_MESSAGE_TYPES` (so
-its timeline — separate from the transcript allowlist — sees the marker) and makes
-`_is_terminal` accept `silent` and **every** `notify` (a notify-only turn is a legal
-completion, not just the `backend_failure` diagnostic). Because the marker is invisible
-in the transcript, a group closing on it anchors to the **visible turn trigger** AFTER
-it (never the marker — which the frontend can't position against, per the #935 backward
-anchor invariant), and the marker never becomes `last_boundary_id`. A visible terminal
-(result/notify/error) still anchors to itself, BEFORE it. **Frontend: no change** — the
-marker never reaches it; the `done` status flows through `groupFromWire` and renders as
-the normal ✓ chip.
+its timeline — separate from the transcript allowlist — sees the marker) and
+`_is_terminal` (result/error/silent + `backend_failure` notify). Because the marker is
+invisible in the transcript, a group closing on it anchors to the **visible turn
+trigger** AFTER it (never the marker — which the frontend can't position against, per
+the #935 backward anchor invariant), and the marker never becomes `last_boundary_id`. A
+visible terminal still anchors to itself, BEFORE it. **Frontend: no change** — the
+marker never reaches it; `done` flows through `groupFromWire` and renders as the ✓ chip.
 
 **Evidence.** `tests/test_agent_activity_service.py` — silent completion → done
-(watch-triggered, tool steps, silent finish; anchored to the visible trigger),
-notify-only → done, backend_failure notify → failed, Stop (no terminal) → interrupted.
-`tests/test_message_mirror.py` — the marker persists but is excluded from the transcript
-allowlist + `NON_CONVERSATION_TYPES` (last visible message unchanged).
-`tests/test_message_dispatcher_result_fallback.py` — the chokepoint writes the marker
-on a clean silent completion and NOT on a Stop (`is_error`). IM delivery untouched
-(marker is avibe-persistence only).
+(watch-triggered, tool steps, silent finish; anchored to the visible trigger); a
+mid-turn notify does NOT split/close a turn; backend_failure notify → failed; Stop (no
+terminal) → interrupted. `tests/test_message_dispatcher_result_fallback.py` — the
+chokepoint writes the marker on a clean completion, NOT on a `level="silent"` stop nor
+an `is_error` result. `tests/test_message_mirror.py` — the marker persists but is
+excluded from the transcript allowlist + `NON_CONVERSATION_TYPES`.
+`tests/test_messages_service.py` — a silent completion clears the inbox "awaiting" flag
+while the preview stays the last visible reply. `tests/test_session_fork.py` — a
+silently-completed codex/opencode source turn is terminal (no trim). IM delivery
+untouched (marker is avibe-persistence only).

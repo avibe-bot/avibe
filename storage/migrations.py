@@ -638,7 +638,7 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
     conn.execute(
         "create index ix_messages_inbox_activity "
         "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
+        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
     )
     conn.execute(
         "create index if not exists ix_messages_inbox_agent_reply "

@@ -1430,14 +1430,20 @@ class ConsolidatedMessageDispatcher:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(context)
-                    if not is_error:
-                        # Clean silent/empty completion: nothing user-visible was or
-                        # will be delivered, so persist an INVISIBLE ``silent`` terminal
-                        # marker. Without it the activity grouping sees "activity rows +
+                    if level != "silent" and not is_error:
+                        # A CLEAN silent completion — ``level='normal'`` with an
+                        # empty/``<silent>``-stripped body (we're already inside the
+                        # ``level=='silent' or not text.strip()`` branch, so here the
+                        # body is empty). Persist an INVISIBLE ``silent`` terminal
+                        # marker; without it the activity grouping sees "activity rows +
                         # no terminal" and misreads a legal completion as interrupted.
-                        # Cancel/Stop (is_error) legitimately stays interrupted; a
-                        # backend failure already emitted a visible notify. Best-effort:
-                        # never let this break turn completion.
+                        #
+                        # This must NOT fire for ``level='silent'``: the user-stop paths
+                        # (codex/claude/opencode) emit a terminal ``result`` with
+                        # ``level='silent'`` and ``is_error=False`` — a stop legitimately
+                        # stays ``interrupted``, so ``not is_error`` is the wrong gate.
+                        # Backend failures also arrive ``level='silent'`` (after a
+                        # visible notify), and are excluded here too.
                         try:
                             persist_silent_completion_marker(context)
                         except Exception:

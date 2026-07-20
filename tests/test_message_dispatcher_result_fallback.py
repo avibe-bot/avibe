@@ -785,9 +785,21 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             await dispatcher.emit_agent_message(ctx, "result", "")
         marker.assert_called_once_with(ctx)
 
-    async def test_stopped_turn_writes_no_marker(self):
-        # Cancel/Stop (is_error) legitimately stays interrupted — NO silent marker, so
-        # the grouping never upgrades a stopped turn to done.
+    async def test_user_stop_writes_no_marker(self):
+        # The REAL stop paths (codex/claude/opencode) emit a terminal result with
+        # ``level='silent'`` and ``is_error=False`` — a stop legitimately stays
+        # interrupted, so NO silent marker. (``not is_error`` alone would wrongly mark
+        # it — the gate keys on ``level != 'silent'`` too. P1.)
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", level="silent")
+        marker.assert_not_called()
+
+    async def test_error_completion_writes_no_marker(self):
+        # An ``is_error`` terminal is a FAILURE, never a done marker.
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
         with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(

@@ -366,7 +366,9 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text("session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"),
+        sqlite_where=text(
+            "session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
+        ),
     ),
     Index(
         "ix_messages_inbox_agent_reply",
