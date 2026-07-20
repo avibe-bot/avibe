@@ -256,17 +256,22 @@ def persist_silent_completion_marker(context: MessageContext) -> None:
     for cancel/Stop (which legitimately stays ``interrupted``) nor backend failures
     (which already emit a visible ``notify``). It exists solely so the activity
     grouping closes the turn as DONE instead of misreading "activity + no terminal" as
-    interrupted; it is never delivered, published to the live stream, or shown (see
+    interrupted; it is never delivered, or shown as a transcript bubble (see
     ``messages_service.SILENT_TYPE`` and its allowlist/denylist exclusions). Writes via
     ``_append_quietly`` directly — bypassing ``persist_agent_message``'s empty-text
-    guard, the ``message.new`` publish, and the inbox recompute — so it causes no live
-    UI churn. Best-effort: the caller wraps it; a failure must never break turn
-    completion.
+    guard and the ``message.new`` publish (the marker is invisible in the transcript).
+
+    It DOES recompute + publish the inbox row, though: the marker counts as a reply for
+    the inbox awaiting/replied flag, so an open sidebar must clear "awaiting the agent"
+    live instead of staying stale until a reconnect. No web-push (a silent completion is
+    not a notifiable reply). Best-effort: the caller wraps it; a failure must never break
+    turn completion.
     """
     if not context.platform:
         return
     session_id = (context.platform_specific or {}).get("agent_session_id")
     engine = get_cached_sqlite_engine()
+    inbox_row = None
     with engine.begin() as conn:
         if context.platform == "avibe":
             session_row = _session_row(conn, session_id) if session_id else None
@@ -292,6 +297,19 @@ def persist_silent_completion_marker(context: MessageContext) -> None:
             parent_native_message_id=context.thread_id,
             content={"kind": "silent"},
         )
+        # Recompute the session's inbox row so the awaiting/replied flag clears live.
+        # avibe-only (the workbench inbox is avibe-scoped; IM rows aren't shown there).
+        if context.platform == "avibe" and session_id:
+            inbox_row = messages_service.get_inbox_session(conn, session_id)
+    if inbox_row is not None:
+        # Same ``inbox.session.updated`` event a visible reply publishes — but NOT
+        # ``message.new`` (no transcript bubble) and NOT web-push (not a notifiable reply).
+        try:
+            from core.inbox_events import bus
+
+            bus.publish("inbox.session.updated", inbox_row)
+        except Exception:
+            logger.debug("persist_silent_completion_marker: inbox publish failed", exc_info=True)
 
 
 def persist_agent_message(

@@ -808,6 +808,23 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
         marker.assert_not_called()
 
+    async def test_suppress_delivery_writes_no_marker(self):
+        # A private/background run (``suppress_delivery``) intentionally leaves NO
+        # message history — no silent marker, so it never pollutes the cross-platform
+        # store / activity / fork state (mirrors the suppressed-delivery path that
+        # already skips ``persist_agent_message``).
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        ctx = MessageContext(
+            user_id="U1", channel_id="ses-1", platform="avibe",
+            platform_specific={"agent_session_id": "ses-1", "suppress_delivery": True},
+        )
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(ctx, "result", "")
+        marker.assert_not_called()
+
     async def test_silent_backend_failure_collapses_status_as_failed(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)

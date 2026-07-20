@@ -910,3 +910,39 @@ def test_silent_completion_marker_persisted_but_invisible(isolated_state):
     # And kept out of the inbox conversation clock (never bumps last-activity/author).
     assert messages_service.SILENT_TYPE in messages_service.NON_CONVERSATION_TYPES
     assert messages_service.SILENT_TYPE not in messages_service.TRANSCRIPT_TYPES
+
+
+def test_silent_completion_marker_publishes_inbox_update_not_message(isolated_state):
+    """The marker clears the inbox awaiting flag, so it publishes ``inbox.session.updated``
+    (live sidebar refresh) — but NOT ``message.new`` (no transcript bubble)."""
+    from unittest import mock
+
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_pub", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_pub", scope_id=scope_id, agent_backend="claude", agent_variant="default",
+                session_anchor="anchor_ses_pub", native_session_id="", status="active", metadata_json="{}",
+                created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+        conn.execute(
+            messages.insert().values(
+                id="m_vis", scope_id=scope_id, session_id="ses_pub", platform="avibe", author="agent",
+                type="result", source="agent", content_text="visible", content_json="{}",
+                metadata_json="{}", created_at=now, updated_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_pub", platform="avibe",
+        platform_specific={"agent_session_id": "ses_pub"},
+    )
+    with mock.patch("core.inbox_events.bus.publish") as publish:
+        persist_silent_completion_marker(ctx)
+
+    published = [call.args[0] for call in publish.call_args_list]
+    assert "inbox.session.updated" in published  # sidebar awaiting clears live
+    assert "message.new" not in published  # invisible: no transcript bubble

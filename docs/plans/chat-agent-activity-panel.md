@@ -395,13 +395,19 @@ user-visible to send, the delivery chokepoint
 (`MessageDispatcher.emit_agent_message`, the `mutates_turn_lifecycle` branch) persists
 ONE `messages` row of a **dedicated `type='silent'`** via
 `message_mirror.persist_silent_completion_marker` → `messages_service.append`
-(bypassing the empty-text guard, the `message.new` publish, and the inbox recompute —
-no live UI churn). **Gate: `level != "silent" and not is_error`.** This is the
+(bypassing the empty-text guard and the `message.new` publish — no transcript bubble).
+**Gate: `level != "silent" and not is_error and not suppress_delivery`.** This is the
 load-bearing distinction: the real user-stop paths (codex/claude/opencode) emit a
 terminal `result` with `level="silent"` and `is_error=False`, so `not is_error` ALONE
 would wrongly mark a stop as done — a stop must stay `interrupted`. A genuine
 `<silent>`-block/empty completion is `level="normal"` with an empty body; backend
-failures arrive `level="silent"` (after a visible notify) and are excluded too.
+failures arrive `level="silent"` (after a visible notify); a `suppress_delivery`
+private/background run intentionally leaves NO history — all excluded.
+
+The marker DOES recompute + publish `inbox.session.updated` (avibe): since it now
+clears the inbox awaiting/replied flag, an open sidebar must drop "awaiting the agent"
+live rather than staying stale until reconnect. But it publishes NO `message.new` (no
+transcript bubble) and NO web-push (a silent completion is not a notifiable reply).
 
 A **dedicated type** (not the originally-sketched `result` + `content.kind='silent'`)
 was chosen after finding the read layer is **allowlist**-based: `type='silent'` is

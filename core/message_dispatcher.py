@@ -1430,7 +1430,8 @@ class ConsolidatedMessageDispatcher:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(context)
-                    if level != "silent" and not is_error:
+                    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery"))
+                    if level != "silent" and not is_error and not suppress_delivery:
                         # A CLEAN silent completion — ``level='normal'`` with an
                         # empty/``<silent>``-stripped body (we're already inside the
                         # ``level=='silent' or not text.strip()`` branch, so here the
@@ -1443,7 +1444,12 @@ class ConsolidatedMessageDispatcher:
                         # ``level='silent'`` and ``is_error=False`` — a stop legitimately
                         # stays ``interrupted``, so ``not is_error`` is the wrong gate.
                         # Backend failures also arrive ``level='silent'`` (after a
-                        # visible notify), and are excluded here too.
+                        # visible notify), and are excluded here too. And a
+                        # ``suppress_delivery`` run is a private/background turn that
+                        # intentionally leaves NO message history — writing a marker
+                        # would pollute the cross-platform store + activity/fork state,
+                        # so it is excluded (mirrors the suppressed-delivery path that
+                        # already skips ``persist_agent_message``).
                         try:
                             persist_silent_completion_marker(context)
                         except Exception:
