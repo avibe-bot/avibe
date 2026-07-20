@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Camera, Check, type LucideIcon, MessageSquarePlus, Sparkles, X } from 'lucide-react';
+import { Camera, Check, type LucideIcon, MessageSquarePlus, MousePointerClick, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -31,7 +31,14 @@ interface ModeDef {
 }
 
 const MODES: readonly ModeDef[] = [
-  { id: 'smart', icon: Sparkles, labelKey: 'chat.showPage.annotate.smart', descKey: 'chat.showPage.annotate.smartDesc' },
+  {
+    id: 'smart',
+    // mouse-pointer-click (matches design.pen + Lane R overlay). Sparkles is
+    // reserved for AI-generate affordances elsewhere in the workbench.
+    icon: MousePointerClick,
+    labelKey: 'chat.showPage.annotate.smart',
+    descKey: 'chat.showPage.annotate.smartDesc',
+  },
   {
     id: 'screenshot',
     icon: Camera,
