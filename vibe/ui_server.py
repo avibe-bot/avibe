@@ -2377,7 +2377,7 @@ async def websocket_echo(websocket: WebSocket):
 
 @app.websocket("/show/{session_id}/__vite_hmr")
 async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageError, ShowPageStore
 
     if not _show_runtime_hmr_origin_allowed(websocket):
         await websocket.close(code=1008)
@@ -2388,7 +2388,14 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
 
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
+        try:
+            page = store.require_access(
+                session_id,
+                user_context=_show_runtime_websocket_resource_context(websocket),
+            )
+        except ShowPageError:
+            await websocket.close(code=1008)
+            return
         # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
         # pages too, so a public page framed in the Dock app must also get live
         # HMR. Mirror the serve route's private+public visibility gate here.
@@ -2525,6 +2532,24 @@ def _show_runtime_websocket_authorized(websocket: Any) -> bool:
     if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
         return False
     return _remote_access_websocket_session_payload(websocket, config) is not None
+
+
+def _show_runtime_websocket_resource_context(websocket: Any):
+    """Build the ACL context from the same signed session used by the socket gate."""
+
+    from storage import resource_access_service
+
+    config = _load_remote_access_config()
+    if config is None or _websocket_is_local_request(websocket, config):
+        return resource_access_service.ResourceUserContext(is_trusted_local=True)
+    payload = _remote_access_websocket_session_payload(websocket, config)
+    if payload is None:
+        return resource_access_service.ResourceUserContext()
+    return resource_access_service.current_resource_context(
+        payload,
+        is_remote=True,
+        is_trusted_local=False,
+    )
 
 
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
@@ -3510,7 +3535,10 @@ def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
-    status = 409 if code in {"not_public", "share_id_taken"} else 400
+    if code == "resource_access_forbidden":
+        status = 403
+    else:
+        status = 409 if code in {"not_public", "share_id_taken"} else 400
     message = str(exc)
     # Structured ``error`` so the Web UI's shared handler localizes via
     # ``errors.<code>`` and falls back to the human message (not the raw code)
@@ -3582,6 +3610,12 @@ def _show_page_icon_not_found():
     return response
 
 
+def _show_page_access_forbidden_response():
+    response = Response("", status=403, mimetype="text/plain")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/api/show-pages/<session_id>/icon", methods=["GET", "HEAD"])
 def show_page_icon_get(session_id):
     # The page's own HTML icon, served as the single chokepoint (§7.1f): ALL href
@@ -3600,7 +3634,7 @@ def show_page_icon_get(session_id):
     try:
         store = ShowPageStore()
         try:
-            page = store.get(session_id)
+            page = store.require_access(session_id)
             # Any of the user's own pages — private, public, OR offline — may serve
             # its static icon: the payload advertises an icon token for all of them
             # and the inventory lists them, so gating by visibility would strand
@@ -3626,7 +3660,11 @@ def show_page_icon_get(session_id):
         # content revert. A plain Response also never honors `Range` (no 206/416).
         response.headers["Cache-Control"] = "private, max-age=604800, immutable"
         return response
-    except (ShowPageError, ValueError, OSError):
+    except ShowPageError as exc:
+        if exc.code == "resource_access_forbidden":
+            return _show_page_access_forbidden_response()
+        return _show_page_icon_not_found()
+    except (ValueError, OSError):
         # Enforce the bytes-or-404 contract at the boundary: a bad session id, a bad
         # page-authored icon, or a file that vanished mid-race must fall back, not 500.
         return _show_page_icon_not_found()
@@ -6684,6 +6722,7 @@ def _show_page_icon_upload_error(code: str, message: str):
     status = {
         "show_page_not_found": 404,
         "session_not_found": 404,
+        "resource_access_forbidden": 403,
         "icon_too_large": 413,
         "invalid_icon_type": 415,
     }.get(code, 400)
@@ -9402,12 +9441,15 @@ def stop_show_runtime_on_shutdown() -> None:
 
 @app.route("/show/<session_id>")
 def redirect_private_show_page_to_canonical_path(session_id):
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageError, ShowPageStore
 
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
+        try:
+            page = store.require_access(session_id)
+        except ShowPageError as exc:
+            if exc.code == "resource_access_forbidden":
+                return _show_page_access_forbidden_response()
             return _show_page_not_found_response()
         # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
         # pages too, so the sibling no-trailing-slash canonical redirect must
@@ -9430,12 +9472,15 @@ def redirect_private_show_page_to_canonical_path(session_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_private_show_page(session_id, asset_path):
-    from core.show_pages import ShowPageStore, ensure_show_page_dir
+    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
 
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
+        try:
+            page = store.require_access(session_id)
+        except ShowPageError as exc:
+            if exc.code == "resource_access_forbidden":
+                return _show_page_access_forbidden_response()
             return _show_page_not_found_response()
         if page.visibility == "offline":
             return _show_page_offline_response()

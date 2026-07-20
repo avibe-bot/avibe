@@ -3437,7 +3437,15 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_access.make_session_cookie(
+            config,
+            "alex@example.com",
+            "user-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_access_source": "owner",
+            },
+        ),
         domain="alex.avibe.bot",
     )
     try:

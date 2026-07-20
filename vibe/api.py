@@ -1203,9 +1203,7 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
-            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        page = store.require_access(session_id)
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
