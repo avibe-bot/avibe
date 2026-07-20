@@ -606,10 +606,10 @@ export type ApiContextType = {
   listSessionQueue: (sessionId: string, options?: { cache?: boolean }) => Promise<{ queued: WorkbenchMessage[] }>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
-  getTurnState: (sessionId: string) => Promise<SessionRuntimeState>;
+  getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
-  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; cache?: boolean }) => Promise<InboxFeedResult>;
+  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
@@ -2587,7 +2587,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       return { ok: res.ok, ...payloadJson };
     },
-    getTurnState: async (sessionId) => {
+    getTurnState: async (sessionId, options) => {
       const path = `/api/sessions/${encodeURIComponent(sessionId)}/turn-state`;
       const res = await apiFetch(path);
       if (res.status === 504) {
@@ -2603,6 +2603,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
       if (!res.ok) {
+        if (options?.handleError === false) {
+          throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+        }
         await handleApiError(res, path);
       }
       return res.json();
@@ -2624,7 +2627,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.before) search.set('before', params.before);
       const qs = search.toString();
       const path = qs ? `/api/inbox?${qs}` : '/api/inbox';
-      return params?.cache === false ? getJson(path) : getCachedJson(path);
+      const options = { handleError: params?.handleError };
+      return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
     },
     listVibeAgents: (params) => {
       const search = new URLSearchParams();

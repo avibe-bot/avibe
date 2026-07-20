@@ -778,11 +778,11 @@ export const ChatPage: React.FC = () => {
   // directions: sets Stop when a turn is live, and clears a stale Stop (a
   // ``turn.end`` we missed while the socket was down) when the controller reports
   // idle — guarded so it can't drop a turn that's genuinely starting.
-  const syncTurnState = useCallback(async () => {
+  const syncTurnState = useCallback(async (options?: { quiet?: boolean }) => {
     if (!sessionId) return;
     const epochAtRequest = turnEpochRef.current;
     try {
-      const res = await api.getTurnState(sessionId);
+      const res = await api.getTurnState(sessionId, { handleError: !options?.quiet });
       if (sessionId !== sessionIdRef.current) return;
       if (res.foreground === 'unknown') return;
       setRuntimeState(res);
@@ -1060,13 +1060,13 @@ export const ChatPage: React.FC = () => {
         // a native bind whose turn.end we missed.
         void reconcile();
         void refreshQueue();
-        void syncTurnState();
+        void syncTurnState({ quiet: true });
         void refreshSessionRowUntilNativeBound();
       },
       onConnectionState: (state) => {
         const connected = state === 'connected';
         setEventStreamConnected(connected);
-        if (!connected) void syncTurnState();
+        if (!connected) void syncTurnState({ quiet: true });
       },
       onError: () => {
         // ApiContext owns the explicit retry loop; keep the page usable while
@@ -1088,7 +1088,7 @@ export const ChatPage: React.FC = () => {
       // three: missed rows, the queue, and the working/Stop state (Codex P2).
       void reconcile();
       void refreshQueue();
-      void syncTurnState();
+      void syncTurnState({ quiet: true });
     };
     document.addEventListener('visibilitychange', resync);
     window.addEventListener('online', resync);
@@ -1122,7 +1122,7 @@ export const ChatPage: React.FC = () => {
     if (!working && !hasBackgroundState && !needsStreamFallback) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
-      void syncTurnState();
+      void syncTurnState({ quiet: needsStreamFallback });
     }, hasBackgroundState || needsStreamFallback ? ACTIVITY_RECONCILE_INTERVAL_MS : WORKING_RECONCILE_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [working, runtimeState.background_activities.length, runtimeState.pending_activity_output_count, runtimeState.connection, eventStreamConnected, syncTurnState]);

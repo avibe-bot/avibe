@@ -155,7 +155,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     const loadedIds = new Set(inboxSessionsRef.current.map((s) => s.session_id));
     const limit = Math.min(Math.max(loadedIds.size, PAGE_SIZE), 100);
     try {
-      const result = await api.listInbox({ platform: 'avibe', limit, cache: false });
+      const result = await api.listInbox({
+        platform: 'avibe',
+        limit,
+        cache: false,
+        handleError: false,
+      });
       setInboxSessions((prev) => {
         const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
         const merged = prev.map((s) => incoming.get(s.session_id) ?? s);
