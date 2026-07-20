@@ -3329,8 +3329,10 @@ def agent_backends_get():
     return jsonify(api.get_agent_backend_catalog())
 
 
-def _vibe_agent_error_response(exc: ValueError):
+def _vibe_agent_error_response(exc: Exception):
     message = str(exc)
+    if isinstance(exc, PermissionError):
+        return jsonify({"ok": False, "code": "agent_access_forbidden", "message": message}), 403
     lowered = message.lower()
     if "not found" in lowered:
         return jsonify({"ok": False, "code": "agent_not_found", "message": message}), 404
@@ -3368,7 +3370,7 @@ def vibe_agents_get():
             "yes",
         }
         return jsonify(api.get_vibe_agents(backend=request.args.get("backend") or None, include_disabled=include_disabled))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3463,7 +3465,7 @@ def vibe_agent_get(name):
 
     try:
         return jsonify(api.get_vibe_agent(name))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3473,7 +3475,7 @@ def vibe_agents_post():
 
     try:
         return jsonify(api.create_vibe_agent(request.json or {}))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3483,7 +3485,7 @@ def vibe_agents_import_post():
 
     try:
         return _vibe_agent_result_response(api.import_vibe_agents(request.json or {}))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3494,7 +3496,7 @@ def vibe_agents_default_post():
     payload = request.json or {}
     try:
         return jsonify(api.set_default_vibe_agent(payload.get("name") or ""))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3504,7 +3506,7 @@ def vibe_agent_patch(name):
 
     try:
         return jsonify(api.update_vibe_agent(name, request.json or {}))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3514,7 +3516,7 @@ def vibe_agent_delete(name):
 
     try:
         return _vibe_agent_result_response(api.remove_vibe_agent(name))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -6773,8 +6775,10 @@ async def sessions_update(session_id: str):
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    except (ValueError, PermissionError) as err:
+    except ValueError as err:
         return jsonify({"error": str(err)}), 400
+    except PermissionError as err:
+        return jsonify({"error": str(err)}), 403
     except workbench_sessions_service.SessionBackendLockedError as err:
         # A session is pinned to its backend once it has a conversation (or a
         # running turn); the UI may switch the agent within the same backend,
