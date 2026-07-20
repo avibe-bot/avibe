@@ -89,6 +89,109 @@ def test_parse_session_cookie_returns_payload_for_fresh_token() -> None:
     assert payload["instance_id"] == "inst_123"
 
 
+def test_session_cookie_persists_validated_organization_claims() -> None:
+    config = _config()
+    cookie = remote_access.make_session_cookie(
+        config,
+        "member@example.com",
+        "user-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
+            "vibe_membership_version": "membership-v2",
+        },
+    )
+
+    payload = remote_access.parse_session_cookie(config, cookie)
+
+    assert payload is not None
+    assert payload["vibe_organization_id"] == "org-1"
+    assert payload["vibe_group_ids"] == ["group-engineering"]
+    assert payload["vibe_membership_version"] == "membership-v2"
+    assert remote_access.session_needs_membership_refresh(
+        payload,
+        now=int(payload["claims_issued_at"]) + remote_access.SESSION_ORGANIZATION_REFRESH_SECONDS,
+    ) is True
+
+
+def test_session_claims_reject_external_guest_organization_context() -> None:
+    config = _config()
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_organization_claims"):
+        remote_access.session_claims_from_oidc(
+            config,
+            {
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_access_source": "email_domain",
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": ["group-engineering"],
+            },
+        )
+
+
+def test_exchange_oauth_code_returns_claims_safe_for_the_local_session(monkeypatch) -> None:
+    config = _config()
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id_token": "id-token"}
+
+    class JwkClientStub:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def get_signing_key_from_jwt(self, id_token):
+            assert id_token == "id-token"
+            return type("SigningKey", (), {"key": "public-key"})()
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+    monkeypatch.setattr(remote_access, "PyJWKClient", JwkClientStub)
+    monkeypatch.setattr(
+        remote_access.jwt,
+        "decode",
+        lambda *args, **kwargs: {
+            "email": "member@example.com",
+            "sub": "user-1",
+            "email_verified": True,
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
+        },
+    )
+
+    result = remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+    cookie = remote_access.make_session_cookie(
+        config,
+        result["claims"]["email"],
+        result["claims"]["sub"],
+        session_claims=result["session_claims"],
+    )
+    payload = remote_access.parse_session_cookie(config, cookie)
+
+    assert result["session_claims"] == {
+        "vibe_instance_id": "inst_123",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+        "vibe_organization_member_id": "member-1",
+        "vibe_organization_role": "member",
+        "vibe_group_ids": ["group-engineering"],
+    }
+    assert payload is not None
+    assert payload["vibe_organization_id"] == "org-1"
+
+
 def test_parse_session_cookie_rejects_tampered_signature() -> None:
     config = _config()
     cookie = remote_access.make_session_cookie(config, "alex@example.com", "user-1")
@@ -229,6 +332,7 @@ def test_exchange_oauth_code_allows_30_seconds_of_clock_skew(
             "iat": issued_at,
             "exp": issued_at + 300,
             "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_access_source": "owner",
             "email_verified": True,
         },
         private_key,
