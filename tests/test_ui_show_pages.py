@@ -2458,6 +2458,8 @@ def test_public_show_page_events_accept_oauth_user_and_record_author(monkeypatch
     config = _save_config(tmp_path)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
+    published = []
+    monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -2487,7 +2489,41 @@ def test_public_show_page_events_accept_oauth_user_and_record_author(monkeypatch
     event = response.get_json()["event"]
     expected_author = {"kind": "user", "email": "member@example.com"}
     assert event["payload"]["author"] == expected_author
-    assert event["message"]["metadata"]["author"] == expected_author
+    assert "session_id" not in event
+    assert "scope_id" not in event
+    assert "message_id" not in event
+    assert "message" not in event
+
+    assert published[0]["message"]["metadata"]["author"] == expected_author
+
+
+@pytest.mark.parametrize("event_type", ["assistant.mark.created", "system.annotation.control"])
+def test_public_show_page_events_reject_non_human_types(monkeypatch, tmp_path, event_type):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={
+            "Origin": "https://alex.avibe.bot",
+            "Content-Type": "application/json",
+            "X-Vibe-Show-Client": "overlay",
+        },
+        json={"type": event_type, "payload": {"action": "enable"}},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "unsupported_event_type"
 
 
 def test_public_show_page_events_accept_no_oauth_local_access(monkeypatch, tmp_path):
@@ -2497,6 +2533,8 @@ def test_public_show_page_events_accept_no_oauth_local_access(monkeypatch, tmp_p
     config.save()
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
+    published = []
+    monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
 
     response = app.test_client().post(
         f"/p/{share_id}/__show/events",
@@ -2515,7 +2553,11 @@ def test_public_show_page_events_accept_no_oauth_local_access(monkeypatch, tmp_p
     assert response.status_code == 201
     event = response.get_json()["event"]
     assert event["payload"]["author"] == {"kind": "local"}
-    assert event["message"]["metadata"]["author"] == {"kind": "local"}
+    assert "session_id" not in event
+    assert "scope_id" not in event
+    assert "message_id" not in event
+    assert "message" not in event
+    assert published[0]["message"]["metadata"]["author"] == {"kind": "local"}
 
 
 def test_private_show_page_api_mutation_rejects_missing_origin(monkeypatch, tmp_path):

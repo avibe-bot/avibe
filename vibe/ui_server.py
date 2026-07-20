@@ -45,7 +45,7 @@ from core.show_pages import (
     show_cli_event_token,
     show_event_write_token,
 )
-from core.show_session_events import show_event_payload_session_mismatch
+from core.show_session_events import HUMAN_EVENT_TYPES, show_event_payload_session_mismatch
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
@@ -8445,6 +8445,7 @@ def _show_event_response_from_payload(
     payload: dict[str, Any],
     *,
     author: dict[str, str] | None = None,
+    public: bool = False,
 ):
     if show_event_payload_session_mismatch(session_id, payload):
         return (
@@ -8467,7 +8468,7 @@ def _show_event_response_from_payload(
 
     _publish_show_session_event(event_payload)
     _dispatch_show_event_if_requested(event_payload)
-    return jsonify({"ok": True, "event": event_payload}), 201
+    return jsonify({"ok": True, "event": _show_event_response_payload(event_payload, public=public)}), 201
 
 
 def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
@@ -9507,10 +9508,23 @@ async def serve_public_show_page(share_id, asset_path):
             author = _show_request_author(public=True)
             if author is None or not str(request.headers.get("X-Vibe-Show-Client") or "").strip():
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
+            payload = _show_events_payload_from_request()
+            if str(payload.get("type") or "").strip() not in HUMAN_EVENT_TYPES:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "code": "unsupported_event_type",
+                            "error": "Public Show Page writes require a supported human event type.",
+                        }
+                    ),
+                    400,
+                )
             return _show_event_response_from_payload(
                 page.session_id,
-                _show_events_payload_from_request(),
+                payload,
                 author=author,
+                public=True,
             )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):

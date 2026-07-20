@@ -17,19 +17,22 @@ from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_
 from storage.models import agent_sessions, show_session_events
 
 DEFAULT_MARK_SCOPE = "default"
-SUPPORTED_EVENT_TYPES = {
-    "assistant.mark.created",
-    "assistant.mark.updated",
-    "assistant.mark.resolved",
-    "assistant.page.updated",
+HUMAN_EVENT_TYPES = {
     "human.intent.submitted",
     "human.annotation.created",
     "human.annotation.updated",
     "human.annotation.resolved",
     "human.annotation.dismissed",
+}
+SUPPORTED_EVENT_TYPES = {
+    "assistant.mark.created",
+    "assistant.mark.updated",
+    "assistant.mark.resolved",
+    "assistant.page.updated",
     "system.runtime.status",
     "system.runtime.error",
     "system.annotation.control",
+    *HUMAN_EVENT_TYPES,
 }
 ANNOTATION_EVENT_TYPES = {
     "human.annotation.created",
