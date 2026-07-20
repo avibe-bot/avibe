@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from storage import resource_access_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
@@ -102,5 +104,24 @@ def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_p
             assert not resource_access_service.can_use_resource(member, "agent", "legacy-agent", connection=connection)
             assert resource_access_service.can_use_resource(owner, "agent", "legacy-agent", connection=connection)
             assert resource_access_service.can_use_resource(local, "agent", "legacy-agent", connection=connection)
+    finally:
+        engine.dispose()
+
+
+def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as connection:
+            with pytest.raises(resource_access_service.ResourceAccessError, match="invalid_resource_acl_intent"):
+                resource_access_service.ensure_resource_policy(
+                    connection,
+                    resource_kind="agent",
+                    resource_id="personal-agent",
+                    organization_id=None,
+                    owner_user_id="owner-1",
+                    access_level="public",
+                )
     finally:
         engine.dispose()

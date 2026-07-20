@@ -2081,8 +2081,14 @@ def enforce_remote_access_cookie():
         return jsonify({"ok": False, "error": "remote_access_session_secret_missing"}), 503
     payload = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
     if payload is not None:
+        if remote_access.session_needs_membership_refresh(payload):
+            if request.method == "GET":
+                if _auth_rate_limited():
+                    return _auth_rate_limit_response()
+                return _redirect_to_vibe_cloud_login(config)
+            return jsonify({"ok": False, "error": "remote_access_membership_refresh_required"}), 401
         if remote_access.session_needs_renewal(payload):
-            g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
+            g.remote_session_renew = payload
         return None
     if request.method == "GET":
         # Bound unauthenticated login-start floods at the door (this writes a
@@ -2213,10 +2219,13 @@ def renew_remote_access_cookie(response: Response) -> Response:
         return response
     from vibe import remote_access
 
-    email, subject = renew
+    if not isinstance(renew, dict):
+        return response
+    email = str(renew.get("email", ""))
+    subject = str(renew.get("sub", ""))
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, email, subject),
+        remote_access.make_session_cookie(config, email, subject, session_claims=renew),
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -2534,10 +2543,13 @@ def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | 
 
     if not config.remote_access.vibe_cloud.enabled or not config.remote_access.vibe_cloud.session_secret:
         return None
-    return remote_access.parse_session_cookie(
+    payload = remote_access.parse_session_cookie(
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
     )
+    if payload is not None and remote_access.session_needs_membership_refresh(payload):
+        return None
+    return payload
 
 
 def _remote_access_websocket_subject(websocket: Any) -> str | None:
@@ -4209,6 +4221,16 @@ def remote_access_auth_callback():
     try:
         result = remote_access.exchange_oauth_code(config, _oauth_callback_arg("code") or "", code_verifier)
         claims = result["claims"]
+        session_claims = result.get("session_claims")
+        if not isinstance(session_claims, dict):
+            # Compatibility for a previously paired backend and test doubles
+            # that return the historical minimal claim set. Production
+            # `exchange_oauth_code` always returns validated session_claims.
+            session_claims = (
+                remote_access.session_claims_from_oidc(config, claims)
+                if claims.get("vibe_instance_id")
+                else {}
+            )
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
@@ -4221,7 +4243,12 @@ def remote_access_auth_callback():
     response.headers["Location"] = _safe_remote_redirect_target(next_target)
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, str(claims.get("email", "")), str(claims.get("sub", ""))),
+        remote_access.make_session_cookie(
+            config,
+            str(claims.get("email", "")),
+            str(claims.get("sub", "")),
+            session_claims=session_claims or None,
+        ),
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -4258,6 +4285,247 @@ def api_session():
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Vary"] = "Cookie"
     return response
+
+
+def _remote_resource_access_context():
+    """Resolve the signed remote session required by local ACL metadata APIs."""
+
+    from storage import resource_access_service
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if (
+        config is None
+        or not config.remote_access.vibe_cloud.enabled
+        or not _is_remote_access_request(config)
+    ):
+        return None, None, None
+    payload = remote_access.parse_session_cookie(
+        config,
+        request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+    )
+    if payload is None:
+        return config, None, None
+    return config, payload, resource_access_service.current_resource_context(
+        payload,
+        is_remote=True,
+        is_trusted_local=False,
+    )
+
+
+def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, connection: Any) -> dict[str, Any]:
+    from storage import resource_access_service
+
+    return {
+        "resource_kind": policy["resource_kind"],
+        "resource_id": policy["resource_id"],
+        "access_level": policy["access_level"],
+        "owner_user_id": policy.get("owner_user_id"),
+        "organization_id": policy.get("organization_id"),
+        "group_ids": policy.get("group_ids") or [],
+        "policy_revision": policy.get("policy_revision"),
+        "last_applied_control_plane_revision": policy.get("last_applied_control_plane_revision"),
+        "can_use": resource_access_service.can_use_resource(
+            user_context,
+            policy["resource_kind"],
+            policy["resource_id"],
+            connection=connection,
+        ),
+        "can_manage": resource_access_service.can_manage_resource_acl(
+            user_context,
+            policy["resource_kind"],
+            policy["resource_id"],
+            connection=connection,
+        ),
+    }
+
+
+@app.route("/api/org/context", methods=["GET"])
+def organization_context_get():
+    _config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    organization = None
+    if user_context.is_active_organization_member:
+        organization = {
+            "id": user_context.organization_id,
+            "member_id": user_context.organization_member_id,
+            "role": user_context.organization_role,
+            "group_ids": sorted(user_context.group_ids or []),
+            "membership_version": user_context.membership_version,
+        }
+    response = jsonify(
+        {
+            "user": {"sub": user_context.subject, "email": user_context.email},
+            "instance_id": _payload.get("vibe_instance_id", _payload.get("instance_id")),
+            "organization": organization,
+            "instance_access_source": user_context.instance_access_source,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.route("/api/org/groups", methods=["GET"])
+def organization_groups_get():
+    _config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    if not user_context.is_active_organization_member:
+        return jsonify({"error": "organization_context_required"}), 403
+    # The frozen device protocol carries group IDs but no mutable group metadata.
+    # These are signed current-member groups, not an authorization cache; a later
+    # metadata endpoint can enrich names and archived state without affecting ACL
+    # evaluation.
+    response = jsonify(
+        {
+            "groups": [
+                {"id": group_id, "name": None, "archived_at": None}
+                for group_id in sorted(user_context.group_ids or [])
+            ]
+        }
+    )
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.route("/api/resource-policies", methods=["GET"])
+def resource_policies_get():
+    from storage import resource_access_service
+
+    _config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    resource_kind = request.args.get("kind")
+    if resource_kind and resource_kind not in resource_access_service.RESOURCE_KINDS:
+        return jsonify({"error": "invalid_resource_kind"}), 422
+    engine = _projects_engine()
+    try:
+        with engine.connect() as connection:
+            if user_context.is_active_organization_member:
+                policies = resource_access_service.list_resource_policies(
+                    resource_kind=resource_kind,
+                    organization_id=user_context.organization_id,
+                    connection=connection,
+                )
+            elif user_context.subject:
+                policies = resource_access_service.list_resource_policies(
+                    resource_kind=resource_kind,
+                    owner_user_id=user_context.subject,
+                    connection=connection,
+                )
+            else:
+                policies = []
+            serialized = [
+                _resource_policy_api_payload(policy, user_context, connection)
+                for policy in policies
+                if resource_access_service.can_use_resource(
+                    user_context,
+                    policy["resource_kind"],
+                    policy["resource_id"],
+                    connection=connection,
+                )
+                or resource_access_service.can_manage_resource_acl(
+                    user_context,
+                    policy["resource_kind"],
+                    policy["resource_id"],
+                    connection=connection,
+                )
+            ]
+    finally:
+        engine.dispose()
+    response = jsonify({"policies": serialized})
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.route("/api/resource-policies/<resource_kind>/<resource_id>", methods=["PUT"])
+def resource_policy_put(resource_kind: str, resource_id: str):
+    from storage import resource_access_service
+    from vibe import remote_access
+
+    config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    if resource_kind not in resource_access_service.RESOURCE_KINDS:
+        return jsonify({"error": "invalid_resource_kind"}), 422
+    body = request.json or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "invalid_request"}), 422
+
+    engine = _projects_engine()
+    try:
+        with engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                resource_kind,
+                resource_id,
+                connection=connection,
+            )
+            if policy is None:
+                return jsonify({"error": "resource_not_found"}), 404
+            if policy.get("organization_id") and policy.get("organization_id") != user_context.organization_id:
+                return jsonify({"error": "resource_not_found"}), 404
+            if policy.get("organization_id") and not user_context.is_active_organization_member:
+                return jsonify({"error": "organization_context_required"}), 403
+            if not resource_access_service.can_manage_resource_acl(
+                user_context,
+                resource_kind,
+                resource_id,
+                connection=connection,
+            ):
+                return jsonify({"error": "resource_acl_forbidden"}), 403
+
+        try:
+            access_level, group_ids = resource_access_service.normalize_policy_request(
+                body.get("access_level"),
+                body.get("group_ids", []),
+                policy.get("organization_id"),
+            )
+        except resource_access_service.ResourceAccessError as exc:
+            return jsonify({"error": exc.code}), 422
+
+        if policy.get("organization_id"):
+            # Desired organization ACLs are written by the hosted resource API.
+            # This local route only reconciles an intent before returning state;
+            # it never invents a local revision that could overwrite a newer one.
+            sync = remote_access.sync_resource_acl_once(config, organization_id=str(policy["organization_id"]))
+            if not sync.get("ok"):
+                return jsonify({"error": sync.get("error") or "resource_acl_sync_failed", "sync": sync}), 503
+            with engine.connect() as connection:
+                refreshed = resource_access_service.get_resource_policy(
+                    resource_kind,
+                    resource_id,
+                    connection=connection,
+                )
+                if refreshed is None:
+                    return jsonify({"error": "resource_not_found"}), 404
+                serialized = _resource_policy_api_payload(refreshed, user_context, connection)
+            if refreshed["access_level"] == access_level and sorted(refreshed.get("group_ids") or []) == sorted(group_ids):
+                return jsonify({"policy": serialized, "sync": sync})
+            return jsonify(
+                {
+                    "error": "resource_acl_control_plane_required",
+                    "policy": serialized,
+                    "sync": sync,
+                }
+            ), 409
+
+        with engine.begin() as connection:
+            updated = resource_access_service.update_local_non_organization_policy(
+                connection,
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                access_level=access_level,
+                group_ids=group_ids,
+                updated_by_user_id=user_context.subject,
+            )
+            serialized = _resource_policy_api_payload(updated, user_context, connection)
+        return jsonify({"policy": serialized})
+    finally:
+        engine.dispose()
 
 
 @app.route("/api/cloud/token", methods=["GET"])

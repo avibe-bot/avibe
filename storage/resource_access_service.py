@@ -111,6 +111,11 @@ def _normalize_group_ids(value: Any) -> list[str]:
 def _validate_policy_values(access_level: Any, group_ids: Any, organization_id: str | None) -> tuple[str, list[str]]:
     normalized_level = _validate_access_level(access_level)
     normalized_groups = _normalize_group_ids(group_ids)
+    if normalized_level in {"public", "scope"} and not organization_id:
+        # Public and scoped policies are organization semantics. A personal
+        # resource stays private rather than accepting a policy no context can
+        # safely authorize.
+        raise ResourceAccessError("invalid_resource_acl_intent")
     if normalized_level == "scope":
         if not organization_id or not normalized_groups:
             raise ResourceAccessError("invalid_resource_acl_intent")
