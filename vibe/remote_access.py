@@ -2388,7 +2388,10 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     if instance_id != config.remote_access.vibe_cloud.instance_id:
         raise OAuthCodeExchangeError("invalid_instance_id")
     access_source_raw = claims.get("vibe_instance_access_source")
-    organization_claim_present = any(key in claims and claims.get(key) is not None for key in _ORGANIZATION_SESSION_CLAIM_KEYS)
+    # An explicit null is not equivalent to an omitted organization claim. It
+    # is a malformed frozen-claim shape and must not silently downgrade into a
+    # base-only session.
+    organization_claim_present = any(key in claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS)
     if access_source_raw is None:
         raise OAuthCodeExchangeError("invalid_instance_access_source")
     access_source = _oidc_claim_string(access_source_raw, reason="invalid_instance_access_source")

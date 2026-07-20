@@ -135,6 +135,20 @@ def test_session_claims_reject_external_guest_organization_context() -> None:
         )
 
 
+def test_session_claims_reject_partial_organization_context() -> None:
+    config = _config()
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_organization_claims"):
+        remote_access.session_claims_from_oidc(
+            config,
+            {
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_access_source": "owner",
+                "vibe_organization_id": None,
+            },
+        )
+
+
 def test_exchange_oauth_code_returns_claims_safe_for_the_local_session(monkeypatch) -> None:
     config = _config()
 
