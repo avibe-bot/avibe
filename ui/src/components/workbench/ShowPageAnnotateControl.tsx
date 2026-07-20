@@ -84,6 +84,19 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   // next Show Page's iframe inert.
   useEffect(() => () => onPopoverOpenChange?.(false), [onPopoverOpenChange]);
 
+  // A state reset or `available=false` transition (iframe re-point, overlay
+  // reporting writes unavailable) swaps the picker subtree for the locked
+  // button below WITHOUT a Radix-driven close, so Radix never fires
+  // onOpenChange(false) and the unmount-only cleanup above doesn't run. Force
+  // the picker shut so ChatPage clears the iframe-inert flag and the Show Page
+  // stays clickable: reset our own flag during render (React's adjust-on-input
+  // pattern) and notify the parent from an effect (can't setState the parent
+  // during our render).
+  if (locked && popoverOpen) setPopoverOpen(false);
+  useEffect(() => {
+    if (locked) onPopoverOpenChange?.(false);
+  }, [locked, onPopoverOpenChange]);
+
   const handlePopoverOpenChange = (next: boolean) => {
     setPopoverOpen(next);
     onPopoverOpenChange?.(next);
@@ -100,6 +113,9 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   };
 
   const toggleLabel = t('chat.showPage.annotate.toggle');
+  // The enabled desktop toggle square turns annotation OFF — label it as such
+  // (icon-only, so the tooltip/screen-reader name must describe the action).
+  const offLabel = t('chat.showPage.annotate.closeAnnotation');
 
   if (locked) {
     return (
@@ -126,8 +142,9 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
             <button
               type="button"
               onClick={onDisable}
-              aria-label={toggleLabel}
-              title={toggleLabel}
+              aria-label={offLabel}
+              title={offLabel}
+              aria-pressed
               className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:brightness-110"
             >
               <MessageSquarePlus className="size-3.5" />
