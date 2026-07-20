@@ -251,13 +251,16 @@ class VibeAgentStore:
     def require_accessible(self, name: str, *, user_context: Any = None, enabled_only: bool = False) -> VibeAgent:
         """Return an Agent only when the caller may use its ACL resource."""
 
-        with self.engine.connect() as conn:
-            agent = ensure_agent_selection_access(
-                conn,
-                agent_name=name,
-                user_context=user_context,
-                missing_is_error=True,
-            )
+        try:
+            with self.engine.connect() as conn:
+                agent = ensure_agent_selection_access(
+                    conn,
+                    agent_name=name,
+                    user_context=user_context,
+                    missing_is_error=True,
+                )
+        except LookupError as exc:
+            raise ValueError(f"agent '{name}' not found") from exc
         assert agent is not None
         if enabled_only and not agent.enabled:
             raise ValueError(f"agent '{agent.name}' is disabled")
