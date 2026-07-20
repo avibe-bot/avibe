@@ -349,6 +349,18 @@ export const ChatPage: React.FC = () => {
   const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
   const [liveStartedAt, setLiveStartedAt] = useState<number | null>(null);
   const [activityCardExpanded, setActivityCardExpanded] = useState(false);
+  // Tool-row visibility (``config.ui.show_tool_calls``, default on). Global +
+  // cross-device: the eye pill and the Settings toggle write the same config field.
+  const [showToolCalls, setShowToolCalls] = useState(true);
+  const toggleToolCalls = useCallback(() => {
+    setShowToolCalls((prev) => {
+      const next = !prev;
+      // Optimistic; persist the minimal ui patch (save_config deep-merges). A failed
+      // save leaves the local flag as the user set it for this session.
+      void api.saveConfig({ ui: { show_tool_calls: next } }).catch(() => {});
+      return next;
+    });
+  }, [api]);
   const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
   const [loadingActivity, setLoadingActivity] = useState<Record<string, boolean>>({});
   // Groups whose lazy detail fetch failed — the chip shows a retry affordance
@@ -843,6 +855,8 @@ export const ChatPage: React.FC = () => {
       const activityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
       setShowAgentActivity(activityEnabled);
       showAgentActivityRef.current = activityEnabled;
+      // Default on: only an explicit ``false`` hides tool rows.
+      setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the
       // load isn't clobbered; the session-change reset keeps prior sessions out.
       setMessages((prev) => mergeById(bootstrap.messages, prev));
@@ -1862,6 +1876,8 @@ export const ChatPage: React.FC = () => {
             error: activityError,
             onToggleGroup: toggleActivityGroup,
             onRetryGroup: loadActivityDetail,
+            showToolCalls,
+            onToggleTools: toggleToolCalls,
           }}
           footer={
             sessionId ? (
@@ -2476,6 +2492,8 @@ interface TranscriptProps {
     error: Record<string, boolean>;
     onToggleGroup: (group: ActivityGroup) => void;
     onRetryGroup: (group: ActivityGroup) => void;
+    showToolCalls: boolean;
+    onToggleTools: () => void;
   };
   // Rendered at the end of the scroll content, after the last message (e.g. the in-scroll
   // vault request cards). Part of the timeline, so it scrolls with the conversation.
@@ -2608,6 +2626,8 @@ const Transcript: React.FC<TranscriptProps> = ({
         error={!!activity.error[group.id]}
         onToggle={() => activity.onToggleGroup(group)}
         onRetry={() => activity.onRetryGroup(group)}
+        showToolCalls={activity.showToolCalls}
+        onToggleTools={activity.onToggleTools}
       />
     ) : null;
   const empty = messages.length === 0 && !working;
@@ -2888,6 +2908,8 @@ const Transcript: React.FC<TranscriptProps> = ({
               startedAtMs={activity.liveStartedAt}
               expanded={activity.cardExpanded}
               onToggleExpanded={activity.onToggleCard}
+              showToolCalls={activity.showToolCalls}
+              onToggleTools={activity.onToggleTools}
             />
           ) : showThinking ? (
             <ThinkingBubble session={session} />
