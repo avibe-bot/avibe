@@ -225,7 +225,11 @@ class ManagedWatchStore:
         session_policy: Optional[str] = None,
         message: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        user_context: Any = None,
     ) -> ManagedWatch:
+        from core.vibe_agents import ensure_agent_name_access
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
             name=name,
@@ -291,7 +295,11 @@ class ManagedWatchStore:
         session_policy: Optional[str] = None,
         message: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        user_context: Any = None,
     ) -> ManagedWatch:
+        from core.vibe_agents import ensure_agent_name_access
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         watch = self._watches[watch_id]
         watch.name = name
         watch.session_key = session_key

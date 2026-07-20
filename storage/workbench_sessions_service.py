@@ -243,6 +243,7 @@ def create_session(
     reasoning_effort: Optional[str] = None,
     title: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Create a workbench session inside the given project scope.
 
@@ -292,6 +293,16 @@ def create_session(
             model = scope_row.get("model")
         if reasoning_effort is None:
             reasoning_effort = scope_row.get("reasoning_effort")
+
+    if agent_name or agent_id:
+        from core.vibe_agents import ensure_agent_selection_access
+
+        ensure_agent_selection_access(
+            conn,
+            agent_name=agent_name,
+            agent_id=agent_id,
+            user_context=user_context,
+        )
 
     now = _utc_now_iso()
     variant = agent_variant or agent_backend or "default"
@@ -348,6 +359,7 @@ def update_session(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     existing = conn.execute(
         select(
@@ -365,6 +377,16 @@ def update_session(
     if agent_name is not _UNSET and agent_backend is _UNSET:
         agent_backend = _backend_for_agent_name(conn, str(agent_name or "")) if agent_name else None
         derived_backend = True
+
+    if agent_name is not _UNSET or agent_id is not _UNSET:
+        from core.vibe_agents import ensure_agent_selection_access
+
+        ensure_agent_selection_access(
+            conn,
+            agent_name=None if agent_name is _UNSET else agent_name,
+            agent_id=None if agent_id is _UNSET else agent_id,
+            user_context=user_context,
+        )
 
     # Backend is pinned once a NATIVE conversation exists: the native can only
     # be resumed by the backend that created it, so switching (or clearing) the

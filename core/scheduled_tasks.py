@@ -702,7 +702,11 @@ class ScheduledTaskStore:
         run_at: Optional[str] = None,
         timezone_name: str,
         metadata: Optional[dict[str, Any]] = None,
+        user_context: Any = None,
     ) -> ScheduledTask:
+        from core.vibe_agents import ensure_agent_name_access
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -761,7 +765,11 @@ class ScheduledTaskStore:
         cwd: Optional[str] = None,
         update_cwd: bool = False,
         metadata: Optional[dict[str, Any]] = None,
+        user_context: Any = None,
     ) -> ScheduledTask:
+        from core.vibe_agents import ensure_agent_name_access
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._tasks[task_id]
         task.name = name
         task.session_key = session_key

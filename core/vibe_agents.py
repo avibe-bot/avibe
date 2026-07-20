@@ -31,6 +31,10 @@ SUPPORTED_AGENT_BACKENDS = {"codex", "claude", "opencode"}
 _UNSET = object()
 
 
+class VibeAgentAccessError(PermissionError):
+    """Raised when the caller is not allowed to use a Vibe Agent."""
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -61,6 +65,91 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return default
+
+
+def resolve_resource_access_context(user_context: Any = None):
+    """Resolve a request context while preserving local service behavior.
+
+    Domain services are also called from the local CLI and background workers,
+    where there is no HTTP request to inspect. Those callers are local by
+    construction. Remote requests always carry an explicit remote context, so
+    they remain subject to the local ACL projection.
+    """
+
+    from storage import resource_access_service
+
+    if isinstance(user_context, resource_access_service.ResourceUserContext):
+        return user_context
+    if user_context is not None:
+        return resource_access_service.current_resource_context(user_context, is_remote=True)
+
+    context = resource_access_service.current_resource_context()
+    if context.is_remote or context.is_trusted_local:
+        return context
+    return resource_access_service.ResourceUserContext(is_trusted_local=True)
+
+
+def ensure_agent_selection_access(
+    connection,
+    *,
+    agent_name: str | None = None,
+    agent_id: str | None = None,
+    user_context: Any = None,
+    missing_is_error: bool = False,
+) -> "VibeAgent | None":
+    """Return a selected Agent only when the request may use it.
+
+    ``agent_id`` is the ACL resource identifier. A supplied name and id must
+    resolve to the same row so a caller cannot authorize one Agent and persist
+    another in a session or background definition.
+    """
+
+    from storage import resource_access_service
+
+    selected_name = str(agent_name or "").strip()
+    selected_id = str(agent_id or "").strip()
+    if not selected_name and not selected_id:
+        return None
+
+    context = resolve_resource_access_context(user_context)
+    statement = select(agents)
+    if selected_id:
+        statement = statement.where(agents.c.id == selected_id)
+    if selected_name:
+        statement = statement.where(agents.c.normalized_name == normalize_agent_name(selected_name))
+    row = connection.execute(statement.limit(1)).mappings().first()
+    if row is None:
+        if context.is_remote or missing_is_error:
+            raise LookupError("Agent not found")
+        # Older local callers may hold a backend/name pairing that predates the
+        # Vibe Agent catalog. Preserve that local compatibility; a remote
+        # request never receives the same exception.
+        return None
+
+    agent = VibeAgentStore._from_row(row)
+    if not resource_access_service.can_use_resource(context, "agent", agent.id, connection=connection):
+        raise VibeAgentAccessError("Agent access is not permitted.")
+    return agent
+
+
+def ensure_agent_name_access(agent_name: str | None, *, user_context: Any = None) -> None:
+    """Reject a remote task/watch binding to an inaccessible named Agent.
+
+    Local task and watch definitions are created outside an HTTP request and
+    intentionally retain their existing trusted-local behavior. A remote
+    request gets the same id-backed authorization used by session creation.
+    """
+
+    if not str(agent_name or "").strip():
+        return
+    context = resolve_resource_access_context(user_context)
+    if not context.is_remote:
+        return
+    store = VibeAgentStore()
+    try:
+        store.require_accessible(str(agent_name), user_context=context)
+    finally:
+        store.close()
 
 
 @dataclass(frozen=True)
@@ -122,12 +211,21 @@ class VibeAgentStore:
     def maybe_reload(self) -> bool:
         return self._probe.has_external_write()
 
-    def list_agents(self, *, include_disabled: bool = True) -> list[VibeAgent]:
+    def list_agents(self, *, include_disabled: bool = True, user_context: Any = None) -> list[VibeAgent]:
+        from storage import resource_access_service
+
+        context = resolve_resource_access_context(user_context)
         with self.engine.connect() as conn:
             stmt = select(agents).order_by(agents.c.name)
             if not include_disabled:
                 stmt = stmt.where(agents.c.enabled == 1)
-            rows = conn.execute(stmt).mappings()
+            rows = conn.execute(stmt).mappings().all()
+            rows = resource_access_service.filter_accessible_resources(
+                context,
+                "agent",
+                rows,
+                connection=conn,
+            )
             return [self._from_row(row) for row in rows]
 
     def get(self, name: str) -> Optional[VibeAgent]:
@@ -150,6 +248,21 @@ class VibeAgentStore:
             raise ValueError(f"agent '{agent.name}' is disabled")
         return agent
 
+    def require_accessible(self, name: str, *, user_context: Any = None, enabled_only: bool = False) -> VibeAgent:
+        """Return an Agent only when the caller may use its ACL resource."""
+
+        with self.engine.connect() as conn:
+            agent = ensure_agent_selection_access(
+                conn,
+                agent_name=name,
+                user_context=user_context,
+                missing_is_error=True,
+            )
+        assert agent is not None
+        if enabled_only and not agent.enabled:
+            raise ValueError(f"agent '{agent.name}' is disabled")
+        return agent
+
     def create(
         self,
         *,
@@ -163,8 +276,12 @@ class VibeAgentStore:
         source_ref: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         enabled: bool = True,
+        user_context: Any = None,
     ) -> VibeAgent:
+        from storage import resource_access_service
+
         normalized = normalize_agent_name(name)
+        context = resolve_resource_access_context(user_context)
         now = _utc_now_iso()
         agent = VibeAgent(
             id=uuid4().hex[:12],
@@ -185,6 +302,18 @@ class VibeAgentStore:
         try:
             with self.engine.begin() as conn:
                 conn.execute(agents.insert().values(**self._values(agent)))
+                if source != "builtin" and context.is_remote and context.is_active_organization_member and context.subject:
+                    resource_access_service.ensure_resource_policy(
+                        conn,
+                        resource_kind="agent",
+                        resource_id=agent.id,
+                        organization_id=context.organization_id,
+                        owner_user_id=context.subject,
+                        owner_email=context.email,
+                        access_level="private",
+                        created_by_user_id=context.subject,
+                        updated_by_user_id=context.subject,
+                    )
         except IntegrityError as exc:
             raise ValueError(f"agent '{name}' already exists") from exc
         return agent
@@ -426,7 +555,14 @@ class VibeAgentStore:
         if fallback is not None and (fallback.enabled or not enabled_only):
             return fallback
         if enabled_only:
-            agents_list = self.list_agents(include_disabled=False)
+            # This resolver maintains the instance-wide default. It must not let
+            # one remote caller's ACL-filtered catalog rewrite that global state.
+            from storage.resource_access_service import ResourceUserContext
+
+            agents_list = self.list_agents(
+                include_disabled=False,
+                user_context=ResourceUserContext(is_trusted_local=True),
+            )
             return agents_list[0] if agents_list else None
         return None
 

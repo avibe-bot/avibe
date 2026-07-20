@@ -67,9 +67,11 @@ from modules.agents.catalog import (
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    VibeAgentAccessError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
+    resolve_resource_access_context,
     validate_agent_backend,
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
@@ -1281,13 +1283,19 @@ def _parse_agent_enabled_field(payload: dict, *, default: Optional[bool] = None)
 
 def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = False) -> dict:
     _ensure_builtin_default_agents()
+    user_context = resolve_resource_access_context()
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
-        agents = store.list_agents(include_disabled=include_disabled)
+        agents = store.list_agents(include_disabled=include_disabled, user_context=user_context)
         if normalized_backend:
             agents = [agent for agent in agents if agent.backend == normalized_backend]
         default_agent = store.get_default_agent()
+        if default_agent is not None:
+            try:
+                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
+            except VibeAgentAccessError:
+                default_agent = None
         return {
             "ok": True,
             "agents": [_vibe_agent_payload(agent, brief=True) for agent in agents],
@@ -1298,10 +1306,16 @@ def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = F
 
 
 def get_vibe_agent(name: str) -> dict:
+    user_context = resolve_resource_access_context()
     store = VibeAgentStore()
     try:
-        agent = store.require(name)
+        agent = store.require_accessible(name, user_context=user_context)
         default_agent = store.get_default_agent()
+        if default_agent is not None:
+            try:
+                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
+            except VibeAgentAccessError:
+                default_agent = None
         return {
             "ok": True,
             "agent": _vibe_agent_payload(agent),
@@ -1328,6 +1342,7 @@ def create_vibe_agent(payload: dict) -> dict:
             system_prompt=payload.get("system_prompt"),
             metadata=metadata,
             enabled=_parse_agent_enabled_field(payload, default=True),
+            user_context=resolve_resource_access_context(),
         )
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
@@ -1378,6 +1393,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
+        store.require_accessible(name, user_context=resolve_resource_access_context())
         agent = store.update(name, **kwargs)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
@@ -1387,6 +1403,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
+        store.require_accessible(name, user_context=resolve_resource_access_context())
         counts = store.reference_counts(name)
         if any(counts.values()):
             return {
@@ -1413,6 +1430,7 @@ def remove_vibe_agent(name: str) -> dict:
 def set_default_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
+        store.require_accessible(name, user_context=resolve_resource_access_context(), enabled_only=True)
         store.set_default_agent_name(name)
         agent = store.require(name)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
