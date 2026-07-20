@@ -1727,6 +1727,45 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sk-secret", summary or "")
         self.assertNotIn("sk-query-secret", summary or "")
 
+    def test_recent_session_error_extracts_typed_response_body(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            line_payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "url": "https://relay.example/v1/responses",
+                    "statusCode": 404,
+                    "responseBody": json.dumps(
+                        {
+                            "error": {
+                                "message": (
+                                    'Model "gpt-5.3-chat-latest" is not supported by '
+                                    "any configured account in this group"
+                                ),
+                                "code": "model_not_found",
+                                "type": "invalid_request_error",
+                            }
+                        }
+                    ),
+                }
+            }
+            (log_dir / "2026-07-20T064420.log").write_text(
+                "ERROR 2026-07-20T06:48:14 +1ms service=llm "
+                f"session.id=ses_test error={SERVER_MODULE.json.dumps(line_payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync("ses_test")
+
+        self.assertEqual(
+            summary,
+            "AI_APICallError (model_not_found; invalid_request_error; HTTP 404) while calling "
+            'https://relay.example/v1/responses: Model "gpt-5.3-chat-latest" is not '
+            "supported by any configured account in this group",
+        )
+
     def test_recent_session_error_reads_only_log_tail(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_dir = Path(tmp_dir)

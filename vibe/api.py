@@ -9595,6 +9595,12 @@ async def _get_opencode_providers_async() -> dict:
 
     auth_index = auth_raw if isinstance(auth_raw, dict) else {}
 
+    try:
+        default_agent = server.get_default_agent_from_config()
+        runtime_agent_model = server.get_agent_model_from_config(default_agent)
+    except Exception:  # noqa: BLE001
+        runtime_agent_model = None
+
     # Resolve the user-configured default provider. ``None`` means
     # the user has not picked one — the UI surfaces that as "no
     # default selected" so clicking a provider actually persists the
@@ -9603,12 +9609,16 @@ async def _get_opencode_providers_async() -> dict:
     # it became a no-op (no state change to persist), silently
     # blocking users from picking Anthropic explicitly.
     default_provider: str | None = None
+    configured_default_model: str | None = None
     try:
         config = load_config()
         cfg = getattr(getattr(config, "agents", None), "opencode", None)
         configured_default = getattr(cfg, "default_provider", None)
         if isinstance(configured_default, str) and configured_default.strip():
             default_provider = configured_default.strip()
+        raw_default_model = getattr(cfg, "default_model", None)
+        if isinstance(raw_default_model, str) and raw_default_model.strip():
+            configured_default_model = raw_default_model.strip()
     except Exception:
         pass
 
@@ -9701,6 +9711,11 @@ async def _get_opencode_providers_async() -> dict:
         api_key_mask_index[pid_key] = masked
         active_auth_type_index[pid_key] = "api"
 
+    from modules.agents.opencode.utils import (
+        resolve_opencode_configured_default_model,
+        resolve_opencode_model_id,
+    )
+
     out_providers = []
     for pid, entry in all_providers.items():
         if not isinstance(entry, dict):
@@ -9776,6 +9791,24 @@ async def _get_opencode_providers_async() -> dict:
             raw_default = defaults_block.get(pid)
             if isinstance(raw_default, str):
                 default_model = raw_default
+        preferred_model = resolve_opencode_configured_default_model(
+            runtime_agent_model,
+            default_provider=default_provider,
+            provider_id=pid,
+        )
+        if not preferred_model:
+            preferred_model = resolve_opencode_configured_default_model(
+                configured_default_model,
+                default_provider=default_provider,
+                provider_id=pid,
+            )
+        if preferred_model:
+            preferred_model = resolve_opencode_model_id(
+                config_raw,
+                pid,
+                preferred_model,
+            )
+            default_model = preferred_model
 
         out_providers.append(
             {
