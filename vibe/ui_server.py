@@ -8581,11 +8581,19 @@ def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str,
 def _show_event_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
     if not public:
         return event_payload
-    return {
+    public_event = {
         key: value
         for key, value in event_payload.items()
         if key not in {"session_id", "scope_id", "message_id", "message"}
     }
+    payload = public_event.get("payload")
+    if isinstance(payload, dict):
+        public_payload = dict(payload)
+        author = public_payload.get("author")
+        if isinstance(author, dict) and "email" in author:
+            public_payload["author"] = {key: value for key, value in author.items() if key != "email"}
+        public_event["payload"] = public_payload
+    return public_event
 
 
 def _show_dispatch_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:

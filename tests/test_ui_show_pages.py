@@ -2488,13 +2488,21 @@ def test_public_show_page_events_accept_oauth_user_and_record_author(monkeypatch
     assert response.status_code == 201
     event = response.get_json()["event"]
     expected_author = {"kind": "user", "email": "member@example.com"}
-    assert event["payload"]["author"] == expected_author
+    assert event["payload"]["author"] == {"kind": "user"}
     assert "session_id" not in event
     assert "scope_id" not in event
     assert "message_id" not in event
     assert "message" not in event
 
     assert published[0]["message"]["metadata"]["author"] == expected_author
+
+    listed = client.get(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    ).get_json()["events"][0]
+    assert listed["payload"]["author"] == {"kind": "user"}
+    assert "member@example.com" not in json.dumps(listed)
 
 
 @pytest.mark.parametrize("event_type", ["assistant.mark.created", "system.annotation.control"])
