@@ -19,7 +19,11 @@ from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
-from core.message_mirror import agent_message_exists, persist_agent_message
+from core.message_mirror import (
+    agent_message_exists,
+    persist_agent_message,
+    persist_silent_completion_marker,
+)
 from core.message_output import MessageOutput, output_for_message
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.session_turns import emit_matches_active_turn
@@ -1426,6 +1430,18 @@ class ConsolidatedMessageDispatcher:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(context)
+                    if not is_error:
+                        # Clean silent/empty completion: nothing user-visible was or
+                        # will be delivered, so persist an INVISIBLE ``silent`` terminal
+                        # marker. Without it the activity grouping sees "activity rows +
+                        # no terminal" and misreads a legal completion as interrupted.
+                        # Cancel/Stop (is_error) legitimately stays interrupted; a
+                        # backend failure already emitted a visible notify. Best-effort:
+                        # never let this break turn completion.
+                        try:
+                            persist_silent_completion_marker(context)
+                        except Exception:
+                            logger.exception("emit_agent_message: silent completion marker failed")
                 return None
             finally:
                 if mutates_turn_lifecycle:

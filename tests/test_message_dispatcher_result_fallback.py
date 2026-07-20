@@ -772,6 +772,30 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
         self.assertEqual(controller.status_calls, [("ses-1", "failed")])
 
+    async def test_clean_silent_completion_writes_marker(self):
+        # The fix: a clean (non-error) terminal result with no visible body — a
+        # ``<silent>``-stripped / empty final reply — persists the invisible ``silent``
+        # marker so the activity grouping closes the turn as DONE, not interrupted.
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        ctx = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(ctx, "result", "")
+        marker.assert_called_once_with(ctx)
+
+    async def test_stopped_turn_writes_no_marker(self):
+        # Cancel/Stop (is_error) legitimately stays interrupted — NO silent marker, so
+        # the grouping never upgrades a stopped turn to done.
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
+        marker.assert_not_called()
+
     async def test_silent_backend_failure_collapses_status_as_failed(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)

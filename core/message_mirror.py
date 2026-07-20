@@ -246,6 +246,54 @@ def _trace_ids_from_context(context: MessageContext) -> tuple[Optional[str], Opt
     return turn_id, run_id
 
 
+def persist_silent_completion_marker(context: MessageContext) -> None:
+    """Persist the invisible ``silent`` terminal marker for a turn that completed
+    NORMALLY but delivered no user-visible message — a ``<silent>``-stripped/empty
+    final reply, or a reply-less bookkeeping turn (common for watch/scheduled runs).
+
+    Written ONCE per turn at the delivery chokepoint
+    (``MessageDispatcher.emit_agent_message``) on the clean-completion path only — NOT
+    for cancel/Stop (which legitimately stays ``interrupted``) nor backend failures
+    (which already emit a visible ``notify``). It exists solely so the activity
+    grouping closes the turn as DONE instead of misreading "activity + no terminal" as
+    interrupted; it is never delivered, published to the live stream, or shown (see
+    ``messages_service.SILENT_TYPE`` and its allowlist/denylist exclusions). Writes via
+    ``_append_quietly`` directly — bypassing ``persist_agent_message``'s empty-text
+    guard, the ``message.new`` publish, and the inbox recompute — so it causes no live
+    UI churn. Best-effort: the caller wraps it; a failure must never break turn
+    completion.
+    """
+    if not context.platform:
+        return
+    session_id = (context.platform_specific or {}).get("agent_session_id")
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        if context.platform == "avibe":
+            session_row = _session_row(conn, session_id) if session_id else None
+            scope_id = session_row["scope_id"] if session_row else None
+        else:
+            session_row = None
+            scope_id = _resolve_scope_id(conn, context)
+        if scope_id is None:
+            return
+        agent_name, _backend = _agent_provenance_from_context(context, session_row)
+        _append_quietly(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform=context.platform,
+            author="agent",
+            source="agent",
+            author_name=agent_name,
+            message_type=messages_service.SILENT_TYPE,
+            text="",
+            metadata=None,
+            native_message_id=None,
+            parent_native_message_id=context.thread_id,
+            content={"kind": "silent"},
+        )
+
+
 def persist_agent_message(
     context: MessageContext,
     canonical_type: str,

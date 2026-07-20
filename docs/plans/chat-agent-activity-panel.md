@@ -366,3 +366,61 @@ guard auto-covering the new field); `ruff` clean; changed-file `eslint` clean.
 60vh scroll feel + top-open, the compact fade-at-cap, the eye-pill live toggle +
 cross-device persistence, the D JSON dialog open/copy/close, and the tier-1/2/3
 rendering against real per-backend `format_toolcall` output.
+
+## As-built implementation notes (silent-completion terminal taxonomy)
+
+**Bug.** P1 defined `interrupted` as "a turn's activity that ends without a terminal
+result". That wrongly captured **silent completions** (final reply is entirely a
+`<silent>` block → stripped → nothing delivered) and **reply-less bookkeeping turns**
+(common for watch/scheduled orchestration): the turn ran tool steps, finished
+normally, but wrote no `messages` row, so the grouping saw "activity + no terminal"
+and rendered a gold "Interrupted · stopped at step N" chip. Nothing was interrupted.
+
+**Terminal taxonomy (as-built).** A turn's activity group closes as:
+
+| Ending | Grouping status |
+| --- | --- |
+| visible `result` reply | `done` |
+| plain `notify` (reply-less completion) | `done` |
+| **invisible `silent` marker** (silent-stripped / empty final) | `done` |
+| `error`, or `backend_failure` `notify` | `failed` |
+| cancel / Stop — **no terminal at all** | `interrupted` |
+
+**Invisible `silent` marker.** When a turn completes NORMALLY with nothing
+user-visible to send, the delivery chokepoint
+(`MessageDispatcher.emit_agent_message`, the `mutates_turn_lifecycle` branch, gated
+`not is_error`) persists ONE `messages` row of a **dedicated `type='silent'`** via
+`message_mirror.persist_silent_completion_marker` → `messages_service.append`
+(bypassing the empty-text guard, the `message.new` publish, and the inbox recompute —
+no live UI churn). A **dedicated type** (not the originally-sketched `result` +
+`content.kind='silent'`) was chosen after finding the read layer is **allowlist**-
+based: `type='silent'` is auto-excluded from the transcript (`TRANSCRIPT_TYPES`),
+inbox preview (`result/notify/error`), unread, web-push and the live-publish gate with
+ZERO new guards — mirroring the existing invisible-type precedent
+(`pending`/`queued`/`draft`/`harness_dedupe`). The single denylist site
+(`NON_CONVERSATION_TYPES`) gains `silent` so the marker never bumps the inbox activity
+clock / last-author. (A `result`-typed marker would have leaked into ~8 allowlist read
+paths, each needing a `content.kind != 'silent'` guard.) The `ix_messages_inbox_activity`
+partial index is intentionally left as a valid **superset** predicate — a silent row it
+still covers is filtered by the query, and SQLite keeps using the index since the query
+predicate is a subset; no migration needed for the rare marker rows.
+
+**Grouping.** `agent_activity_service` adds `silent` to `_RELEVANT_MESSAGE_TYPES` (so
+its timeline — separate from the transcript allowlist — sees the marker) and makes
+`_is_terminal` accept `silent` and **every** `notify` (a notify-only turn is a legal
+completion, not just the `backend_failure` diagnostic). Because the marker is invisible
+in the transcript, a group closing on it anchors to the **visible turn trigger** AFTER
+it (never the marker — which the frontend can't position against, per the #935 backward
+anchor invariant), and the marker never becomes `last_boundary_id`. A visible terminal
+(result/notify/error) still anchors to itself, BEFORE it. **Frontend: no change** — the
+marker never reaches it; the `done` status flows through `groupFromWire` and renders as
+the normal ✓ chip.
+
+**Evidence.** `tests/test_agent_activity_service.py` — silent completion → done
+(watch-triggered, tool steps, silent finish; anchored to the visible trigger),
+notify-only → done, backend_failure notify → failed, Stop (no terminal) → interrupted.
+`tests/test_message_mirror.py` — the marker persists but is excluded from the transcript
+allowlist + `NON_CONVERSATION_TYPES` (last visible message unchanged).
+`tests/test_message_dispatcher_result_fallback.py` — the chokepoint writes the marker
+on a clean silent completion and NOT on a Stop (`is_error`). IM delivery untouched
+(marker is avibe-persistence only).

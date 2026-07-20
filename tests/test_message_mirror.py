@@ -26,8 +26,14 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.message_mirror import mirror_harness_inbound, mirror_inbound, persist_agent_message
+from core.message_mirror import (
+    mirror_harness_inbound,
+    mirror_inbound,
+    persist_agent_message,
+    persist_silent_completion_marker,
+)
 from modules.im import MessageContext
+from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, messages, scopes
@@ -854,3 +860,53 @@ def test_avibe_inbound_is_noop(isolated_state):
     with engine.connect() as conn:
         rows = conn.execute(select(messages).where(messages.c.author == "user")).mappings().all()
     assert rows == []
+
+
+def test_silent_completion_marker_persisted_but_invisible(isolated_state):
+    """``persist_silent_completion_marker`` writes an agent-authored ``silent`` row
+    (empty text, content.kind='silent') that is EXCLUDED from the transcript allowlist
+    and from the inbox conversation clock, so the last visible message is unchanged."""
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_sil", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_sil", scope_id=scope_id, agent_backend="claude", agent_variant="default",
+                session_anchor="anchor_ses_sil", native_session_id="", status="active", metadata_json="{}",
+                created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+        # A real, visible reply for an earlier turn — must stay the "last visible" one.
+        conn.execute(
+            messages.insert().values(
+                id="m_vis", scope_id=scope_id, session_id="ses_sil", platform="avibe", author="agent",
+                type="result", source="agent", content_text="the visible answer", content_json="{}",
+                metadata_json="{}", created_at=now, updated_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_sil", platform="avibe",
+        platform_specific={"agent_session_id": "ses_sil"},
+    )
+    persist_silent_completion_marker(ctx)
+
+    with engine.connect() as conn:
+        rows = conn.execute(select(messages).where(messages.c.session_id == "ses_sil")).mappings().all()
+        transcript = messages_service.list_session_messages(
+            conn, session_id="ses_sil", limit=50, tail=True, types=messages_service.TRANSCRIPT_TYPES
+        )["messages"]
+
+    silent_rows = [r for r in rows if r["type"] == "silent"]
+    assert len(silent_rows) == 1  # persisted
+    assert silent_rows[0]["author"] == "agent"
+    assert (silent_rows[0]["content_text"] or "") == ""
+    assert json.loads(silent_rows[0]["content_json"]).get("kind") == "silent"
+
+    # Invisible: excluded from the transcript allowlist; last visible row unchanged.
+    assert "silent" not in [m["type"] for m in transcript]
+    assert transcript[-1]["type"] == "result" and transcript[-1]["text"] == "the visible answer"
+    # And kept out of the inbox conversation clock (never bumps last-activity/author).
+    assert messages_service.SILENT_TYPE in messages_service.NON_CONVERSATION_TYPES
+    assert messages_service.SILENT_TYPE not in messages_service.TRANSCRIPT_TYPES

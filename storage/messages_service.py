@@ -575,8 +575,19 @@ PENDING_TYPE = "pending"
 # Hidden row used only to keep native-message-id dedupe coverage after multiple
 # queued harness callbacks are coalesced into one dispatched turn.
 HARNESS_DEDUPE_TYPE = "harness_dedupe"
-# Ephemeral types that must never count as inbox activity / conversation.
-NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE)
+# An INVISIBLE, agent-authored terminal marker persisted when a turn completes
+# NORMALLY but produces no user-visible message — a ``<silent>``-stripped or empty
+# final reply, or a reply-less bookkeeping turn (common for watch/scheduled
+# orchestration). It exists ONLY so the activity grouping can close such a turn as
+# DONE instead of misreading "activity rows + no terminal" as ``interrupted``. It is
+# kept out of every user-facing surface by the allowlist reads (TRANSCRIPT_TYPES,
+# inbox preview, unread, web-push, live publish) and, being author='agent', is listed
+# in NON_CONVERSATION_TYPES below so it never bumps the inbox activity clock / last
+# author. Never delivered to IM (avibe-persistence only).
+SILENT_TYPE = "silent"
+# Types that must never count as inbox conversation activity: the ephemeral user rows
+# above plus the invisible agent silent-completion marker.
+NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE, SILENT_TYPE)
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
