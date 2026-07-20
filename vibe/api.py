@@ -11088,10 +11088,21 @@ async def _skills_guarded(call):
 
 
 async def list_skills(
-    *, scope: str = "all", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
+    *,
+    scope: str = "all",
+    project_dir: Optional[str] = None,
+    backends: Optional[List[str]] = None,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.list_skills(askill, scope=scope, project_dir=project_dir, backends=backends)
+        lambda askill, svc: svc.list_skills(
+            askill,
+            scope=scope,
+            project_dir=project_dir,
+            backends=backends,
+            user_context=context,
+        )
     )
 
 
@@ -11108,7 +11119,9 @@ async def add_skill(
     all_skills: bool = False,
     skill: Optional[str] = None,
     copy: bool = False,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
         lambda askill, svc: svc.add_skill(
             askill,
@@ -11119,15 +11132,29 @@ async def add_skill(
             all_skills=all_skills,
             skill=skill,
             copy=copy,
+            user_context=context,
         )
     )
 
 
 async def remove_skill(
-    name: str, *, scope: str = "project", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
+    name: str,
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    backends: Optional[List[str]] = None,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.remove_skill(askill, name, scope=scope, project_dir=project_dir, backends=backends)
+        lambda askill, svc: svc.remove_skill(
+            askill,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            backends=backends,
+            user_context=context,
+        )
     )
 
 
@@ -11139,8 +11166,23 @@ async def check_skills(*, scope: str = "project", project_dir: Optional[str] = N
     return await _skills_guarded(lambda askill, svc: svc.check(askill, scope=scope, project_dir=project_dir))
 
 
-async def update_skill(name: str, *, scope: str = "project", project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.update(askill, name, scope=scope, project_dir=project_dir))
+async def update_skill(
+    name: str,
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.update(
+            askill,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            user_context=context,
+        )
+    )
 
 
 async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) -> dict:
