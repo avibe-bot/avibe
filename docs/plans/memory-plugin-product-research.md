@@ -1,7 +1,7 @@
 # Memory Plugin Provider Research (v3)
 
 > Research date: 2026-07-20 (replaces the 2026-07-15 survey)
-> Contract sync: technical design revision 36, 2026-07-20
+> Contract sync: technical design revision 37, 2026-07-21
 >
 > Decision framework: **product fit first**. Cleanly fixable defects (a scoping
 > bug, a missing endpoint) are priced as engineering cost, not used as

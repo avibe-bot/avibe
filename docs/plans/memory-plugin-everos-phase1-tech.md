@@ -1,6 +1,6 @@
 # Memory Plugin Phase 1: Technical Design
 
-> Status: revision 36 convergence candidate after thirty-fifth review, 2026-07-20
+> Status: revision 37 convergence candidate after thirty-sixth review, 2026-07-21
 > Parent: `docs/plans/memory-plugin-everos-phase1.md` (product design)
 > Review: pass 1 2026-07-19 (12 blockers → rev2); pass 2 reviewer-max
 > re-review (7 partial/unresolved + 8 new → rev3); pass 3 blind review
@@ -102,7 +102,7 @@ Path notation: `<AVIBE_HOME>` means the effective root returned by
 supported legacy-home migration. `~/.avibe` is only the default display example;
 no Memory implementation path may hardcode it.
 
-## 3. Core types and interfaces (slice 1, frozen after revision 36)
+## 3. Core types and interfaces (slice 1, frozen after revision 37)
 
 ```python
 MemoryKind = Literal["profile", "episode", "fact", "foresight"]
@@ -1596,7 +1596,12 @@ memory_outbox
 ├── payload_json  TEXT               -- immutable while pending/delivering; NULL after
 │                                    -- delivered/ordinary-dead retention, and NULL in
 │                                    -- awaiting_flush when no affected source still
-│                                    -- needs a retained replay payload (rev36 F1)
+│                                    -- needs a retained replay payload (rev36 F1).
+│                                    -- rev37 (F3): preserves the original /add
+│                                    -- request's EXACT message membership + order so a
+│                                    -- replay reconstructs the byte-identical request →
+│                                    -- identical derived ids. Replay unit = the whole
+│                                    -- original request, never a subset/message (§4.2)
 ├── state         TEXT NOT NULL      -- pending | delivering | awaiting_flush |
 │                                    -- durability_blocked | delivered | dead
 │                                    -- rev36 (F1): awaiting_flush = add accepted &
@@ -2594,7 +2599,11 @@ but does not fsync the containing directory
    `durability_blocked`/tail retention machinery) — drives each message
    **independently** to a terminal (`episode_backed` or `orphan_dead`);
    `buffered_pending` is a healthy pending tail owned by the flush queue and
-   `absent_pending` is eligible for a fenced exact replay. The row is `delivered`
+   `absent_pending` is eligible for a fenced exact replay **only when every other
+   already-present member of the same original `/add` request is still `buffered`**
+   (request-granularity replay gate, finding 3 rev37 — the replay unit is the
+   original request; if any member has episode-materialized or otherwise left the
+   buffer, the absent member is terminalized `orphan_dead`, not replayed). The row is `delivered`
    only when **every** affected source is terminal (`episode_backed` OR
    `orphan_dead`) AND at least one is `episode_backed` AND none is `absent_pending`;
    a set whose sources ALL resolve `orphan_dead` is `dead`, not `delivered`
@@ -2615,7 +2624,7 @@ but does not fsync the containing directory
    | `full` + `episode` | barrier-only, no re-mutation | barrier-only, no re-mutation | barrier-only, no re-mutation (`distilled` complete) |
    | `full` + `buffered`\|`mixed` | barrier-only (buffer membership proves the add accumulated durably) | **NOT barrier-only** — a remaining buffer is pre-call state, not proof the flush ran; requires **one fenced flush after prior-call death is proved** (per §4.3), gated by the `flush_repair` CAS `unused → issued` | add-side durable, but `distilled` **not** complete — a remaining buffer requires **one fenced flush** to reach episode coverage, gated by the `flush_repair` CAS `unused → issued` |
    | `zero` (proven stable) | one automatic fenced full replay from the retained outbox payload, gated by the `add_repair` CAS `unused → issued` | **dead / unrecoverable** — no Avibe-side flush payload exists to replay | one automatic fenced replay of the retained add+flush `payload_json` (it is retained), gated by the `add_repair`/`flush_repair` CAS `unused → issued` per stage |
-   | `partial` / `ambiguous_orphan` | **per-message resolution — NOT wholly dead** (the set is heterogeneous and a turn may split; apply the per-message transition list below over `per_message`): each present message is recorded `episode_backed`/`buffered_pending`, each `orphan` message is terminalized `orphan_dead`, each `absent` message with a retained payload becomes `absent_pending` (one fenced exact current-payload replay via the `add_repair` CAS); the row is wholly `dead` **only if every affected source resolves to `orphan_dead`/uncertain (all-orphan ⇒ dead — dead takes precedence over delivered)**, otherwise it is `delivered` (every source terminal, ≥1 `episode_backed`, none `absent_pending`) or held `awaiting_flush` | dead, no replay | dead, no replay |
+   | `partial` / `ambiguous_orphan` | **per-message resolution — NOT wholly dead** (the set is heterogeneous and a turn may split; apply the per-message transition list below over `per_message`): each present message is recorded `episode_backed`/`buffered_pending`, each `orphan` message is terminalized `orphan_dead`, each `absent` message with a retained payload becomes `absent_pending` **only when every already-present member of the same original `/add` request is still `buffered`** (one fenced exact request-payload replay — the replay unit is the original request, finding 3 rev37 — via the `add_repair` CAS); an `absent` message whose request already has any episode-materialized/departed member is terminalized `orphan_dead` (replay unsafe, no mutation); the row is wholly `dead` **only if every affected source resolves to `orphan_dead`/uncertain (all-orphan ⇒ dead — dead takes precedence over delivered)**, otherwise it is `delivered` (every source terminal, ≥1 `episode_backed`, none `absent_pending`) or held `awaiting_flush` | dead, no replay | dead, no replay |
    | `unreadable` | dead, no replay (dead-safe — a changing/failed read is never trusted) | dead, no replay | dead, no replay |
 
    `materialization=buffered`|`mixed` on a `full` result proves **add** durability
@@ -2650,8 +2659,20 @@ but does not fsync the containing directory
      already-durable buffer membership) and B takes a **fenced exact
      current-payload replay** gated by the existing `add_repair` CAS
      (`unused → issued`), driving B to `absent_pending`→(on replay)
-     `buffered_pending`/`episode_backed`. This is **NOT** `dead`: B's retained
-     payload + deterministic ids make an exact B replay provably safe.
+     `buffered_pending`/`episode_backed`. This is **NOT** `dead`: because every
+     already-present member of the original request (A) is still `buffered` — the
+     request-granularity replay gate is satisfied — re-sending the byte-identical
+     request reproduces the same derived ids, EverOS's current-buffer dedup
+     absorbs A without duplication, and only B is effectively re-added, so the
+     exact request replay is provably safe (finding 3, rev37).
+   - **materialized member + current batch `absent`** (finding 3, rev37: a member
+     of the original `/add` request has already episode-materialized / left the
+     buffer while another member is `absent`, e.g. evidence `A=episode, B=absent`)
+     → replay is **UNSAFE** and forbidden: re-sending the request cannot reproduce
+     A's already-consumed id and would shift/duplicate ids, so B is terminalized
+     `orphan_dead` with **no** provider mutation while A stays `episode_backed`.
+     The absent member is NOT `absent_pending` here because the request-granularity
+     gate (every already-present member still `buffered`) is not met.
    - **prior source `orphan` + current source `buffered`** (the episode-failure
      case: `/add` wrote A's memcell, replaced the buffer with B, then A's episode
      write failed, so disk = `A=orphan, B=buffered`) → terminalize **the prior
@@ -2789,9 +2810,28 @@ the EverOS adapter that inspection is implemented as:
    the 14-day review window, and require owner retry/clear; never resend a
    subset or full batch.
 
-Subset replay is deliberately forbidden. EverOS does not accept caller message
-ids; it derives each id from `(session_id, timestamp, batch_index)`, so removing
-an already-covered item changes later ids and cannot be made idempotent. This
+Subset replay is deliberately forbidden, and the replay UNIT is the original
+`/add` request, never an individual message (finding 3, rev37). EverOS does not
+accept caller message ids; it derives each id from the raw request index
+(`(session_id, timestamp, batch_index)` — `memory/extract/ingest/service.py:67`,
+`.../id_gen.py:15`), and its dedup covers only the current unprocessed buffer.
+Two consequences make per-message replay non-idempotent: replaying only a subset
+of an original request's messages shifts the surviving members' derived indices,
+so their ids change; and replaying the full request once some members have
+already left the buffer (episode-materialized) re-adds the still-buffered members
+a second time. So Avibe persists the original request's **exact message
+membership and order** alongside the retained replay payload (see the
+outbox/payload schema and the retained-payload description in §4), so a replay
+reconstructs the byte-identical request → identical derived ids, and permits a
+fenced replay **ONLY when EVERY already-present member of that request is still
+`buffered`** (none has been episode-materialized or otherwise left the buffer).
+Then re-sending the byte-identical request reproduces the same derived ids,
+EverOS's current-buffer dedup absorbs the still-buffered members without
+duplication, and only the `absent` members are effectively re-added. If ANY
+member of the request has already left the buffer (episode / orphan /
+materialized), replay is UNSAFE: do NOT mutate — terminalize the unsafe `absent`
+member(s) as `orphan_dead` (no replay). Per-message dispositions still drive
+classification, but replay is **gated at request granularity**. This
 reconciliation is a pinned-version internal contract, not a claim that upstream
 offers exactly-once receipts. Upgrade tests cover schema/lineage changes, and
 the POC injects the real post-`status="extracted"` crash to prove the production
@@ -3991,11 +4031,23 @@ unchanged by that finding:
 
 - runtime provisioning is frozen, not an installer fallback TODO. Avibe ships a
   platform-marked, hash-locked transitive dependency lock for official
-  base `everos==1.1.3`, never the `everos[multimodal]` extra. The installed
-  source's `require_multimodal()` rejects non-text parsing when
-  `everalgo_parser` is absent; startup asserts that parser and its optional
-  LibreOffice/cairosvg integration are absent from the locked runtime. An
-  unexpected installed multimodal capability is a lock/runtime mismatch, not a
+  base `everos==1.1.3`, never the `everos[multimodal]` extra. **Correction,
+  finding 6 (rev37):** base `everos==1.1.3` **transitively requires**
+  `everalgo-knowledge==0.1.1`, which hard-requires `everalgo-parser>=0.2.0`
+  (verified in the two packages' `dist-info/METADATA`), so `everalgo-parser`
+  (text/no-svg) is **ALWAYS installed** with base everos and cannot be omitted;
+  upstream `parser_available()` is a bare `import everalgo.parser`
+  (`everos/component/parser/_core.py:17`) that returns True on any valid base
+  install. The docs therefore do **not** claim `everalgo-parser` is absent and
+  do **not** assert its absence at startup — that assertion is impossible.
+  Text-only is enforced structurally at the **Avibe boundary** instead (see the
+  ASGI-wrapper bullet below), not by relying on a missing package. What the lock
+  DOES still decline is the `everos[multimodal]` extra, so the optional multimodal
+  INTEGRATIONS — the `everalgo-parser[svg]` extra, `cairosvg`, and LibreOffice —
+  are genuinely absent; startup asserts **those optional integrations** are absent
+  from the locked runtime (it does NOT assert `everalgo-parser` itself is absent).
+  An unexpected installed multimodal integration (svg/cairosvg/LibreOffice) is a
+  lock/runtime mismatch, not a
   feature silently enabled on the unauthenticated sidecar. Enablement builds `<AVIBE_HOME>/memory/env.staging-<random>` with
   mode `0700`, installs only from that lock, verifies Python 3.12, package
   version/import and wheel hashes, writes/fsyncs a distinct **runtime-env**
@@ -4139,6 +4191,20 @@ unchanged by that finding:
   tree chmod `0700`. This closes only the browser-JS/wildcard-CORS vector
   (threat-model §3.0); it does not authenticate same-OS-user callers, who can
   still open the socket file directly;
+- **Avibe-boundary text-only guard, finding 6 (rev37)**: because base
+  `everos==1.1.3` transitively includes `everalgo-parser` and upstream
+  `parser_available()` returns True on any valid install (§9 runtime-provisioning
+  bullet), text-only cannot rely on the parser package being absent. The same
+  uds-bound Avibe-owned ASGI wrapper around the upstream `create_app` factory
+  therefore **structurally rejects any non-text request** at the boundary: before
+  forwarding a `/add` (or `/flush`) body upstream, the wrapper inspects the parsed
+  request and rejects — with a closed error, **before** any upstream call — any
+  body carrying an attachment, file, file-URI, or non-text message part, so a
+  non-text payload never reaches EverOS's parser regardless of parser
+  availability. This is a positive Avibe-side guard (behavioral
+  parser-unreachability), not reliance on a missing package. The `file_uri_allow_dirs`
+  override below and the capability-unavailable adapter check remain defense in
+  depth behind this boundary guard;
 - generated runtime config **forces** `EVEROS_MEMORIZE__MODE=chat`; upstream
   1.1.3 defaults to `agent`, which would also register the agent-memory pipeline
   and violates phase 1's user-track-only mapping. Avibe also writes and
@@ -4163,9 +4229,11 @@ unchanged by that finding:
 - pin upstream multimodal `file_uri_allow_dirs` to an Avibe-owned, `0700`
   staging directory (empty by default). The upstream empty-list default means
   “any readable file”, so phase 1 must override it even though it sends only
-  text payloads and deliberately omits the optional parser extra. Direct
-  non-text sidecar input must fail capability-unavailable before a file open,
-  subprocess, parser/model call, or relay request.
+  text payloads and declines the `everos[multimodal]` extra (so the svg/cairosvg/
+  LibreOffice integrations are absent; base `everalgo-parser` itself is present,
+  finding 6 rev37). Behind the Avibe-boundary text-only guard above, any direct
+  non-text sidecar input must additionally fail capability-unavailable before a
+  file open, subprocess, parser/model call, or relay request.
 - launch with content-body access logging disabled, Python log level
   `CRITICAL`, and `RUST_LOG=off`. EverOS 1.1.3 logs `str(exc)` for some
   infrastructure/configuration failures and sends third-party logs to its
@@ -4971,6 +5039,16 @@ but is non-destructive and uses the path rules in §8.4.
   value (finding 5, rev32; finding 3, rev33 closes full==exact / zero==empty /
   partial==strict-subset / nonempty-expected / orphan-materialization; findings 2+3,
   rev36 close per-message keys/reduction and partial-materialization reduction).
+  For the recovery path, assert the **request-granularity replay gate** (finding 3,
+  rev37): the `per_message={U: episode, A: absent}` case — a mixed original `/add`
+  request whose U member has episode-materialized/left the buffer while A is
+  absent — is **NOT** replay-eligible; the absent member A is terminalized
+  `orphan_dead` with **zero** provider mutation, U stays `episode_backed`, and only
+  a request whose every already-present member is still `buffered` (e.g.
+  `per_message={A: buffered, B: absent}`) authorizes the one fenced exact
+  request-payload replay that drives the absent member to `absent_pending`. The
+  replay unit under test is the original request, never an individual message, and
+  no subset is ever resent.
   Advance the frozen 30s/2m/10m/1h schedule, prove exactly five provider-mutation
   attempts then dead with no sixth background call, and exercise owner drain
   re-arm only for retained-payload stable-zero/proved-tail evidence; partial,
@@ -5425,6 +5503,83 @@ governance surface. Capture matrix wording aligned to speaker-scoped rules
 everywhere. (Slice list updated in parent doc §7.)
 
 ## 15. Review changelog
+
+### Revision 37 (2026-07-21, thirty-sixth review — request-level replay idempotency, Avibe-boundary text-only enforcement; six durability-lifecycle items deferred to implementation)
+
+- **Finding 3 (blocking)**: EverOS derives each message id from the raw request
+  index (`memory/extract/ingest/service.py:67`, `.../id_gen.py:15`) and its dedup
+  covers only the current unprocessed buffer, so per-message replay is
+  non-idempotent — replaying a subset shifts surviving members' ids, and replaying
+  a full request once some members have episode-materialized re-adds the
+  still-buffered members. The rev36 per-message model authorized replay per absent
+  message (§4.2 ~transition list), the `{U:episode, A:absent}` test accepted that
+  case as replay-eligible, yet the existing subset-prohibition already forbade
+  resending a subset — a live contradiction. Rev37 makes the **replay UNIT the
+  original `/add` request**, not the individual message: the retained payload
+  persists the request's exact message membership + order (outbox `payload_json`
+  schema note), a fenced replay is permitted **only when every already-present
+  member of that request is still `buffered`** (then the byte-identical request
+  reproduces identical ids and current-buffer dedup absorbs the buffered members
+  without duplication), and if any member has episode-materialized/left the buffer
+  the `absent` member(s) are terminalized `orphan_dead` with no mutation.
+  Reconciled the §4.2 per-message transition list, the `absent_pending` matrix
+  cell, the `{U:episode, A:absent}` test (now asserts NO replay), and the
+  subset-prohibition; added a POC case (materialized member blocks replay).
+- **Finding 6 (blocking)**: text-only cannot rely on parser-package absence. Base
+  `everos==1.1.3` transitively requires `everalgo-knowledge==0.1.1` →
+  `everalgo-parser>=0.2.0` (both `dist-info/METADATA`), so `everalgo-parser` is
+  ALWAYS installed and upstream `parser_available()` (`everos/component/parser/
+  _core.py:17`, a bare `import everalgo.parser`) returns True on any valid base
+  install — the prior claim that the lock omits `everalgo-parser` and that startup
+  asserts its absence was impossible. Rev37 stops claiming that package is absent,
+  enforces text-only **structurally at the Avibe boundary** (the uds-bound ASGI
+  wrapper around `create_app` rejects any non-text `/add`/`/flush` body with a
+  closed error before forwarding upstream, regardless of parser availability), and
+  narrows the startup absence assertion to the genuinely-absent optional
+  multimodal INTEGRATIONS (the `[multimodal]`/`[svg]` extra, cairosvg, LibreOffice).
+  Updated §9 runtime provisioning, the §9 sidecar-wrapper description, the
+  `file_uri_allow_dirs` bullet, and the POC gate.
+- **Six durability-lifecycle findings DEFERRED**: the thirty-sixth review's other
+  six findings (durability/evidence lifecycle state-machine precision) are
+  consciously DEFERRED to the implementation + POC phase as tracked open questions
+  (see the new "Deferred durability-lifecycle items" subsection below), per the
+  convergence assessment that the architecture has converged and those items are
+  cheaper and safer to finalize against a live EverOS with real tests than in
+  further prose review. They are deferred, not overlooked.
+
+### Deferred durability-lifecycle items (thirty-sixth review — resolve in implementation + POC, not further prose review)
+
+These six thirty-sixth-review findings are consciously deferred: the architecture
+has converged and each is cheaper and safer to finalize against a running EverOS
+with real tests than to keep re-deciding in prose. They are tracked open
+questions, NOT overlooked defects.
+
+1. **DEFERRED — implementation/POC phase**: outbox→source coverage needs a
+   normalized coverage table, not a single `owning_outbox_id` scalar (a later
+   covering add orphans the earlier outbox row).
+2. **DEFERRED — implementation/POC phase**: the derived source rollup is not
+   closed over mixed per-message states (`{orphan,buffered}`, `{episode,orphan}`)
+   — pending/episode-backed members must take precedence over a lone orphan;
+   represent the mixed terminal state explicitly.
+3. **DEFERRED — implementation/POC phase** (thirty-sixth review #4): repair-fence
+   outcomes must be resolved per message, not row-wide, with every active
+   matrix/test/UI statement synchronized.
+4. **DEFERRED — implementation/POC phase** (thirty-sixth review #5): terminal
+   flush failure must atomically settle its awaiting dependents (classify each
+   dependent message, recompute sources, dead/deliver covering outboxes) and
+   define a fresh-flush-cycle transition when the session's sole flush row is
+   already dead.
+5. **DEFERRED — implementation/POC phase** (thirty-sixth review #7):
+   `awaiting_flush` rows need an explicit bound (include in `max_pending_outbox`
+   or a separate atomic cap) — the one-per-session flush reservation does not
+   bound them.
+6. **DEFERRED — implementation/POC phase** (thirty-sixth review #8):
+   delivery/export accounting still partly encodes the pre-rev36 model
+   (`memory_sources.delivered_at` non-null at creation; duplicate handling treats
+   any source row as delivered; manifest count list omits `awaiting_flush_outbox`)
+   — add `accepted_at`, make `delivered_at` nullable until terminal delivery,
+   derive duplicate receipts from current state, and add the awaiting count to the
+   manifest.
 
 ### Revision 36 (2026-07-20, thirty-fifth review — awaiting_flush outbox lifecycle, per-provider-message evidence granularity, and complete WriteEvidence reduction)
 

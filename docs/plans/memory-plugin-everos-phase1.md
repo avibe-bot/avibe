@@ -1,6 +1,6 @@
 # Memory Plugin Phase 1: Official EverOS Integration
 
-> Status: revision 36 convergence candidate, 2026-07-20; implementation not started
+> Status: revision 37 convergence candidate, 2026-07-21; implementation not started
 > Parent: `docs/plans/memory-plugin-product-research.md` (selection comparison
 > and decision log) · POC sandbox: `docs/plans/memory-poc-everos.md`
 > Technical design: `docs/plans/memory-plugin-everos-phase1-tech.md`
@@ -1135,6 +1135,28 @@ its overall recovery state is derived from it. And the evidence type's validatio
 now checks a partially-materialized write faithfully, so a partial result can no
 longer mislabel whether its landed messages were buffered or episode-backed (tech
 doc §15 revision-36 changelog is authoritative).
+
+Thirty-sixth review (blind review against docs plus the installed 1.1.3 source)
+found 8 findings; 2 blocking were folded into rev37 and the remaining 6
+durability-lifecycle items were consciously deferred to the implementation + POC
+phase. The two folded fixes: (1) crash replay now respects EverOS's request-level
+idempotency — because EverOS derives each message id from the raw request index
+and only dedups the current buffer, the replay unit is the whole original `/add`
+request rather than an individual message, and a fenced replay is allowed only
+when every already-present member of that request is still buffered; if any member
+has already become an episode the absent members are terminalized dead rather than
+replayed. (2) Text-only is now enforced at Avibe's own boundary: base
+`everos==1.1.3` always ships the base parser package transitively, so the design
+no longer pretends that package is absent and instead has the Avibe-owned sidecar
+wrapper reject any non-text add/flush body before it reaches EverOS, while startup
+still asserts the genuinely-absent optional multimodal integrations (svg/cairosvg/
+LibreOffice). The six deferred items (outbox→source coverage table, mixed
+per-message rollup precedence, per-message repair-fence resolution, terminal-flush
+dependent settlement, an explicit `awaiting_flush` bound, and delivery/export
+accounting cleanup) are tracked open questions — the architecture has converged
+and they are cheaper and safer to finalize against a running EverOS with real
+tests (tech doc §15 revision-37 changelog and its "Deferred durability-lifecycle
+items" subsection are authoritative).
 
 Decided 2026-07-19:
 

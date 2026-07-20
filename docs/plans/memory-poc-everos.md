@@ -1,6 +1,6 @@
 # Memory POC Phase 1: EverOS Evaluation
 
-> Status: sandbox scaffolded; provider probes are blocked on (a) rev36 harness
+> Status: sandbox scaffolded; provider probes are blocked on (a) rev37 harness
 > contract fixes below and (b) model endpoint credentials. The production
 > duplicate gate additionally waits for slice-2 worker + slice-3 EverOS adapter
 > code. The POC has not been run and does not block slice 1.
@@ -100,13 +100,19 @@ memory feature therefore needs its own model endpoint config
       different route/token set each time; before each sidecar/canary launch,
       generated `everos.toml` must be atomically rewritten/fsynced, expose only
       the current relay material, and reject the preserved prior-boot token
-- [ ] Text-only runtime capability (credential-free): build from the production
-      base-distribution lock and prove the multimodal extra, `everalgo_parser`,
-      cairosvg/LibreOffice integration, and any third model route are absent.
-      Send image/doc/pdf/audio/file-URI payloads directly to the owned sidecar and
-      require capability-unavailable before any file open, subprocess, parser/
-      model invocation, or relay request. Keep the exact empty owner-only
-      `file_uri_allow_dirs` staging allowlist effective as defense in depth
+- [ ] Text-only runtime enforcement (credential-free): build from the production
+      base-distribution lock. Note (finding 6, rev37) that base `everos==1.1.3`
+      transitively includes `everalgo-parser` and cannot be installed without it,
+      so do **NOT** assert that package is absent; instead prove the multimodal
+      `everos[multimodal]` extra and its svg/cairosvg/LibreOffice integrations, and
+      any third model route, are absent. The primary gate is **behavioral
+      parser-unreachability at the Avibe boundary**: send image/doc/pdf/audio/
+      file-URI payloads as `/add` (and `/flush`) bodies and prove the Avibe-owned
+      ASGI wrapper rejects each non-text body with a closed error **before** any
+      upstream call — no file open, subprocess, parser/model invocation, or relay
+      request occurs — regardless of parser availability. Keep the exact empty
+      owner-only `file_uri_allow_dirs` staging allowlist and the adapter
+      capability-unavailable check effective as defense in depth behind that guard
 - [ ] Platform/filesystem gate (rev22; credential-free and run before every
       model probe): invoke the production capability adapter, not a POC copy, on
       each advertised Darwin/APFS, native-Linux/ext4|XFS|Btrfs, and WSL2/ext4
@@ -362,6 +368,18 @@ memory feature therefore needs its own model endpoint config
           flush transaction and assert `A` advances to `'episode_backed'`, the rollup
           becomes `episode_backed`, and the outbox row reaches `delivered` — a case a
           single source-level verdict could not have represented.
+        - **request-granularity replay gate — materialized member blocks replay**
+          (finding 3, rev37): from a single original `/add` request of two messages,
+          drive one member (U) to an episode (it leaves the unprocessed buffer) while
+          the other member (A) records as `absent`, so the disk evidence is
+          `per_message={U:episode, A:absent}`. Restart and assert the recovery path
+          does **NOT** replay: because a member of the original request already left
+          the buffer, re-sending the request cannot reproduce the derived ids, so A is
+          terminalized `orphan_dead` with **zero** provider mutation (assert no `/add`
+          fires) while U stays `episode_backed`. Contrast with the
+          crash-before-send case above, where every already-present member is still
+          `buffered` and exactly one fenced exact request replay is authorized —
+          proving the replay unit is the whole original request, never a subset.
       Do **not** manufacture the window with an external `/flush` that production
       could not schedule before the local commit. Then flush remaining tails and
       settle all OME/cascade work.
