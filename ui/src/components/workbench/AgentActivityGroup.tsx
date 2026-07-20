@@ -130,7 +130,9 @@ const ToolJsonDialog: React.FC<{ open: boolean; onClose: () => void; parsed: Par
   return (
     <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
       <DialogContent className="max-w-2xl gap-0 overflow-hidden p-0">
-        <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
+        {/* ``DialogContent`` renders its own absolute close X at right-4 top-4;
+            reserve right padding so the Copy action never sits under it. */}
+        <div className="flex items-center gap-2 border-b border-border py-2.5 pl-4 pr-12">
           <Terminal className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
             {parsed.name || '—'}
