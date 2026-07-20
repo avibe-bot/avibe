@@ -131,6 +131,7 @@ def test_show_event_store_records_human_annotation_with_anchor_context(isolated_
     assert event["actor"] == "human"
     assert event["scope"] == "default"
     assert event["payload"]["status"] == "pending"
+    assert event["payload"]["author"] == {"kind": "local"}
     assert event["message_id"]
     assert "[show-annotation:default:created] question" in event["transcript_text"]
     assert "Clarify this claim." in event["transcript_text"]
@@ -141,6 +142,82 @@ def test_show_event_store_records_human_annotation_with_anchor_context(isolated_
         message_row = conn.execute(select(messages).where(messages.c.id == event["message_id"])).mappings().one()
 
     assert message_row["author"] == "user"
+    assert json.loads(message_row["metadata_json"])["author"] == {"kind": "local"}
+
+
+def test_show_event_store_records_remote_human_author_in_event_and_message(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Review this."},
+            },
+            author={"kind": "user", "email": "alex@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert event["payload"]["author"] == {"kind": "user", "email": "alex@example.com"}
+    assert event["message"]["metadata"]["author"] == {
+        "kind": "user",
+        "email": "alex@example.com",
+    }
+
+
+def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
+    from vibe.ui_server import _show_event_requests_dispatch
+
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "system.annotation.control",
+                "payload": {"action": "enable", "mode": "screenshot"},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["actor"] == "system"
+    assert event["payload"] == {"action": "enable", "mode": "screenshot"}
+    assert event["transcript_text"] == ""
+    assert event["message_id"] is None
+    assert event["message"] is None
+    assert _show_event_requests_dispatch(event) is False
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.id)).scalar_one() == event["id"]
+        assert conn.execute(select(messages.c.id)).first() is None
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"action": "toggle"},
+        {"action": "enable", "mode": "area"},
+        {"action": "set-mode"},
+    ],
+)
+def test_annotation_control_event_rejects_invalid_payload(isolated_state, control):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {"type": "system.annotation.control", "payload": control},
+            )
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "invalid_payload"
 
 
 def test_show_event_store_rejects_mismatched_session_id(isolated_state):

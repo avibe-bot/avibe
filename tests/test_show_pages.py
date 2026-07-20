@@ -69,7 +69,7 @@ def test_show_without_subcommand_prints_help(capsys):
     assert cli.cmd_show(args) == 0
     captured = capsys.readouterr()
     assert "Manage the one visual Show Page attached to an Agent Session." in captured.out
-    assert "usage: vibe show [-h] {list,path,status,update,mark,event} ..." in captured.out
+    assert "usage: vibe show [-h] {list,path,status,update,mark,event,annotate} ..." in captured.out
     assert "vibe show list" in captured.out
     assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
 
@@ -2306,6 +2306,125 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Clarify this." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+def test_show_annotate_cli_posts_single_enable_event_to_live_ui(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    captured = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "event": {
+                        "id": "show_evt_control",
+                        "type": "system.annotation.control",
+                        "payload": {"action": "enable", "mode": "screenshot"},
+                        "message_id": None,
+                    },
+                }
+            ).encode("utf-8")
+
+    def _urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["url"] = request.full_url
+        return _Response()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "annotate",
+            "--session-id",
+            "ses123",
+            "--on",
+            "--mode",
+            "screenshot",
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["event"]["id"] == "show_evt_control"
+    assert captured["payload"] == {
+        "type": "system.annotation.control",
+        "payload": {"action": "enable", "mode": "screenshot"},
+    }
+    assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/events"
+
+
+def test_show_annotate_cli_defaults_session_and_records_offline_control(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(["show", "annotate", "--mode", "smart", "--json"])
+    assert cli.cmd_show(args) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["session_id"] == "sesCaller"
+    assert result["session_default_notice"]["session_id"] == "sesCaller"
+    assert result["event"]["payload"] == {"action": "set-mode", "mode": "smart"}
+    assert result["event"]["transcript_text"] == ""
+    assert result["event"]["message_id"] is None
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.id)).scalar_one() == result["event"]["id"]
+        assert conn.execute(select(messages.c.id)).first() is None
+
+
+def test_show_annotate_cli_rejects_off_with_mode(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+
+    args = cli.build_parser().parse_args(
+        ["show", "annotate", "--session-id", "ses123", "--off", "--mode", "smart", "--json"]
+    )
+
+    assert cli.cmd_show(args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == "invalid_arguments"
 
 
 def test_show_event_defaults_to_caller_session(monkeypatch, tmp_path, capsys):

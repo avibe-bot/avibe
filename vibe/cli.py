@@ -873,6 +873,7 @@ def _show_examples_text() -> str:
           update   Switch visibility, set a custom public link, rotate share links, or take the page offline.
           mark     Add an assistant mark event to the session.
           event    Record a generic annotation-layer event.
+          annotate Control the page's annotation overlay.
 
         Visibility:
           private  Authenticated Web UI URL under /show/<session-id>/.
@@ -888,6 +889,7 @@ def _show_examples_text() -> str:
           vibe show update --session-id sesk8m4q2p7x --visibility offline
           vibe show mark --session-id sesk8m4q2p7x --target mark-default-summary --body "Review this summary."
           vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json --json
+          vibe show annotate --session-id sesk8m4q2p7x --on --mode screenshot
 
         More:
           vibe show list --help
@@ -896,6 +898,7 @@ def _show_examples_text() -> str:
           vibe show update --help
           vibe show mark --help
           vibe show event --help
+          vibe show annotate --help
         """
     )
 
@@ -976,6 +979,21 @@ def _show_event_examples_text() -> str:
         Examples:
           vibe show event --session-id sesk8m4q2p7x --type assistant.page.updated --event-json '{"summary":"Updated the plan."}'
           vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json --json
+        """
+    )
+
+
+def _show_annotate_examples_text() -> str:
+    return dedent(
+        """\
+        Control the annotation overlay through the Show Page event stream.
+        Control events do not create transcript messages or dispatch Agent turns.
+
+        Examples:
+          vibe show annotate --session-id sesk8m4q2p7x --on
+          vibe show annotate --session-id sesk8m4q2p7x --on --mode screenshot
+          vibe show annotate --session-id sesk8m4q2p7x --mode smart
+          vibe show annotate --session-id sesk8m4q2p7x --off --json
         """
     )
 
@@ -10605,6 +10623,73 @@ def cmd_show_event(args):
             event_store.close()
 
 
+def cmd_show_annotate(args):
+    from core.show_pages import ShowPageStore
+    from core.show_session_events import ShowSessionEventStore
+
+    page_store = ShowPageStore()
+    event_store = None
+    try:
+        session_id, session_default_notice = _resolve_show_session_id(
+            args,
+            help_command="vibe show annotate --help",
+        )
+        if not (args.annotation_on or args.annotation_off or args.mode):
+            raise TaskCliError(
+                "pass --on, --off, or --mode",
+                code="invalid_arguments",
+                help_command="vibe show annotate --help",
+            )
+        if args.annotation_off and args.mode:
+            raise TaskCliError(
+                "--off cannot be combined with --mode",
+                code="invalid_arguments",
+                help_command="vibe show annotate --help",
+            )
+
+        page = page_store.ensure(session_id)
+        if args.annotation_on:
+            control = {"action": "enable", **({"mode": args.mode} if args.mode else {})}
+        elif args.annotation_off:
+            control = {"action": "disable"}
+        else:
+            control = {"action": "set-mode", "mode": args.mode}
+        payload = {"type": "system.annotation.control", "payload": control}
+        event = _post_show_event_to_live_ui(session_id, payload)
+        if event is None:
+            event_store = ShowSessionEventStore()
+            event = event_store.append(session_id, payload)
+
+        result = _show_page_result(
+            page,
+            message="Annotation control recorded.",
+            extra={
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+                "event": event,
+                "event_id": event["id"],
+                "message_id": event.get("message_id"),
+            },
+        )
+        if getattr(args, "json", False):
+            _print_json(result)
+        else:
+            _print_show_page_result(result)
+            print("")
+            print("Annotation:")
+            print(f"  Event: {event['id']}")
+            print(f"  Action: {event['payload']['action']}")
+            if event["payload"].get("mode"):
+                print(f"  Mode: {event['payload']['mode']}")
+        return 0
+    except Exception as exc:
+        _print_show_page_error(exc)
+        return 1
+    finally:
+        page_store.close()
+        if event_store is not None:
+            event_store.close()
+
+
 def cmd_show(args):
     if args.show_command is None:
         args.show_help_parser.print_help()
@@ -10621,6 +10706,8 @@ def cmd_show(args):
         return cmd_show_mark(args)
     if args.show_command == "event":
         return cmd_show_event(args)
+    if args.show_command == "annotate":
+        return cmd_show_annotate(args)
     raise TaskCliError(
         "show command is required",
         code="invalid_arguments",
@@ -11853,7 +11940,10 @@ def build_parser():
         error_hint="Run one of the show subcommands below. Start with: vibe show path --session-id <session-id>",
     )
     show_parser.set_defaults(show_help_parser=show_parser)
-    show_subparsers = show_parser.add_subparsers(dest="show_command", metavar="{list,path,status,update,mark,event}")
+    show_subparsers = show_parser.add_subparsers(
+        dest="show_command",
+        metavar="{list,path,status,update,mark,event,annotate}",
+    )
     show_subparsers.required = False
 
     show_list_parser = show_subparsers.add_parser(
@@ -11995,6 +12085,26 @@ def build_parser():
         help="For human intent/annotation events, request an Agent turn after recording the event.",
     )
     show_event_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+
+    show_annotate_parser = show_subparsers.add_parser(
+        "annotate",
+        help="Control the Show Page annotation overlay",
+        description="Enable, disable, or change the mode of the Show Page annotation overlay.",
+        epilog=_show_annotate_examples_text(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe show annotate --help",
+        error_hint="Pass --on, --off, or --mode smart|screenshot.",
+    )
+    show_annotate_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
+    annotate_toggle = show_annotate_parser.add_mutually_exclusive_group()
+    annotate_toggle.add_argument("--on", dest="annotation_on", action="store_true", help="Enable annotation.")
+    annotate_toggle.add_argument("--off", dest="annotation_off", action="store_true", help="Disable annotation.")
+    show_annotate_parser.add_argument(
+        "--mode",
+        choices=("smart", "screenshot"),
+        help="Set annotation mode; with --on, enable directly in this mode.",
+    )
+    show_annotate_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     task_parser = subparsers.add_parser(
         "task",

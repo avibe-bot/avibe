@@ -8214,7 +8214,13 @@ def _show_page_runtime_unavailable_response():
 
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
+    if relative == "__show/annotation.js":
+        return False
     return relative == "api" or relative.startswith("api/") or relative == "__show" or relative.startswith("__show/")
+
+
+def _is_show_annotation_asset(asset_path: str) -> bool:
+    return (asset_path or "").strip("/") == "__show/annotation.js"
 
 
 def _is_show_page_entry_asset(asset_path: str) -> bool:
@@ -8404,7 +8410,42 @@ def _show_event_write_authorized(session_id: str) -> bool:
     return hmac.compare_digest(token, expected)
 
 
-def _show_event_response_from_payload(session_id: str, payload: dict[str, Any]):
+def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if config is not None:
+        session = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+        email = str(session.get("email", "")).strip() if session is not None else ""
+        if email:
+            return {"kind": "user", "email": email}
+
+        cloud = config.remote_access.vibe_cloud
+        if public and cloud.enabled:
+            return None
+
+    if public and not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
+        return None
+    return {"kind": "local"}
+
+
+def _show_me_response(author: dict[str, str] | None):
+    authenticated = author is not None
+    response = jsonify({"authenticated": authenticated, "canAnnotate": authenticated})
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+def _show_event_response_from_payload(
+    session_id: str,
+    payload: dict[str, Any],
+    *,
+    author: dict[str, str] | None = None,
+):
     if show_event_payload_session_mismatch(session_id, payload):
         return (
             jsonify(
@@ -8418,7 +8459,7 @@ def _show_event_response_from_payload(session_id: str, payload: dict[str, Any]):
         )
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload)
+        event_payload = store.append(session_id, payload, author=author)
     except Exception as exc:
         return _show_session_event_error_response(exc)
     finally:
@@ -8671,7 +8712,11 @@ async def _show_events_response(session_id: str, *, public: bool = False):
     if not _show_event_write_authorized(session_id):
         return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
 
-    return _show_event_response_from_payload(session_id, _show_events_payload_from_request())
+    return _show_event_response_from_payload(
+        session_id,
+        _show_events_payload_from_request(),
+        author=_show_request_author(),
+    )
 
 
 @app.route("/api/show/sessions/<session_id>/events", methods=["POST"])
@@ -8840,7 +8885,8 @@ async def _show_page_runtime_response(
     starlette_request: FastAPIRequest,
     *,
     external_prefix: str | None = None,
-    inject_private_config: bool = False,
+    inject_show_config: bool = False,
+    show_authenticated: bool = False,
 ):
     from core.show_runtime import get_show_runtime_manager
 
@@ -8904,8 +8950,19 @@ async def _show_page_runtime_response(
             external_prefix=external_prefix,
         )
         content = _rewrite_public_show_runtime_client(content, response_headers, external_prefix=external_prefix)
-    if _should_inject_show_runtime_config(proxied.status_code, response_headers, inject_private_config=inject_private_config):
-        content = _inject_show_runtime_config(content, session_id)
+    if _should_inject_show_runtime_config(
+        proxied.status_code,
+        response_headers,
+        inject_show_config=inject_show_config,
+    ):
+        base_path = f"{external_prefix.rstrip('/')}/" if external_prefix else f"/show/{quote(session_id, safe='')}/"
+        content = _inject_show_runtime_config(
+            content,
+            session_id,
+            base_path=base_path,
+            authenticated=show_authenticated,
+            include_write_token=external_prefix is None,
+        )
         _mark_show_runtime_document_no_store(response_headers)
     elif _is_show_page_entry_asset(asset_path) and 200 <= proxied.status_code < 300:
         # The entry document is per-session/per-share dynamic (it embeds the import map
@@ -8920,9 +8977,9 @@ def _should_inject_show_runtime_config(
     status_code: int,
     headers: dict[str, str],
     *,
-    inject_private_config: bool,
+    inject_show_config: bool,
 ) -> bool:
-    if not inject_private_config or status_code != 200:
+    if not inject_show_config or status_code != 200:
         return False
     if _show_response_is_attachment(_response_header(headers, "content-disposition")):
         return False
@@ -9163,20 +9220,46 @@ def _show_response_is_attachment(content_disposition: str | None) -> bool:
     return bool(content_disposition and content_disposition.lstrip().lower().startswith("attachment"))
 
 
-def _show_runtime_config_payload(session_id: str) -> dict[str, str]:
-    session_path = quote(session_id, safe="")
-    events_path = f"/show/{session_path}/__show/events"
-    return {
+def _show_runtime_config_payload(
+    session_id: str,
+    *,
+    base_path: str,
+    authenticated: bool,
+    include_write_token: bool,
+) -> dict[str, Any]:
+    events_path = f"{base_path}__show/events"
+    payload: dict[str, Any] = {
         "sessionId": session_id,
-        "basePath": f"/show/{session_path}/",
+        "basePath": base_path,
         "eventsPath": events_path,
         "streamPath": f"{events_path}?stream=1",
-        "writeToken": show_event_write_token(session_id),
+        "annotation": {
+            "authenticated": authenticated,
+            "mePath": "__show/me",
+        },
     }
+    if include_write_token:
+        payload["writeToken"] = show_event_write_token(session_id)
+    return payload
 
 
-def _show_runtime_config_script(session_id: str) -> str:
-    payload = json.dumps(_show_runtime_config_payload(session_id), ensure_ascii=False, separators=(",", ":"))
+def _show_runtime_config_script(
+    session_id: str,
+    *,
+    base_path: str,
+    authenticated: bool,
+    include_write_token: bool,
+) -> str:
+    payload = json.dumps(
+        _show_runtime_config_payload(
+            session_id,
+            base_path=base_path,
+            authenticated=authenticated,
+            include_write_token=include_write_token,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     payload = payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return (
         "<script>"
@@ -9188,21 +9271,35 @@ def _show_runtime_config_script(session_id: str) -> str:
     )
 
 
-def _inject_show_runtime_config(content: bytes, session_id: str) -> bytes:
+def _inject_show_runtime_config(
+    content: bytes,
+    session_id: str,
+    *,
+    base_path: str,
+    authenticated: bool,
+    include_write_token: bool,
+) -> bytes:
     try:
         html = content.decode("utf-8")
     except UnicodeDecodeError:
         return content
-    script = _show_runtime_config_script(session_id)
+    script = _show_runtime_config_script(
+        session_id,
+        base_path=base_path,
+        authenticated=authenticated,
+        include_write_token=include_write_token,
+    )
+    bootstrap = f'<script type="module" src="{base_path}__show/annotation.js"></script>'
+    injected = f"{script}\n    {bootstrap}"
     module_match = _SHOW_RUNTIME_MODULE_SCRIPT_RE.search(html)
     if module_match:
-        html = f"{html[: module_match.start()]}{script}\n    {html[module_match.start() :]}"
+        html = f"{html[: module_match.start()]}{injected}\n    {html[module_match.start() :]}"
     elif "</head>" in html:
-        html = html.replace("</head>", f"{script}\n  </head>", 1)
+        html = html.replace("</head>", f"{injected}\n  </head>", 1)
     elif "</body>" in html:
-        html = html.replace("</body>", f"{script}\n  </body>", 1)
+        html = html.replace("</body>", f"{injected}\n  </body>", 1)
     else:
-        html = f"{script}\n{html}"
+        html = f"{injected}\n{html}"
     return html.encode("utf-8")
 
 
@@ -9322,6 +9419,10 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
             return _show_page_file_not_found_response()
+        if asset_path.strip("/") == "__show/me":
+            if request.method not in {"GET", "HEAD"}:
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            return _show_me_response({"kind": "local"})
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
@@ -9333,10 +9434,11 @@ async def serve_private_show_page(session_id, asset_path):
                     page.session_id,
                     asset_path,
                     starlette_request,
-                    inject_private_config=request.method == "GET" and not _is_show_api_asset(asset_path),
+                    inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
+                    show_authenticated=True,
                 )
             except Exception:
-                if _is_show_api_asset(asset_path):
+                if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
                 if _is_show_page_entry_asset(asset_path):
                     response = _show_page_recovery_response(page.session_id)
@@ -9393,10 +9495,23 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id, public=True):
             return _show_page_file_not_found_response()
+        if asset_path.strip("/") == "__show/me":
+            if request.method not in {"GET", "HEAD"}:
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            return _show_me_response(_show_request_author(public=True))
         if asset_path.strip("/") in {"__show/events", "__events"}:
-            if request.method != "GET":
-                return jsonify({"ok": False, "code": "public_show_events_read_only"}), 403
-            return await _show_events_response(page.session_id, public=True)
+            if request.method == "GET":
+                return await _show_events_response(page.session_id, public=True)
+            if request.method != "POST":
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            author = _show_request_author(public=True)
+            if author is None or not str(request.headers.get("X-Vibe-Show-Client") or "").strip():
+                return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
+            return _show_event_response_from_payload(
+                page.session_id,
+                _show_events_payload_from_request(),
+                author=author,
+            )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):
                 return shim_response
@@ -9410,9 +9525,11 @@ async def serve_public_show_page(share_id, asset_path):
                     asset_path,
                     starlette_request,
                     external_prefix=f"/p/{quote(share_id, safe='')}",
+                    inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
+                    show_authenticated=_show_request_author(public=True) is not None,
                 )
             except Exception:
-                if _is_show_api_asset(asset_path):
+                if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
                 if _is_show_page_entry_asset(asset_path):
                     response = _show_page_recovery_response(page.session_id)
