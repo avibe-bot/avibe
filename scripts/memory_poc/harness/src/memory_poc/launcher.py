@@ -578,6 +578,14 @@ class EverOSProcess:
                 return None
             if last_error is None:
                 last_error = LaunchError("sidecar_process_termination_failed")
+        # Final reconciliation: if the child and all tracked descendants are gone
+        # after the bounded retries, treat cleanup as successful even if a transient
+        # signal/reap error was observed mid-loop (the owned tree is reaped, which is
+        # the actual ownership guarantee). Only a genuinely surviving process blocks.
+        if _process_has_exited(process) and not _tracked_descendants_alive(
+            process, monitor, process_group=process_group
+        ):
+            return None
         return last_error
 
     def _stop_monitor_with_retries(self) -> LaunchError | None:
