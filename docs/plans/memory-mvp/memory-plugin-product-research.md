@@ -6,6 +6,7 @@
 > phase-0 POC. It is not yet selected for production integration.
 >
 > Related documents:
+> - EverOS deep dive: `docs/plans/memory-mvp/everos-1.1.3-deep-dive.md`
 > - Product scope: `docs/plans/memory-mvp/memory-plugin-everos-phase1.md`
 > - Provider POC: `docs/plans/memory-mvp/memory-poc-everos.md`
 > - Technical design: `docs/plans/memory-mvp/memory-plugin-everos-phase1-tech.md`
@@ -32,23 +33,28 @@ search with a vector index.
 
 The MVP intentionally makes three narrower product choices:
 
-- **One personal pool.** One Avibe install represents one owner and one global
-  personal memory. There is no workspace partitioning or sharing model.
+- **One personal pool.** One Avibe install has one provider principal and one
+  global personal memory. Bound, enabled administrator identities in private IM
+  are explicit co-owners of that pool; this is not per-user isolation or a
+  general sharing model. There is no workspace partitioning.
 - **Whole-memory governance.** The MVP supports disable and full local clear.
   Selective item deletion and profile rebuild are later capabilities.
-- **At-least-once ingestion.** Avibe deduplicates its own queue by source
-  message id, but a timeout or crash around a provider write can produce a
-  duplicate derived memory. The MVP reports failed work and does not claim
-  exactly-once provider delivery.
+- **At-least-once ingestion.** Avibe deduplicates its own queue by a keyed digest
+  of the source-qualified message id, but a timeout or crash around a provider
+  write can produce a duplicate derived memory. The MVP reports failed work and
+  does not claim exactly-once provider delivery.
 
 These are product semantics, not waivers from a stronger phase-1 promise. A
 later requirement for selective deletion, exactly-once ingestion, workspace
 isolation, or shared memory reopens the provider decision before that capability
 ships.
 
-The MVP also excludes automatic recall, agent-facing memory tools, group and
-network access, export/import, and foresight. Those features must not influence
-the first provider interface.
+The MVP also excludes automatic recall, all agent-facing Memory tools,
+write-capable command/CLI operations, group and network access, non-administrator
+DM access, export/import, and foresight. It exposes the same bounded
+profile/search/status reads through Workbench `/memory`, authorized private-IM
+`/memory`, and the local CLI. Those entry adapters must not add provider
+capabilities or influence the first provider interface.
 
 ## 3. Candidate summary
 
@@ -184,26 +190,45 @@ flat-fact fallback if profile/episode generation moves into Avibe.
 The following constraints are stable across outcomes A and B:
 
 - one controller-owned `MemoryModule` presents a small product-level interface;
+- the Memory page, Workbench `/memory`, authorized private-IM `/memory`, and local
+  `vibe memory` reuse the same `profile`, `search`, and `status` operations; only
+  automatic capture writes and only the UI owns Clear all;
 - provider behavior stays behind one internal port used by the real provider and
   a test fake;
 - one fixed `app_id=avibe`, `project_id=personal`, and local owner principal are
-  used for the MVP;
+  used for the MVP; bound, enabled IM administrators are co-owners of that one
+  pool rather than separate provider principals;
 - the provider runs in a dedicated version-pinned environment and owner-only
-  root;
+  root; Avibe packages that environment as one managed `memory-runtime`
+  dependency, so users do not install Python or individual transitive packages;
+- `memory-runtime` appears under Settings -> Dependencies and reuses the shared
+  background install/status/repair flow; it is optional while Memory is disabled
+  and required while enabled;
+- its artifact implementation specializes Avibe's existing managed-runtime
+  Module, while the EverOS child-process lifecycle remains private to Memory;
+- dependency installation and Memory enablement remain separate explicit
+  actions; no pending enable intent survives the request;
 - capture never blocks ordinary chat on provider I/O;
-- direct Memory results bypass agent backends and ordinary transcript storage;
+- every explicit-read result bypasses agent backends and Memory capture;
+  Workbench results bypass ordinary Avibe transcript storage, while private-IM
+  results are sent as bounded inert replies and remain subject to that platform's
+  chat-history and notification retention;
 - processing destinations and hidden raw retention are disclosed before enable;
 - full clear stops the sidecar and removes only a sentinel-owned Memory root;
 - no future provider capability is added to the interface before a real second
   implementation or product requirement exists.
 
-## 9. Deferred provider questions
+## 9. Deferred capability questions
 
 These questions belong to later capability decisions, not the MVP:
 
 - selective source deletion and profile rebuild convergence;
 - workspace partitioning and controlled sharing;
+- independent per-user pools, non-administrator DMs, group IM, and cross-platform
+  human-identity linking;
 - automatic recall quality and prompt-injection handling;
+- agent-facing Memory tools, including MCP transport, turn/session binding, and
+  backend-specific registration;
 - export/import as a provider-neutral format;
 - editable memory with durable index convergence;
 - foresight and agent-skill tracks;

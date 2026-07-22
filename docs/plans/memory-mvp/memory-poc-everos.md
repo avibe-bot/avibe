@@ -9,8 +9,9 @@
 ## 1. Purpose
 
 This POC decides whether EverOS is worth integrating into Avibe's narrow Memory
-MVP. It produces provider evidence before Avibe production migrations, workers,
-UI, backend changes, or recovery state machines are designed.
+MVP. The surrounding documents describe an implementation candidate; this POC
+produces provider evidence before its production migrations, worker, UI, and
+runtime integration are implemented or frozen.
 
 The POC answers six questions:
 
@@ -20,23 +21,30 @@ The POC answers six questions:
 3. Is the runtime acceptable on a personal computer?
 4. What data is retained, when does it become searchable, and what happens on
    stop/restart/clear?
-5. Can the pinned runtime serve the required operations exclusively over an
-   owner-only Unix-domain socket without opening a TCP listener?
+5. Can the Avibe runtime launcher load the pinned package and serve the required
+   operations exclusively over an owner-only Unix-domain socket without opening
+   a TCP listener?
 6. Can Avibe integrate through a thin public provider interface, or would it
    need to depend on EverOS internals?
 
 The POC is not a production crash-recovery certification. It characterizes
 duplicate behavior and failure modes so the product can choose a contract.
 
+Plain-language decision: if the candidate cannot produce useful memories, fit
+on a personal computer, run through Avibe's local-only launcher, and survive the
+basic retry/restart tests below, Avibe does not integrate it.
+
 ## 2. Isolation and safety
 
-The harness lives under `.runtime/memory-poc/` and is gitignored. Each run owns:
+Harness and corpus source code live in the repository under
+`scripts/memory_poc/` and are reviewed like any other change. The gitignored
+`.runtime/memory-poc/` directory holds only local run state. `.env.poc` is read
+from the current worktree first, then the primary checkout. Each run owns:
 
 ```text
 .runtime/memory-poc/
 ├── env/                         # pinned Python 3.12 environment
 ├── .env.poc                     # mode 0600; never committed
-├── harness/
 └── runs/<run-id>/
     ├── everos-root/             # fresh root for this run only
     ├── report.json
@@ -74,6 +82,12 @@ Use the MVP mapping:
 Reflection, agent-memory tracks, reranking, multimodal inputs, file ingestion,
 foresight reads, and manual Markdown editing are not part of this POC.
 
+The proposed initial targets are `darwin-arm64`, `darwin-x64`, `linux-arm64`, and
+`linux-x64`, matching Avibe's existing managed-runtime platform vocabulary. A
+target enters the release manifest only when its own clean-host artifact test
+passes; an untested or failed target is explicitly unsupported. Building these
+prototype artifacts is provider-selection evidence, not production rollout.
+
 ## 4. Fixture corpus
 
 Use synthetic fixtures only. The corpus is versioned with the harness and
@@ -94,7 +108,12 @@ not counted as an empty successful result.
 
 ### 5.1 API and storage sanity
 
-On a clean root and owner-only socket directory:
+On a clean root and owner-only socket directory, start the pinned package through
+the Avibe-owned runtime launcher. The launcher may load the pinned
+`everos.entrypoints.api.app:create_app` application factory and pass it to
+uvicorn with a Unix socket. The production controller does not import EverOS.
+
+Then:
 
 1. start EverOS bound only to a Unix-domain socket and prove that it opens no
    TCP listener;
@@ -118,6 +137,11 @@ Run the complete corpus from a clean root three times. For each query record:
 - latency;
 - whether stale information outranked a declared correction;
 - whether an unrelated negative item appeared.
+
+Every scored run must reproduce the proposed production write pattern: one
+message is added and explicitly flushed before the next queue item is handled.
+The POC may also run a session-batched comparison, but only the production-shaped
+run determines whether the quality gate passes.
 
 LLM prose is evaluated only where the provider does not expose a stable item
 identity. Leakage and temporal-critical assertions remain deterministic.
@@ -144,7 +168,21 @@ Exercise the normal lifecycle through public operations:
 3. stop after a successful add, restart, flush, and query;
 4. lose one add response or kill the process around the response, then retry the
    original request once;
-5. count resulting logical duplicate facts/episodes.
+5. count resulting logical duplicate facts/episodes;
+6. add two messages with identical millisecond timestamps in one session and
+   verify both survive as distinct memories after flush (EverOS derives message
+   ids from session, timestamp, and request index);
+7. while one add or flush call is still executing, or immediately after a
+   deliberately timed-out call, issue one bounded retry and record how the
+   provider's session lock serializes or rejects it and which error shape the
+   caller sees;
+8. separately trigger a sidecar/UDS failure, endpoint connection failure,
+   invalid credential, rate limit, invalid configured model, and a reproducible
+   content-specific processing failure. For each case, record the public HTTP
+   status, any stable closed code, and the redacted response schema visible over
+   the UDS. State whether the pinned public response alone distinguishes a
+   system failure from a message failure; do not treat free-form error prose as
+   a stable contract.
 
 The result determines whether at-least-once delivery is acceptable. The harness
 does not implement `WriteEvidence`, repair fences, per-message recovery, or an
@@ -201,18 +239,30 @@ EverOS may proceed to MVP integration only when:
 - flushed content becomes searchable within 5 minutes for at least 95% of the
   fixed fixtures;
 - environment size is at most 1 GiB;
+- the exact dependency closure has compatible wheels for every proposed initial
+  target and can be launched from an isolated artifact without user site
+  packages or a host Python 3.12;
+- that archive, manifest, executable path, and smoke test fit Avibe's existing
+  `ManagedRuntimeManager` schema without a Memory-specific installer or active
+  pointer format;
 - warm idle RSS p95 is at most 512 MiB;
 - peak RSS is at most 1.5 GiB;
 - provider-root growth is at most 512 MiB for the fixed workload;
 - the recorded egress set contains only the configured processing destinations
   and system DNS required to resolve their configured hostnames;
 - an all-loopback endpoint run attempts no external connection;
-- the pinned official runtime completes every required public operation through
-  an owner-only Unix-domain socket while opening no TCP listener;
+- the Avibe runtime launcher loads the pinned official package and completes
+  every required provider operation through an owner-only Unix-domain socket
+  while opening no TCP listener;
 - stop/restart preserves queryable memory;
 - full-root clear removes all provider-owned local state in the isolated root;
 - the required MVP operations can be implemented without core Avibe code
-  reading private EverOS SQLite schemas.
+  importing EverOS or reading private EverOS SQLite schemas; the versioned
+  runtime launcher is the documented exception for loading the pinned ASGI
+  application factory;
+- provider failures are either distinguishable through tested public response
+  fields or can be classified with the public sidecar health check plus the two
+  Avibe-owned authenticated endpoint probes, without provider-private reads.
 
 The duplicate experiment has no invented statistical threshold. The report must
 state the exact observed outcome and its product consequence. One duplicate
@@ -233,6 +283,8 @@ Each run writes a redacted `report.json` and a short Markdown summary containing
 - RSS, disk, request-count, and egress measurements;
 - observed raw-retention locations and clear result;
 - duplicate/restart observations;
+- a redacted public-error classification matrix and every case that requires
+  sidecar and model-endpoint probes to decide the result;
 - unexpected behavior and reproducible steps;
 - exactly one recommendation: official integration, small Avibe fork, or stop
   and evaluate the next candidate.
@@ -243,11 +295,17 @@ the technical design and tests built after this provider decision.
 ## 8. Work list
 
 - [ ] Create the hermetic Python 3.12 environment and exact dependency lock.
+- [ ] Prototype the relocatable managed artifact and verify it on a clean host
+  without Python 3.12 or user site packages.
+- [ ] Package it in the existing `ManagedRuntimeManager` manifest/archive shape
+  and verify install, resolve, reuse, failed-staging cleanup, and `current.json`.
 - [ ] Implement the process-owning harness with fresh roots and redacted output.
 - [ ] Add the versioned synthetic corpus and predeclared expected results.
-- [ ] Implement UDS-only API/storage sanity and restart probes.
+- [ ] Implement launcher-owned UDS-only API/storage sanity and restart probes.
 - [ ] Implement quality and cross-session personal-pool probes.
 - [ ] Implement buffer/flush/duplicate characterization.
+- [ ] Record the public error shapes for system and message failures and test
+  which ambiguous cases need sidecar and model-endpoint probes to classify them.
 - [ ] Implement retention and full-root-clear inspection.
 - [ ] Add RSS, disk, latency, request-count, and destination recording.
 - [ ] Run three clean quality trials plus one all-loopback egress trial.
