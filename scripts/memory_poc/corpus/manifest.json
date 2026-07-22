@@ -1,0 +1,6 @@
+{
+  "corpus_revision": "2026-07-22.1",
+  "message_count": 31,
+  "query_count": 50,
+  "notes": "Synthetic Chinese-first personal-memory corpus for the EverOS phase-0 POC. One synthetic principal, project codename Seagull, three sessions (s1 kickoff / s2 two-week adjustments / s3 later). No real names, employers, chats, or personal data; product/tech names are generic tooling. Queries: 34 positive, 11 negative (8 unrelated-fact, 3 stale-assertion), 5 temporal. See corpus/README.md for the coverage table and expectation rationale. All expectations declared before any run."
+}
