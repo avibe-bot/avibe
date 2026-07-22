@@ -243,11 +243,19 @@ class MemoryModule:
         if self._is_starting():
             return await self._status("starting", meta=meta, stats=stats)
         if not await self._provider_healthy():
+            # An active provider outage is the cause; do not echo a stale persisted
+            # last_error (e.g. a resolved memory_low_disk_space) that would misreport
+            # the current condition (tech §15 precedence).
+            active = (
+                None
+                if (meta is not None and meta.last_error == "memory_low_disk_space")
+                else (meta.last_error if meta is not None else None)
+            )
             return await self._status(
                 "down",
                 meta=meta,
                 stats=stats,
-                error=(meta.last_error if meta is not None else None) or "memory_sidecar_unavailable",
+                error=active or "memory_sidecar_unavailable",
             )
         if not await self._has_minimum_free_disk():
             return await self._status(

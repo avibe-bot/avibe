@@ -935,6 +935,31 @@ async def test_status_rechecks_persistent_low_disk_after_an_older_row_delivers(t
     assert status.error == "memory_low_disk_space"
 
 
+async def test_provider_outage_after_disk_recovery_reports_sidecar_error(tmp_path: Path) -> None:
+    """A resolved low-disk condition must not mask a later active provider outage.
+
+    Sequence: low-disk skipped -> disk recovers (ready) -> provider goes down ->
+    status must be 'down' with error 'memory_sidecar_unavailable', NOT the stale
+    'memory_low_disk_space' (tech §15 precedence: active outage over resolved disk).
+    """
+    disk = {"free": MIN_FREE_DISK_BYTES}
+    module, store, provider = _module(tmp_path, disk_free_bytes=lambda: disk["free"])
+    disk["free"] = 0
+    assert await module.capture(_request(source="low-disk")) == CaptureSkipped(reason="memory_low_disk_space")
+
+    # Disk recovers -> ready, error None.
+    disk["free"] = MIN_FREE_DISK_BYTES
+    status = await module.status()
+    assert status.state == "ready"
+    assert status.error is None
+
+    # Provider goes down -> down with the active sidecar error, not stale disk.
+    provider.healthy = False
+    status = await module.status()
+    assert status.state == "down"
+    assert status.error == "memory_sidecar_unavailable"
+
+
 async def test_health_recovery_clears_only_the_persisted_system_outage_error(tmp_path: Path) -> None:
     provider = FakeMemoryProvider(healthy=False)
     module, store, _provider = _module(tmp_path, provider=provider)
