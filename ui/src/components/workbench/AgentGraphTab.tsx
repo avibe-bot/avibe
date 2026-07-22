@@ -118,7 +118,10 @@ export const AgentGraphTab: React.FC = () => {
       } catch {
         if (mountedRef.current && seq === seqRef.current) setErrored(true);
       } finally {
-        if (mountedRef.current && seq === seqRef.current && !background) setLoading(false);
+        // Always clear the spinner a foreground fetch raised — even if a newer
+        // fetch superseded its result — or a superseded foreground load leaves
+        // loading stuck true forever.
+        if (mountedRef.current && !background) setLoading(false);
       }
     },
     [api, windowSel, projectSel, mode, showBackground],

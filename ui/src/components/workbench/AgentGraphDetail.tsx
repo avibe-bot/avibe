@@ -102,10 +102,16 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
       // teardown. Resolve the live row for this session at click time so the
       // graph node stays free of transient process identifiers.
       const snap = await api.getRunningAgents();
-      const rows = snap.ok ? snap.agents : [];
+      const rows = (snap.ok ? snap.agents : []).filter((a) => a.session_id === node.session_id);
+      // A session can have multiple backend rows; the liveness merge picked one
+      // state for the node. End the row whose state made the node live (else the
+      // idle/persisted row could be targeted instead of the active one), then
+      // fall back to backend match, then any row for the session.
       const row =
-        rows.find((a) => a.session_id === node.session_id && a.backend === node.agent_backend) ??
-        rows.find((a) => a.session_id === node.session_id);
+        rows.find((a) => a.state === node.status && a.backend === node.agent_backend) ??
+        rows.find((a) => a.state === node.status) ??
+        rows.find((a) => a.backend === node.agent_backend) ??
+        rows[0];
       if (!row) {
         showToast(t('agents.graph.detail.endGone'), 'warning');
         onRefresh();
