@@ -41,11 +41,17 @@ is built to expose exactly that seam:
 - **Five temporal pairs.** Each *old* statement (`temporal-old`, in `s1`) and
   its *correction* (`temporal-new`, in `s2`/`s3`) name the **same subject**
   (database, deploy platform, state manager, pricing, payment scope) but the
-  correction **deliberately never repeats the old value token**. So the `forbid`
-  hint (old value) matches only the superseded statement and the `expect` hint
-  (new value) matches only the correction — a stale-outranks-correction failure
-  is mechanically detectable under substring matching. Corrections are clearly
-  dated later (day 14 / day 21 vs day 0).
+  correction **deliberately never repeats the old value token**, and the old
+  value's forbidden token appears **only** in the superseded statement. So the
+  `forbid` hint (old value) matches only the superseded statement and the
+  `expect` hint (new value) matches only the correction — a
+  stale-outranks-correction failure is mechanically detectable under substring
+  matching. Two subtleties the checker enforces: the payment correction's new
+  token (`Stripe`) is kept out of the unrelated payment-refactor episode `s3#1`
+  so it cannot masquerade as the correction; and the pricing forbid token is
+  `捐赠` (donation), which occurs only in the superseded `s1#5` (the correction
+  drops both `免费` and `捐赠`), because `免费` is polluted across unrelated
+  deploy episodes. Corrections are clearly dated later (day 14 / day 21 vs day 0).
 - **Retained history is respected.** Because superseded values legitimately
   survive in episode history, the authoritative stale test is the `temporal`
   **rank** comparison (correction must outrank superseded), not an absolute
@@ -60,14 +66,22 @@ text. To keep every expectation decidable from fixture text alone:
 - **Positive queries are paraphrase/synonym-driven, not lexical echoes** of the
   fixture (e.g. "每个月能赚到多少钱" → `MRR`; "内测什么时候开跑" → `2026-08-01`;
   "带静态类型的语言" → `TypeScript`), so vector recall is genuinely tested.
-- **Every `expect.text_hint` is a distinctive noun phrase contained in the
-  referenced fixture message(s)** — a proper noun, exact date, or number that
-  any faithful distillation must preserve. A local checker confirms each
-  positive/temporal hint is a substring of its `seq_refs` text.
+- **Every `expect.text_hint` is a distinctive noun phrase that occurs *only* in
+  the referenced fixture message(s)** — a proper noun, exact date, or number that
+  any faithful distillation must preserve *and* that no other message shares. A
+  local checker confirms each positive/temporal hint appears in its `seq_refs`
+  text **and in no non-referenced message**, so a pass cannot come from an
+  unrelated memory (e.g. `Seagull` recurs in seven messages and is therefore
+  never used as an identifying hint; q001 hints on `三个月`, unique to `s1#1`).
+- **Hints avoid internal ASCII spaces** that NFC does not remove: dates and
+  counts hint on the space-free contiguous form (`3月15日`, `50行`) and the
+  indentation preference hints on `空格` rather than a fragile `2 个空格`, so a
+  faithful `3月15日`/`50行` prose distillation still matches.
 - **Every `negative` forbid hint is verified absent from the entire corpus**, so
   retained history can never turn a negative into a guaranteed failure.
-- **Every `temporal` forbid hint is verified present in a `temporal-old` message
-  and absent from its correction message**, guaranteeing the pair is decidable.
+- **Every `temporal` forbid hint is verified present only in a `temporal-old`
+  message and absent from its correction (and every non-old message)**,
+  guaranteeing the pair is decidable.
 
 ## 4. Query inventory
 
@@ -96,9 +110,9 @@ Temporal pairs (subject → old ⇒ new):
 | Negative queries for stale assertions | q048–q050 (stale current-state, decidably absent) + `temporal` rank tests q035–q039 |
 | Temporal corrections (old choice replaced) | 5 pairs, `temporal-old`↔`temporal-new`; e.g. DB MongoDB⇒PostgreSQL (q035) |
 | Stable preferences | s1#7 TypeScript, s1#8 pnpm, s1#9 Neovim/LazyVim, s2#5 Conventional Commits, s2#6 dark mode, s2#11 ≤50-line functions, s3#2 2-space indent, s3#3 lo-fi |
-| Goals | s1#1 3-month MVP, s1#10 $1000 MRR, s2#7 i18n, s3#4 learn Rust |
-| Dates | s1#1 2026-09-30, s2#8 2026-08-01, s3#5 renew 3 月 15 日 |
-| Short episodic events | s1#11 scaffold, s1#12 hackathon, s2#1 OAuth bug, s2#9 first deploy, s2#10 slow-search feedback, s3#1 payment refactor |
+| Goals | s1#1 3-month MVP (q001), s1#10 $1000 MRR, s2#7 i18n, s3#4 learn Rust |
+| Dates | s1#1 2026-09-30, s2#8 2026-08-01, s3#5 renew 3月15日 |
+| Short episodic events | s1#11 scaffold, s1#12 hackathon, s2#1 OAuth `state` bug, s2#9 first deploy, s2#10 slow-search feedback, s3#1 payment refactor |
 | ≥2 sessions for same principal | `s1`, `s2`, `s3` |
 | `buffered-tail` (buffered until explicit flush) | s3#8 (incomplete Pomodoro idea, session tail) |
 | `kill-case` (response-loss/kill experiment) | s2#10 |
@@ -120,7 +134,16 @@ Temporal pairs (subject → old ⇒ new):
   is the `temporal` rank test. The stale negatives add defense-in-depth by
   forbidding "finality/current-marker + old value" phrasings that the fixture
   only ever attaches to the *new* value.
+- All proper nouns are generic developer tooling; the only domain is the
+  synthetic reserved-TLD `seagull.example` (RFC 2606, cannot resolve to a real
+  asset). `Seagull` is a common word used as a personal-project codename, not a
+  real org/product; no real domain, product, org, or person is attributed to the
+  principal.
 - A local checker (run during authoring) confirms: contract-shape, count
-  integrity vs `manifest.json`, tag-vocabulary, positive/temporal hints ⊆
-  referenced fixture, negative forbids ∉ corpus, and temporal forbids ∈ old ∧ ∉
-  correction. No expectation was adjusted to any run output.
+  integrity vs `manifest.json`, tag-vocabulary, monotonic offsets, **each
+  positive/temporal hint occurs only in its referenced message(s)** (globally
+  identifying), negative forbids ∉ corpus, temporal forbids ∈ old-only ∧ ∉
+  correction ∧ ∉ any non-old message, and no `seagull.app` real domain. 0
+  errors / 0 warnings on content (the only heuristic warning is the `Fly.io`
+  `.io` token, a generic deploy platform). No expectation was adjusted to any
+  run output.
