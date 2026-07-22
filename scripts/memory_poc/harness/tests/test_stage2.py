@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import memory_poc.stage2 as stage2
+
 from memory_poc.constants import CRITERIA_IDS
+from memory_poc.errors import HarnessError
 from memory_poc.provider import HttpShape
 from memory_poc.stage2 import (
     _error_shape_lines,
@@ -127,3 +130,24 @@ def test_same_timestamp_probe_requires_distinct_public_identities() -> None:
     assert observation.alpha_identities == 1
     assert observation.bravo_identities == 1
     assert observation.distinct is True
+
+
+def test_wait_searchable_or_none_forwards_the_quality_observation_timeout(monkeypatch: object) -> None:
+    observed: dict[str, float] = {}
+
+    def timeout(*_args: object, timeout_seconds: float, **_kwargs: object) -> int:
+        observed["timeout_seconds"] = timeout_seconds
+        raise HarnessError("searchable_timeout")
+
+    monkeypatch.setattr(stage2, "_wait_searchable", timeout)  # type: ignore[attr-defined]
+
+    result = stage2._wait_searchable_or_none(  # type: ignore[attr-defined]
+        object(),
+        owner_id="owner",
+        query="query",
+        hints=("hint",),
+        timeout_seconds=15.0,
+    )
+
+    assert result is None
+    assert observed == {"timeout_seconds": 15.0}

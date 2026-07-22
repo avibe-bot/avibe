@@ -52,6 +52,7 @@ from .research_inspection import RetentionInspection, inspect_retention
 
 _OWNER_ID = "00000000-0000-4000-8000-000000000002"
 _READINESS_TIMEOUT_SECONDS = 300.0
+_QUALITY_HINT_OBSERVATION_SECONDS = 15.0
 _SEARCH_POLL_SECONDS = 2.0
 _RSS_INTERVAL_SECONDS = 5.0
 _IDLE_SAMPLE_SECONDS = 600.0
@@ -501,13 +502,14 @@ def _run_quality(suite: Stage2Suite) -> Path:
                     owner_id=_OWNER_ID,
                     query=message.text,
                     hints=hints,
+                    timeout_seconds=_QUALITY_HINT_OBSERVATION_SECONDS,
                 )
                 message_label = f"q{trial}-{message.session_key}-{message.seq}"
                 report["latency"]["add_ms"][message_label] = add_ms
                 report["latency"]["flush_ms"][message_label] = flush_ms
                 if observed_searchable_ms is None:
                     evidence.append(
-                        f"message {message_label} not searchable via hint within {_READINESS_TIMEOUT_SECONDS:.0f}s "
+                        f"message {message_label} not searchable via hint within {_QUALITY_HINT_OBSERVATION_SECONDS:.0f}s "
                         f"(distilled wording may not contain the hint substring; continuing)"
                     )
                 else:
@@ -550,6 +552,7 @@ def _run_quality(suite: Stage2Suite) -> Path:
     temporal_passed = sum(item.passed for item in temporals)
     negative_passed = sum(item.passed for item in negatives)
     query_p95 = percentile(query_ms, 0.95) / 1000
+    searchable_p95: float | None = None
     if searchable_ms:
         searchable_p95 = percentile(searchable_ms, 0.95) / 60000
         _set_measurement(
@@ -594,10 +597,13 @@ def _run_quality(suite: Stage2Suite) -> Path:
             f"quality temporal pass {temporal_passed}/{len(temporals)}",
             f"quality negatives pass {negative_passed}/{len(negatives)}",
             f"quality query p95 ms {int(query_p95 * 1000)}",
-            f"quality searchable p95 ms {int(searchable_p95 * 60000)}",
             "quality profile search not measured accepted known behavior",
         )
     )
+    if searchable_p95 is None:
+        evidence.append("quality searchable p95 not measured")
+    else:
+        evidence.append(f"quality searchable p95 ms {int(searchable_p95 * 60000)}")
     return suite.complete("quality", report=report, evidence_lines=tuple(evidence))
 
 
@@ -716,9 +722,16 @@ def _message_payload(message: CorpusMessage, *, session_id: str, started_epoch_m
     }
 
 
-def _wait_searchable(client: EverOSClient, *, owner_id: str, query: str, hints: tuple[str, ...]) -> int:
+def _wait_searchable(
+    client: EverOSClient,
+    *,
+    owner_id: str,
+    query: str,
+    hints: tuple[str, ...],
+    timeout_seconds: float = _READINESS_TIMEOUT_SECONDS,
+) -> int:
     started = time.monotonic()
-    deadline = started + _READINESS_TIMEOUT_SECONDS
+    deadline = started + timeout_seconds
     while time.monotonic() < deadline:
         result = client.search(owner_id=owner_id, query=query)
         if _search_contains_any_hint(result, owner_id=owner_id, hints=hints):
@@ -735,9 +748,16 @@ def _wait_searchable_or_none(
     owner_id: str,
     query: str,
     hints: tuple[str, ...],
+    timeout_seconds: float = _READINESS_TIMEOUT_SECONDS,
 ) -> int | None:
     try:
-        return _wait_searchable(client, owner_id=owner_id, query=query, hints=hints)
+        return _wait_searchable(
+            client,
+            owner_id=owner_id,
+            query=query,
+            hints=hints,
+            timeout_seconds=timeout_seconds,
+        )
     except HarnessError as exc:
         if str(exc) == "searchable_timeout":
             return None
