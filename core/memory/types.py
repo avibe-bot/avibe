@@ -1,0 +1,131 @@
+"""Small caller-facing value types for the Memory module."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal, TypeAlias
+
+
+MemoryKind = Literal["profile", "episode", "fact"]
+MemoryErrorCode = Literal[
+    "memory_disabled",
+    "memory_invalid_input",
+    "memory_input_too_large",
+    "memory_queue_full",
+    "memory_low_disk_space",
+    "memory_store_unavailable",
+    "memory_runtime_missing",
+    "memory_runtime_unsupported",
+    "memory_runtime_install_failed",
+    "memory_sidecar_unavailable",
+    "memory_provider_timeout",
+    "memory_provider_response_invalid",
+    "memory_processing_failed",
+    "memory_clear_failed",
+]
+
+CLOSED_MEMORY_ERROR_CODES = frozenset(
+    {
+        "memory_disabled",
+        "memory_invalid_input",
+        "memory_input_too_large",
+        "memory_queue_full",
+        "memory_low_disk_space",
+        "memory_store_unavailable",
+        "memory_runtime_missing",
+        "memory_runtime_unsupported",
+        "memory_runtime_install_failed",
+        "memory_sidecar_unavailable",
+        "memory_provider_timeout",
+        "memory_provider_response_invalid",
+        "memory_processing_failed",
+        "memory_clear_failed",
+    }
+)
+
+
+def is_memory_error_code(value: object) -> bool:
+    """Return whether *value* is a closed Memory error code."""
+
+    return isinstance(value, str) and value in CLOSED_MEMORY_ERROR_CODES
+
+
+@dataclass(frozen=True)
+class CaptureRequest:
+    source_message_id: str
+    session_id: str
+    text: str
+    occurred_at_ms: int
+
+
+@dataclass(frozen=True)
+class CaptureAccepted:
+    status: Literal["accepted"] = "accepted"
+
+
+@dataclass(frozen=True)
+class CaptureDuplicate:
+    status: Literal["duplicate"] = "duplicate"
+
+
+@dataclass(frozen=True)
+class CaptureSkipped:
+    reason: MemoryErrorCode
+    status: Literal["skipped"] = "skipped"
+
+
+@dataclass(frozen=True)
+class OperationFailed:
+    error: MemoryErrorCode
+    status: Literal["failed"] = "failed"
+
+
+CaptureReceipt: TypeAlias = CaptureAccepted | CaptureDuplicate | CaptureSkipped | OperationFailed
+
+
+@dataclass(frozen=True)
+class MemoryItem:
+    kind: MemoryKind
+    text: str
+    date: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryItems:
+    items: tuple[MemoryItem, ...] = ()
+    warnings: tuple[MemoryErrorCode, ...] = ()
+    status: Literal["ok"] = "ok"
+
+
+MemoryResult: TypeAlias = MemoryItems | OperationFailed
+
+
+@dataclass(frozen=True)
+class MemoryStatus:
+    state: Literal[
+        "disabled",
+        "starting",
+        "ready",
+        "indexing",
+        "degraded",
+        "down",
+        "clearing",
+        "error",
+    ]
+    pending: int = 0
+    processing: int = 0
+    dead: int = 0
+    missed: int = 0
+    queue_plaintext_bytes: int = 0
+    provider_disk_bytes: int = 0
+    last_success_at: str | None = None
+    error: MemoryErrorCode | None = None
+
+
+@dataclass(frozen=True)
+class ClearCompleted:
+    epoch: int
+    status: Literal["completed"] = "completed"
+
+
+ClearReceipt: TypeAlias = ClearCompleted | OperationFailed
