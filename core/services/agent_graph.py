@@ -39,7 +39,7 @@ from sqlalchemy.engine import Engine
 
 from storage.background import normalize_run_status
 from storage.db import create_sqlite_engine
-from storage.models import agent_runs, agent_sessions, run_definitions, scopes
+from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
 
 # History window → lookback seconds. ``24h`` is the default (contract §3).
 WINDOW_SECONDS: dict[str, int] = {
@@ -239,10 +239,12 @@ def build_graph(
             # session's original delegation). Without this the edge would be
             # dropped in pruning because its other endpoint was never loaded, and
             # the live node would look like a human-started root with no report
-            # target.
-            lineage = _lineage_refs(runs_by_session)
-            extra = lineage - candidate_ids
-            if extra:
+            # target. Expand to a fixed point: a lineage session's own runs can
+            # reference further ancestors/targets.
+            while True:
+                extra = _lineage_refs(runs_by_session) - candidate_ids
+                if not extra:
+                    break
                 candidate_ids |= extra
                 runs_by_session.update(_load_runs(conn, extra))
             session_rows = _load_sessions(conn, candidate_ids)
@@ -343,12 +345,17 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
         scopes.c.platform.label("scope_platform"),
         scopes.c.scope_type.label("scope_scope_type"),
         scopes.c.native_type.label("scope_native_type"),
+        scope_settings.c.enabled.label("scope_enabled"),
     ]
     if _HAS_VISIBILITY:
         cols.append(agent_sessions.c.visibility)
     stmt = (
         select(*cols)
-        .select_from(agent_sessions.outerjoin(scopes, agent_sessions.c.scope_id == scopes.c.id))
+        .select_from(
+            agent_sessions
+            .outerjoin(scopes, agent_sessions.c.scope_id == scopes.c.id)
+            .outerjoin(scope_settings, agent_sessions.c.scope_id == scope_settings.c.scope_id)
+        )
         .where(agent_sessions.c.id.in_(candidate_ids))
     )
     return [dict(row) for row in conn.execute(stmt).mappings()]
@@ -515,10 +522,12 @@ def _build_nodes(
         live = live_by_session.get(session_id)
         status, is_live = _node_status(live["state"] if live else None, latest_status)
 
-        # An archived session is a user-deleted chat; other session lists hide
-        # it, so it must not reappear as a (non-live) history node. A live
-        # archived row (edge case) still shows so its runtime can be ended.
-        if row.get("status") == "archived" and not is_live:
+        # Hide user-deleted chats (archived session) and sessions under an
+        # archived project (avibe project scope with scope_settings.enabled=0) —
+        # other session lists hide both, so they must not reappear as non-live
+        # history nodes. A live row still shows so its runtime can be ended.
+        is_archived_project = row.get("scope_scope_type") == "project" and row.get("scope_enabled") == 0
+        if (row.get("status") == "archived" or is_archived_project) and not is_live:
             continue
 
         run_count_total = len(runs)

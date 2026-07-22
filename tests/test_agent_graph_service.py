@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.services import agent_graph
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, agent_sessions, run_definitions, scopes
+from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
 
 NOW = datetime(2026, 7, 23, 2, 0, 0, tzinfo=timezone.utc)
 PROJECT_ID = "proj_x"
@@ -391,6 +391,60 @@ def test_live_node_lineage_survives_old_window(isolated_state):
         assert "ses_livekid" in nodes and nodes["ses_livekid"]["live"] is True
         assert "ses_caller" in nodes  # pulled in as lineage despite the old run
         assert _edge(payload, "spawn", "ses_caller", "ses_livekid") is not None
+    finally:
+        engine.dispose()
+
+
+def test_lineage_expands_to_fixed_point(isolated_state):
+    # A→B→C where A and B's spawn runs are older than the window and only C is
+    # live: fixed-point expansion must pull in BOTH B (1 hop) and A (2 hops).
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            for sid in ("ses_a", "ses_b", "ses_c"):
+                _insert_session(conn, sid, scope_id=None, backend="claude", title=sid)
+            _insert_run(conn, "run_b", session_id="ses_b", source_kind="agent",
+                        source_actor="ses_a", created=NOW - timedelta(days=3))
+            _insert_run(conn, "run_c", session_id="ses_c", source_kind="agent",
+                        source_actor="ses_b", created=NOW - timedelta(days=3))
+        live = [{"session_id": "ses_c", "state": "active", "elapsed_seconds": 5.0}]
+        payload = agent_graph.build_graph(live_agents=live, now=NOW, engine=engine, window="24h")
+        nodes = _nodes_by_id(payload)
+        assert {"ses_a", "ses_b", "ses_c"} <= set(nodes)
+        assert _edge(payload, "spawn", "ses_a", "ses_b") is not None
+        assert _edge(payload, "spawn", "ses_b", "ses_c") is not None
+    finally:
+        engine.dispose()
+
+
+def test_archived_project_sessions_hidden(isolated_state):
+    # A session under an archived project (avibe project scope with
+    # scope_settings.enabled=0) is hidden like an archived session.
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                scopes.insert().values(
+                    id="avibe::project::proj_arch", platform="avibe", scope_type="project",
+                    native_id="proj_arch", parent_scope_id=None, display_name="Archived proj",
+                    native_type="project", is_private=0, supports_threads=1, metadata_json="{}",
+                    first_seen_at=_z(NOW), last_seen_at=_z(NOW), updated_at=_z(NOW),
+                )
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id="avibe::project::proj_arch", enabled=0, role=None,
+                    workdir="/tmp/arch", agent_name=None, agent_backend=None, agent_variant=None,
+                    model=None, reasoning_effort=None, require_mention=None, settings_version=1,
+                    settings_json="{}", created_at=_z(NOW), updated_at=_z(NOW),
+                )
+            )
+            _insert_session(conn, "ses_ap", scope_id="avibe::project::proj_arch", backend="claude",
+                            title="Under archived project")
+            _insert_run(conn, "run_ap", session_id="ses_ap", status="succeeded",
+                        created=NOW - timedelta(minutes=10))
+        nodes = _nodes_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=engine))
+        assert "ses_ap" not in nodes
     finally:
         engine.dispose()
 
