@@ -23,6 +23,8 @@ from .reports import build_report, set_criterion, write_report, write_summary
 from .reports import local_timezone_name
 
 _READINESS_TIMEOUT_SECONDS = 300.0
+_READINESS_POLL_SECONDS = 0.5
+_SEARCH_POLL_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,12 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     child_home = ensure_owner_directory(run_dir / "child-home", anchor=state)
     write_generated_config(everos_root=everos_root, timezone=local_timezone_name(), anchor=state)
     metrics_path = logs_dir / "request-counts.jsonl"
+    fixture_texts = tuple(message["content"] for message in fixture.messages)
+    write_private_text(
+        run_dir / "run.json",
+        json.dumps({"stage": "sanity", "fixture_set": "stage1-mini"}, ensure_ascii=True) + "\n",
+        anchor=state,
+    )
 
     first = EverOSProcess(
         python=python,
@@ -62,58 +70,69 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         owner_id=fixture.owner_id,
     )
     first_shapes = ()
-    try:
-        client = first.start()
-        add_ms = _elapsed_ms(lambda: client.add(session_id=fixture.session_id, messages=fixture.messages))
-        flush_started = time.monotonic()
-        client.flush(session_id=fixture.session_id)
-        flush_ms = int((time.monotonic() - flush_started) * 1000)
-        first_searchable_ms = _read_required_memory(client, fixture, started_at=flush_started)
-        first_shapes = client.observed_http_shapes
-    finally:
-        first.stop()
-
-    second = EverOSProcess(
-        python=python,
-        everos_root=everos_root,
-        child_home=child_home,
-        state_root=state,
-        settings=settings,
-        metrics_path=metrics_path,
-        owner_id=fixture.owner_id,
-    )
     restarted_shapes = ()
+    first_started = False
+    restart_preserved = False
+    add_ms: int | None = None
+    flush_ms: int | None = None
+    first_searchable_ms: int | None = None
+    failure: HarnessError | None = None
     try:
-        restarted_client = second.start()
-        _read_required_memory(restarted_client, fixture)
-        restarted_shapes = restarted_client.observed_http_shapes
-    finally:
-        second.stop()
+        client = None
+        try:
+            client = first.start()
+            first_started = True
+            add_ms = _elapsed_ms(lambda: client.add(session_id=fixture.session_id, messages=fixture.messages))
+            flush_started = time.monotonic()
+            client.flush(session_id=fixture.session_id)
+            flush_ms = int((time.monotonic() - flush_started) * 1000)
+            first_searchable_ms = _read_required_memory(client, fixture, started_at=flush_started)
+        finally:
+            if client is not None:
+                first_shapes = client.observed_http_shapes
+            first.stop()
 
-    storage_ok = _storage_exists(everos_root)
+        second = EverOSProcess(
+            python=python,
+            everos_root=everos_root,
+            child_home=child_home,
+            state_root=state,
+            settings=settings,
+            metrics_path=metrics_path,
+            owner_id=fixture.owner_id,
+        )
+        restarted_client = None
+        try:
+            restarted_client = second.start()
+            _read_required_memory(restarted_client, fixture)
+            restart_preserved = True
+        finally:
+            if restarted_client is not None:
+                restarted_shapes = restarted_client.observed_http_shapes
+            second.stop()
+
+        if not _storage_exists(everos_root):
+            raise HarnessError("sanity_storage_layout_missing")
+    except HarnessError as exc:
+        failure = exc
+
     metrics = read_call_metrics(metrics_path)
     report = build_report(run_id=run_id, settings=settings)
-    set_criterion(report["criteria"], "launcher_uds_only", state="pass", value=1, threshold=1)
-    set_criterion(report["criteria"], "restart_preserves", state="pass", value=1, threshold=1)
-    set_criterion(report["criteria"], "no_internals_needed", state="pass", value=1, threshold=1)
+    if first_started:
+        set_criterion(report["criteria"], "launcher_uds_only", state="pass", value=1, threshold=1)
+    if restart_preserved:
+        set_criterion(report["criteria"], "restart_preserves", state="pass", value=1, threshold=1)
+        set_criterion(report["criteria"], "no_internals_needed", state="pass", value=1, threshold=1)
     report["latency"] = {
-        "add_ms": {"sanity": add_ms},
-        "flush_ms": {"sanity": flush_ms},
-        "searchable_ms": {"sanity": first_searchable_ms},
+        "add_ms": {"sanity": add_ms} if add_ms is not None else {},
+        "flush_ms": {"sanity": flush_ms} if flush_ms is not None else {},
+        "searchable_ms": {"sanity": first_searchable_ms} if first_searchable_ms is not None else {},
         "query_ms": {},
     }
     report["resources"]["llm_calls"] = metrics.llm_calls
     report["resources"]["embedding_calls"] = metrics.embedding_calls
     report["duplicates"] = {"observed": "not_run", "count": 0}
-    if not storage_ok:
-        raise HarnessError("sanity_storage_layout_missing")
     report_path = run_dir / "report.json"
-    fixture_texts = tuple(message["content"] for message in fixture.messages)
-    write_private_text(
-        run_dir / "run.json",
-        json.dumps({"stage": "sanity", "fixture_set": "stage1-mini"}, ensure_ascii=True) + "\n",
-        anchor=state,
-    )
     write_report(report_path, report, anchor=state, fixture_texts=fixture_texts)
     write_summary(
         run_dir / "summary.md",
@@ -121,8 +140,11 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         metrics=metrics,
         message_count=len(fixture.messages),
         http_shapes=first_shapes + restarted_shapes,
+        outcome="completed" if failure is None else _failure_outcome(failure),
         anchor=state,
     )
+    if failure is not None:
+        raise failure
     return report_path
 
 
@@ -159,24 +181,42 @@ def _elapsed_ms(callback: Any) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
+def _failure_outcome(error: HarnessError) -> str:
+    code = str(error)
+    if (
+        0 < len(code) <= 128
+        and code.isascii()
+        and code[0].isalnum()
+        and all(character.isalnum() or character in "_.-" for character in code)
+    ):
+        return code
+    return "harness_failure"
+
+
 def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: float | None = None) -> int:
     measurement_start = time.monotonic() if started_at is None else started_at
     deadline = time.monotonic() + _READINESS_TIMEOUT_SECONDS
+    next_search_at = measurement_start
     while time.monotonic() < deadline:
         try:
             profile = client.get(owner_id=fixture.owner_id, memory_type="profile")
             episodes = client.get(owner_id=fixture.owner_id, memory_type="episode")
-            facts = client.search(owner_id=fixture.owner_id, query=fixture.query)
         except LaunchError:
-            time.sleep(0.5)
+            time.sleep(_READINESS_POLL_SECONDS)
             continue
-        if (
-            _contains_owned_items(profile, key="profiles", owner_id=fixture.owner_id)
-            and _contains_owned_items(episodes, key="episodes", owner_id=fixture.owner_id)
-            and _contains_atomic_fact(facts, owner_id=fixture.owner_id, fact_hint=fixture.fact_hint)
-        ):
-            return int((time.monotonic() - measurement_start) * 1000)
-        time.sleep(0.5)
+        profile_ready = _contains_owned_items(profile, key="profiles", owner_id=fixture.owner_id)
+        episodes_ready = _contains_owned_items(episodes, key="episodes", owner_id=fixture.owner_id)
+        now = time.monotonic()
+        if profile_ready and episodes_ready and now >= next_search_at:
+            try:
+                facts = client.search(owner_id=fixture.owner_id, query=fixture.query)
+            except LaunchError:
+                time.sleep(_READINESS_POLL_SECONDS)
+                continue
+            if _contains_atomic_fact(facts, owner_id=fixture.owner_id, fact_hint=fixture.fact_hint):
+                return int((time.monotonic() - measurement_start) * 1000)
+            next_search_at = now + _SEARCH_POLL_SECONDS
+        time.sleep(_READINESS_POLL_SECONDS)
     raise HarnessError("sanity_memory_not_ready")
 
 

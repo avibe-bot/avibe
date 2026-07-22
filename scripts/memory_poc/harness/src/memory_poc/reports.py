@@ -182,8 +182,11 @@ def write_summary(
     metrics: CallMetrics,
     message_count: int,
     http_shapes: tuple[HttpShape, ...],
+    outcome: str = "completed",
     anchor: Path | None = None,
 ) -> None:
+    if not _SAFE_IDENTIFIER.fullmatch(outcome):
+        raise ReportValidationError("summary_outcome_invalid")
     divisor = max(message_count, 1)
     usage_lines = _ingestion_usage_lines(metrics, divisor)
     cost_line = _rough_cost_line(settings, metrics, message_count)
@@ -194,6 +197,7 @@ def write_summary(
             (
                 "# EverOS POC Stage 1 Sanity",
                 "",
+                f"Run outcome: {outcome}",
                 "Ingestion means provider work attributed to add and explicit flush only; readiness and restart reads are excluded.",
                 f"LLM ingestion calls per message: {metrics.ingestion_llm_calls / divisor:.2f}",
                 f"Embedding ingestion calls per message: {metrics.ingestion_embedding_calls / divisor:.2f}",

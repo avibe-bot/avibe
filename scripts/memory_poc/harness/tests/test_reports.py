@@ -6,7 +6,8 @@ import pytest
 
 from memory_poc.environment import ProviderSettings
 from memory_poc.errors import ReportValidationError
-from memory_poc.reports import build_report, validate_report, write_report
+from memory_poc.metrics import CallMetrics
+from memory_poc.reports import build_report, validate_report, write_report, write_summary
 
 
 def _settings(tmp_path: Path) -> ProviderSettings:
@@ -108,3 +109,27 @@ def test_report_rejects_model_metadata_that_matches_an_api_key(tmp_path: Path, m
 
     with pytest.raises(ReportValidationError, match="report_model_matches_secret"):
         build_report(run_id="r1", settings=settings)
+
+
+def test_summary_records_a_safe_failure_outcome(tmp_path: Path) -> None:
+    path = tmp_path / "summary.md"
+
+    write_summary(
+        path,
+        settings=_settings(tmp_path),
+        metrics=CallMetrics(),
+        message_count=1,
+        http_shapes=(),
+        outcome="sanity_memory_not_ready",
+    )
+
+    assert "Run outcome: sanity_memory_not_ready" in path.read_text(encoding="utf-8")
+    with pytest.raises(ReportValidationError, match="summary_outcome_invalid"):
+        write_summary(
+            path,
+            settings=_settings(tmp_path),
+            metrics=CallMetrics(),
+            message_count=1,
+            http_shapes=(),
+            outcome="unsafe outcome",
+        )
