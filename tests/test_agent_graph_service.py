@@ -374,6 +374,43 @@ def test_callback_delivery_is_not_a_spawn(isolated_state):
         engine.dispose()
 
 
+def test_live_node_lineage_survives_old_window(isolated_state):
+    # A live session spawned by a run OLDER than the window: the caller has no
+    # in-window run, but its lineage must still be loaded so the spawn edge and
+    # the caller node survive (not a human-started root).
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "ses_caller", scope_id=None, backend="claude", title="Caller")
+            _insert_session(conn, "ses_livekid", scope_id=None, backend="codex", title="Live kid")
+            _insert_run(conn, "run_oldspawn", session_id="ses_livekid", source_kind="agent",
+                        source_actor="ses_caller", created=NOW - timedelta(days=3))
+        live = [{"session_id": "ses_livekid", "state": "active", "elapsed_seconds": 5.0}]
+        payload = agent_graph.build_graph(live_agents=live, now=NOW, engine=engine, window="24h")
+        nodes = _nodes_by_id(payload)
+        assert "ses_livekid" in nodes and nodes["ses_livekid"]["live"] is True
+        assert "ses_caller" in nodes  # pulled in as lineage despite the old run
+        assert _edge(payload, "spawn", "ses_caller", "ses_livekid") is not None
+    finally:
+        engine.dispose()
+
+
+def test_archived_non_live_session_excluded(isolated_state):
+    # An archived (user-deleted) chat with a recent run must not reappear as a
+    # history node.
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "ses_arch", scope_id=None, backend="claude", title="Archived",
+                            status="archived")
+            _insert_run(conn, "run_arch", session_id="ses_arch", status="canceled",
+                        created=NOW - timedelta(minutes=10))
+        nodes = _nodes_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=engine))
+        assert "ses_arch" not in nodes
+    finally:
+        engine.dispose()
+
+
 def test_spawn_edges_aggregate(seeded):
     payload = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded)
     spawn_a = _edge(payload, "spawn", "ses_root", "ses_child_a")

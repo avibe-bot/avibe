@@ -233,8 +233,19 @@ def build_graph(
             if not candidate_ids:
                 return _empty_payload(now, window, live_unreachable)
 
-            session_rows = _load_sessions(conn, candidate_ids)
             runs_by_session = _load_runs(conn, candidate_ids)
+            # Pull in lineage sessions referenced by ANY run of a candidate — even
+            # a spawn/callback run older than the window (e.g. a long-lived live
+            # session's original delegation). Without this the edge would be
+            # dropped in pruning because its other endpoint was never loaded, and
+            # the live node would look like a human-started root with no report
+            # target.
+            lineage = _lineage_refs(runs_by_session)
+            extra = lineage - candidate_ids
+            if extra:
+                candidate_ids |= extra
+                runs_by_session.update(_load_runs(conn, extra))
+            session_rows = _load_sessions(conn, candidate_ids)
             edges, trigger_ids = _build_edges(runs_by_session, candidate_ids)
             trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
     finally:
@@ -374,6 +385,18 @@ def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]
     return grouped
 
 
+def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:
+    """Session ids referenced as a spawn caller or callback target by any run."""
+    refs: set[str] = set()
+    for runs in runs_by_session.values():
+        for run in runs:
+            if run.get("source_kind") == "agent" and run.get("source_actor"):
+                refs.add(run["source_actor"])
+            if run.get("callback_session_id"):
+                refs.add(run["callback_session_id"])
+    return refs
+
+
 def _build_edges(
     runs_by_session: dict[str, list[dict[str, Any]]],
     candidate_ids: set[str],
@@ -491,6 +514,12 @@ def _build_nodes(
         latest_status = runs[0]["status"] if runs else None
         live = live_by_session.get(session_id)
         status, is_live = _node_status(live["state"] if live else None, latest_status)
+
+        # An archived session is a user-deleted chat; other session lists hide
+        # it, so it must not reappear as a (non-live) history node. A live
+        # archived row (edge case) still shows so its runtime can be ended.
+        if row.get("status") == "archived" and not is_live:
+            continue
 
         run_count_total = len(runs)
         run_count_running = sum(1 for r in runs if normalize_run_status(r["status"]) == "running")
