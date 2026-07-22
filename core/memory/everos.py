@@ -82,12 +82,15 @@ class MemoryProviderPort(Protocol):
 
     async def health(self) -> bool: ...
 
+    async def processing_healthy(self) -> bool: ...
+
 
 @dataclass
 class FakeMemoryProvider:
     """In-memory provider fake for Memory module and worker contract tests."""
 
     healthy: bool = True
+    processing_healthy_flag: bool = True
     search_items: tuple[MemoryItem, ...] = ()
     profile_items: tuple[MemoryItem, ...] = ()
     captures: list[ProviderCapture] = field(default_factory=list)
@@ -95,6 +98,7 @@ class FakeMemoryProvider:
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
     health_failure: BaseException | None = None
+    processing_health_failure: BaseException | None = None
 
     async def ingest(self, capture: ProviderCapture) -> None:
         if self.ingest_failures:
@@ -122,3 +126,16 @@ class FakeMemoryProvider:
         if self.health_failure is not None:
             raise self.health_failure
         return self.healthy
+
+    async def processing_healthy(self) -> bool:
+        """Whether the configured processing (LLM/embedding) endpoints are reachable.
+
+        Distinct from sidecar ``health``: the sidecar process can answer /health
+        while its configured model endpoint is down. The disambiguation between a
+        system outage and a poison row depends on this. The fake returns a flag; the
+        real EverOS adapter (Slice 2) performs bounded authenticated LLM+embedding
+        probes.
+        """
+        if self.processing_health_failure is not None:
+            raise self.processing_health_failure
+        return self.processing_healthy_flag

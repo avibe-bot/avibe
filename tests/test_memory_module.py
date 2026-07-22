@@ -299,6 +299,50 @@ async def test_ambiguous_failure_uses_health_to_preserve_attempt_budget(tmp_path
     assert row.last_error == "memory_sidecar_unavailable"
 
 
+async def test_processing_endpoint_outage_pauses_claims_without_consuming_attempts(tmp_path: Path) -> None:
+    """Sidecar is healthy but the processing (LLM/embedding) endpoint is down.
+
+    This is the r3 #1 case: a reachable sidecar whose model endpoint never responds
+    must be treated as a SYSTEM outage (pause + preserve attempts), not a poison row
+    that burns its retry budget.
+    """
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="one")) == CaptureAccepted()
+    # An ambiguous failure (plain MemoryProviderFailure) routes through the
+    # disambiguation probe; with the processing endpoint down it must be classified
+    # as a system outage, preserving attempts.
+    provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
+    provider.processing_healthy_flag = False  # sidecar up, endpoint down
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    # The claim happens (sidecar health gate passes), then ingest fails and the
+    # disambiguation probe finds the processing endpoint down -> system pause. The
+    # row returns to pending with attempts preserved.
+    await worker.drain(max_rows=1)
+    row = store.list_queue_rows()[0]
+    assert row.state == "pending"
+    assert row.attempts == 0  # not consumed by the endpoint outage
+
+
+async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path: Path) -> None:
+    """Both sidecar and processing endpoints healthy, but this row fails to ingest.
+
+    This is the disambiguation's positive side: a genuine message failure (system
+    healthy) must increment attempts so a poison row eventually deads and unblocks
+    the queue (tech §10.3).
+    """
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="one")) == CaptureAccepted()
+    provider.ingest_failures.append(MemoryProviderMessageFailure("memory_processing_failed"))
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    await worker.drain_once()
+    row = store.list_queue_rows()[0]
+    assert row.state == "pending"
+    assert row.attempts == 1  # message failure charged to the row
+    assert row.last_error == "memory_processing_failed"
+
+
 async def test_old_boot_processing_row_is_reclaimed_for_at_least_once_delivery(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()

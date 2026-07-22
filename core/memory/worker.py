@@ -213,10 +213,18 @@ class MemoryWorker:
         *,
         retryable: bool = True,
     ) -> bool:
-        """Probe health once before spending a row's message-failure budget."""
+        """Probe sidecar AND processing-endpoint health before spending a row's budget.
 
+        A sidecar can answer /health while its configured LLM/embedding endpoint is
+        down. Both must be reachable before an ingest failure is charged to this row;
+        either failing means a system outage that pauses claims without consuming
+        attempts (tech §10).
+        """
         if not await self._provider_healthy():
             await self._return_system_failure(row, "memory_sidecar_unavailable")
+            return True
+        if not await self._provider_processing_healthy():
+            await self._return_system_failure(row, "memory_processing_failed")
             return True
         await self._record_message_failure(row, error, retryable)
         return False
@@ -241,6 +249,17 @@ class MemoryWorker:
             return bool(
                 await asyncio.wait_for(
                     self._provider.health(),
+                    timeout=self._health_timeout_seconds,
+                )
+            )
+        except Exception:
+            return False
+
+    async def _provider_processing_healthy(self) -> bool:
+        try:
+            return bool(
+                await asyncio.wait_for(
+                    self._provider.processing_healthy(),
                     timeout=self._health_timeout_seconds,
                 )
             )

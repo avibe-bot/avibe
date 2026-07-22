@@ -95,6 +95,7 @@ class MemoryModule:
         self._disk_free_bytes = disk_free_bytes or self._default_free_disk_bytes
         self._provider_root = provider_root or (paths.get_vibe_remote_dir() / "memory" / "everos-root")
         self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
+        self._effective_home = paths.get_vibe_remote_dir()
         self._provider_root_format = _root_metadata_value(
             provider_root_format,
             fallback=SLICE1_PROVIDER_ROOT_FORMAT,
@@ -255,7 +256,12 @@ class MemoryModule:
                 stats=stats,
                 error="memory_low_disk_space",
             )
-        if (meta is not None and meta.last_error is not None) or stats.dead:
+        historical = meta.last_error if meta is not None else None
+        # A historical low-disk error must not pin status degraded once disk pressure
+        # has cleared (it was already re-checked above); only currently-active causes
+        # and dead work render degraded (tech §15 reachable-provider fallback to ready).
+        active_error = None if historical == "memory_low_disk_space" else historical
+        if active_error is not None or stats.dead:
             return await self._status("degraded", meta=meta, stats=stats)
         if stats.pending or stats.processing:
             return await self._status("indexing", meta=meta, stats=stats)
@@ -497,6 +503,7 @@ class MemoryModule:
             await result
 
     def _verify_owned_provider_root(self, meta: MemoryMeta, *, require_empty: bool) -> None:
+        _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
         root_info = _lstat_or_clear_failure(self._provider_root, "provider root")
         _require_owned_directory(root_info, "provider root", private=True)
         sentinel_path = self._provider_root / ROOT_SENTINEL_FILENAME
@@ -740,6 +747,37 @@ def _remove_root_child_no_follow(path: Path) -> None:
             os.unlink(path)
     except OSError as error:
         raise _ClearStepFailure("provider root child could not be removed") from error
+
+
+def _ensure_provider_root_chain_safe(provider_root: Path, effective_home: Path) -> None:
+    """Reject a provider root whose path reaches its target via a symlinked component.
+
+    The final root and sentinel are validated separately; this guards every PARENT
+    component so that clear/delete cannot traverse a symlinked directory and remove
+    data outside the intended root (tech §13 exact-root/no-follow requirement).
+    Each component from the root upward is lstat'd (no follow) until it reaches the
+    effective home or the filesystem root; a symlink anywhere on that chain is
+    rejected. Components below the effective home (e.g. an isolated test tmpdir) are
+    still checked for symlinks but are not required to live inside the home.
+    """
+    del effective_home  # accepted for API symmetry; the chain is checked from the root up
+    home_abs = os.path.abspath(os.fspath(paths.get_vibe_remote_dir()))
+    current = Path(os.path.abspath(os.fspath(provider_root)))
+    while True:
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            # A not-yet-created ancestor is acceptable (clear recreates the chain);
+            # only existing components are checked for symlink escape.
+            pass
+        else:
+            if stat.S_ISLNK(info.st_mode):
+                raise _ClearStepFailure("provider root chain contains a symlink")
+        if current == current.parent:
+            break
+        if current == home_abs:
+            break
+        current = current.parent
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
