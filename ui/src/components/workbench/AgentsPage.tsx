@@ -127,9 +127,11 @@ export const AgentsPage: React.FC = () => {
     try {
       const result = await api.getRunningAgents();
       if (result.ok && result.counts) {
-        // Badge reflects the live-session count (active + idle + orphan), which
-        // matches the graph tab's ``counts.live``.
-        setRunningActiveCount((result.counts as any).total ?? 0);
+        // Badge = the true live-session count (active + idle + orphan) from the
+        // running-agents snapshot. Deliberately sourced here (not from the graph
+        // tab's counts) so it stays independent of the graph's project/time/
+        // visibility filters — a narrowed graph must not shrink the badge.
+        setRunningActiveCount(result.counts.total ?? 0);
       } else {
         setRunningActiveCount(null);
       }
@@ -138,12 +140,13 @@ export const AgentsPage: React.FC = () => {
     }
   }, [api]);
 
+  // Keep the badge fresh on every tab (including 运行) so it never depends on
+  // the graph view's filters.
   useEffect(() => {
-    if (agentsTab !== 'running') void fetchRunningActiveCount();
-  }, [agentsTab, fetchRunningActiveCount]);
+    void fetchRunningActiveCount();
+  }, [fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (agentsTab === 'running') return;
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
         if (data.source === 'controller') {
@@ -161,10 +164,10 @@ export const AgentsPage: React.FC = () => {
       onTurnEnd: () => fetchRunningActiveCount(),
       onSessionStatus: () => fetchRunningActiveCount(),
     });
-  }, [api, agentsTab, fetchRunningActiveCount]);
+  }, [api, fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (agentsTab === 'running' || eventBridgeConnected) return;
+    if (eventBridgeConnected) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -209,7 +212,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, agentsTab, fetchRunningActiveCount]);
+  }, [eventBridgeConnected, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -256,9 +259,6 @@ export const AgentsPage: React.FC = () => {
     refresh().then(() => setSelected(agent));
   };
 
-  const handleRunningActiveCountChange = useCallback((count: number | null) => {
-    setRunningActiveCount(count);
-  }, []);
 
   const updateField = async (patch: Partial<VibeAgentFull>) => {
     if (!selected) return;
@@ -398,7 +398,7 @@ export const AgentsPage: React.FC = () => {
       </div>
 
       {/* 运行 tab body — the run graph (replaces the old flat running list). */}
-      {agentsTab === 'running' && <AgentGraphTab onLiveCountChange={handleRunningActiveCountChange} />}
+      {agentsTab === 'running' && <AgentGraphTab />}
 
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
       <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>

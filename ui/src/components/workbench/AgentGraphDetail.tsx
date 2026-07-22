@@ -96,10 +96,28 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
     setArmEnd(false);
     setBusy(true);
     try {
+      // Ending a live runtime needs the backend-specific identifiers the
+      // running-agents snapshot holds (Claude → composite_key, Codex/OpenCode →
+      // base_session_id, orphan → pid); session_id alone can't resolve the
+      // teardown. Resolve the live row for this session at click time so the
+      // graph node stays free of transient process identifiers.
+      const snap = await api.getRunningAgents();
+      const rows = snap.ok ? snap.agents : [];
+      const row =
+        rows.find((a) => a.session_id === node.session_id && a.backend === node.agent_backend) ??
+        rows.find((a) => a.session_id === node.session_id);
+      if (!row) {
+        showToast(t('agents.graph.detail.endGone'), 'warning');
+        onRefresh();
+        return;
+      }
       const result = await api.endRunningAgent({
-        backend: node.agent_backend,
-        state: node.status,
-        session_id: node.session_id,
+        backend: row.backend,
+        state: row.state,
+        session_id: row.session_id,
+        composite_key: row.composite_key,
+        base_session_id: row.base_session_id,
+        pid: row.pid,
       });
       if (result.ok) {
         showToast(t('agents.running.endedToast'), 'success');

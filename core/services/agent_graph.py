@@ -140,8 +140,10 @@ def _merge_live_state(states: Iterable[str]) -> str:
 def _index_live_agents(live_agents: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     """Index running-agents rows by ``session_id``.
 
-    Keeps the merged live ``state`` and the longest live ``elapsed_seconds``
-    (the turn-elapsed the node header shows for live sessions).
+    Keeps the merged live ``state`` and the ``elapsed_seconds`` of the row whose
+    state *won* the merge — the header shows the winning state (e.g. ``active``),
+    so its elapsed must come from an ``active`` row, not from an unrelated idle
+    row that happened to have a larger elapsed.
     """
     by_session: dict[str, dict[str, Any]] = {}
     grouped: dict[str, list[Mapping[str, Any]]] = {}
@@ -151,10 +153,14 @@ def _index_live_agents(live_agents: Sequence[Mapping[str, Any]]) -> dict[str, di
             grouped.setdefault(session_id, []).append(row)
     for session_id, rows in grouped.items():
         state = _merge_live_state(str(r.get("state") or "idle") for r in rows)
-        elapsed = [r.get("elapsed_seconds") for r in rows if r.get("elapsed_seconds") is not None]
+        winning_elapsed = [
+            r.get("elapsed_seconds")
+            for r in rows
+            if str(r.get("state") or "idle") == state and r.get("elapsed_seconds") is not None
+        ]
         by_session[session_id] = {
             "state": state,
-            "elapsed_seconds": max(elapsed) if elapsed else None,
+            "elapsed_seconds": max(winning_elapsed) if winning_elapsed else None,
         }
     return by_session
 

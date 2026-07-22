@@ -1994,7 +1994,8 @@
         "toBackground": "Hide",
         "cancelRun": "Cancel run",
         "movedForeground": "Moved to foreground",
-        "movedBackground": "Moved to background"
+        "movedBackground": "Moved to background",
+        "endGone": "This session is no longer live."
       }
     },
     "showDisabled": "Show disabled",

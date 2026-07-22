@@ -40,11 +40,7 @@ function useIsDesktop(): boolean {
   return !!desktop;
 }
 
-interface AgentGraphTabProps {
-  onLiveCountChange?: (count: number | null) => void;
-}
-
-export const AgentGraphTab: React.FC<AgentGraphTabProps> = ({ onLiveCountChange }) => {
+export const AgentGraphTab: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const navigate = useNavigate();
@@ -87,8 +83,10 @@ export const AgentGraphTab: React.FC<AgentGraphTabProps> = ({ onLiveCountChange 
     };
   }, [api]);
 
+  const seqRef = useRef(0);
   const fetchGraph = useCallback(
     async (background = false) => {
+      const seq = ++seqRef.current;
       if (!background) setLoading(true);
       try {
         const result = await api.getAgentsGraph({
@@ -97,20 +95,18 @@ export const AgentGraphTab: React.FC<AgentGraphTabProps> = ({ onLiveCountChange 
           includeEnded: mode === 'history',
           includeBackground: showBackground,
         });
-        if (!mountedRef.current) return;
+        // Ignore a stale response: a slower earlier request must not clobber a
+        // newer one issued after a filter change.
+        if (!mountedRef.current || seq !== seqRef.current) return;
         setGraph(result);
         setErrored(false);
-        onLiveCountChange?.(result.counts?.live ?? 0);
       } catch {
-        if (mountedRef.current) {
-          setErrored(true);
-          onLiveCountChange?.(null);
-        }
+        if (mountedRef.current && seq === seqRef.current) setErrored(true);
       } finally {
-        if (mountedRef.current && !background) setLoading(false);
+        if (mountedRef.current && seq === seqRef.current && !background) setLoading(false);
       }
     },
-    [api, windowSel, projectSel, mode, showBackground, onLiveCountChange],
+    [api, windowSel, projectSel, mode, showBackground],
   );
 
   useEffect(() => {

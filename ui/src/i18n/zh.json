@@ -1994,7 +1994,8 @@
         "toBackground": "隐藏",
         "cancelRun": "取消 Run",
         "movedForeground": "已移到前台",
-        "movedBackground": "已移到后台"
+        "movedBackground": "已移到后台",
+        "endGone": "该会话已不在运行。"
       }
     },
     "showDisabled": "显示已禁用",

@@ -438,3 +438,14 @@ def test_merge_live_state_prefers_active():
     assert agent_graph._merge_live_state(["idle", "active", "orphan"]) == "active"
     assert agent_graph._merge_live_state(["idle", "orphan"]) == "orphan"
     assert agent_graph._merge_live_state([]) == "idle"
+
+
+def test_liveness_elapsed_from_winning_state_row():
+    # Two backend rows for one session: the idle row has a larger elapsed, but
+    # the node shows the ACTIVE state, so it must use the active row's elapsed.
+    indexed = agent_graph._index_live_agents([
+        {"session_id": "s", "state": "idle", "elapsed_seconds": 9999.0},
+        {"session_id": "s", "state": "active", "elapsed_seconds": 42.0},
+    ])
+    assert indexed["s"]["state"] == "active"
+    assert indexed["s"]["elapsed_seconds"] == 42.0
