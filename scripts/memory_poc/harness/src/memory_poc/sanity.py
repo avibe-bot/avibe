@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .environment import discover_provider_settings, verify_locked_environment
+from .environment import checked_workspace_root, discover_provider_settings, locked_environment_python, verify_locked_environment
 from .errors import HarnessError, LaunchError
 from .generated_config import write_generated_config
+from .identifiers import validate_run_id
 from .launcher import EverOSProcess
 from .metrics import read_call_metrics
 from .paths import ensure_owner_directory, runtime_root
 from .reports import build_report, set_criterion, write_report, write_summary
 from .reports import local_timezone_name
 
-_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _READINESS_TIMEOUT_SECONDS = 300.0
 
 
@@ -25,25 +24,25 @@ class SanityFixture:
     session_id: str
     owner_id: str
     query: str
+    fact_hint: str
     messages: list[dict[str, Any]]
 
 
 def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
-    if not _RUN_ID.fullmatch(run_id):
-        raise HarnessError("invalid_run_id")
-    root = workspace
+    validate_run_id(run_id)
+    root = checked_workspace_root(workspace)
     fixture = load_sanity_fixture()
     settings = discover_provider_settings(root)
-    python = verify_locked_environment()
-    state = ensure_owner_directory(runtime_root(root))
+    python = verify_locked_environment(locked_environment_python(root))
+    state = ensure_owner_directory(runtime_root(root), anchor=root)
     run_dir = state / "runs" / run_id
     if run_dir.exists():
         raise HarnessError("run_id_already_exists")
-    ensure_owner_directory(run_dir)
-    logs_dir = ensure_owner_directory(run_dir / "logs")
-    everos_root = ensure_owner_directory(run_dir / "everos-root")
-    child_home = ensure_owner_directory(run_dir / "child-home")
-    write_generated_config(everos_root=everos_root, timezone=local_timezone_name())
+    ensure_owner_directory(run_dir, anchor=state)
+    logs_dir = ensure_owner_directory(run_dir / "logs", anchor=state)
+    everos_root = ensure_owner_directory(run_dir / "everos-root", anchor=state)
+    child_home = ensure_owner_directory(run_dir / "child-home", anchor=state)
+    write_generated_config(everos_root=everos_root, timezone=local_timezone_name(), anchor=state)
     metrics_path = logs_dir / "request-counts.jsonl"
 
     started = time.monotonic()
@@ -54,6 +53,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         state_root=state,
         settings=settings,
         metrics_path=metrics_path,
+        owner_id=fixture.owner_id,
     )
     try:
         client = first.start()
@@ -70,6 +70,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         state_root=state,
         settings=settings,
         metrics_path=metrics_path,
+        owner_id=fixture.owner_id,
     )
     try:
         restarted_client = second.start()
@@ -95,12 +96,14 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     if not storage_ok:
         raise HarnessError("sanity_storage_layout_missing")
     report_path = run_dir / "report.json"
-    write_report(report_path, report)
+    fixture_texts = tuple(message["content"] for message in fixture.messages)
+    write_report(report_path, report, anchor=state, fixture_texts=fixture_texts)
     write_summary(
         run_dir / "summary.md",
         llm_calls=metrics.llm_calls,
         embedding_calls=metrics.embedding_calls,
         message_count=len(fixture.messages),
+        anchor=state,
     )
     return report_path
 
@@ -127,6 +130,7 @@ def load_sanity_fixture() -> SanityFixture:
         session_id=str(payload["session_id"]),
         owner_id=str(payload["owner_id"]),
         query=str(payload["query"]),
+        fact_hint=str(payload["fact_hint"]),
         messages=messages,
     )
 
@@ -147,29 +151,46 @@ def _read_required_memory(client: Any, fixture: SanityFixture) -> bool:
         except LaunchError:
             time.sleep(0.5)
             continue
-        if _contains_items(profile) and _contains_items(episodes) and _contains_kind(facts, {"atomic_fact", "fact"}):
+        if (
+            _contains_owned_items(profile, key="profiles", owner_id=fixture.owner_id)
+            and _contains_owned_items(episodes, key="episodes", owner_id=fixture.owner_id)
+            and _contains_atomic_fact(facts, owner_id=fixture.owner_id, fact_hint=fixture.fact_hint)
+        ):
             return True
         time.sleep(0.5)
     raise HarnessError("sanity_memory_not_ready")
 
 
-def _contains_items(value: Any) -> bool:
-    if isinstance(value, list):
-        return bool(value)
-    if isinstance(value, dict):
-        return any(_contains_items(item) for item in value.values())
-    return False
+def _contains_owned_items(value: Any, *, key: str, owner_id: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    items = value.get(key)
+    return isinstance(items, list) and any(
+        isinstance(item, dict) and item.get("user_id") == owner_id for item in items
+    )
 
 
-def _contains_kind(value: Any, expected: set[str]) -> bool:
-    if isinstance(value, dict):
-        for key in ("kind", "type", "item_type", "memory_type"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.lower() in expected:
+def _contains_atomic_fact(value: Any, *, owner_id: str, fact_hint: str) -> bool:
+    """Check the EverOS 1.1.3 public hybrid shape, not private storage details."""
+    if not isinstance(value, dict):
+        return False
+    episodes = value.get("episodes")
+    if not isinstance(episodes, list):
+        return False
+    expected = fact_hint.casefold()
+    for episode in episodes:
+        if not isinstance(episode, dict) or episode.get("user_id") != owner_id:
+            continue
+        facts = episode.get("atomic_facts")
+        if not isinstance(facts, list):
+            continue
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            fact_id = fact.get("id")
+            content = fact.get("content")
+            if isinstance(fact_id, str) and fact_id and isinstance(content, str) and expected in content.casefold():
                 return True
-        return any(_contains_kind(item, expected) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_kind(item, expected) for item in value)
     return False
 
 

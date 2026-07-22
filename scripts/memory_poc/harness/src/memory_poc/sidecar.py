@@ -65,6 +65,9 @@ def serve(uds: Path) -> None:
         raise RuntimeError("socket_path_already_exists")
     if not uds.parent.is_dir():
         raise RuntimeError("socket_directory_missing")
+    owner_id = os.environ.get("MEMORY_POC_OWNER_ID")
+    if not owner_id:
+        raise RuntimeError("fixed_owner_missing")
     os.umask(0o077)
     metrics_value = os.environ.get("MEMORY_POC_REQUEST_METRICS")
     if metrics_value:
@@ -79,7 +82,7 @@ def serve(uds: Path) -> None:
 
     @app.middleware("http")
     async def guard(request: Any, call_next: Any) -> Any:
-        rejection = validate_request(request.method, request.url.path, await request.body())
+        rejection = validate_request(request.method, request.url.path, await request.body(), owner_id=owner_id)
         if rejection is not None:
             return JSONResponse({"detail": "memory_poc_request_rejected"}, status_code=403)
         return await call_next(request)

@@ -31,7 +31,8 @@ def append_request_metric(path: Path, *, kind: str, usage: dict[str, Any] | None
             if isinstance(value, int) and value >= 0:
                 record[target] = value
     encoded = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     try:
         os.write(fd, encoded)
     finally:

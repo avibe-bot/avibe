@@ -6,9 +6,11 @@ import sys
 
 from .constants import STAGES
 from .errors import HarnessError, StageNotImplementedError
-from .environment import runtime_root
+from .environment import checked_workspace_root
 from .reports import load_report
 from .sanity import run_sanity
+from .identifiers import validate_run_id
+from .paths import ensure_owner_directory, runtime_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,7 +30,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             return _run_stage(args.stage, args.run_id)
         if args.command == "report":
-            path = runtime_root() / "runs" / args.run_id / "report.json"
+            run_id = validate_run_id(args.run_id)
+            workspace = checked_workspace_root()
+            state = runtime_root(workspace)
+            if not state.is_dir():
+                raise HarnessError("report_not_found")
+            ensure_owner_directory(state, anchor=workspace)
+            runs = state / "runs"
+            run_directory = runs / run_id
+            if not runs.is_dir() or not run_directory.is_dir():
+                raise HarnessError("report_not_found")
+            ensure_owner_directory(runs, anchor=state)
+            ensure_owner_directory(run_directory, anchor=state)
+            path = run_directory / "report.json"
             print(json.dumps(load_report(path), ensure_ascii=True, indent=2))
             return 0
         raise HarnessError("unknown_command")

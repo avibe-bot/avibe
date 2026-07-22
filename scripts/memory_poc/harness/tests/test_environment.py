@@ -61,6 +61,19 @@ def test_discovery_rejects_an_overly_open_configuration_file(tmp_path: Path) -> 
         discover_provider_settings(tmp_path)
 
 
+def test_discovery_rejects_a_symlinked_local_runtime_ancestor(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    local = outside / "memory-poc"
+    local.mkdir(parents=True)
+    dotenv = local / ".env.poc"
+    dotenv.write_text("LLM_API_KEY=not-used\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+    (tmp_path / ".runtime").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigurationError, match="provider_configuration_path_unsafe"):
+        discover_provider_settings(tmp_path)
+
+
 def test_child_environment_is_allowlisted_and_drops_proxy_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "not-used")
     settings = ProviderSettings(
@@ -78,10 +91,13 @@ def test_child_environment_is_allowlisted_and_drops_proxy_variables(tmp_path: Pa
         everos_root=tmp_path / "everos-root",
         child_home=tmp_path / "child-home",
         metrics_path=tmp_path / "metrics.jsonl",
+        owner_id="00000000-0000-4000-8000-000000000001",
+        anchor=tmp_path,
     )
 
     assert "HTTPS_PROXY" not in child
     assert "HTTP_PROXY" not in child
     assert child["PYTHONNOUSERSITE"] == "1"
     assert child["EVEROS_LLM__API_KEY"] == "not-a-real-key"
+    assert child["MEMORY_POC_OWNER_ID"] == "00000000-0000-4000-8000-000000000001"
     assert all(key in child for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import signal
 import stat
 import subprocess
 import sys
@@ -52,10 +53,43 @@ def assert_no_tcp_listener(pid: int, *, connection_provider: Callable[[int], lis
 
 
 def new_socket_path(state_root: Path) -> Path:
-    socket_dir = ensure_owner_directory(state_root / "s")
+    socket_dir = ensure_owner_directory(state_root / "s", anchor=state_root)
     path = socket_dir / f"{secrets.token_hex(8)}.sock"
     validate_socket_path(path)
     return path
+
+
+def _signal_owned_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
+    """Signal the isolated sidecar group, falling back to its direct process."""
+    if os.name == "posix" and hasattr(os, "getpgid") and hasattr(os, "killpg"):
+        try:
+            process_group = os.getpgid(process.pid)
+            if process_group != os.getpgrp():
+                os.killpg(process_group, signum)
+                return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    try:
+        if signum == signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+
+
+def terminate_owned_process(process: subprocess.Popen[bytes], *, timeout_seconds: float = 10.0) -> None:
+    """Terminate the launcher-owned process and descendants in its private group."""
+    if process.poll() is not None:
+        return
+    _signal_owned_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _signal_owned_process_group(process, getattr(signal, "SIGKILL", signal.SIGTERM))
+        process.wait(timeout=timeout_seconds)
 
 
 @dataclass
@@ -66,6 +100,7 @@ class EverOSProcess:
     state_root: Path
     settings: ProviderSettings
     metrics_path: Path
+    owner_id: str
     timeout_seconds: float = 30.0
     process: subprocess.Popen[bytes] | None = field(default=None, init=False)
     socket_path: Path | None = field(default=None, init=False)
@@ -74,13 +109,16 @@ class EverOSProcess:
         if os.name != "posix":
             raise LaunchError("uds_launcher_requires_posix")
         verify_locked_environment(self.python)
-        ensure_owner_directory(self.everos_root)
+        ensure_owner_directory(self.everos_root, anchor=self.state_root)
+        ensure_owner_directory(self.child_home, anchor=self.state_root)
         self.socket_path = new_socket_path(self.state_root)
         child_env = child_environment(
             self.settings,
             everos_root=self.everos_root,
             child_home=self.child_home,
             metrics_path=self.metrics_path,
+            owner_id=self.owner_id,
+            anchor=self.state_root,
         )
         try:
             self.process = subprocess.Popen(
@@ -117,18 +155,15 @@ class EverOSProcess:
     def stop(self) -> None:
         process = self.process
         self.process = None
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
-        if self.socket_path is not None and self.socket_path.exists():
+        if process is not None:
+            terminate_owned_process(process)
+        if self.socket_path is not None:
             try:
                 info = self.socket_path.lstat()
                 if stat.S_ISSOCK(info.st_mode) and (not hasattr(os, "getuid") or info.st_uid == os.getuid()):
                     self.socket_path.unlink()
+            except FileNotFoundError:
+                pass
             finally:
                 self.socket_path = None
 

@@ -2,6 +2,7 @@
   "session_id": "poc-sanity-session",
   "owner_id": "00000000-0000-4000-8000-000000000001",
   "query": "Which language does the synthetic owner use?",
+  "fact_hint": "Python",
   "messages": [
     {
       "sender_id": "00000000-0000-4000-8000-000000000001",

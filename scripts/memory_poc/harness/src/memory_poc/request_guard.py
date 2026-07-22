@@ -7,8 +7,10 @@ from typing import Any
 MAX_BODY_BYTES = 64 * 1024
 
 
-def validate_request(method: str, path: str, body: bytes) -> str | None:
+def validate_request(method: str, path: str, body: bytes, *, owner_id: str) -> str | None:
     """Return a closed, payload-free rejection reason for non-MVP requests."""
+    if not isinstance(owner_id, str) or not owner_id:
+        return "fixed_owner_missing"
     if method == "GET" and path == "/health":
         return None
     if method != "POST" or path not in {
@@ -32,7 +34,7 @@ def validate_request(method: str, path: str, body: bytes) -> str | None:
         "/api/v1/memory/search": _validate_search,
         "/api/v1/memory/get": _validate_get,
     }
-    return validators[path](payload)
+    return validators[path](payload, owner_id)
 
 
 def _keys_are(payload: dict[str, Any], allowed: Iterable[str], required: Iterable[str]) -> bool:
@@ -45,7 +47,7 @@ def _valid_scope(payload: dict[str, Any]) -> bool:
     return payload.get("app_id") == "avibe" and payload.get("project_id") == "personal"
 
 
-def _validate_add(payload: dict[str, Any]) -> str | None:
+def _validate_add(payload: dict[str, Any], owner_id: str) -> str | None:
     if not _keys_are(payload, {"session_id", "app_id", "project_id", "messages"}, {"session_id", "app_id", "project_id", "messages"}):
         return "add_shape_rejected"
     if not _valid_scope(payload) or not isinstance(payload.get("session_id"), str):
@@ -53,6 +55,7 @@ def _validate_add(payload: dict[str, Any]) -> str | None:
     messages = payload.get("messages")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 500:
         return "add_messages_rejected"
+    user_message_seen = False
     for message in messages:
         if not isinstance(message, dict):
             return "add_message_rejected"
@@ -68,10 +71,16 @@ def _validate_add(payload: dict[str, Any]) -> str | None:
             return "add_message_rejected"
         if not isinstance(message.get("content"), str):
             return "add_non_text_rejected"
+        if message["role"] == "user":
+            if message["sender_id"] != owner_id:
+                return "add_owner_rejected"
+            user_message_seen = True
+    if not user_message_seen:
+        return "add_owner_rejected"
     return None
 
 
-def _validate_flush(payload: dict[str, Any]) -> str | None:
+def _validate_flush(payload: dict[str, Any], _owner_id: str) -> str | None:
     if not _keys_are(payload, {"session_id", "app_id", "project_id"}, {"session_id", "app_id", "project_id"}):
         return "flush_shape_rejected"
     if not _valid_scope(payload) or not isinstance(payload.get("session_id"), str):
@@ -79,27 +88,31 @@ def _validate_flush(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _validate_search(payload: dict[str, Any]) -> str | None:
+def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
     allowed = {"user_id", "app_id", "project_id", "query", "method", "top_k", "include_profile", "enable_llm_rerank"}
     required = {"user_id", "app_id", "project_id", "query", "method", "top_k", "include_profile", "enable_llm_rerank"}
     if not _keys_are(payload, allowed, required):
         return "search_shape_rejected"
     if not _valid_scope(payload) or not isinstance(payload.get("user_id"), str) or not isinstance(payload.get("query"), str):
         return "search_scope_rejected"
-    if payload.get("method") not in {"keyword", "vector", "hybrid"}:
+    if payload["user_id"] != owner_id:
+        return "search_owner_rejected"
+    if payload.get("method") != "hybrid":
         return "search_method_rejected"
     if payload.get("enable_llm_rerank") is not False:
         return "search_rerank_rejected"
     return None
 
 
-def _validate_get(payload: dict[str, Any]) -> str | None:
+def _validate_get(payload: dict[str, Any], owner_id: str) -> str | None:
     allowed = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size", "sort_by", "sort_order"}
     required = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size", "sort_by", "sort_order"}
     if not _keys_are(payload, allowed, required):
         return "get_shape_rejected"
     if not _valid_scope(payload) or not isinstance(payload.get("user_id"), str):
         return "get_scope_rejected"
+    if payload["user_id"] != owner_id:
+        return "get_owner_rejected"
     if payload.get("memory_type") not in {"profile", "episode"}:
         return "get_memory_type_rejected"
     return None

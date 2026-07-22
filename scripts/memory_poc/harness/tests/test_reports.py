@@ -41,3 +41,26 @@ def test_report_rejects_url_and_extra_top_level_field(tmp_path: Path, monkeypatc
 
     with pytest.raises(ReportValidationError, match="report_top_level_schema_invalid"):
         validate_report(report)
+
+
+def test_report_rejects_nested_uris_and_fixture_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["environment"]["llm_model"] = "https://example.invalid"
+
+    with pytest.raises(ReportValidationError, match="report_contains_uri"):
+        validate_report(report)
+
+    report["environment"]["llm_model"] = "llm-model"
+    report["duplicates"]["observed"] = "synthetic fixture body"
+    with pytest.raises(ReportValidationError, match="report_contains_fixture_text"):
+        validate_report(report, fixture_texts=("synthetic fixture body",))
+
+
+def test_report_rejects_unknown_nested_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["resources"]["secret"] = 1
+
+    with pytest.raises(ReportValidationError, match="report_resources_schema_invalid"):
+        validate_report(report)

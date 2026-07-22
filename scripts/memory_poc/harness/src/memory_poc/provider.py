@@ -63,7 +63,7 @@ class EverOSClient:
                 "app_id": APP_ID,
                 "project_id": PROJECT_ID,
                 "query": query,
-                "method": "keyword",
+                "method": "hybrid",
                 "top_k": 8,
                 "include_profile": True,
                 "enable_llm_rerank": False,
