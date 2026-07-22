@@ -82,7 +82,8 @@ def test_show_without_subcommand_prints_help(capsys):
     assert cli.cmd_show(args) == 0
     captured = capsys.readouterr()
     assert "Manage the one visual Show Page attached to an Agent Session." in captured.out
-    assert "usage: vibe show [-h] {list,path,status,update,mark,event,annotate} ..." in captured.out
+    assert "usage: vibe show [-h]" in captured.out
+    assert "{list,path,status,update,mark,reply,marks,unmark,event,annotate} ..." in " ".join(captured.out.split())
     assert "vibe show list" in captured.out
     assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
 
@@ -2074,6 +2075,35 @@ def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, cap
     assert payload["code"] == "not_public"
 
 
+def _seed_show_cli_session(session_id: str = "ses123") -> None:
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=f"anchor_{session_id}",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+
 def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions, messages, show_session_events
@@ -2257,6 +2287,182 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
     assert captured["cli_token"] == show_cli_event_token()
     assert captured["payload"]["type"] == "assistant.mark.created"
     assert captured["timeout"] == 3
+
+
+def test_show_reply_copies_annotation_anchor_and_replaces_prior_reply(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    store = ShowSessionEventStore()
+    try:
+        annotation = store.append(
+            "ses123",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "question",
+                    "comment": "Why did this change?",
+                    "anchor": {
+                        "kind": "text-range",
+                        "selector": "#revenue-card",
+                        "textQuote": "Revenue",
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    first_args = cli.build_parser().parse_args(
+        ["show", "reply", annotation["id"], "--session-id", "ses123", "--message", "First answer.", "--json"]
+    )
+    assert cli.cmd_show(first_args) == 0
+    first = json.loads(capsys.readouterr().out)
+
+    second_args = cli.build_parser().parse_args(
+        ["show", "reply", annotation["id"], "--session-id", "ses123", "--message", "Better answer.", "--json"]
+    )
+    assert cli.cmd_show(second_args) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["mark_id"] == second["mark_id"]
+    assert first["event"]["anchor"] == annotation["anchor"]
+    assert first["event"]["payload"]["target"] == "#revenue-card"
+    assert first["event"]["payload"]["replyTo"] == annotation["id"]
+    assert second["replaced"] is True
+    assert "vibe show marks" in second["replacement_notice"]
+
+    store = ShowSessionEventStore()
+    try:
+        active = store.active_marks("ses123")
+    finally:
+        store.close()
+    assert len(active) == 1
+    assert active[0]["kind"] == "reply"
+    assert active[0]["body"] == "Better answer."
+
+
+def test_show_reply_unknown_id_lists_recent_session_annotation_ids(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    store = ShowSessionEventStore()
+    try:
+        recent = store.append(
+            "ses123",
+            {"type": "human.annotation.created", "annotation": {"comment": "Known annotation."}},
+        )
+    finally:
+        store.close()
+
+    args = cli.build_parser().parse_args(
+        ["show", "reply", "show_evt_foreign", "--session-id", "ses123", "--message", "Answer.", "--json"]
+    )
+    assert cli.cmd_show(args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["code"] == "show_annotation_not_found"
+    assert error["details"]["recent_annotation_event_ids"] == [recent["id"]]
+    assert recent["id"] in error["error"]
+
+
+def test_show_mark_positional_target_replaces_same_target(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+
+    first_args = cli.build_parser().parse_args(
+        ["show", "mark", "#revenue-card", "--session-id", "ses123", "--message", "First note.", "--json"]
+    )
+    assert cli.cmd_show(first_args) == 0
+    first = json.loads(capsys.readouterr().out)
+    second_args = cli.build_parser().parse_args(
+        ["show", "mark", "--target", "#revenue-card", "--session-id", "ses123", "--body", "New note.", "--json"]
+    )
+    assert cli.cmd_show(second_args) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["mark_id"] == second["mark_id"]
+    assert second["replaced"] is True
+    store = ShowSessionEventStore()
+    try:
+        active = store.active_marks("ses123")
+    finally:
+        store.close()
+    assert [(mark["target"], mark["body"]) for mark in active] == [("#revenue-card", "New note.")]
+
+
+def test_show_marks_filters_resolved_and_unmark_reports_partial_success(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore, stable_assistant_mark_id
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    first_id = stable_assistant_mark_id(scope="default", target="#first")
+    second_id = stable_assistant_mark_id(scope="default", target="#second")
+    store = ShowSessionEventStore()
+    try:
+        first = store.append(
+            "ses123",
+            {"type": "assistant.mark.created", "mark": {"id": first_id, "target": "#first", "body": "First."}},
+        )
+        store.append(
+            "ses123",
+            {"type": "assistant.mark.created", "mark": {"id": second_id, "target": "#second", "body": "Second."}},
+        )
+        store.append(
+            "ses123",
+            {
+                "type": "assistant.mark.resolved",
+                "mark": {"id": first_id, "updatedAt": first["payload"]["updatedAt"]},
+            },
+        )
+    finally:
+        store.close()
+
+    marks_args = cli.build_parser().parse_args(["show", "marks", "--session-id", "ses123", "--json"])
+    assert cli.cmd_show(marks_args) == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["marks"] == [
+        {
+            "id": second_id,
+            "kind": "note",
+            "target": "#second",
+            "body_head": "Second.",
+            "read_state": "unread",
+        }
+    ]
+
+    unmark_args = cli.build_parser().parse_args(
+        ["show", "unmark", second_id, "missing-target", "--session-id", "ses123", "--json"]
+    )
+    assert cli.cmd_show(unmark_args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    assert [item["ok"] for item in result["results"]] == [True, False]
+
+    missing_args = cli.build_parser().parse_args(
+        ["show", "unmark", "missing-one", "missing-two", "--session-id", "ses123", "--json"]
+    )
+    assert cli.cmd_show(missing_args) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["succeeded"] == 0
+
+    store = ShowSessionEventStore()
+    try:
+        assert store.active_marks("ses123") == []
+    finally:
+        store.close()
 
 
 def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):

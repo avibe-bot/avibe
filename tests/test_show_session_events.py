@@ -432,8 +432,7 @@ def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_stat
                 "type": "assistant.mark.resolved",
                 "mark": {
                     "id": "mark_1",
-                    "target": "summary",
-                    "body": "Resolved.",
+                    "updatedAt": created["payload"]["updatedAt"],
                 },
             },
         )
@@ -445,6 +444,118 @@ def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_stat
     assert created["id"] != "mark_1"
     assert resolved["id"] != "mark_1"
     assert created["id"] != resolved["id"]
+
+
+def test_show_event_store_hydrates_read_receipt_from_active_mark(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        created = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"id": "mark_1", "target": "summary", "body": "Server body."},
+                "anchor": {"selector": "#summary", "text": "Summary"},
+            },
+        )
+        resolved = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.resolved",
+                "mark": {
+                    "id": "mark_1",
+                    "updatedAt": created["payload"]["updatedAt"],
+                    "target": "forged",
+                    "body": "Forged body.",
+                },
+                "anchor": {"selector": "#forged"},
+            },
+            author={"kind": "user", "email": "reader@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert resolved["payload"]["target"] == "summary"
+    assert resolved["payload"]["body"] == "Server body."
+    assert resolved["anchor"] == {"selector": "#summary", "text": "Summary"}
+    assert resolved["payload"]["author"] == {"kind": "user", "email": "reader@example.com"}
+    assert resolved["transcript_text"] == ""
+    assert resolved["message_id"] is None
+    assert resolved["message"] is None
+
+
+@pytest.mark.parametrize(
+    ("mark", "expected_code"),
+    [
+        ({"id": "missing", "updatedAt": "2026-07-23T00:00:00Z"}, "mark_not_active"),
+        ({"id": "mark_1"}, "mark_version_required"),
+    ],
+)
+def test_show_event_store_rejects_invalid_mark_resolution(isolated_state, mark, expected_code):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"id": "mark_1", "target": "summary", "body": "Current."},
+            },
+        )
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append("ses_mark", {"type": "assistant.mark.resolved", "mark": mark})
+    finally:
+        store.close()
+
+    assert exc_info.value.code == expected_code
+
+
+def test_show_event_store_rejects_stale_mark_read_receipt(isolated_state):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        original = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {
+                    "id": "mark_1",
+                    "target": "summary",
+                    "body": "Original.",
+                    "createdAt": "2026-07-23T00:00:00Z",
+                    "updatedAt": "2026-07-23T00:00:00Z",
+                },
+            },
+        )
+        store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.updated",
+                "mark": {
+                    "id": "mark_1",
+                    "target": "summary",
+                    "body": "Replacement.",
+                    "createdAt": original["payload"]["createdAt"],
+                    "updatedAt": "2026-07-23T00:00:01Z",
+                },
+            },
+        )
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {
+                    "type": "assistant.mark.resolved",
+                    "mark": {"id": "mark_1", "updatedAt": original["payload"]["updatedAt"]},
+                },
+                author={"kind": "local"},
+            )
+        active = store.active_marks("ses_mark")
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "mark_version_conflict"
+    assert [(mark["id"], mark["body"]) for mark in active] == [("mark_1", "Replacement.")]
 
 
 def test_show_event_store_records_intent_dispatch_payload(isolated_state):
@@ -596,3 +707,41 @@ def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeyp
         "turn.chunk",
         "turn.end",
     ]
+
+
+@pytest.mark.parametrize(
+    ("intent", "expects_guidance"),
+    [("question", True), ("change", False)],
+)
+def test_annotation_dispatch_text_adds_event_id_and_question_guidance_only(monkeypatch, intent, expects_guidance):
+    import asyncio
+
+    from vibe import internal_client, ui_server
+
+    captured = []
+
+    async def fake_stream_dispatch(payload, **kwargs):
+        captured.append(payload)
+        if False:
+            yield None
+
+    monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
+    event = {
+        "id": "show_evt_1a2b3c4d",
+        "type": "human.annotation.created",
+        "session_id": "ses_show",
+        "scope_id": "scope1",
+        "payload": {"intent": intent},
+        "transcript_text": "[show-annotation:default:created] question\n\nWhy?",
+        "message_id": "m1",
+    }
+
+    asyncio.run(ui_server._run_show_event_dispatch(event))
+
+    assert event["transcript_text"] == "[show-annotation:default:created] question\n\nWhy?"
+    assert "Show event id: show_evt_1a2b3c4d" in captured[0]["text"]
+    guidance = (
+        "用户在页面上提出了疑问。请优先把回答放回页面上用户指的位置（chat 里保留一句简短结论即可）：\n"
+        "  vibe show reply show_evt_1a2b3c4d --message '<你的回答>'"
+    )
+    assert (guidance in captured[0]["text"]) is expects_guidance
