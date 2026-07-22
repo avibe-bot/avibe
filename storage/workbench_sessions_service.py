@@ -466,7 +466,7 @@ def update_session(
                 .where(scopes.c.id == str(scope_id))
             ).first()
             if scope is None:
-                raise LookupError(f"Scope not found: {scope_id}")
+                raise ValueError(f"Scope not found: {scope_id}")
             if scope.enabled == 0:
                 raise PermissionError(f"Scope is archived: {scope_id}")
         values["scope_id"] = scope_id

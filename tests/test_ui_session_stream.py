@@ -876,6 +876,20 @@ def test_patch_session_rejects_invalid_visibility(isolated_state, tmp_path):
     assert response.status_code == 400
 
 
+def test_patch_session_rejects_unknown_target_scope_as_invalid_value(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"scope_id": "avibe::project::missing"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+
+
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
     """A selected Vibe Agent implies its backend. The UI often sends only
     ``agent_name`` when changing the picker, so the route must derive the
