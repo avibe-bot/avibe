@@ -113,7 +113,7 @@ EMBEDDING_API_KEY=…
   "harness_commit": "…",
   "corpus_revision": "…",
   "environment": {"os": "…", "machine_class": "…", "python": "…", "lock_id": "…", "llm_model": "…", "embedding_model": "…", "endpoint_locality": "remote|loopback", "timezone": "…"},
-  "criteria": [{"id": "…", "pass": true, "value": 0, "threshold": 0}],
+  "criteria": [{"id": "…", "state": "pass|fail|not_measured", "value": 0, "threshold": 0}],
   "quality": [{"query_id": "q001", "pass": true, "rank": 1, "latency_ms": 0}],
   "latency": {"add_ms": {}, "flush_ms": {}, "searchable_ms": {}, "query_ms": {}},
   "resources": {"env_size_bytes": 0, "idle_rss_p95_bytes": 0, "peak_rss_bytes": 0, "root_growth_bytes": 0, "llm_calls": 0, "embedding_calls": 0},
@@ -130,5 +130,28 @@ EMBEDDING_API_KEY=…
 `launcher_uds_only`, `restart_preserves`, `clear_removes_all`,
 `no_internals_needed`.
 
-No secrets, endpoint URLs, or fixture message bodies appear in `report.json`
-or logs.
+### Criterion state (v1.1 — PM decision 2026-07-22)
+
+Each `criteria[]` entry carries an explicit tri-state so unmeasured criteria are
+never confused with a measured zero:
+
+- `state = "pass"` — measured and meets the POC §6 threshold.
+- `state = "fail"` — measured and misses the threshold.
+- `state = "not_measured"` — not exercised in this run (e.g. a sanity-only run
+  with no live provider keys). `value` and `threshold` MUST be `null` for a
+  `not_measured` criterion. Never emit `0/0` for an unmeasured criterion.
+
+A run whose gate criteria are all `not_measured` is not a POC pass; it is a
+sanity/partial run. The final provider decision requires every §6 criterion to
+reach `pass`.
+
+### Companion summary.md (v1.1 — PM decision 2026-07-22)
+
+Each run also writes `runs/<run-id>/summary.md` alongside `report.json` (already
+anticipated by POC §7). Free-form, redacted prose evidence — observed HTTP
+response shapes (POC §5.1), retention locations, duplicate/restart notes — lives
+in `summary.md`. `report.json` stays the frozen machine-readable schema and does
+NOT absorb prose or provider-internal shapes. Same redaction rule as below.
+
+No secrets, endpoint URLs, or fixture message bodies appear in `report.json`,
+`summary.md`, or logs.
