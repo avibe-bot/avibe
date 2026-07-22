@@ -12,8 +12,9 @@ from pathlib import Path
 import psutil
 import pytest
 
+from memory_poc.environment import ProviderSettings
 from memory_poc.errors import LaunchError
-from memory_poc.launcher import _TcpListenerMonitor, assert_no_tcp_listener, secure_socket, terminate_owned_process, validate_socket_path
+from memory_poc.launcher import EverOSProcess, _TcpListenerMonitor, assert_no_tcp_listener, secure_socket, terminate_owned_process, validate_socket_path
 from memory_poc.provider import EverOSClient
 
 
@@ -38,6 +39,33 @@ def test_socket_path_overflow_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(LaunchError, match="uds_path_too_long"):
         validate_socket_path(path)
+
+
+def test_sidecar_startup_and_request_timeouts_are_separate(tmp_path: Path) -> None:
+    process = EverOSProcess(
+        python=Path(sys.executable),
+        everos_root=tmp_path / "everos-root",
+        child_home=tmp_path / "child-home",
+        state_root=tmp_path,
+        settings=ProviderSettings(
+            llm_base_url="http://127.0.0.1",
+            llm_model="test-llm",
+            llm_api_key="test-key",
+            embedding_base_url="http://127.0.0.1",
+            embedding_model="test-embedding",
+            embedding_api_key="test-key",
+            source=tmp_path / ".env.poc",
+        ),
+        metrics_path=tmp_path / "request-counts.jsonl",
+        owner_id="00000000-0000-4000-8000-000000000001",
+    )
+    process.socket_path = tmp_path / "everos.sock"
+    process.tcp_monitor = SimpleNamespace(assert_safe=lambda: None)  # type: ignore[assignment]
+
+    client = process._client()
+
+    assert process.startup_timeout_seconds == 30.0
+    assert client.timeout_seconds == 390.0
 
 
 def test_tcp_listener_is_rejected() -> None:

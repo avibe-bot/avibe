@@ -19,6 +19,10 @@ from .errors import LaunchError
 from .paths import ensure_owner_directory
 from .provider import EverOSClient
 
+_STARTUP_TIMEOUT_SECONDS = 30.0
+# EverOS 1.1.3 permits a single memorize call to hold its session lock for 360s.
+_REQUEST_TIMEOUT_SECONDS = 390.0
+
 
 def _socket_path_limit() -> int:
     return 104 if sys.platform == "darwin" else 108
@@ -319,7 +323,8 @@ class EverOSProcess:
     settings: ProviderSettings
     metrics_path: Path
     owner_id: str
-    timeout_seconds: float = 30.0
+    startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS
+    request_timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS
     process: subprocess.Popen[bytes] | None = field(default=None, init=False)
     socket_path: Path | None = field(default=None, init=False)
     tcp_monitor: _TcpListenerMonitor | None = field(default=None, init=False)
@@ -354,11 +359,7 @@ class EverOSProcess:
             self.tcp_monitor.start()
             self._wait_for_socket()
             secure_socket(self.socket_path)
-            client = EverOSClient(
-                self.socket_path,
-                timeout_seconds=self.timeout_seconds,
-                safety_check=self.tcp_monitor.assert_safe,
-            )
+            client = self._client()
             client.health()
             self.tcp_monitor.assert_safe()
             return client
@@ -369,7 +370,7 @@ class EverOSProcess:
     def _wait_for_socket(self) -> None:
         assert self.process is not None
         assert self.socket_path is not None
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = time.monotonic() + self.startup_timeout_seconds
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise LaunchError("sidecar_exited_before_ready")
@@ -377,6 +378,15 @@ class EverOSProcess:
                 return
             time.sleep(0.05)
         raise LaunchError("sidecar_socket_timeout")
+
+    def _client(self) -> EverOSClient:
+        assert self.socket_path is not None
+        assert self.tcp_monitor is not None
+        return EverOSClient(
+            self.socket_path,
+            timeout_seconds=self.request_timeout_seconds,
+            safety_check=self.tcp_monitor.assert_safe,
+        )
 
     def stop(self) -> None:
         process = self.process
