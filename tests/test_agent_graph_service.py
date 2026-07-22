@@ -306,6 +306,34 @@ def test_every_node_openable_in_chat(seeded):
     assert all(n["openable_in_chat"] for n in nodes.values())
 
 
+def test_private_agent_run_scope_is_internal(isolated_state):
+    # A private ``vibe agent run`` session on the legacy private_agent_run
+    # pseudo-scope must render as an internal run: no platform/scope label/
+    # project, and not openable in chat (mirrors running-agents enrichment).
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                scopes.insert().values(
+                    id="slack::private::pv1", platform="slack", scope_type="private",
+                    native_id="pv1", parent_scope_id=None, display_name="internal-run",
+                    native_type="private_agent_run", is_private=1, supports_threads=0,
+                    metadata_json="{}", first_seen_at=_z(NOW), last_seen_at=_z(NOW), updated_at=_z(NOW),
+                )
+            )
+            _insert_session(conn, "ses_priv", scope_id="slack::private::pv1", backend="codex",
+                            title="Internal run")
+            _insert_run(conn, "run_p1", session_id="ses_priv", status="succeeded",
+                        created=NOW - timedelta(minutes=10))
+        node = _nodes_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=engine))["ses_priv"]
+        assert node["platform"] is None
+        assert node["scope_label"] is None
+        assert node["project_id"] is None
+        assert node["openable_in_chat"] is False
+    finally:
+        engine.dispose()
+
+
 def test_spawn_edges_aggregate(seeded):
     payload = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded)
     spawn_a = _edge(payload, "spawn", "ses_root", "ses_child_a")

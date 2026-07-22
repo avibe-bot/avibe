@@ -322,6 +322,7 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
         scopes.c.native_id.label("scope_native_id"),
         scopes.c.platform.label("scope_platform"),
         scopes.c.scope_type.label("scope_scope_type"),
+        scopes.c.native_type.label("scope_native_type"),
     ]
     if _HAS_VISIBILITY:
         cols.append(agent_sessions.c.visibility)
@@ -481,6 +482,21 @@ def _build_nodes(
             for r in runs[:RUNS_PER_NODE]
         ]
 
+        # A private ``vibe agent run`` session hangs on the legacy
+        # ``private_agent_run`` pseudo-scope (placeholder platform, no delivery).
+        # Mirror the running-agents enrichment: render it as an internal run
+        # (no platform/scope label/project) and not openable — never label it as
+        # an IM channel session or offer a chat link. M1 re-parents sessions off
+        # this pseudo-scope, so this branch is a no-op post-migration.
+        is_private_run = row.get("scope_native_type") == "private_agent_run"
+        platform = None if is_private_run else row.get("scope_platform")
+        scope_label = None if is_private_run else _scope_label(
+            row.get("scope_display_name"), row.get("scope_native_id")
+        )
+        project_id = None if is_private_run else _project_id(
+            row.get("scope_platform"), row.get("scope_scope_type"), row.get("scope_native_id")
+        )
+
         node: dict[str, Any] = {
             "session_id": session_id,
             "title": row.get("title"),
@@ -491,15 +507,13 @@ def _build_nodes(
             "status": status,
             "live": is_live,
             "scope_id": row.get("scope_id"),
-            "project_id": _project_id(
-                row.get("scope_platform"), row.get("scope_scope_type"), row.get("scope_native_id")
-            ),
-            "scope_label": _scope_label(row.get("scope_display_name"), row.get("scope_native_id")),
-            "platform": row.get("scope_platform"),
+            "project_id": project_id,
+            "scope_label": scope_label,
+            "platform": platform,
             "workdir": row.get("workdir"),
-            # M1 flips this always-true for persisted sessions; every graph node
-            # is a persisted session, so it is always openable.
-            "openable_in_chat": True,
+            # Every persisted session is openable in chat EXCEPT the internal
+            # private-agent-run pseudo-scope sessions (M1 retires those).
+            "openable_in_chat": not is_private_run,
             "created_at": _iso_z(row.get("created_at")),
             "last_active_at": _iso_z(row.get("last_active_at")),
             "elapsed_seconds": (live or {}).get("elapsed_seconds") if is_live else None,

@@ -266,13 +266,17 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
 
       {/* Actions */}
       <div className="flex flex-col gap-2 pt-1">
-        <Link
-          to={`/chat/${encodeURIComponent(node.session_id)}`}
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-mint/40 bg-mint-soft text-[13px] font-semibold text-mint transition hover:brightness-110"
-        >
-          <MessageSquare className="size-3.5" />
-          {t('agents.graph.detail.openChat')}
-        </Link>
+        {/* Open-chat only for openable sessions — an internal private-agent-run
+            session has no chat to open (openable_in_chat=false). */}
+        {node.openable_in_chat && (
+          <Link
+            to={`/chat/${encodeURIComponent(node.session_id)}`}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-mint/40 bg-mint-soft text-[13px] font-semibold text-mint transition hover:brightness-110"
+          >
+            <MessageSquare className="size-3.5" />
+            {t('agents.graph.detail.openChat')}
+          </Link>
+        )}
         <div className="flex items-center gap-2">
           {node.visibility && (
             <Button type="button" variant="outline" size="xs" onClick={toggleVisibility} disabled={busy} className="flex-1">

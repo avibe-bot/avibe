@@ -10,6 +10,7 @@ controller is unreachable the route still returns a DB-only graph flagged
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -20,31 +21,36 @@ from storage.settings_service import upsert_scope
 from vibe import internal_client
 from vibe.ui_server import app
 
-NOW = "2026-07-23T02:00:00Z"
-
 
 def _seed(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
+    # The route computes its 24h cutoff from the real wall clock (it does not
+    # accept an injected ``now``), so anchor the fixture to now — a fixed
+    # calendar date would fall out of the default window once the suite runs
+    # more than 24h later.
+    now = datetime.now(timezone.utc)
+    now_z = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent_iso = (now - timedelta(minutes=30)).isoformat()
     engine = create_sqlite_engine()
     try:
         with engine.begin() as conn:
             scope_id = upsert_scope(conn, platform="avibe", scope_type="project",
-                                    native_id="proj_route", now=NOW)
+                                    native_id="proj_route", now=now_z)
             for sid in ("ses_live", "ses_ended"):
                 conn.execute(
                     agent_sessions.insert().values(
                         id=sid, scope_id=scope_id, agent_backend="claude", agent_variant="default",
                         session_anchor=sid, native_session_id=sid, title=sid.upper(),
                         status="active", agent_status="idle", metadata_json="{}",
-                        created_at=NOW, updated_at=NOW, last_active_at=NOW,
+                        created_at=now_z, updated_at=now_z, last_active_at=now_z,
                     )
                 )
             conn.execute(
                 agent_runs.insert().values(
                     id="run_e1", run_type="agent", status="succeeded", session_id="ses_ended",
-                    cancel_requested=0, created_at="2026-07-23T01:30:00+00:00",
-                    started_at="2026-07-23T01:30:00+00:00", updated_at="2026-07-23T01:31:00+00:00",
+                    cancel_requested=0, created_at=recent_iso,
+                    started_at=recent_iso, updated_at=recent_iso,
                     metadata_json="{}",
                 )
             )

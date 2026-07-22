@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ChevronDown, Clock, FolderClosed, Loader2, RefreshCw, ServerCrash } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Clock, FolderClosed, Loader2, RefreshCw, ServerCrash } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -202,6 +202,11 @@ export const AgentGraphTab: React.FC = () => {
   const triggerNodes = useMemo(() => graph?.trigger_nodes ?? [], [graph]);
   const edges = useMemo(() => graph?.edges ?? [], [graph]);
 
+  // The visibility column ships with M1; until then nodes carry no `visibility`
+  // and the server ignores include_background — so the 显示后台会话 toggle is
+  // inert. Only surface it once at least one node reports visibility.
+  const hasVisibility = useMemo(() => nodes.some((n) => n.visibility !== undefined), [nodes]);
+
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.session_id, n])), [nodes]);
   const triggersById = useMemo(
     () => new Map(triggerNodes.map((tr) => [tr.definition_id, tr])),
@@ -301,10 +306,13 @@ export const AgentGraphTab: React.FC = () => {
             </>
           )}
         </FilterDropdown>
-        <label className="ml-auto inline-flex items-center gap-2 text-[12px] text-muted">
-          {t('agents.graph.filters.showBackground')}
-          <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
-        </label>
+        <span className="flex-1" />
+        {hasVisibility && (
+          <label className="inline-flex items-center gap-2 text-[12px] text-muted">
+            {t('agents.graph.filters.showBackground')}
+            <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
+          </label>
+        )}
         <Button type="button" variant="outline" size="xs" onClick={() => fetchGraph(false)} disabled={loading}>
           <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
           {t('common.refresh')}
@@ -315,6 +323,13 @@ export const AgentGraphTab: React.FC = () => {
         <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-[12px] text-gold">
           <ServerCrash className="size-3.5" />
           {t('agents.graph.unreachable')}
+        </div>
+      )}
+
+      {graph?.truncated && (
+        <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-[12px] text-gold">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          {t('agents.graph.truncated')}
         </div>
       )}
 

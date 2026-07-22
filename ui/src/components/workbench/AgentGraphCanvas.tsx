@@ -64,7 +64,9 @@ const SessionRFNode: React.FC<NodeProps> = ({ data }) => {
         selected={d.selected}
         faded={d.faded}
         onClick={() => d.onSelect(d.node.session_id)}
-        onDoubleClick={() => d.onOpenChat(d.node.session_id)}
+        // Double-click opens the chat only for openable sessions (internal
+        // private-agent-run nodes have none).
+        onDoubleClick={() => d.node.openable_in_chat && d.onOpenChat(d.node.session_id)}
       />
       <Handle type="source" position={Position.Right} className={HANDLE_CLASS} isConnectable={false} />
     </>
