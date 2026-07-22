@@ -61,11 +61,6 @@ RUNS_PER_NODE = 10
 # Trigger definition types that produce a trigger chip.
 _TRIGGER_RUN_TYPES = {"scheduled", "watch"}
 
-# The M1 lane adds ``agent_sessions.visibility``. Until it merges the column is
-# absent from the model (and the DB); detect it once and degrade gracefully —
-# omit ``visibility`` from nodes so the client treats every session as
-# foreground and hides the 移到前台/隐藏 actions (the PATCH would 400 anyway).
-_HAS_VISIBILITY = "visibility" in agent_sessions.c
 
 
 # ── timestamp helpers ────────────────────────────────────────────────────────
@@ -337,6 +332,7 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
         agent_sessions.c.workdir,
         agent_sessions.c.title,
         agent_sessions.c.status,
+        agent_sessions.c.visibility,
         agent_sessions.c.created_at,
         agent_sessions.c.updated_at,
         agent_sessions.c.last_active_at,
@@ -347,8 +343,6 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
         scopes.c.native_type.label("scope_native_type"),
         scope_settings.c.enabled.label("scope_enabled"),
     ]
-    if _HAS_VISIBILITY:
-        cols.append(agent_sessions.c.visibility)
     stmt = (
         select(*cols)
         .select_from(
@@ -581,9 +575,9 @@ def _build_nodes(
             "elapsed_seconds": (live or {}).get("elapsed_seconds") if is_live else None,
             "run_counts": {"total": run_count_total, "running": run_count_running},
             "runs": recent,
+            # Legacy rows backfill to foreground (contract §1).
+            "visibility": row.get("visibility") or "foreground",
         }
-        if _HAS_VISIBILITY:
-            node["visibility"] = row.get("visibility") or "foreground"
         nodes.append(node)
     return nodes
 
@@ -607,7 +601,7 @@ def _filter_nodes(
         else:
             target = f"avibe::project::{project}"
             result = [n for n in result if n["scope_id"] == target]
-    if not include_background and _HAS_VISIBILITY:
+    if not include_background:
         result = [n for n in result if n.get("visibility") != "background"]
     return result
 

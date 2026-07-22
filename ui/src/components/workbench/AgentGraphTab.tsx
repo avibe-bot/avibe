@@ -206,16 +206,6 @@ export const AgentGraphTab: React.FC = () => {
   const triggerNodes = useMemo(() => graph?.trigger_nodes ?? [], [graph]);
   const edges = useMemo(() => graph?.edges ?? [], [graph]);
 
-  // The visibility column ships with M1; until then nodes carry no `visibility`
-  // and the server ignores include_background — so the 显示后台会话 toggle is
-  // inert. Latch support ON once ANY node has reported visibility, and keep it
-  // (a filtered view that returns zero nodes must not hide the toggle and strand
-  // the user with backgrounds turned off).
-  const [visibilitySeen, setVisibilitySeen] = useState(false);
-  useEffect(() => {
-    if (!visibilitySeen && nodes.some((n) => n.visibility !== undefined)) setVisibilitySeen(true);
-  }, [nodes, visibilitySeen]);
-
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.session_id, n])), [nodes]);
   const triggersById = useMemo(
     () => new Map(triggerNodes.map((tr) => [tr.definition_id, tr])),
@@ -316,12 +306,10 @@ export const AgentGraphTab: React.FC = () => {
           )}
         </FilterDropdown>
         <span className="flex-1" />
-        {visibilitySeen && (
-          <label className="inline-flex items-center gap-2 text-[12px] text-muted">
-            {t('agents.graph.filters.showBackground')}
-            <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
-          </label>
-        )}
+        <label className="inline-flex items-center gap-2 text-[12px] text-muted">
+          {t('agents.graph.filters.showBackground')}
+          <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
+        </label>
         <Button type="button" variant="outline" size="xs" onClick={() => fetchGraph(false)} disabled={loading}>
           <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
           {t('common.refresh')}

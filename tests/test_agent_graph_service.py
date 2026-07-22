@@ -5,8 +5,8 @@ triggers, a standalone session, an ended session, and an out-of-window
 session, then asserts the frozen contract §3 payload
 (``docs/plans/agents-run-graph-contract.md``): node status/liveness, scope vs
 标准 standalone bucketing, spawn/callback/trigger edge aggregation, window
-filter, project filter, live-only mode, node cap + truncation, and the
-visibility-absent graceful degradation.
+filter, project filter, live-only mode, node cap + truncation, and
+visibility emission + background filtering.
 """
 
 from __future__ import annotations
@@ -67,7 +67,8 @@ def _insert_scope(conn) -> None:
 
 
 def _insert_session(conn, session_id, *, scope_id, backend="claude", title=None,
-                    created=None, last_active=None, status="active") -> None:
+                    created=None, last_active=None, status="active",
+                    visibility="foreground") -> None:
     created = created or (NOW - timedelta(hours=2))
     conn.execute(
         agent_sessions.insert().values(
@@ -85,6 +86,7 @@ def _insert_session(conn, session_id, *, scope_id, backend="claude", title=None,
             title=title,
             status=status,
             agent_status="idle",
+            visibility=visibility,
             metadata_json="{}",
             created_at=_z(created),
             updated_at=_z(last_active or created),
@@ -529,7 +531,7 @@ def test_counts(seeded):
     assert counts["queued"] == 1
     assert counts["ended"] == 4
     assert counts["total"] == 6
-    # visibility column absent (pre-M1) ⇒ everything reads foreground
+    # seeded sessions default to foreground (no explicit visibility set)
     assert counts["foreground"] == 6
     assert counts["background"] == 0
 
@@ -588,11 +590,31 @@ def test_node_cap_truncates(seeded):
     assert {n["session_id"] for n in payload["nodes"]} == {"ses_root", "ses_child_a"}
 
 
-def test_visibility_absent_omits_field(seeded):
-    # Until M1 ships the column, nodes must not carry ``visibility`` so the
-    # client hides the 移到前台/隐藏 actions instead of firing a 400 PATCH.
-    nodes = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded)["nodes"]
-    assert all("visibility" not in n for n in nodes)
+def test_visibility_emitted_and_filtered(isolated_state):
+    # M1's ``agent_sessions.visibility`` is now a hard column: every node
+    # carries it (legacy rows backfill to foreground), a background session is
+    # reflected in the counts, and ``include_background=0`` drops it.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_fg", scope_id=None, title="Foreground")
+        _insert_session(conn, "ses_bg", scope_id=None, title="Background",
+                        visibility="background")
+        # A window run makes each session a graph candidate (bare sessions with
+        # no run and no liveness are not surfaced).
+        _insert_run(conn, "run_fg", session_id="ses_fg")
+        _insert_run(conn, "run_bg", session_id="ses_bg")
+
+    full = agent_graph.build_graph(live_agents=[], now=NOW, engine=engine)
+    by_id = _nodes_by_id(full)
+    assert by_id["ses_fg"]["visibility"] == "foreground"
+    assert by_id["ses_bg"]["visibility"] == "background"
+    assert full["counts"]["foreground"] == 1
+    assert full["counts"]["background"] == 1
+
+    hidden = agent_graph.build_graph(
+        live_agents=[], now=NOW, engine=engine, include_background=False
+    )
+    assert set(_nodes_by_id(hidden)) == {"ses_fg"}
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────────
