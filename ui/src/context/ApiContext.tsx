@@ -2871,7 +2871,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.includeEnded === false) search.set('include_ended', '0');
       if (params?.includeBackground === false) search.set('include_background', '0');
       const qs = search.toString();
-      return getJson(qs ? `/api/agents/graph?${qs}` : '/api/agents/graph');
+      return getJson(qs ? `/api/agents-graph?${qs}` : '/api/agents-graph');
     },
     setSessionVisibility: (sessionId, visibility) =>
       patchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { visibility }),

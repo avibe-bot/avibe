@@ -1,7 +1,7 @@
 // Shared types + pure helpers for the Agents · 运行图 (run graph).
 //
 // The wire shape is the frozen contract in
-// `docs/plans/agents-run-graph-contract.md` §3 (GET /api/agents/graph). The
+// `docs/plans/agents-run-graph-contract.md` §3 (GET /api/agents-graph). The
 // only addition over that doc is the per-node `runs` array: the detail panel's
 // "RUNS · 本会话" timeline needs the recent run rows, and the graph service is
 // the one place that already has agent_runs open — embedding them avoids an

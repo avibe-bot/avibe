@@ -1,10 +1,10 @@
-"""Route tests for ``GET /api/agents/graph``.
+"""Route tests for ``GET /api/agents-graph``.
 
-Locks three things the service unit tests can't: (1) the static ``/graph`` path
-resolves to the graph handler and is NOT swallowed by the dynamic
-``/api/agents/<name>`` rule; (2) query params flow through; (3) when the
-controller is unreachable the route still returns a DB-only graph flagged
-``live_unreachable`` instead of erroring.
+Locks three things the service unit tests can't: (1) the endpoint lives at
+``/api/agents-graph`` (contract A7), OUTSIDE ``/api/agents/<name>``, so it
+neither shadows nor is shadowed by an agent named ``graph``; (2) query params
+flow through; (3) when the controller is unreachable the route still returns a
+DB-only graph flagged ``live_unreachable`` instead of erroring.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def test_graph_route_resolves_and_merges_liveness(monkeypatch, tmp_path):
     _seed(monkeypatch, tmp_path)
     _mock_live(monkeypatch, [{"session_id": "ses_live", "state": "active", "elapsed_seconds": 9.0}])
 
-    status, body = _get("/api/agents/graph?window=24h")
+    status, body = _get("/api/agents-graph?window=24h")
     assert status == 200
     # Resolved to the graph handler (not vibe_agent_get(name="graph")).
     assert body["ok"] is True
@@ -88,7 +88,7 @@ def test_include_ended_flag(monkeypatch, tmp_path):
     _seed(monkeypatch, tmp_path)
     _mock_live(monkeypatch, [{"session_id": "ses_live", "state": "active"}])
 
-    _, body = _get("/api/agents/graph?include_ended=0")
+    _, body = _get("/api/agents-graph?include_ended=0")
     assert {n["session_id"] for n in body["nodes"]} == {"ses_live"}
 
 
@@ -100,7 +100,7 @@ def test_controller_unreachable_degrades(monkeypatch, tmp_path):
 
     monkeypatch.setattr(internal_client, "list_running_agents", fake_raise)
 
-    status, body = _get("/api/agents/graph")
+    status, body = _get("/api/agents-graph")
     assert status == 200
     assert body["ok"] is True
     assert body.get("live_unreachable") is True
@@ -109,16 +109,17 @@ def test_controller_unreachable_degrades(monkeypatch, tmp_path):
     assert body["counts"]["live"] == 0
 
 
-def test_graph_path_not_swallowed_by_name_route(monkeypatch, tmp_path):
-    """The dynamic ``/api/agents/<name>`` rule must not capture ``graph``."""
+def test_graph_endpoint_outside_agent_namespace(monkeypatch, tmp_path):
+    """A7: the graph endpoint is /api/agents-graph, OUTSIDE /api/agents/<name>,
+    so it neither shadows nor is shadowed by an agent literally named 'graph'."""
     _seed(monkeypatch, tmp_path)
     _mock_live(monkeypatch, [])
 
-    _, graph_body = _get("/api/agents/graph")
-    assert "nodes" in graph_body  # graph handler, not the agent-detail handler
+    _, graph_body = _get("/api/agents-graph")
+    assert "nodes" in graph_body  # the run-graph handler
 
-    # A genuine unknown agent name still routes to the agent-detail handler,
-    # which returns an agent-shaped error (no "nodes" key) — proving the two
-    # coexist.
-    status, detail_body = _get("/api/agents/definitely-not-an-agent")
+    # /api/agents/graph now falls through to the agent-detail handler for the
+    # agent named "graph" (no "nodes"), proving an agent named "graph" stays
+    # reachable/editable and is not captured by the graph route.
+    _, detail_body = _get("/api/agents/graph")
     assert "nodes" not in detail_body

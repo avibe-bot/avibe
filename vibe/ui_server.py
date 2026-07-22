@@ -3112,11 +3112,11 @@ async def running_agents_end():
     return jsonify(body), (result.get("status_code") or 200)
 
 
-# NOTE: this static route MUST be registered before ``/api/agents/<name>``
-# below — the compat router matches in registration order, so a dynamic
-# ``<name>`` rule declared first would swallow ``/api/agents/graph`` as
-# ``name="graph"``.
-@app.route("/api/agents/graph", methods=["GET"])
+# Contract A7: the run-graph endpoint lives OUTSIDE the ``/api/agents/<name>``
+# namespace (``/api/agents-graph``). ``<name>`` is a user-creatable agent slug,
+# so a ``/api/agents/graph`` path would be shadowed by — or shadow — an agent
+# literally named ``graph``; a distinct top-level path avoids the collision.
+@app.route("/api/agents-graph", methods=["GET"])
 async def agents_graph_get():
     """Read-only run-graph payload for the Agents → 运行 tab.
 
