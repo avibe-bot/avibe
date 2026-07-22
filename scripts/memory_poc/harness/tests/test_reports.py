@@ -171,3 +171,29 @@ def test_summary_marks_search_readiness_unmeasured_before_flush(tmp_path: Path) 
     assert "Search readiness timing: not measured because flush did not complete." in summary
     assert "Profile content via search: not measured." in summary
     assert "Max observed cascade lag via search: not measured." in summary
+
+
+def test_summary_allows_a_slash_in_the_configured_model_name(tmp_path: Path) -> None:
+    path = tmp_path / "summary.md"
+    settings = _settings(tmp_path)
+    settings = ProviderSettings(
+        llm_base_url=settings.llm_base_url,
+        llm_model="provider/model",
+        llm_api_key=settings.llm_api_key,
+        embedding_base_url=settings.embedding_base_url,
+        embedding_model=settings.embedding_model,
+        embedding_api_key=settings.embedding_api_key,
+        source=settings.source,
+    )
+
+    write_summary(
+        path,
+        settings=settings,
+        metrics=CallMetrics(),
+        message_count=1,
+        http_shapes=(),
+        readiness=SearchReadiness(profile_ms=None, episode_ms=1, atomic_fact_ms=2, timeout_ms=600000),
+    )
+
+    summary = path.read_text(encoding="utf-8")
+    assert "profile not published/readable via public search in 1.1.3 + provider/model;" in summary

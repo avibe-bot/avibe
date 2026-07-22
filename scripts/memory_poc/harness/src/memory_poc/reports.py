@@ -265,13 +265,25 @@ def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...
 def _profile_known_absent_lines(readiness: SearchReadiness | None, *, model_name: str) -> tuple[str, ...]:
     if readiness is None or not readiness.profile_known_absent:
         return ()
-    if not _safe_identifier(model_name):
-        raise ReportValidationError("summary_model_invalid")
+    rendered_model_name = _summary_model_name(model_name)
     return (
         "WARNING: profile content not retrievable via /search within the window; episode+fact retrieval succeeded; "
         "profile treated as known-absent.",
-        f"Conclusion: profile not published/readable via public search in 1.1.3 + {model_name}; accepted as known behavior for MVP.",
+        f"Conclusion: profile not published/readable via public search in 1.1.3 + {rendered_model_name}; accepted as known behavior for MVP.",
     )
+
+
+def _summary_model_name(model_name: Any) -> str:
+    """Render provider model metadata without making model syntax a gate."""
+    if (
+        not isinstance(model_name, str)
+        or not model_name
+        or len(model_name) > 256
+        or _URI_PATTERN.search(model_name)
+        or any(unicodedata.category(character).startswith("C") for character in model_name)
+    ):
+        return "configured model (redacted)"
+    return model_name
 
 
 def _ingestion_usage_lines(metrics: CallMetrics, divisor: int) -> tuple[str, ...]:
