@@ -10,7 +10,9 @@ import {
   FolderClosed,
   Loader2,
   MessageSquare,
+  Power,
   Square,
+  Trash2,
   X,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -284,24 +286,44 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
               {t(background ? 'agents.graph.detail.toForeground' : 'agents.graph.detail.toBackground')}
             </Button>
           )}
-          {node.live && (
-            <Button
-              type="button"
-              variant={armEnd ? 'destructive' : 'destructive-soft'}
-              size="xs"
-              onClick={() => (armEnd ? endRun() : setArmEnd(true))}
-              onBlur={() => setArmEnd(false)}
-              disabled={busy}
-              className="flex-1"
-            >
-              {busy ? <Loader2 className="size-3 animate-spin" /> : <Square className="size-3" />}
-              {armEnd ? t('agents.running.confirmEnd') : t('agents.graph.detail.cancelRun')}
-            </Button>
-          )}
+          {node.live && (() => {
+            // Per-state end action (Stop / Disconnect / Kill), matching the old
+            // running list: active + orphan are destructive (2-step confirm),
+            // idle disconnect is non-destructive (single click).
+            const meta = END_META[node.status as EndState] ?? END_META.active;
+            const EndIcon = meta.Icon;
+            return (
+              <Button
+                type="button"
+                variant={armEnd ? 'destructive' : 'destructive-soft'}
+                size="xs"
+                onClick={() => (meta.needsConfirm && !armEnd ? setArmEnd(true) : endRun())}
+                onBlur={() => setArmEnd(false)}
+                disabled={busy}
+                className="flex-1"
+              >
+                {busy ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : armEnd ? null : (
+                  <EndIcon className="size-3" />
+                )}
+                {armEnd ? t('agents.running.confirmEnd') : t(meta.labelKey)}
+              </Button>
+            );
+          })()}
         </div>
       </div>
     </div>
   );
+};
+
+// Per-state end action, matching the old running list. Idle disconnect is
+// non-destructive (no confirm); active Stop and orphan Kill require a 2nd click.
+type EndState = 'active' | 'idle' | 'orphan';
+const END_META: Record<EndState, { labelKey: string; Icon: typeof Square; needsConfirm: boolean }> = {
+  active: { labelKey: 'agents.running.endActive', Icon: Square, needsConfirm: true },
+  idle: { labelKey: 'agents.running.endIdle', Icon: Power, needsConfirm: false },
+  orphan: { labelKey: 'agents.running.endOrphan', Icon: Trash2, needsConfirm: true },
 };
 
 // A run row's stored status is already normalized to the run vocabulary; map it

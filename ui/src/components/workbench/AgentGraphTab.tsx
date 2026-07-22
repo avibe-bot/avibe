@@ -113,7 +113,14 @@ export const AgentGraphTab: React.FC = () => {
         // newer one issued after a filter change.
         if (!mountedRef.current || seq !== seqRef.current) return;
         setGraph(result);
-        setOrphans(running && running.ok ? running.agents.filter((a) => !a.session_id) : []);
+        // Orphan strip = genuine leaked processes only (state 'orphan'). A
+        // session-less live row that is active/idle is an enrichment miss, not
+        // an orphan — don't mislabel it as a kill target.
+        setOrphans(
+          running && running.ok
+            ? running.agents.filter((a) => !a.session_id && a.state === 'orphan')
+            : [],
+        );
         setErrored(false);
       } catch {
         if (mountedRef.current && seq === seqRef.current) setErrored(true);
@@ -204,8 +211,13 @@ export const AgentGraphTab: React.FC = () => {
 
   // The visibility column ships with M1; until then nodes carry no `visibility`
   // and the server ignores include_background — so the 显示后台会话 toggle is
-  // inert. Only surface it once at least one node reports visibility.
-  const hasVisibility = useMemo(() => nodes.some((n) => n.visibility !== undefined), [nodes]);
+  // inert. Latch support ON once ANY node has reported visibility, and keep it
+  // (a filtered view that returns zero nodes must not hide the toggle and strand
+  // the user with backgrounds turned off).
+  const [visibilitySeen, setVisibilitySeen] = useState(false);
+  useEffect(() => {
+    if (!visibilitySeen && nodes.some((n) => n.visibility !== undefined)) setVisibilitySeen(true);
+  }, [nodes, visibilitySeen]);
 
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.session_id, n])), [nodes]);
   const triggersById = useMemo(
@@ -307,7 +319,7 @@ export const AgentGraphTab: React.FC = () => {
           )}
         </FilterDropdown>
         <span className="flex-1" />
-        {hasVisibility && (
+        {visibilitySeen && (
           <label className="inline-flex items-center gap-2 text-[12px] text-muted">
             {t('agents.graph.filters.showBackground')}
             <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
