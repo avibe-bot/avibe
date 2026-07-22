@@ -184,12 +184,20 @@ def load_report(
     secret_values: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     try:
-        payload = json.loads(read_private_text(path))
-    except (HarnessError, OSError, ValueError) as exc:
+        raw = read_private_text(path)
+    except (HarnessError, OSError) as exc:
+        raise ReportValidationError("report_unreadable") from exc
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
         raise ReportValidationError("report_unreadable") from exc
     if not isinstance(payload, dict):
         raise ReportValidationError("report_not_object")
     validate_report(payload, fixture_texts=fixture_texts, secret_values=secret_values)
+    # Whole-text scan on the persisted bytes too: an older report written before
+    # the write-time scan existed (or a tampered one) must not expose a configured
+    # secret when loaded and printed by `memory_poc report`.
+    _assert_text_secret_free(raw, secret_values, error_code="report_contains_secret")
     return payload
 
 

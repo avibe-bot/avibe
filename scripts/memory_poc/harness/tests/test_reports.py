@@ -8,7 +8,7 @@ from memory_poc.environment import ProviderSettings
 from memory_poc.errors import ReportValidationError
 from memory_poc.metrics import CallMetrics
 from memory_poc.readiness import SearchReadiness
-from memory_poc.reports import build_report, validate_report, write_report, write_summary
+from memory_poc.reports import build_report, load_report, validate_report, write_report, write_summary
 
 
 def _settings(tmp_path: Path) -> ProviderSettings:
@@ -265,3 +265,35 @@ def test_summary_allows_a_slash_in_the_configured_model_name(tmp_path: Path) -> 
 
     summary = path.read_text(encoding="utf-8")
     assert "profile not published/readable via public search in 1.1.3 + provider/model;" in summary
+
+
+def test_load_report_rejects_stale_secret_in_any_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reviewer r4 blocking: a report persisted by an older head (before the
+    write-time whole-text scan) that contains the configured 35-char key in a
+    non-model field must be rejected on load, not printed by `memory_poc report`."""
+    import json
+
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    secret = "sk-" + "a" * 32  # 35-char key, above the 16-char match floor
+    settings = ProviderSettings(
+        llm_base_url="https://example.invalid/v1",
+        llm_model="qwen3.7-plus",
+        llm_api_key=secret,
+        embedding_base_url="https://example.invalid/v1",
+        embedding_model="qwen3.7-text-embedding",
+        embedding_api_key=secret,
+        source=tmp_path / ".env.poc",
+    )
+    # Simulate a stale report written without the whole-text scan: build a clean
+    # report, then inject the key into duplicates.observed and write it raw.
+    report = build_report(run_id="stale-run", settings=settings)
+    report["duplicates"]["observed"] = "echoed " + secret
+    (tmp_path / "report.json").write_text(
+        json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8"
+    )
+    with pytest.raises(ReportValidationError):
+        load_report(
+            tmp_path / "report.json",
+            fixture_texts=(),
+            secret_values=(settings.llm_api_key, settings.embedding_api_key),
+        )

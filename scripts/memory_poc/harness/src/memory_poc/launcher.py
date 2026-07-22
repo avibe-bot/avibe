@@ -218,12 +218,21 @@ def _signal_owned_processes(identities: Mapping[int, float], signum: int) -> Non
 def _tracked_descendants_alive(
     process: subprocess.Popen[bytes] | None,
     monitor: _TcpListenerMonitor | None,
+    *,
+    process_group: int | None = None,
 ) -> bool:
     """True if any tracked descendant of the owned process is still alive.
 
     The direct child may have exited while a same-group worker it spawned is still
-    running. Treat the sidecar tree as cleaned only when both the direct child is
-    gone AND no monitored descendant remains reachable.
+    running, and that worker may not yet have been observed by the monitor. Treat
+    the sidecar tree as cleaned only when the direct child is gone AND no
+    descendant remains reachable.
+
+    Descendants are discovered via the process group snapshot (which survives the
+    direct child exiting), not via the direct child's psutil tree (which is empty
+    once the child is reaped). When no group is known, only the monitor's last
+    known set is used — the direct child's psutil tree is empty once it has exited,
+    so snapshotting it adds nothing and can fail on a reaped PID.
     """
     identities: dict[int, float] = {}
     if monitor is not None:
@@ -232,9 +241,12 @@ def _tracked_descendants_alive(
         except LaunchError:
             # A monitor that cannot report cannot be assumed clean.
             return True
-    # Always include a fresh snapshot of any current child tree so a descendant
-    # started after the last monitor tick is still detected.
-    if process is not None and _process_has_exited(process):
+    if process_group is not None:
+        identities.update(_snapshot_process_group(process_group))
+    elif process is not None and not _process_has_exited(process):
+        # Child still alive: include its current tree for descendants the monitor
+        # has not yet observed. When the child has already exited, this tree is
+        # empty by definition and is skipped.
         identities.update(_snapshot_owned_processes(process))
     return bool(_live_owned_processes(identities))
 
@@ -450,8 +462,12 @@ class EverOSProcess:
         process = self.process
         if process is None:
             return True
+        monitor = self.tcp_monitor
+        process_group = None
+        if monitor is not None:
+            process_group = monitor.process_group
         return _process_has_exited(process) and not _tracked_descendants_alive(
-            process, self.tcp_monitor
+            process, monitor, process_group=process_group
         )
 
     def stop(self) -> None:
@@ -477,7 +493,7 @@ class EverOSProcess:
 
     def _terminate_child_with_retries(self) -> LaunchError | None:
         process = self.process
-        if process is None or _process_has_exited(process):
+        if process is None:
             return None
         monitor = self.tcp_monitor
         last_error: LaunchError | None = None
@@ -490,6 +506,11 @@ class EverOSProcess:
                     process_group = monitor.process_group
                 except LaunchError as exc:
                     last_error = exc
+            child_exited = _process_has_exited(process)
+            if child_exited and not _tracked_descendants_alive(
+                process, monitor, process_group=process_group
+            ):
+                return None
             try:
                 terminate_owned_process(
                     process,
@@ -498,7 +519,9 @@ class EverOSProcess:
                 )
             except LaunchError as exc:
                 last_error = exc
-            if _process_has_exited(process) and not _tracked_descendants_alive(process, monitor):
+            if _process_has_exited(process) and not _tracked_descendants_alive(
+                process, monitor, process_group=process_group
+            ):
                 return None
             if last_error is None:
                 last_error = LaunchError("sidecar_process_termination_failed")
