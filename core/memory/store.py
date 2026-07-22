@@ -40,6 +40,32 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _absolute_path_without_resolve(value: Path | str) -> Path:
+    """Make a lexical absolute path without following any filesystem links."""
+
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(value))))
+
+
+def _ensure_no_follow_directory_chain(directory: Path) -> None:
+    """Create and validate each directory component before SQLite can open a file."""
+
+    if not directory.is_absolute():
+        raise OSError("Memory store path must be absolute")
+    current = Path(directory.anchor)
+    for component in directory.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            try:
+                os.mkdir(current, mode=0o700)
+            except FileExistsError:
+                pass
+            info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError("Memory store path contains an unsafe directory component")
+
+
 @dataclass(frozen=True)
 class MemoryMeta:
     epoch: int
@@ -96,7 +122,10 @@ class MemoryStore:
     """Own the small, durable Memory queue without exposing SQLite to callers."""
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self.path = (db_path or memory_store_path()).expanduser().resolve()
+        self._effective_home = _absolute_path_without_resolve(paths.get_vibe_remote_dir())
+        requested_path = db_path if db_path is not None else memory_store_path()
+        self.path = _absolute_path_without_resolve(requested_path)
+        self._validate_store_confinement()
         self._prepare_private_directory()
         self._initialize()
         self._enforce_private_database_modes()
@@ -620,6 +649,21 @@ class MemoryStore:
                 now,
             )
 
+    def clear_system_outage_error(self) -> None:
+        """Clear only the availability categories resolved by a fresh health probe."""
+
+        now = utc_now_iso()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET last_error = NULL, updated_at = ?
+                WHERE singleton = 1
+                  AND last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                """,
+                (now,),
+            )
+
     def compact_terminal_tombstones(self, *, now: datetime | None = None) -> int:
         """Bound terminal digest retention by age and count without exposing payloads."""
 
@@ -732,12 +776,13 @@ class MemoryStore:
         )
 
     def _prepare_private_directory(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _ensure_no_follow_directory_chain(self._effective_home)
+        _ensure_no_follow_directory_chain(self.path.parent)
         directory_info = os.lstat(self.path.parent)
         if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
             raise OSError("Memory store directory must be an owned directory")
         os.chmod(self.path.parent, 0o700)
-        if stat.S_IMODE(os.stat(self.path.parent).st_mode) != 0o700:
+        if stat.S_IMODE(os.lstat(self.path.parent).st_mode) != 0o700:
             raise OSError("Memory store directory is not owner-only")
         try:
             database_info = os.lstat(self.path)
@@ -759,8 +804,16 @@ class MemoryStore:
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
                 raise OSError("Memory database path must be a regular file")
             os.chmod(candidate, 0o600)
-            if stat.S_IMODE(os.stat(candidate).st_mode) != 0o600:
+            if stat.S_IMODE(os.lstat(candidate).st_mode) != 0o600:
                 raise OSError("Memory database is not owner-only")
+
+    def _validate_store_confinement(self) -> None:
+        try:
+            self.path.relative_to(self._effective_home)
+        except ValueError as error:
+            raise OSError("Memory store path must stay within the effective Avibe home") from error
+        if self.path == self._effective_home:
+            raise OSError("Memory store path must name a database below the effective Avibe home")
 
     def _compact_terminal_tombstones_in_connection(
         self,

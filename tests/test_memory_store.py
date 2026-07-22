@@ -9,11 +9,16 @@ from pathlib import Path
 
 import pytest
 
+from config import paths
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
     TERMINAL_TOMBSTONE_RETENTION,
 )
+
+
+def _store_path(scope: Path, filename: str = "memory.sqlite") -> Path:
+    return paths.get_state_dir() / "memory-tests" / scope.name / filename
 
 
 def _enqueue(store: MemoryStore, digest: str, *, occurred_at_ms: int = 1_000):
@@ -27,7 +32,7 @@ def _enqueue(store: MemoryStore, digest: str, *, occurred_at_ms: int = 1_000):
 
 
 def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
 
     with sqlite3.connect(store.path) as conn:
         tables = {
@@ -52,7 +57,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
 
 
 def test_duplicate_enqueue_is_atomic_and_does_not_advance_provider_clock(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
 
     first = _enqueue(store, "same", occurred_at_ms=5_000)
     duplicate = _enqueue(store, "same", occurred_at_ms=99_000)
@@ -68,7 +73,7 @@ def test_duplicate_enqueue_is_atomic_and_does_not_advance_provider_clock(tmp_pat
 
 
 def test_concurrent_duplicate_enqueue_has_one_row(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(lambda _: _enqueue(store, "same").outcome, range(2)))
@@ -78,7 +83,7 @@ def test_concurrent_duplicate_enqueue_has_one_row(tmp_path: Path) -> None:
 
 
 def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
     accepted = store.enqueue_capture(
         source_message_digest="one",
         session_ref="src--one--e0",
@@ -109,7 +114,7 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
 
 
 def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
     _enqueue(store, "queued")
     claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
     assert claimed is not None
@@ -131,7 +136,7 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
 
 
 def test_terminal_tombstones_compact_by_retention(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
     _enqueue(store, "terminal")
     row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
     assert row is not None
@@ -161,7 +166,7 @@ def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatc
 
 
 def test_store_enforces_owner_only_directory_and_database_modes_under_open_umask(tmp_path: Path) -> None:
-    database = tmp_path / "memory-private" / "memory.sqlite"
+    database = _store_path(tmp_path / "memory-private")
     original_umask = os.umask(0o022)
     try:
         store = MemoryStore(database)
@@ -173,7 +178,8 @@ def test_store_enforces_owner_only_directory_and_database_modes_under_open_umask
 
 
 def test_opening_a_higher_version_database_never_downgrades_user_version(tmp_path: Path) -> None:
-    database = tmp_path / "future-version.sqlite"
+    database = _store_path(tmp_path / "future-version", "future-version.sqlite")
+    database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
         conn.execute("PRAGMA user_version = 2")
 
@@ -181,3 +187,20 @@ def test_opening_a_higher_version_database_never_downgrades_user_version(tmp_pat
 
     with sqlite3.connect(database) as conn:
         assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+
+
+def test_store_rejects_a_symlinked_state_component_before_creating_external_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effective_home = tmp_path / "effective-home"
+    external = tmp_path / "external-memory-state"
+    monkeypatch.setenv("AVIBE_HOME", str(effective_home))
+    memory_directory = effective_home / "state" / "memory"
+    memory_directory.parent.mkdir(parents=True)
+    memory_directory.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        MemoryStore()
+
+    assert not external.exists()

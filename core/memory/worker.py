@@ -128,8 +128,12 @@ class MemoryWorker:
                         timeout=self._ingest_timeout_seconds,
                     )
                 except asyncio.TimeoutError:
-                    await self._return_system_failure(row, "memory_provider_timeout")
-                    break
+                    if await self._ambiguous_failure_is_system_outage(
+                        row,
+                        "memory_provider_timeout",
+                    ):
+                        break
+                    continue
                 except MemoryProviderSystemFailure as failure:
                     await self._return_system_failure(
                         row,
@@ -144,20 +148,19 @@ class MemoryWorker:
                     )
                     continue
                 except MemoryProviderFailure as failure:
-                    if not await self._provider_healthy():
-                        await self._return_system_failure(row, "memory_sidecar_unavailable")
-                        break
-                    await self._record_message_failure(
+                    if await self._ambiguous_failure_is_system_outage(
                         row,
                         _provider_error_code(failure, "memory_processing_failed"),
-                        failure.retryable,
-                    )
+                        retryable=failure.retryable,
+                    ):
+                        break
                     continue
                 except Exception:
-                    if not await self._provider_healthy():
-                        await self._return_system_failure(row, "memory_sidecar_unavailable")
+                    if await self._ambiguous_failure_is_system_outage(
+                        row,
+                        "memory_processing_failed",
+                    ):
                         break
-                    await self._record_message_failure(row, "memory_processing_failed", True)
                     continue
 
                 await self._store_call(
@@ -184,6 +187,7 @@ class MemoryWorker:
                 return False
             self._system_paused = False
             self._system_pause_until = None
+            await self._store_call(self._store.clear_system_outage_error)
             return True
 
         if not await self._provider_healthy():
@@ -201,6 +205,21 @@ class MemoryWorker:
             error=error,
             now=_iso_from_datetime(self._current_time()),
         )
+
+    async def _ambiguous_failure_is_system_outage(
+        self,
+        row: QueueRow,
+        error: MemoryErrorCode,
+        *,
+        retryable: bool = True,
+    ) -> bool:
+        """Probe health once before spending a row's message-failure budget."""
+
+        if not await self._provider_healthy():
+            await self._return_system_failure(row, "memory_sidecar_unavailable")
+            return True
+        await self._record_message_failure(row, error, retryable)
+        return False
 
     async def _record_message_failure(
         self,

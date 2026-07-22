@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
+import secrets
 import shutil
 import stat
 import unicodedata
@@ -49,6 +51,16 @@ PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 CLEAR_CLEANUP_TIMEOUT_SECONDS = 20.0
 MAX_PROVIDER_DISK_ENTRIES = 100_000
+ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
+ROOT_SENTINEL_SCHEMA_VERSION = 1
+ROOT_PROVIDER_ID = "everos"
+SLICE1_PROVIDER_ROOT_FORMAT = "slice1"
+SLICE1_ARTIFACT_FINGERPRINT = "slice1-core"
+MAX_ROOT_SENTINEL_BYTES = 4 * 1024
+
+
+_ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
+_ROOT_CLEANUP_TASKS: dict[str, asyncio.Task[None]] = {}
 
 
 class _ClearStepFailure(RuntimeError):
@@ -69,6 +81,8 @@ class MemoryModule:
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
         clear_provider_data: Callable[[], Awaitable[None] | None] | None = None,
+        provider_root_format: str = SLICE1_PROVIDER_ROOT_FORMAT,
+        artifact_fingerprint: str = SLICE1_ARTIFACT_FINGERPRINT,
         clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
         clear_cleanup_timeout_seconds: float = CLEAR_CLEANUP_TIMEOUT_SECONDS,
         worker: MemoryWorker | None = None,
@@ -80,6 +94,15 @@ class MemoryModule:
         self._starting_source = starting
         self._disk_free_bytes = disk_free_bytes or self._default_free_disk_bytes
         self._provider_root = provider_root or (paths.get_vibe_remote_dir() / "memory" / "everos-root")
+        self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
+        self._provider_root_format = _root_metadata_value(
+            provider_root_format,
+            fallback=SLICE1_PROVIDER_ROOT_FORMAT,
+        )
+        self._artifact_fingerprint = _root_metadata_value(
+            artifact_fingerprint,
+            fallback=SLICE1_ARTIFACT_FINGERPRINT,
+        )
         self._clear_provider_data = clear_provider_data
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
@@ -225,6 +248,13 @@ class MemoryModule:
                 stats=stats,
                 error=(meta.last_error if meta is not None else None) or "memory_sidecar_unavailable",
             )
+        if not await self._has_minimum_free_disk():
+            return await self._status(
+                "degraded",
+                meta=meta,
+                stats=stats,
+                error="memory_low_disk_space",
+            )
         if (meta is not None and meta.last_error is not None) or stats.dead:
             return await self._status("degraded", meta=meta, stats=stats)
         if stats.pending or stats.processing:
@@ -235,23 +265,24 @@ class MemoryModule:
         """Run one idempotent, bounded clear lifecycle operation."""
 
         async with self._lifecycle_lock:
-            self._clear_active = True
-            try:
-                started = await self._store_call(self._store.begin_clear)
-                if not await self._worker.pause_and_wait(
-                    timeout_seconds=self._clear_drain_timeout_seconds
-                ):
-                    raise _ClearStepFailure("worker drain did not stop in time")
-                await self._clear_provider_data_or_fail()
-                completed = await self._store_call(self._store.finish_clear)
-            except Exception:
-                await self._record_clear_failure()
-                return OperationFailed(error="memory_clear_failed")
-            finally:
-                self._clear_active = False
+            async with self._root_lifecycle_lock():
+                self._clear_active = True
+                try:
+                    started = await self._store_call(self._store.begin_clear)
+                    if not await self._worker.pause_and_wait(
+                        timeout_seconds=self._clear_drain_timeout_seconds
+                    ):
+                        raise _ClearStepFailure("worker drain did not stop in time")
+                    await self._clear_provider_data_or_fail(started)
+                    completed = await self._store_call(self._store.finish_clear)
+                except Exception:
+                    await self._record_clear_failure()
+                    return OperationFailed(error="memory_clear_failed")
+                finally:
+                    self._clear_active = False
 
-            self._worker.resume_claims()
-            return ClearCompleted(epoch=completed.epoch if completed is not None else started.epoch)
+                self._worker.resume_claims()
+                return ClearCompleted(epoch=completed.epoch if completed is not None else started.epoch)
 
     async def _recover_interrupted_clear(self) -> OperationFailed | None:
         """Retry a durable clear marker on every eligible lifecycle check."""
@@ -259,29 +290,30 @@ class MemoryModule:
         if self._clear_active:
             return None
         async with self._lifecycle_lock:
-            if self._clear_active:
-                return None
-            try:
-                meta = await self._store_call(self._store.get_meta)
-            except Exception:
-                return OperationFailed(error="memory_clear_failed")
-            if meta is None or not meta.clear_in_progress:
+            async with self._root_lifecycle_lock():
+                if self._clear_active:
+                    return None
+                try:
+                    meta = await self._store_call(self._store.get_meta)
+                except Exception:
+                    return OperationFailed(error="memory_clear_failed")
+                if meta is None or not meta.clear_in_progress:
+                    self._worker.resume_claims()
+                    return None
+
+                try:
+                    if not await self._worker.pause_and_wait(
+                        timeout_seconds=self._clear_drain_timeout_seconds
+                    ):
+                        raise _ClearStepFailure("worker drain did not stop in time")
+                    await self._clear_provider_data_or_fail(meta)
+                    await self._store_call(self._store.finish_clear)
+                except Exception:
+                    await self._record_clear_failure()
+                    return OperationFailed(error="memory_clear_failed")
+
                 self._worker.resume_claims()
                 return None
-
-            try:
-                if not await self._worker.pause_and_wait(
-                    timeout_seconds=self._clear_drain_timeout_seconds
-                ):
-                    raise _ClearStepFailure("worker drain did not stop in time")
-                await self._clear_provider_data_or_fail()
-                await self._store_call(self._store.finish_clear)
-            except Exception:
-                await self._record_clear_failure()
-                return OperationFailed(error="memory_clear_failed")
-
-            self._worker.resume_claims()
-            return None
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:
@@ -406,18 +438,155 @@ class MemoryModule:
         except Exception:
             return False
 
-    async def _clear_provider_data_or_fail(self) -> None:
-        if self._clear_provider_data is None:
-            raise _ClearStepFailure("provider clear dependency is unavailable")
+    async def _has_minimum_free_disk(self) -> bool:
         try:
-            async with asyncio.timeout(self._clear_cleanup_timeout_seconds):
-                result = await asyncio.to_thread(self._clear_provider_data)
-                if inspect.isawaitable(result):
-                    await result
-        except TimeoutError as error:
+            return int(await asyncio.to_thread(self._disk_free_bytes)) >= MIN_FREE_DISK_BYTES
+        except Exception:
+            return False
+
+    async def _clear_provider_data_or_fail(self, meta: MemoryMeta) -> None:
+        """Clear one verified root without allowing timed-out cleanup to escape ownership."""
+
+        await asyncio.to_thread(self._verify_owned_provider_root, meta, require_empty=False)
+        await self._run_owned_provider_cleanup()
+        await asyncio.to_thread(self._recreate_owned_provider_root, meta)
+
+    def _root_lifecycle_lock(self) -> asyncio.Lock:
+        return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())
+
+    async def _run_owned_provider_cleanup(self) -> None:
+        """Await a cleanup task once, retaining it after timeout until it actually ends."""
+
+        existing = _ROOT_CLEANUP_TASKS.get(self._provider_root_key)
+        if existing is not None:
+            if not existing.done():
+                raise _ClearStepFailure("provider cleanup is still running")
+            _ROOT_CLEANUP_TASKS.pop(self._provider_root_key, None)
+            try:
+                existing.result()
+            except BaseException as error:
+                raise _ClearStepFailure("provider cleanup failed") from error
+            return
+
+        task = asyncio.create_task(self._invoke_provider_cleanup())
+        _ROOT_CLEANUP_TASKS[self._provider_root_key] = task
+        task.add_done_callback(_consume_cleanup_task_exception)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=self._clear_cleanup_timeout_seconds,
+            )
+        except asyncio.TimeoutError as error:
+            # Shielding leaves the task owned here.  A later recovery sees it and
+            # cannot start a second cleanup against the same provider root.
             raise _ClearStepFailure("provider clear timed out") from error
-        if not self._provider_root_is_empty():
-            raise _ClearStepFailure("provider root was not cleared")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _ROOT_CLEANUP_TASKS.pop(self._provider_root_key, None)
+            raise _ClearStepFailure("provider cleanup failed") from error
+        else:
+            _ROOT_CLEANUP_TASKS.pop(self._provider_root_key, None)
+
+    async def _invoke_provider_cleanup(self) -> None:
+        callback = self._clear_provider_data
+        if callback is None:
+            raise _ClearStepFailure("provider clear dependency is unavailable")
+        result = await asyncio.to_thread(callback)
+        if inspect.isawaitable(result):
+            await result
+
+    def _verify_owned_provider_root(self, meta: MemoryMeta, *, require_empty: bool) -> None:
+        root_info = _lstat_or_clear_failure(self._provider_root, "provider root")
+        _require_owned_directory(root_info, "provider root", private=True)
+        sentinel_path = self._provider_root / ROOT_SENTINEL_FILENAME
+        sentinel_info = _lstat_or_clear_failure(sentinel_path, "provider root sentinel")
+        _require_owned_regular_file(sentinel_info, "provider root sentinel", private=True)
+        sentinel = _read_root_sentinel(sentinel_path)
+        expected_keys = {
+            "schema_version",
+            "provider_root_id",
+            "provider_id",
+            "provider_root_format",
+            "created_by_artifact_fingerprint",
+        }
+        if not isinstance(sentinel, dict) or set(sentinel) != expected_keys:
+            raise _ClearStepFailure("provider root sentinel is invalid")
+        if (
+            type(sentinel.get("schema_version")) is not int
+            or sentinel.get("schema_version") != ROOT_SENTINEL_SCHEMA_VERSION
+        ):
+            raise _ClearStepFailure("provider root sentinel schema is invalid")
+        if sentinel.get("provider_root_id") != meta.provider_root_id:
+            raise _ClearStepFailure("provider root id does not match")
+        if sentinel.get("provider_id") != ROOT_PROVIDER_ID:
+            raise _ClearStepFailure("provider root owner does not match")
+        if sentinel.get("provider_root_format") != self._provider_root_format:
+            raise _ClearStepFailure("provider root format does not match")
+        if not _is_root_metadata_value(sentinel.get("created_by_artifact_fingerprint")):
+            raise _ClearStepFailure("provider root sentinel is invalid")
+
+        if require_empty:
+            try:
+                with os.scandir(self._provider_root) as entries:
+                    if any(entry.name != ROOT_SENTINEL_FILENAME for entry in entries):
+                        raise _ClearStepFailure("provider root still contains data")
+            except OSError as error:
+                raise _ClearStepFailure("provider root cannot be read") from error
+
+    def _recreate_owned_provider_root(self, meta: MemoryMeta) -> None:
+        """Remove all provider children with no-follow traversal, preserving the root itself."""
+
+        # The sentinel remains until the replacement is atomically installed, so
+        # a crash retains a verifiable root for idempotent recovery.
+        self._verify_owned_provider_root(meta, require_empty=False)
+        try:
+            with os.scandir(self._provider_root) as entries:
+                children = [Path(entry.path) for entry in entries if entry.name != ROOT_SENTINEL_FILENAME]
+        except OSError as error:
+            raise _ClearStepFailure("provider root cannot be read") from error
+        for child in children:
+            _remove_root_child_no_follow(child)
+        self._write_root_sentinel(meta)
+        self._verify_owned_provider_root(meta, require_empty=True)
+
+    def _write_root_sentinel(self, meta: MemoryMeta) -> None:
+        payload = json.dumps(
+            {
+                "schema_version": ROOT_SENTINEL_SCHEMA_VERSION,
+                "provider_root_id": meta.provider_root_id,
+                "provider_id": ROOT_PROVIDER_ID,
+                "provider_root_format": self._provider_root_format,
+                "created_by_artifact_fingerprint": self._artifact_fingerprint,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        temporary = self._provider_root / f".{ROOT_SENTINEL_FILENAME}.{secrets.token_hex(8)}.tmp"
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary, self._provider_root / ROOT_SENTINEL_FILENAME)
+            sentinel_info = _lstat_or_clear_failure(
+                self._provider_root / ROOT_SENTINEL_FILENAME,
+                "provider root sentinel",
+            )
+            _require_owned_regular_file(sentinel_info, "provider root sentinel", private=True)
+        except OSError as error:
+            raise _ClearStepFailure("provider root sentinel could not be written") from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
     async def _record_clear_failure(self) -> None:
         try:
@@ -461,21 +630,6 @@ class MemoryModule:
             return 0
         return total
 
-    def _provider_root_is_empty(self) -> bool:
-        try:
-            root_info = self._provider_root.lstat()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-            return False
-        try:
-            with os.scandir(self._provider_root) as entries:
-                return next(entries, None) is None
-        except OSError:
-            return False
-
     @staticmethod
     def _normalize_text(value: object) -> str:
         if not isinstance(value, str):
@@ -498,6 +652,117 @@ class MemoryModule:
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return error.error if is_memory_error_code(error.error) else fallback
+
+
+def _consume_cleanup_task_exception(task: asyncio.Task[None]) -> None:
+    """Retrieve a retained task error without exposing provider details anywhere."""
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        return
+
+
+def _lstat_or_clear_failure(path: Path, label: str) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as error:
+        raise _ClearStepFailure(f"{label} is unavailable") from error
+
+
+def _require_owned_directory(info: os.stat_result, label: str, *, private: bool) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise _ClearStepFailure(f"{label} is not an owned directory")
+    _require_current_user_owner(info, label)
+    if private and stat.S_IMODE(info.st_mode) != 0o700:
+        raise _ClearStepFailure(f"{label} is not owner-only")
+
+
+def _require_owned_regular_file(info: os.stat_result, label: str, *, private: bool) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise _ClearStepFailure(f"{label} is not an owned regular file")
+    _require_current_user_owner(info, label)
+    if private and stat.S_IMODE(info.st_mode) != 0o600:
+        raise _ClearStepFailure(f"{label} is not owner-only")
+
+
+def _require_current_user_owner(info: os.stat_result, label: str) -> None:
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid) and info.st_uid != getuid():
+        raise _ClearStepFailure(f"{label} has an unexpected owner")
+
+
+def _read_root_sentinel(path: Path) -> object:
+    flags = os.O_RDONLY
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags | no_follow)
+        _require_owned_regular_file(
+            os.fstat(descriptor),
+            "provider root sentinel",
+            private=True,
+        )
+        chunks: list[bytes] = []
+        remaining = MAX_ROOT_SENTINEL_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+    except OSError as error:
+        raise _ClearStepFailure("provider root sentinel cannot be read") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(payload) > MAX_ROOT_SENTINEL_BYTES:
+        raise _ClearStepFailure("provider root sentinel is too large")
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError) as error:
+        raise _ClearStepFailure("provider root sentinel is invalid") from error
+
+
+def _remove_root_child_no_follow(path: Path) -> None:
+    try:
+        info = os.lstat(path)
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            with os.scandir(path) as entries:
+                children = [Path(entry.path) for entry in entries]
+            for child in children:
+                _remove_root_child_no_follow(child)
+            os.rmdir(path)
+        else:
+            os.unlink(path)
+    except OSError as error:
+        raise _ClearStepFailure("provider root child could not be removed") from error
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    written = 0
+    while written < len(payload):
+        result = os.write(descriptor, payload[written:])
+        if result <= 0:
+            raise OSError("provider root sentinel write failed")
+        written += result
+
+
+def _is_root_metadata_value(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 128
+        and value.isascii()
+        and all(character.isalnum() or character in {"-", "_", "."} for character in value)
+    )
+
+
+def _root_metadata_value(value: object, *, fallback: str) -> str:
+    return value if _is_root_metadata_value(value) else fallback
 
 
 def _utf8_bytes(value: str) -> bytes | None:

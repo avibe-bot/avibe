@@ -1,5 +1,3 @@
-"""Slice 2 home for the owned EverOS sidecar lifecycle."""
+"""Internal Slice 2 implementation slot; Slice 1 exposes no process runtime API."""
 
-
-class EverOSProcess:
-    """Placeholder until the EverOS process supervisor implementation lands."""
+__all__: tuple[str, ...] = ()

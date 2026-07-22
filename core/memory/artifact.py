@@ -1,5 +1,3 @@
-"""Slice 2 home for the managed Memory runtime specialization."""
+"""Internal Slice 2 implementation slot; Slice 1 exposes no artifact runtime API."""
 
-
-class MemoryArtifactManager:
-    """Placeholder until the managed memory-runtime implementation lands."""
+__all__: tuple[str, ...] = ()

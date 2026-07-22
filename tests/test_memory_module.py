@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
+import threading
 from collections import deque
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -10,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from config import paths
 from core.memory.everos import (
     FakeMemoryProvider,
     MemoryProviderFailure,
@@ -37,6 +40,34 @@ from core.memory.types import (
 from core.memory.worker import MemoryWorker, SYSTEM_PAUSE_SECONDS
 
 
+ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
+
+
+def _store_path(scope: Path) -> Path:
+    return paths.get_state_dir() / "memory-tests" / scope.name / "memory.sqlite"
+
+
+def _write_owned_provider_root(root: Path, store: MemoryStore) -> None:
+    meta = store.ensure_meta()
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+    sentinel = root / ROOT_SENTINEL_FILENAME
+    sentinel.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider_root_id": meta.provider_root_id,
+                "provider_id": "everos",
+                "provider_root_format": "slice1",
+                "created_by_artifact_fingerprint": "slice1-core",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    sentinel.chmod(0o600)
+
+
 def _request(
     *,
     source: str = "source-1",
@@ -60,9 +91,14 @@ def _module(
     provider: FakeMemoryProvider | None = None,
     enabled=True,
     disk_free_bytes=None,
+    owned_provider_root: bool = False,
     **kwargs,
 ) -> tuple[MemoryModule, MemoryStore, FakeMemoryProvider]:
-    store = MemoryStore(tmp_path / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path))
+    if owned_provider_root:
+        provider_root = kwargs.pop("provider_root", tmp_path / "provider-root")
+        _write_owned_provider_root(provider_root, store)
+        kwargs["provider_root"] = provider_root
     fake = provider or FakeMemoryProvider()
     module = MemoryModule(
         store,
@@ -304,7 +340,13 @@ async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module
         if calls == 1:
             raise RuntimeError("clear-body-canary")
 
-    module, store, provider = _module(tmp_path, clear_provider_data=clear_provider_data)
+    provider_root = tmp_path / "provider-root"
+    module, store, provider = _module(
+        tmp_path,
+        clear_provider_data=clear_provider_data,
+        owned_provider_root=True,
+        provider_root=provider_root,
+    )
     assert await module.capture(_request()) == CaptureAccepted()
     assert await module.clear() == OperationFailed(error="memory_clear_failed")
     assert store.ensure_meta().clear_in_progress is True
@@ -316,6 +358,7 @@ async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module
         enabled=True,
         disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
         clear_provider_data=clear_provider_data,
+        provider_root=provider_root,
     )
     status = await recovered.status()
     assert calls == 2
@@ -338,7 +381,11 @@ async def test_status_reports_clearing_while_clear_waits_on_provider_data(tmp_pa
         entered.set()
         await release.wait()
 
-    module, _store, _provider = _module(tmp_path, clear_provider_data=clear_provider_data)
+    module, _store, _provider = _module(
+        tmp_path,
+        clear_provider_data=clear_provider_data,
+        owned_provider_root=True,
+    )
     clear_task = asyncio.create_task(module.clear())
     await entered.wait()
     assert (await module.status()).state == "clearing"
@@ -446,7 +493,7 @@ async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Pat
             with super()._transaction() as conn:
                 yield conn
 
-    store = CountingStore(tmp_path / "memory.sqlite")
+    store = CountingStore(_store_path(tmp_path))
     module = MemoryModule(
         store,
         FakeMemoryProvider(),
@@ -467,7 +514,11 @@ async def test_capture_does_not_wait_or_admit_during_an_active_clear(tmp_path: P
         entered.set()
         await release.wait()
 
-    module, store, _provider = _module(tmp_path, clear_provider_data=clear_provider_data)
+    module, store, _provider = _module(
+        tmp_path,
+        clear_provider_data=clear_provider_data,
+        owned_provider_root=True,
+    )
     clear_task = asyncio.create_task(module.clear())
     await entered.wait()
 
@@ -512,10 +563,13 @@ async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path
         tmp_path / "cleanup-timeout",
         clear_provider_data=never_finish_cleanup,
         clear_cleanup_timeout_seconds=0.01,
+        owned_provider_root=True,
     )
 
     assert await asyncio.wait_for(module.clear(), timeout=0.5) == OperationFailed(error="memory_clear_failed")
     assert store.ensure_meta().clear_in_progress is True
+    cleanup_wait.set()
+    await asyncio.sleep(0)
 
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -527,7 +581,9 @@ async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path
             await release.wait()
 
     provider = BlockingProvider()
-    store = MemoryStore(tmp_path / "drain-timeout" / "memory.sqlite")
+    store = MemoryStore(_store_path(tmp_path / "drain-timeout"))
+    provider_root = tmp_path / "drain-timeout" / "provider-root"
+    _write_owned_provider_root(provider_root, store)
     worker = MemoryWorker(
         store=store,
         provider=provider,
@@ -541,6 +597,7 @@ async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path
         disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
         clear_provider_data=lambda: None,
         clear_drain_timeout_seconds=0.01,
+        provider_root=provider_root,
         worker=worker,
     )
     assert await module.capture(_request()) == CaptureAccepted()
@@ -571,8 +628,10 @@ async def test_interrupted_clear_rechecks_after_a_transient_store_read_failure(t
         nonlocal calls
         calls += 1
 
-    store = FailingFirstReadStore(tmp_path / "memory.sqlite")
+    store = FailingFirstReadStore(_store_path(tmp_path))
     store.begin_clear()
+    provider_root = tmp_path / "provider-root"
+    _write_owned_provider_root(provider_root, store)
     store.fail_next_read = True
     module = MemoryModule(
         store,
@@ -580,6 +639,7 @@ async def test_interrupted_clear_rechecks_after_a_transient_store_read_failure(t
         enabled=True,
         disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
         clear_provider_data=clear_provider_data,
+        provider_root=provider_root,
     )
 
     first = await module.status()
@@ -597,6 +657,7 @@ async def test_disabled_clear_resumes_worker_after_reenable(tmp_path: Path) -> N
         tmp_path,
         enabled=lambda: enabled["value"],
         clear_provider_data=lambda: None,
+        owned_provider_root=True,
     )
     assert await module.capture(_request(source="before-clear")) == CaptureAccepted()
     enabled["value"] = False
@@ -656,3 +717,163 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
 
     assert "MemoryProviderPort" not in memory.__all__
     assert "ProviderCapture" not in memory.__all__
+
+
+async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_work(tmp_path: Path) -> None:
+    class PoisonProvider(FakeMemoryProvider):
+        async def ingest(self, capture):
+            if capture.text == "poison":
+                await asyncio.Event().wait()
+            await super().ingest(capture)
+
+    provider = PoisonProvider()
+    module, store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request(source="poison", text="poison")) == CaptureAccepted()
+    assert await module.capture(_request(source="later", text="later")) == CaptureAccepted()
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="poison-worker",
+        now=lambda: current,
+        ingest_timeout_seconds=0.01,
+    )
+
+    assert await worker.drain_once() == 1
+    assert store.list_queue_rows()[0].attempts == 1
+    current += timedelta(seconds=31)
+    assert await worker.drain_once() == 1
+    assert store.list_queue_rows()[0].attempts == 2
+    current += timedelta(minutes=2, seconds=1)
+    assert await worker.drain_once() == 1
+    poison = store.list_queue_rows()[0]
+    assert (poison.state, poison.attempts, poison.payload_text) == ("dead", 3, None)
+
+    assert await worker.drain_once() == 1
+    later = store.list_queue_rows()[1]
+    assert later.state == "delivered"
+    assert [capture.text for capture in provider.captures] == ["later"]
+
+
+async def test_clear_rejects_a_missing_or_unsentinelized_provider_root(tmp_path: Path) -> None:
+    missing_root = tmp_path / "missing-root"
+    missing, missing_store, _provider = _module(
+        tmp_path / "missing",
+        provider_root=missing_root,
+        clear_provider_data=lambda: None,
+    )
+    assert await missing.clear() == OperationFailed(error="memory_clear_failed")
+    assert missing_store.ensure_meta().clear_in_progress is True
+
+    root_without_sentinel = tmp_path / "root-without-sentinel"
+    root_without_sentinel.mkdir()
+    unsentinelized, unsentinelized_store, _provider = _module(
+        tmp_path / "unsentinelized",
+        provider_root=root_without_sentinel,
+        clear_provider_data=lambda: None,
+    )
+    assert await unsentinelized.clear() == OperationFailed(error="memory_clear_failed")
+    assert unsentinelized_store.ensure_meta().clear_in_progress is True
+
+
+async def test_clear_removes_provider_children_and_recreates_the_owned_sentinel(tmp_path: Path) -> None:
+    provider_root = tmp_path / "provider-root"
+    module, store, _provider = _module(
+        tmp_path,
+        provider_root=provider_root,
+        clear_provider_data=lambda: None,
+        owned_provider_root=True,
+    )
+    (provider_root / "derived-state").write_text("derived", encoding="utf-8")
+    nested = provider_root / "nested"
+    nested.mkdir()
+    (nested / "more-state").write_text("derived", encoding="utf-8")
+
+    assert isinstance(await module.clear(), ClearCompleted)
+    assert [entry.name for entry in provider_root.iterdir()] == [ROOT_SENTINEL_FILENAME]
+    sentinel = json.loads((provider_root / ROOT_SENTINEL_FILENAME).read_text(encoding="utf-8"))
+    assert sentinel["provider_root_id"] == store.ensure_meta().provider_root_id
+    assert store.ensure_meta().clear_in_progress is False
+
+
+async def test_timed_out_sync_cleanup_remains_lifecycle_owned_without_overlap(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    calls = 0
+    active = 0
+    max_active = 0
+
+    def blocking_cleanup() -> None:
+        nonlocal active, calls, max_active
+        with lock:
+            calls += 1
+            active += 1
+            max_active = max(max_active, active)
+        started.set()
+        release.wait(timeout=1.0)
+        with lock:
+            active -= 1
+
+    module, _store, _provider = _module(
+        tmp_path,
+        clear_provider_data=blocking_cleanup,
+        clear_cleanup_timeout_seconds=0.01,
+        owned_provider_root=True,
+    )
+    try:
+        assert await module.clear() == OperationFailed(error="memory_clear_failed")
+        assert await asyncio.to_thread(started.wait, 0.5)
+
+        status = await asyncio.wait_for(module.status(), timeout=0.2)
+        assert status.state == "clearing"
+        with lock:
+            assert (calls, max_active) == (1, 1)
+    finally:
+        release.set()
+        await asyncio.sleep(0.05)
+
+
+async def test_status_rechecks_persistent_low_disk_after_an_older_row_delivers(tmp_path: Path) -> None:
+    disk = {"free": MIN_FREE_DISK_BYTES}
+    module, store, provider = _module(tmp_path, disk_free_bytes=lambda: disk["free"])
+    assert await module.capture(_request(source="older")) == CaptureAccepted()
+    disk["free"] = 0
+    assert await module.capture(_request(source="low-disk")) == CaptureSkipped(reason="memory_low_disk_space")
+
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="disk-worker")
+    assert await worker.drain_once() == 1
+
+    status = await module.status()
+    assert status.state == "degraded"
+    assert status.error == "memory_low_disk_space"
+
+
+async def test_health_recovery_clears_only_the_persisted_system_outage_error(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(healthy=False)
+    module, store, _provider = _module(tmp_path, provider=provider)
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="recovery-worker",
+        now=lambda: current,
+    )
+
+    assert await worker.drain_once() == 0
+    assert store.ensure_meta().last_error == "memory_sidecar_unavailable"
+    provider.healthy = True
+    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
+    assert await worker.drain_once() == 0
+    assert store.ensure_meta().last_error is None
+    assert (await module.status()).state == "ready"
+
+
+def test_slice2_placeholder_modules_expose_no_public_runtime_types() -> None:
+    import core.memory.artifact as artifact
+    import core.memory.process as process
+
+    assert not hasattr(artifact, "MemoryArtifactManager")
+    assert not hasattr(process, "EverOSProcess")
