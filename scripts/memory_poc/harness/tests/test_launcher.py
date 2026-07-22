@@ -411,3 +411,40 @@ def test_termination_reaps_a_sidecar_descendant(tmp_path: Path) -> None:
         assert not psutil.pid_exists(descendant_pid) or psutil.Process(descendant_pid).status() == psutil.STATUS_ZOMBIE
     finally:
         terminate_owned_process(parent, timeout_seconds=1)
+
+
+def test_child_reaped_false_when_tracked_descendant_alive(monkeypatch):
+    """Reviewer r3 blocking: direct child exited but a tracked descendant still
+    alive must NOT count as reaped, and stop() must terminate the descendant."""
+
+    from memory_poc.launcher import EverOSProcess
+
+    # A fake process whose poll() says it has exited (direct child gone) ...
+    class _ExitedPopen:
+        def poll(self):
+            return 0  # exited
+
+    # ... plus a real short-lived grandchild we spawn and track via the monitor's
+    # known_processes mapping, simulating a same-group worker outliving its parent.
+    grandchild = subprocess.Popen(
+        ["sleep", "30"], start_new_session=False
+    )
+    grandchild_create = psutil.Process(grandchild.pid).create_time()
+
+    proc = EverOSProcess.__new__(EverOSProcess)
+    proc.process = _ExitedPopen()
+    proc.tcp_monitor = None
+
+    # With no monitor, _snapshot_owned_processes on an exited fake returns {},
+    # so child_reaped is True. Inject a monitor-like stub that reports the live
+    # grandchild as a tracked descendant.
+    class _FakeMonitor:
+        def known_processes(self):
+            return {grandchild.pid: grandchild_create}
+
+    proc.tcp_monitor = _FakeMonitor()
+    try:
+        assert proc.child_reaped is False, "live tracked descendant must block child_reaped"
+    finally:
+        grandchild.kill()
+        grandchild.wait()

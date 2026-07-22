@@ -197,13 +197,46 @@ def _process_has_exited(process: subprocess.Popen[bytes]) -> bool:
 
 
 def _signal_owned_processes(identities: Mapping[int, float], signum: int) -> None:
-    for process_id in _live_owned_processes(identities):
+    for process_id, created_at in _live_owned_processes(identities).items():
+        # Re-validate process identity immediately before signaling to close the
+        # TOCTOU window where a descendant exits and its PID is reused. psutil's
+        # Process object binds (pid, create_time); NoSuchProcess means it already
+        # exited, and a create_time mismatch means the PID was reused.
         try:
-            os.kill(process_id, signum)
-        except ProcessLookupError:
+            candidate = psutil.Process(process_id)
+            if abs(candidate.create_time() - created_at) > 0.001:
+                continue
+            candidate.send_signal(signum)
+        except psutil.NoSuchProcess:
             continue
-        except PermissionError as exc:
+        except psutil.AccessDenied:
+            continue
+        except psutil.Error as exc:
             raise LaunchError("sidecar_process_signal_failed") from exc
+
+
+def _tracked_descendants_alive(
+    process: subprocess.Popen[bytes] | None,
+    monitor: _TcpListenerMonitor | None,
+) -> bool:
+    """True if any tracked descendant of the owned process is still alive.
+
+    The direct child may have exited while a same-group worker it spawned is still
+    running. Treat the sidecar tree as cleaned only when both the direct child is
+    gone AND no monitored descendant remains reachable.
+    """
+    identities: dict[int, float] = {}
+    if monitor is not None:
+        try:
+            identities.update(monitor.known_processes())
+        except LaunchError:
+            # A monitor that cannot report cannot be assumed clean.
+            return True
+    # Always include a fresh snapshot of any current child tree so a descendant
+    # started after the last monitor tick is still detected.
+    if process is not None and _process_has_exited(process):
+        identities.update(_snapshot_owned_processes(process))
+    return bool(_live_owned_processes(identities))
 
 
 class _TcpListenerMonitor:
@@ -415,7 +448,11 @@ class EverOSProcess:
     @property
     def child_reaped(self) -> bool:
         process = self.process
-        return process is None or _process_has_exited(process)
+        if process is None:
+            return True
+        return _process_has_exited(process) and not _tracked_descendants_alive(
+            process, self.tcp_monitor
+        )
 
     def stop(self) -> None:
         """Boundedly reap the child and clean its UDS even if monitoring failed."""
@@ -461,7 +498,7 @@ class EverOSProcess:
                 )
             except LaunchError as exc:
                 last_error = exc
-            if _process_has_exited(process):
+            if _process_has_exited(process) and not _tracked_descendants_alive(process, monitor):
                 return None
             if last_error is None:
                 last_error = LaunchError("sidecar_process_termination_failed")

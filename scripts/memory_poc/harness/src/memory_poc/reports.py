@@ -122,6 +122,8 @@ def validate_report(
         validate_run_id(report.get("run_id"))
     except HarnessError:
         raise ReportValidationError("report_run_id_invalid")
+    if _contains_secret(str(report["run_id"]), secret_values):
+        raise ReportValidationError("report_contains_secret")
 
     if not _safe_identifier(report["harness_commit"], allow_unknown=True):
         raise ReportValidationError("report_harness_commit_invalid")
@@ -170,7 +172,9 @@ def write_report(
     secret_values: tuple[str, ...],
 ) -> None:
     validate_report(report, fixture_texts=fixture_texts, secret_values=secret_values)
-    write_private_text(path, json.dumps(report, ensure_ascii=True, indent=2, sort_keys=False) + "\n", anchor=anchor)
+    serialized = json.dumps(report, ensure_ascii=True, indent=2, sort_keys=False) + "\n"
+    _assert_text_secret_free(serialized, secret_values, error_code="report_contains_secret")
+    write_private_text(path, serialized, anchor=anchor)
 
 
 def load_report(
@@ -237,6 +241,7 @@ def write_summary(
             "",
         )
     )
+    _assert_text_secret_free(rendered, secret_values, error_code="summary_contains_secret")
     write_private_text(path, rendered, anchor=anchor)
 
 
@@ -418,6 +423,20 @@ def _redacted_model_name(model_name: str, *, secret_values: tuple[str, ...]) -> 
 
 def _contains_secret(value: str, secret_values: tuple[str, ...]) -> bool:
     return any(secret in value for secret in matchable_secret_values(secret_values))
+
+
+def _assert_text_secret_free(text: str, secret_values: tuple[str, ...], *, error_code: str) -> None:
+    """Final defense-in-depth: scan a whole rendered document for any configured secret.
+
+    Field-level checks (model names, run_id) are the first line, but provider-echoed
+    values (e.g. a key returned in a response `code`) can reach other fields. This
+    whole-text scan, using the >=SECRET_SUBSTRING_MATCH_MIN_LENGTH floor, catches
+    any leak without the false positives that short keys would cause against fixed
+    report/summary text.
+    """
+    matchable = matchable_secret_values(secret_values)
+    if any(secret in text for secret in matchable):
+        raise ReportValidationError(error_code)
 
 
 def _validate_environment(value: Any, *, secret_values: tuple[str, ...]) -> None:
