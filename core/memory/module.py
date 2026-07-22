@@ -262,10 +262,10 @@ class MemoryModule:
         # and dead work render degraded (tech §15 reachable-provider fallback to ready).
         active_error = None if historical == "memory_low_disk_space" else historical
         if active_error is not None or stats.dead:
-            return await self._status("degraded", meta=meta, stats=stats)
+            return await self._status("degraded", meta=meta, stats=stats, error=active_error)
         if stats.pending or stats.processing:
-            return await self._status("indexing", meta=meta, stats=stats)
-        return await self._status("ready", meta=meta, stats=stats)
+            return await self._status("indexing", meta=meta, stats=stats, error=None)
+        return await self._status("ready", meta=meta, stats=stats, error=None)
 
     async def clear(self) -> ClearReceipt:
         """Run one idempotent, bounded clear lifecycle operation."""
@@ -414,7 +414,7 @@ class MemoryModule:
             queue_plaintext_bytes=stats.queue_plaintext_bytes,
             provider_disk_bytes=await asyncio.to_thread(self._provider_disk_bytes),
             last_success_at=meta.last_success_at if meta is not None else None,
-            error=error if error is not None else (meta.last_error if meta is not None else None),
+            error=error,
         )
 
     def _is_enabled(self) -> bool:
@@ -760,8 +760,7 @@ def _ensure_provider_root_chain_safe(provider_root: Path, effective_home: Path) 
     rejected. Components below the effective home (e.g. an isolated test tmpdir) are
     still checked for symlinks but are not required to live inside the home.
     """
-    del effective_home  # accepted for API symmetry; the chain is checked from the root up
-    home_abs = os.path.abspath(os.fspath(paths.get_vibe_remote_dir()))
+    home_abs = Path(os.path.abspath(os.fspath(effective_home)))
     current = Path(os.path.abspath(os.fspath(provider_root)))
     while True:
         try:

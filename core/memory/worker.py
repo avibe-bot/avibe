@@ -185,6 +185,10 @@ class MemoryWorker:
                 self._pause_for_system_failure(now)
                 await self._store_call(self._store.set_last_error, "memory_sidecar_unavailable")
                 return False
+            if not await self._provider_processing_healthy():
+                self._pause_for_system_failure(now)
+                await self._store_call(self._store.set_last_error, "memory_processing_failed")
+                return False
             self._system_paused = False
             self._system_pause_until = None
             await self._store_call(self._store.clear_system_outage_error)

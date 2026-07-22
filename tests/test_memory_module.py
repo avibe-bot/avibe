@@ -597,6 +597,47 @@ async def test_system_failure_globally_pauses_claims_until_health_gate_recovers(
     assert store.list_queue_rows()[0].state == "delivered"
 
 
+async def test_pause_does_not_resume_until_processing_endpoint_recovers(tmp_path: Path) -> None:
+    """Sidecar health alone must not reopen claims after a processing-endpoint outage.
+
+    The resume gate must require BOTH health() and processing_healthy(); otherwise an
+    endpoint that is still down gets re-probed on every tick after the pause interval,
+    prematurely reopening the claim fence (tech §10 resume-on-global-health).
+    """
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
+    provider.processing_healthy_flag = False  # endpoint stays down throughout
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+    )
+
+    # First drain: ambiguous failure + endpoint-down probe => system pause, attempts 0.
+    await worker.drain_once()
+    paused = store.list_queue_rows()[0]
+    assert (paused.state, paused.attempts) == ("pending", 0)
+
+    # Past the pause interval but processing endpoint STILL down: the row must NOT
+    # be delivered (resume gate requires processing_healthy, not just sidecar health).
+    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
+    for _ in range(3):
+        await worker.drain_once()
+    still_paused = store.list_queue_rows()[0]
+    assert still_paused.state == "pending"
+    assert still_paused.attempts == 0
+
+    # Endpoint recovers => advance past the pause window and claims resume.
+    provider.processing_healthy_flag = True
+    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
+    await worker.drain_once()
+    assert store.list_queue_rows()[0].state == "delivered"
+
+
 async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path) -> None:
     cleanup_wait = asyncio.Event()
 
