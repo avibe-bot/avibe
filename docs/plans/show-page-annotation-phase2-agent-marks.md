@@ -16,7 +16,7 @@ Two complementary mark kinds:
 | Kind | Authored via | Nature | Lifecycle owner |
 | --- | --- | --- | --- |
 | **Reply mark** (回应型) | `vibe show reply` (CLI, event-backed) | Answers a specific user annotation | Read-to-retire pairing |
-| **Note mark** (说明型) | `vibe show mark` (CLI) or `mark-note` attribute (declarative, in page source) | Agent's own callout on an element | CLI: replace-on-same-target + read-to-fade; attribute: lives/dies with the source |
+| **Note mark** (说明型) | `vibe show mark` (CLI) or `agent-note` attribute (declarative, in page source) | Agent's own callout on an element | CLI: replace-on-same-target + read-to-fade; attribute: lives/dies with the source |
 
 ## Agent-facing API (owner review section)
 
@@ -128,7 +128,7 @@ so `vibe show reply` remains available.
   — POST path already exists, ensure resolved-by-user authoring is allowed
   and author-stamped.
 - **Lane R (vibe-show-runtime)**: mark rendering upgrade (unread violet →
-  expand bubble → emit resolved → gray fade); `mark-note` attribute pickup
+  expand bubble → emit resolved → gray fade); `agent-note` attribute pickup
   (registry scan alongside `mark-*` anchors); cap-and-aggregate badge +
   list; missing-anchor list entries; replace semantics on render
   (same target/pair → newest wins).
@@ -146,5 +146,5 @@ so `vibe show reply` remains available.
    all; reading retires each.
 4. Agent rewrites the page section → orphaned mark moves to the badge list
    as "原位置已更新" (never mis-pinned).
-5. `mark-note` attribute renders a mark; removing the attribute removes it;
+5. `agent-note` attribute renders a mark; removing the attribute removes it;
    read state survives reload via localStorage.
