@@ -60,7 +60,11 @@ _MIB = 1024 * 1024
 _GIB = 1024 * 1024 * 1024
 _QUALITY_CRITERIA = {"temporal_all", "negatives_all", "positive_top8_rate"}
 _LOOPBACK_HOSTS = {"localhost"}
-_SAFE_NOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,_()/%=-]{0,511}$")
+# Evidence lines are diagnostic prose. Allow Unicode letters/digits and common
+# punctuation so Chinese identities/timestamps/ids are not rejected; control chars,
+# newlines, and tabs remain forbidden. Secret leakage is handled separately by the
+# report/summary whole-text scan, not by this character gate.
+_SAFE_NOTE = re.compile(r"^[^\S\r\n\t]*[\w][^\r\n\t]{0,511}$", re.UNICODE)
 
 
 @dataclass(frozen=True)
