@@ -31,6 +31,14 @@ class CallMetrics:
     ingestion_embedding_usage_records: int = 0
 
 
+@dataclass(frozen=True)
+class EgressObservation:
+    """Redacted child-network evidence for the final hostname-only report."""
+
+    hosts: tuple[str, ...] = ()
+    ip_literal_attempted: bool = False
+
+
 def classify_request_path(path: str) -> str:
     return "embedding" if "embeddings" in path.lower() else "llm"
 
@@ -63,13 +71,17 @@ def append_egress_metric(path: Path, *, hostname: str | None) -> None:
     """Persist a hostname-only child egress observation.
 
     Network URLs, ports, headers, addresses, and payloads are intentionally
-    excluded. Direct IP targets are not reportable under the frozen contract,
-    so they are omitted rather than being relabelled as hostnames.
+    excluded. A direct IP target is retained only as a boolean so it cannot
+    evade the egress gate while still never appearing in the final report.
     """
     safe_hostname = _normalise_hostname(hostname)
-    if safe_hostname is None:
+    if safe_hostname is not None:
+        record: dict[str, object] = {"hostname": safe_hostname}
+    elif _is_ip_literal(hostname):
+        record = {"ip_literal": True}
+    else:
         return
-    encoded = (json.dumps({"hostname": safe_hostname}, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    encoded = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
     flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
     try:
@@ -143,9 +155,15 @@ def read_call_metrics(path: Path) -> CallMetrics:
 
 def read_egress_hosts(path: Path) -> tuple[str, ...]:
     """Return the sorted hostname-only set from a child egress metric log."""
+    return read_egress_observation(path).hosts
+
+
+def read_egress_observation(path: Path) -> EgressObservation:
+    """Return hostnames plus the redacted direct-IP-attempt signal."""
     if not path.is_file():
-        return ()
+        return EgressObservation()
     hosts: set[str] = set()
+    ip_literal_attempted = False
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             item = json.loads(line)
@@ -156,7 +174,9 @@ def read_egress_hosts(path: Path) -> tuple[str, ...]:
         hostname = _normalise_hostname(item.get("hostname"))
         if hostname is not None:
             hosts.add(hostname)
-    return tuple(sorted(hosts))
+        if item.get("ip_literal") is True:
+            ip_literal_attempted = True
+    return EgressObservation(hosts=tuple(sorted(hosts)), ip_literal_attempted=ip_literal_attempted)
 
 
 def _normalise_hostname(value: object) -> str | None:
@@ -170,3 +190,13 @@ def _normalise_hostname(value: object) -> str | None:
     except ValueError:
         return hostname
     return None
+
+
+def _is_ip_literal(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        ipaddress.ip_address(value.strip().strip("[]"))
+    except ValueError:
+        return False
+    return True

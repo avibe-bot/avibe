@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_poc.provider import EverOSClient
+from memory_poc.provider import EverOSClient, _closed_code
 
 
 class _Response:
@@ -185,3 +185,7 @@ def test_client_records_redacted_public_http_shapes(monkeypatch) -> None:
     assert "data.episodes[].atomic_facts[].id:string" in client.observed_http_shapes[0].response_schema_paths
     assert "data.episodes[].atomic_facts[].content:string" in client.observed_http_shapes[0].response_schema_paths
     assert "synthetic fact" not in " ".join(client.observed_http_shapes[0].response_schema_paths)
+
+
+def test_closed_code_reads_the_canonical_nested_error_envelope() -> None:
+    assert _closed_code({"error": {"code": "invalid_api_key"}}) == "invalid_api_key"

@@ -241,6 +241,7 @@ def assert_clean_harness_source(root: Path | None = None) -> None:
             "--untracked-files=all",
             "--",
             "scripts/memory_poc/harness",
+            "scripts/memory_poc/corpus",
         ],
         check=False,
         capture_output=True,

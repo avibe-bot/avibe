@@ -230,10 +230,15 @@ def _schema_paths(value: Any) -> tuple[str, ...]:
 def _closed_code(value: Any) -> int | str | None:
     if not isinstance(value, dict):
         return None
-    for key in ("code", "error_code"):
-        candidate = value.get(key)
-        if isinstance(candidate, int) and not isinstance(candidate, bool) and -999_999 <= candidate <= 999_999:
-            return candidate
-        if isinstance(candidate, str) and _safe_schema_key(candidate):
-            return candidate
+    candidates = [value]
+    nested_error = value.get("error")
+    if isinstance(nested_error, dict):
+        candidates.append(nested_error)
+    for candidate_map in candidates:
+        for key in ("code", "error_code"):
+            candidate = candidate_map.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and -999_999 <= candidate <= 999_999:
+                return candidate
+            if isinstance(candidate, str) and _safe_schema_key(candidate):
+                return candidate
     return None

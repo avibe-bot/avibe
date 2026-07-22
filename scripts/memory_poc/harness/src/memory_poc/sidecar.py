@@ -8,6 +8,7 @@ have been established.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import importlib
 import os
 import socket
@@ -75,18 +76,54 @@ def _install_request_counter(metrics_path: Path, *, egress_path: Path | None = N
     httpx.AsyncClient.send = tracked_async_send
     httpx.Client.send = tracked_sync_send
     if egress_path is not None:
-        _install_hostname_resolver_counter(egress_path)
+        _install_egress_counter(egress_path)
 
 
-def _install_hostname_resolver_counter(egress_path: Path) -> None:
-    """Record hostname arguments passed to the child resolver, never IPs or URLs."""
+def _install_egress_counter(egress_path: Path) -> None:
+    """Record network destinations without retaining URLs, ports, or IP values."""
     original_getaddrinfo = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    resolved_ip_literals: set[str] = set()
 
     def tracked_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
         append_egress_metric(egress_path, hostname=host if isinstance(host, str) else None)
-        return original_getaddrinfo(host, *args, **kwargs)
+        result = original_getaddrinfo(host, *args, **kwargs)
+        if isinstance(host, str) and not _is_ip_literal(host):
+            for item in result:
+                if isinstance(item, tuple) and len(item) >= 5 and isinstance(item[4], tuple) and item[4]:
+                    address = item[4][0]
+                    if isinstance(address, str) and _is_ip_literal(address):
+                        resolved_ip_literals.add(address)
+        return result
+
+    def record_socket_address(address: Any) -> None:
+        if not isinstance(address, tuple) or not address or not isinstance(address[0], str):
+            return
+        host = address[0]
+        if _is_ip_literal(host) and host in resolved_ip_literals:
+            return
+        append_egress_metric(egress_path, hostname=host)
+
+    def tracked_connect(self: Any, address: Any) -> Any:
+        record_socket_address(address)
+        return original_connect(self, address)
+
+    def tracked_connect_ex(self: Any, address: Any) -> Any:
+        record_socket_address(address)
+        return original_connect_ex(self, address)
 
     socket.getaddrinfo = tracked_getaddrinfo
+    socket.socket.connect = tracked_connect
+    socket.socket.connect_ex = tracked_connect_ex
+
+
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip().strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 def serve(uds: Path) -> None:

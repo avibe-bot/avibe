@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
-from memory_poc.metrics import append_egress_metric, append_request_metric, classify_request_path, read_call_metrics, read_egress_hosts
+from memory_poc.metrics import (
+    append_egress_metric,
+    append_request_metric,
+    classify_request_path,
+    read_call_metrics,
+    read_egress_hosts,
+    read_egress_observation,
+)
 
 
 def test_metric_log_contains_only_counts_and_tokens(tmp_path: Path) -> None:
@@ -40,6 +48,27 @@ def test_egress_log_keeps_only_unique_hostname_values(tmp_path: Path) -> None:
     append_egress_metric(path, hostname="dashscope.aliyuncs.com")
 
     assert read_egress_hosts(path) == ("dashscope.aliyuncs.com",)
+    assert read_egress_observation(path).ip_literal_attempted is True
     rendered = path.read_text(encoding="utf-8")
     assert "https://" not in rendered
     assert "127.0.0.1" not in rendered
+    assert '"ip_literal":true' in rendered
+
+
+def test_child_egress_counter_marks_direct_ip_attempt_without_storing_the_ip(tmp_path: Path) -> None:
+    from memory_poc.sidecar import _install_egress_counter
+
+    path = tmp_path / "egress.jsonl"
+    original_getaddrinfo = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    try:
+        _install_egress_counter(path)
+        socket.getaddrinfo("127.0.0.1", 9)
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+        socket.socket.connect = original_connect
+        socket.socket.connect_ex = original_connect_ex
+
+    assert read_egress_observation(path).ip_literal_attempted is True
+    assert "127.0.0.1" not in path.read_text(encoding="utf-8")

@@ -37,7 +37,7 @@ from .errors import HarnessError, LaunchError
 from .generated_config import write_generated_config
 from .identifiers import validate_run_id
 from .launcher import EverOSProcess
-from .metrics import CallMetrics, read_call_metrics, read_egress_hosts
+from .metrics import CallMetrics, read_call_metrics, read_egress_observation
 from .paths import create_owner_directory, ensure_owner_directory, read_private_text, runtime_root, write_private_text
 from .provider import EverOSClient, HttpShape
 from .reports import (
@@ -67,11 +67,19 @@ class ProbeMeasurement:
     label: str
     metrics: CallMetrics
     egress: tuple[str, ...]
+    ip_literal_egress: bool
     peak_rss_bytes: int
     rss_samples: tuple[int, ...]
     root_growth_bytes: int
     uds_only_verified: bool
     http_shapes: tuple[HttpShape, ...]
+
+
+@dataclass(frozen=True)
+class _SameTimestampObservation:
+    alpha_identities: int
+    bravo_identities: int
+    distinct: bool
 
 
 class _RssSampler:
@@ -166,11 +174,12 @@ class _Probe:
         finally:
             self._closed = True
         metrics = read_call_metrics(self.metrics_path)
-        egress = read_egress_hosts(self.egress_path)
+        egress = read_egress_observation(self.egress_path)
         measurement = ProbeMeasurement(
             label=self.label,
             metrics=metrics,
-            egress=egress,
+            egress=egress.hosts,
+            ip_literal_egress=egress.ip_literal_attempted,
             peak_rss_bytes=max(self._rss_samples, default=0),
             rss_samples=tuple(self._rss_samples),
             root_growth_bytes=max(_directory_size(self.everos_root) - self._root_initial_bytes, 0),
@@ -217,6 +226,7 @@ class Stage2Suite:
         corpus: Corpus,
         completed_stages: tuple[str, ...],
         evidence_lines: tuple[str, ...],
+        ip_literal_egress: bool,
     ) -> None:
         self.run_id = run_id
         self.workspace = workspace
@@ -227,6 +237,7 @@ class Stage2Suite:
         self.corpus = corpus
         self.completed_stages = completed_stages
         self.evidence_lines = evidence_lines
+        self.ip_literal_egress = ip_literal_egress
         self._report: dict[str, Any] | None = None
 
     @classmethod
@@ -242,7 +253,12 @@ class Stage2Suite:
         run_dir = runs_dir / run_id
         if not run_dir.exists():
             create_owner_directory(run_dir, anchor=state)
-            metadata = {"stage": "stage2", "corpus_revision": corpus.revision, "completed_stages": []}
+            metadata = {
+                "stage": "stage2",
+                "corpus_revision": corpus.revision,
+                "completed_stages": [],
+                "ip_literal_egress": False,
+            }
             write_private_text(run_dir / "run.json", json.dumps(metadata, sort_keys=True) + "\n", anchor=state)
             write_private_text(run_dir / "evidence.json", json.dumps({"lines": []}, sort_keys=True) + "\n", anchor=state)
             report = build_report(run_id=run_id, settings=settings, corpus_revision=corpus.revision)
@@ -255,6 +271,7 @@ class Stage2Suite:
             )
             completed: tuple[str, ...] = ()
             evidence_lines: tuple[str, ...] = ()
+            ip_literal_egress = False
         else:
             ensure_owner_directory(run_dir, anchor=state)
             metadata = _read_suite_json(run_dir / "run.json")
@@ -262,6 +279,9 @@ class Stage2Suite:
                 raise HarnessError("stage2_run_metadata_invalid")
             raw_completed = metadata.get("completed_stages")
             if not isinstance(raw_completed, list) or not all(isinstance(item, str) for item in raw_completed):
+                raise HarnessError("stage2_run_metadata_invalid")
+            ip_literal_egress = metadata.get("ip_literal_egress", False)
+            if not isinstance(ip_literal_egress, bool):
                 raise HarnessError("stage2_run_metadata_invalid")
             failed_stage = metadata.get("failed_stage")
             if failed_stage is not None:
@@ -286,6 +306,7 @@ class Stage2Suite:
             corpus=corpus,
             completed_stages=completed,
             evidence_lines=evidence_lines,
+            ip_literal_egress=ip_literal_egress,
         )
 
     def report(self) -> dict[str, Any]:
@@ -310,6 +331,7 @@ class Stage2Suite:
         resources["peak_rss_bytes"] = max(resources["peak_rss_bytes"], measurement.peak_rss_bytes)
         resources["root_growth_bytes"] = max(resources["root_growth_bytes"], measurement.root_growth_bytes)
         report["egress"] = sorted(set(report["egress"]).union(measurement.egress))
+        self.ip_literal_egress = self.ip_literal_egress or measurement.ip_literal_egress
         self._write_report(report)
 
     def complete(self, stage: str, *, report: dict[str, Any], evidence_lines: tuple[str, ...]) -> Path:
@@ -318,13 +340,18 @@ class Stage2Suite:
         all_lines = self.evidence_lines + evidence_lines
         if not all(_safe_note(line) for line in all_lines):
             raise HarnessError("stage2_evidence_invalid")
-        report["recommendation"] = recommendation_for_criteria(report["criteria"])
+        report["recommendation"] = recommendation_for_report(report)
         self._write_report(report)
         completed = self.completed_stages + (stage,)
         write_private_text(
             self.run_dir / "run.json",
             json.dumps(
-                {"stage": "stage2", "corpus_revision": self.corpus.revision, "completed_stages": list(completed)},
+                {
+                    "stage": "stage2",
+                    "corpus_revision": self.corpus.revision,
+                    "completed_stages": list(completed),
+                    "ip_literal_egress": self.ip_literal_egress,
+                },
                 sort_keys=True,
             )
             + "\n",
@@ -373,6 +400,20 @@ def recommendation_for_criteria(criteria: list[dict[str, Any]]) -> str:
     if all(states.get(identifier) == "pass" for identifier in CRITERIA_IDS):
         return "official"
     return "fork"
+
+
+def recommendation_for_report(report: dict[str, Any]) -> str:
+    """Apply non-statistical duplicate safety outcomes after the explicit gates."""
+    recommendation = recommendation_for_criteria(report["criteria"])
+    if recommendation != "official":
+        return recommendation
+    duplicates = report.get("duplicates")
+    observed = duplicates.get("observed") if isinstance(duplicates, dict) else ""
+    if not isinstance(observed, str):
+        return "fork"
+    if "same timestamp distinct false" in observed or "retry searchable false" in observed:
+        return "fork"
+    return "official"
 
 
 def _read_suite_json(path: Path) -> dict[str, Any]:
@@ -527,8 +568,8 @@ def _run_quality(suite: Stage2Suite) -> Path:
         value=searchable_p95,
         threshold=5,
     )
-    _set_boolean(report, "launcher_uds_only", launch_verified)
-    _set_boolean(report, "no_internals_needed", launch_verified)
+    _set_aggregate_boolean(report, "launcher_uds_only", launch_verified)
+    _set_aggregate_boolean(report, "no_internals_needed", launch_verified)
     evidence.extend(
         (
             f"quality temporal pass {temporal_passed}/{len(temporals)}",
@@ -568,12 +609,14 @@ def _run_pool(suite: Stage2Suite) -> Path:
             probe.remember_shapes(client)
         measurement = probe.close()
     passed = all(outcome.passed for outcome in outcomes)
-    _set_boolean(report, "restart_preserves", passed)
-    _set_boolean(report, "launcher_uds_only", measurement.uds_only_verified)
-    _set_boolean(report, "no_internals_needed", measurement.uds_only_verified)
+    _set_aggregate_boolean(report, "restart_preserves", passed)
+    _set_aggregate_boolean(report, "launcher_uds_only", measurement.uds_only_verified)
+    _set_aggregate_boolean(report, "no_internals_needed", measurement.uds_only_verified)
     evidence.extend(
         (
             f"personal pool cross session assertions pass {sum(item.passed for item in outcomes)}/{len(outcomes)}",
+            "personal pool third session pool-s3 established public search is owner scoped without caller session field",
+            "personal pool assertions include cross session positives and unrelated negative q040",
             f"personal pool restart preserves {str(passed).lower()}",
         )
     )
@@ -637,10 +680,10 @@ def _run_retention(suite: Stage2Suite) -> Path:
             probe.remember_shapes(client)
         measurement = probe.close()
     clear_removed = _clear_owned_provider_root(probe.everos_root, stage_dir=probe.stage_dir)
-    _set_boolean(report, "restart_preserves", restart_preserves)
+    _set_aggregate_boolean(report, "restart_preserves", restart_preserves)
     _set_boolean(report, "clear_removes_all", clear_removed)
-    _set_boolean(report, "launcher_uds_only", measurement.uds_only_verified)
-    _set_boolean(report, "no_internals_needed", measurement.uds_only_verified)
+    _set_aggregate_boolean(report, "launcher_uds_only", measurement.uds_only_verified)
+    _set_aggregate_boolean(report, "no_internals_needed", measurement.uds_only_verified)
     evidence.append(f"retention full root clear {str(clear_removed).lower()}")
     return suite.complete("retention", report=report, evidence_lines=tuple(evidence))
 
@@ -665,6 +708,58 @@ def _wait_searchable(client: EverOSClient, *, owner_id: str, query: str, hints: 
         if remaining > 0:
             time.sleep(min(_SEARCH_POLL_SECONDS, remaining))
     raise HarnessError("searchable_timeout")
+
+
+def _wait_searchable_or_none(
+    client: EverOSClient,
+    *,
+    owner_id: str,
+    query: str,
+    hints: tuple[str, ...],
+) -> int | None:
+    try:
+        return _wait_searchable(client, owner_id=owner_id, query=query, hints=hints)
+    except HarnessError as exc:
+        if str(exc) == "searchable_timeout":
+            return None
+        raise
+
+
+def _wait_same_timestamp_distinct(client: EverOSClient) -> _SameTimestampObservation:
+    """Wait until both same-ms messages have distinct public result identities."""
+    deadline = time.monotonic() + _READINESS_TIMEOUT_SECONDS
+    observed = _SameTimestampObservation(alpha_identities=0, bravo_identities=0, distinct=False)
+    while time.monotonic() < deadline:
+        alpha_items = flatten_search_response(
+            client.search(owner_id=_OWNER_ID, query="same timestamp alpha marker"),
+            owner_id=_OWNER_ID,
+        )
+        bravo_items = flatten_search_response(
+            client.search(owner_id=_OWNER_ID, query="same timestamp bravo marker"),
+            owner_id=_OWNER_ID,
+        )
+        alpha_ids = _matching_public_identities(alpha_items, hint="alpha")
+        bravo_ids = _matching_public_identities(bravo_items, hint="bravo")
+        observed = _SameTimestampObservation(
+            alpha_identities=len(alpha_ids),
+            bravo_identities=len(bravo_ids),
+            distinct=any(left != right for left in alpha_ids for right in bravo_ids),
+        )
+        if observed.distinct:
+            return observed
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(_SEARCH_POLL_SECONDS, remaining))
+    return observed
+
+
+def _matching_public_identities(items: tuple[Any, ...], *, hint: str) -> frozenset[tuple[str, str]]:
+    normalised_hint = _normalise(hint)
+    return frozenset(
+        (item.kind, item.identity)
+        for item in items
+        if item.identity != "unavailable" and normalised_hint in _normalise(item.text)
+    )
 
 
 def _search_contains_any_hint(value: Any, *, owner_id: str, hints: tuple[str, ...]) -> bool:
@@ -726,6 +821,18 @@ def _display_count(value: int | None) -> str:
     return "unavailable" if value is None else str(value)
 
 
+def _display_latency(value: int | None) -> str:
+    return "timeout" if value is None else str(value)
+
+
+def _duplicate_product_consequence(*, duplicate_count: int, retry_searchable: bool) -> str:
+    if not retry_searchable:
+        return "duplicate product consequence replay was not searchable within the observation window bounded retry remains ambiguous"
+    if duplicate_count:
+        return "duplicate product consequence extra public items observed integration needs at least once reconciliation"
+    return "duplicate product consequence no extra matching public top8 item observed one replay remains at least once"
+
+
 def _clear_owned_provider_root(root: Path, *, stage_dir: Path) -> bool:
     try:
         root.relative_to(stage_dir)
@@ -768,6 +875,15 @@ def _set_boolean(report: dict[str, Any], criterion_id: str, passed: bool) -> Non
     _set_measurement(report, criterion_id, passed=passed, value=1 if passed else 0, threshold=1)
 
 
+def _set_aggregate_boolean(report: dict[str, Any], criterion_id: str, passed: bool) -> None:
+    """Preserve a failed shared criterion across independent stage probes."""
+    current = next((item for item in report["criteria"] if item.get("id") == criterion_id), None)
+    if not isinstance(current, dict):
+        raise HarnessError("criterion_missing")
+    prior_passed = current.get("state") != "fail"
+    _set_boolean(report, criterion_id, prior_passed and passed)
+
+
 def _normalise(value: str) -> str:
     import unicodedata
 
@@ -794,6 +910,7 @@ def _write_failed_stage(suite: Stage2Suite, *, stage: str, error: HarnessError) 
                         "stage": "stage2",
                         "corpus_revision": suite.corpus.revision,
                         "completed_stages": list(suite.completed_stages),
+                        "ip_literal_egress": suite.ip_literal_egress,
                         "failed_stage": stage,
                     },
                     sort_keys=True,
@@ -829,8 +946,7 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
     restart_preserves = False
     episode_matches = 0
     fact_matches = 0
-    same_timestamp_survived = 0
-    concurrent_outcome = "not run"
+    timed_retry_outcome = "not run"
     try:
         client = probe.start()
         clients.append(client)
@@ -869,8 +985,13 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
         restart_hints = suite.corpus.search_hints_for(restart_message)
         if not restart_hints:
             raise HarnessError("corpus_message_search_hint_missing")
-        restart_result = client.search(owner_id=_OWNER_ID, query=restart_message.text)
-        restart_preserves = _search_contains_any_hint(restart_result, owner_id=_OWNER_ID, hints=restart_hints)
+        restart_searchable_ms = _wait_searchable_or_none(
+            client,
+            owner_id=_OWNER_ID,
+            query=restart_message.text,
+            hints=restart_hints,
+        )
+        restart_preserves = restart_searchable_ms is not None
 
         kill_case = next(item for item in suite.corpus.messages if "kill-case" in item.tags)
         retry_session = "duplicate-response-loss"
@@ -881,56 +1002,66 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
         client.add(session_id=retry_session, messages=[retry_payload])
         client.flush(session_id=retry_session)
         retry_query = suite.corpus.query("q015")
-        retry_result = client.search(owner_id=_OWNER_ID, query=retry_query.query)
-        retry_items = flatten_search_response(retry_result, owner_id=_OWNER_ID)
         retry_hint = retry_query.expect.text_hint if retry_query.expect is not None else ""
+        retry_searchable_ms = _wait_searchable_or_none(
+            client,
+            owner_id=_OWNER_ID,
+            query=retry_query.query,
+            hints=(retry_hint,),
+        )
+        retry_items = ()
+        if retry_searchable_ms is not None:
+            retry_result = client.search(owner_id=_OWNER_ID, query=retry_query.query)
+            retry_items = flatten_search_response(retry_result, owner_id=_OWNER_ID)
         episode_matches = sum(item.kind == "episode" and _normalise(retry_hint) in _normalise(item.text) for item in retry_items)
         fact_matches = sum(item.kind == "atomic_fact" and _normalise(retry_hint) in _normalise(item.text) for item in retry_items)
 
-        same_timestamp = started_epoch_ms + 1000
+        same_timestamp_ms = started_epoch_ms + 1000
         same_session = "duplicate-same-ms"
         same_messages = [
-            _synthetic_message("same timestamp alpha marker", same_timestamp),
-            _synthetic_message("same timestamp bravo marker", same_timestamp),
+            _synthetic_message("same timestamp alpha marker", same_timestamp_ms),
+            _synthetic_message("same timestamp bravo marker", same_timestamp_ms),
         ]
         client.add(session_id=same_session, messages=same_messages)
         client.flush(session_id=same_session)
-        alpha = client.search(owner_id=_OWNER_ID, query="same timestamp alpha marker")
-        bravo = client.search(owner_id=_OWNER_ID, query="same timestamp bravo marker")
-        same_timestamp_survived = int(
-            _search_contains_any_hint(alpha, owner_id=_OWNER_ID, hints=("alpha",))
-        ) + int(_search_contains_any_hint(bravo, owner_id=_OWNER_ID, hints=("bravo",)))
+        same_timestamp = _wait_same_timestamp_distinct(client)
 
-        concurrent_outcome, concurrent_clients = _concurrent_retry_probe(
+        timed_retry_outcome, timed_retry_clients = _timed_retry_probe(
             probe,
             started_epoch_ms=started_epoch_ms,
         )
-        clients.extend(concurrent_clients)
+        clients.extend(timed_retry_clients)
     finally:
         for client in clients:
             probe.remember_shapes(client)
         measurement = probe.close()
 
     error_lines = _run_error_matrix(suite)
-    duplicate_count = max(episode_matches - 1, 0)
+    duplicate_count = max(episode_matches - 1, 0) + max(fact_matches - 1, 0)
+    duplicate_consequence = _duplicate_product_consequence(
+        duplicate_count=duplicate_count,
+        retry_searchable=retry_searchable_ms is not None,
+    )
     report["duplicates"] = {
         "observed": (
             f"simulated response loss retry episodes {episode_matches} facts {fact_matches} "
-            f"same timestamp survived {same_timestamp_survived} concurrent {concurrent_outcome}"
+            f"retry searchable {str(retry_searchable_ms is not None).lower()} "
+            f"same timestamp distinct {str(same_timestamp.distinct).lower()} timed retry {timed_retry_outcome}"
         ),
         "count": duplicate_count,
     }
-    _set_boolean(report, "restart_preserves", restart_preserves)
-    _set_boolean(report, "launcher_uds_only", measurement.uds_only_verified)
-    _set_boolean(report, "no_internals_needed", measurement.uds_only_verified)
+    _set_aggregate_boolean(report, "restart_preserves", restart_preserves)
+    _set_aggregate_boolean(report, "launcher_uds_only", measurement.uds_only_verified)
+    _set_aggregate_boolean(report, "no_internals_needed", measurement.uds_only_verified)
     evidence.extend(
         (
             f"duplicate buffered before flush {str(before_flush_buffered).lower()} completed episode {str(before_flush_episode).lower()}",
             f"duplicate flush searchable ms {buffered_searchable_ms}",
-            f"duplicate unflushed restart preserves {str(restart_preserves).lower()}",
-            f"duplicate simulated response loss retry episode matches {episode_matches} fact matches {fact_matches}",
-            f"duplicate same millisecond distinct survival {same_timestamp_survived}/2",
-            f"duplicate concurrent retry outcome {concurrent_outcome}",
+            f"duplicate unflushed restart preserves {str(restart_preserves).lower()} searchable ms {_display_latency(restart_searchable_ms)}",
+            f"duplicate simulated response loss retry public top8 episode matches {episode_matches} fact matches {fact_matches} searchable ms {_display_latency(retry_searchable_ms)}",
+            f"duplicate same millisecond alpha identities {same_timestamp.alpha_identities} bravo identities {same_timestamp.bravo_identities} distinct {str(same_timestamp.distinct).lower()}",
+            f"duplicate timed retry outcome {timed_retry_outcome}",
+            duplicate_consequence,
             *error_lines,
         )
     )
@@ -941,36 +1072,27 @@ def _synthetic_message(content: str, timestamp: int) -> dict[str, Any]:
     return {"sender_id": _OWNER_ID, "role": "user", "timestamp": timestamp, "content": content}
 
 
-def _concurrent_retry_probe(probe: _Probe, *, started_epoch_ms: int) -> tuple[str, tuple[EverOSClient, ...]]:
-    first = probe.process.client()
+def _timed_retry_probe(probe: _Probe, *, started_epoch_ms: int) -> tuple[str, tuple[EverOSClient, ...]]:
+    """Issue one retry immediately after a deliberately short flush timeout."""
+    prepared = probe.process.client()
+    first = probe.process.client(timeout_seconds=0.05)
     retry = probe.process.client(timeout_seconds=10)
     payload = [_synthetic_message("concurrent retry marker", started_epoch_ms + 2000)]
-    outcomes: list[str] = []
-
-    def invoke_first() -> None:
-        try:
-            first.add(session_id="duplicate-concurrent", messages=payload)
-        except HarnessError as exc:
-            outcomes.append(f"first {_safe_failure_code(exc)}")
-        else:
-            outcomes.append("first completed")
-
-    worker = threading.Thread(target=invoke_first, name="memory-poc-concurrent-add", daemon=True)
-    worker.start()
-    time.sleep(0.1)
+    session_id = "duplicate-concurrent"
+    prepared.add(session_id=session_id, messages=payload)
     try:
-        retry.add(session_id="duplicate-concurrent", messages=payload)
+        first.flush(session_id=session_id)
+    except HarnessError as exc:
+        first_outcome = _safe_failure_code(exc)
+    else:
+        first_outcome = "completed before timeout"
+    try:
+        retry.flush(session_id=session_id)
     except HarnessError as exc:
         retry_outcome = _safe_failure_code(exc)
     else:
         retry_outcome = "completed"
-    worker.join(timeout=70)
-    if worker.is_alive():
-        probe._stop_sidecar()
-        worker.join(timeout=5)
-        return f"retry {retry_outcome} first force stopped", (first, retry)
-    first_outcome = outcomes[0] if outcomes else "first unknown"
-    return f"retry {retry_outcome} {first_outcome}", (first, retry)
+    return f"flush first {first_outcome} retry {retry_outcome}", (prepared, first, retry)
 
 
 class _FakeUpstream:
@@ -1056,6 +1178,7 @@ def _run_error_matrix(suite: Stage2Suite) -> tuple[str, ...]:
         lines.extend(
             _error_case_lines(suite, "synthetic content processing", content_settings, "poc-content-error-marker")
         )
+    lines.append("error classification public response alone insufficient sidecar and endpoint probes required true")
     return tuple(lines)
 
 
@@ -1071,7 +1194,12 @@ def _error_case_lines(suite: Stage2Suite, label: str, settings: ProviderSettings
                 messages=[_synthetic_message(content, time.time_ns() // 1_000_000)],
             )
         except HarnessError as exc:
-            outcome = _safe_failure_code(exc)
+            outcome = f"add {_safe_failure_code(exc)}"
+        else:
+            try:
+                client.flush(session_id=f"error-{label.replace(' ', '-')}")
+            except HarnessError as exc:
+                outcome = f"flush {_safe_failure_code(exc)}"
     finally:
         if client is not None:
             probe.remember_shapes(client)
@@ -1140,7 +1268,12 @@ def _run_footprint(suite: Stage2Suite) -> Path:
                 messages=[_synthetic_message("loopback egress marker", time.time_ns() // 1_000_000)],
             )
         except HarnessError as exc:
-            loopback_outcome = _safe_failure_code(exc)
+            loopback_outcome = f"add {_safe_failure_code(exc)}"
+        else:
+            try:
+                loopback_client.flush(session_id="footprint-loopback")
+            except HarnessError as exc:
+                loopback_outcome = f"flush {_safe_failure_code(exc)}"
     finally:
         if loopback_client is not None:
             loopback_probe.remember_shapes(loopback_client)
@@ -1164,12 +1297,22 @@ def _run_footprint(suite: Stage2Suite) -> Path:
     all_egress = set(report["egress"])
     configured_hosts = _configured_hosts(suite.settings)
     external_hosts = all_egress - _LOOPBACK_HOSTS
-    egress_configured_only = external_hosts.issubset(configured_hosts)
-    loopback_only = set(loopback_measurement.egress).issubset(_LOOPBACK_HOSTS)
+    egress_configured_only = not suite.ip_literal_egress and external_hosts.issubset(configured_hosts)
+    loopback_only = (
+        not loopback_measurement.ip_literal_egress and set(loopback_measurement.egress).issubset(_LOOPBACK_HOSTS)
+    )
     _set_boolean(report, "egress_configured_only", egress_configured_only)
     _set_boolean(report, "loopback_no_egress", loopback_only)
-    _set_boolean(report, "launcher_uds_only", idle_measurement.uds_only_verified and loopback_measurement.uds_only_verified)
-    _set_boolean(report, "no_internals_needed", idle_measurement.uds_only_verified and loopback_measurement.uds_only_verified)
+    _set_aggregate_boolean(
+        report,
+        "launcher_uds_only",
+        idle_measurement.uds_only_verified and loopback_measurement.uds_only_verified,
+    )
+    _set_aggregate_boolean(
+        report,
+        "no_internals_needed",
+        idle_measurement.uds_only_verified and loopback_measurement.uds_only_verified,
+    )
 
     query_values = tuple(report["latency"]["query_ms"].values())
     if query_values:
@@ -1182,6 +1325,7 @@ def _run_footprint(suite: Stage2Suite) -> Path:
             f"footprint root growth bytes {root_growth}",
             f"footprint llm calls {resources['llm_calls']} embedding calls {resources['embedding_calls']}",
             f"footprint egress configured only {str(egress_configured_only).lower()}",
+            f"footprint egress direct ip attempted {str(suite.ip_literal_egress).lower()}",
             f"footprint loopback outcome {loopback_outcome} external free {str(loopback_only).lower()}",
             "artifact wheels all targets not measured",
             "artifact managed runtime schema fit not measured",

@@ -212,3 +212,19 @@ def test_clean_harness_source_rejects_uncommitted_harness_files(
 
     with pytest.raises(HarnessError, match="harness_source_dirty"):
         assert_clean_harness_source(tmp_path)
+
+
+def test_clean_harness_source_binds_the_scored_corpus_to_the_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def fake_run(args: list[object], **_kwargs: object) -> SimpleNamespace:
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("memory_poc.environment.subprocess.run", fake_run)
+
+    assert_clean_harness_source(tmp_path)
+
+    assert calls[0][-2:] == ("scripts/memory_poc/harness", "scripts/memory_poc/corpus")

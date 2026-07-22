@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from memory_poc.constants import CRITERIA_IDS
 from memory_poc.provider import HttpShape
-from memory_poc.stage2 import _error_shape_lines, _quality_evidence_lines, percentile, recommendation_for_criteria
+from memory_poc.stage2 import (
+    _error_shape_lines,
+    _quality_evidence_lines,
+    _set_aggregate_boolean,
+    _wait_same_timestamp_distinct,
+    percentile,
+    recommendation_for_criteria,
+    recommendation_for_report,
+)
 
 
 def _criteria(state: str = "pass") -> list[dict[str, object]]:
@@ -30,6 +38,12 @@ def test_primary_quality_failure_stops_the_provider_decision() -> None:
     criteria[0] = {"id": "temporal_all", "state": "fail", "value": 0, "threshold": 1}
 
     assert recommendation_for_criteria(criteria) == "stop"
+
+
+def test_ambiguous_duplicate_outcome_cannot_be_called_official() -> None:
+    report = {"criteria": _criteria("pass"), "duplicates": {"observed": "same timestamp distinct false", "count": 0}}
+
+    assert recommendation_for_report(report) == "fork"
 
 
 def test_percentile_uses_nearest_rank_and_preserves_timeout_values() -> None:
@@ -76,3 +90,27 @@ def test_quality_evidence_records_expected_identity_and_public_result_identity()
         "quality q1-q004 expected episode s1 seq 7 pass true rank 1",
         "quality q1-q004 returned 1-1 episode_rank1_idepisode-123",
     )
+
+
+def test_shared_boolean_criteria_preserve_an_earlier_failure() -> None:
+    report = {"criteria": _criteria("not_measured")}
+
+    _set_aggregate_boolean(report, "restart_preserves", False)
+    _set_aggregate_boolean(report, "restart_preserves", True)
+
+    criterion = next(item for item in report["criteria"] if item["id"] == "restart_preserves")
+    assert criterion == {"id": "restart_preserves", "state": "fail", "value": 0, "threshold": 1}
+
+
+def test_same_timestamp_probe_requires_distinct_public_identities() -> None:
+    class Client:
+        def search(self, *, query: str, **_kwargs: object) -> dict[str, object]:
+            if "alpha" in query:
+                return {"episodes": [{"user_id": "00000000-0000-4000-8000-000000000002", "id": "a", "summary": "alpha"}]}
+            return {"episodes": [{"user_id": "00000000-0000-4000-8000-000000000002", "id": "b", "summary": "bravo"}]}
+
+    observation = _wait_same_timestamp_distinct(Client())  # type: ignore[arg-type]
+
+    assert observation.alpha_identities == 1
+    assert observation.bravo_identities == 1
+    assert observation.distinct is True
