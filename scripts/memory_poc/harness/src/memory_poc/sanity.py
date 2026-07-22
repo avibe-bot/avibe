@@ -93,9 +93,9 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     storage_ok = _storage_exists(everos_root)
     metrics = read_call_metrics(metrics_path)
     report = build_report(run_id=run_id, settings=settings)
-    set_criterion(report["criteria"], "launcher_uds_only", passed=True, value=1, threshold=1)
-    set_criterion(report["criteria"], "restart_preserves", passed=True, value=1, threshold=1)
-    set_criterion(report["criteria"], "no_internals_needed", passed=True, value=1, threshold=1)
+    set_criterion(report["criteria"], "launcher_uds_only", state="pass", value=1, threshold=1)
+    set_criterion(report["criteria"], "restart_preserves", state="pass", value=1, threshold=1)
+    set_criterion(report["criteria"], "no_internals_needed", state="pass", value=1, threshold=1)
     report["latency"] = {
         "add_ms": {"sanity": add_ms},
         "flush_ms": {"sanity": flush_ms},

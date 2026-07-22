@@ -44,7 +44,8 @@ _ENVIRONMENT_KEYS = {
     "endpoint_locality",
     "timezone",
 }
-_CRITERION_KEYS = {"id", "pass", "value", "threshold"}
+_CRITERION_KEYS = {"id", "state", "value", "threshold"}
+_CRITERION_STATES = {"pass", "fail", "not_measured"}
 _QUALITY_KEYS = {"query_id", "pass", "rank", "latency_ms"}
 _LATENCY_KEYS = {"add_ms", "flush_ms", "searchable_ms", "query_ms"}
 _RESOURCE_KEYS = {
@@ -59,13 +60,16 @@ _DUPLICATE_KEYS = {"observed", "count"}
 
 
 def pending_criteria() -> list[dict[str, Any]]:
-    return [{"id": criterion_id, "pass": False, "value": 0, "threshold": 0} for criterion_id in CRITERIA_IDS]
+    return [
+        {"id": criterion_id, "state": "not_measured", "value": None, "threshold": None}
+        for criterion_id in CRITERIA_IDS
+    ]
 
 
-def set_criterion(criteria: list[dict[str, Any]], criterion_id: str, *, passed: bool, value: Any, threshold: Any) -> None:
+def set_criterion(criteria: list[dict[str, Any]], criterion_id: str, *, state: str, value: Any, threshold: Any) -> None:
     for item in criteria:
         if item["id"] == criterion_id:
-            item.update({"pass": passed, "value": value, "threshold": threshold})
+            item.update({"state": state, "value": value, "threshold": threshold})
             return
     raise ReportValidationError("unknown_criterion")
 
@@ -123,10 +127,14 @@ def validate_report(report: dict[str, Any], *, fixture_texts: tuple[str, ...]) -
     for expected_id, item in zip(CRITERIA_IDS, criteria, strict=True):
         if not isinstance(item, dict) or set(item) != _CRITERION_KEYS or item.get("id") != expected_id:
             raise ReportValidationError("report_criteria_schema_invalid")
-        if type(item.get("pass")) is not bool or not _numeric(item.get("value")):
-            raise ReportValidationError("report_criteria_value_invalid")
-        if not _numeric(item.get("threshold")):
-            raise ReportValidationError("report_criteria_threshold_invalid")
+        state = item.get("state")
+        if state not in _CRITERION_STATES:
+            raise ReportValidationError("report_criteria_state_invalid")
+        if state == "not_measured":
+            if item.get("value") is not None or item.get("threshold") is not None:
+                raise ReportValidationError("report_criteria_not_measured_invalid")
+        elif not _numeric(item.get("value")) or not _numeric(item.get("threshold")):
+            raise ReportValidationError("report_criteria_measurement_invalid")
 
     _validate_quality(report["quality"])
     _validate_latency(report["latency"])

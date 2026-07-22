@@ -66,12 +66,21 @@ def test_report_rejects_unknown_nested_fields(tmp_path: Path, monkeypatch: pytes
         validate_report(report, fixture_texts=())
 
 
-def test_report_rejects_unmeasured_null_criteria(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_report_requires_null_measurements_for_not_measured_criteria(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
     report = build_report(run_id="r1", settings=_settings(tmp_path))
-    report["criteria"][0]["value"] = None
+    report["criteria"][0]["value"] = 0
 
-    with pytest.raises(ReportValidationError, match="report_criteria_value_invalid"):
+    with pytest.raises(ReportValidationError, match="report_criteria_not_measured_invalid"):
+        validate_report(report, fixture_texts=())
+
+
+def test_report_requires_numeric_measurements_for_measured_criteria(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["criteria"][0].update({"state": "pass", "value": None, "threshold": 1})
+
+    with pytest.raises(ReportValidationError, match="report_criteria_measurement_invalid"):
         validate_report(report, fixture_texts=())
 
 
