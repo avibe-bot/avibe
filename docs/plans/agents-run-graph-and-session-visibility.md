@@ -188,6 +188,13 @@ Principle: `agent_runs` remains the only store; views are projections.
 - UI: graph detail panel buttons (`移到前台` / `隐藏`); session list row menu
   gets `隐藏会话`; hidden sessions reachable via the graph's
   `显示后台会话` toggle.
+- Realtime contract: every PATCH or CLI placement edit publishes the same
+  `session.activity` `updated` event with `session_id`, nullable `scope_id`,
+  `title`, and `visibility`. Foreground-only list and Inbox consumers remove a
+  row when `visibility='background'` and reconcile it when it returns to
+  foreground or moves scope. M1 owns the shared backend event path; M2 owns
+  the `ui/**` consumption so the two lanes do not edit `ApiContext.tsx` in
+  parallel.
 
 ### Migration
 
@@ -231,3 +238,6 @@ Principle: `agent_runs` remains the only store; views are projections.
   chicken-and-egg solved by pre-minting the session id (Part C).
 - D4 task/watch-created sessions default background — **approved**.
 - D5 @xyflow/react dependency — **approved**.
+- D6 placement-change realtime ownership — **backend event contract in M1,
+  browser consumption in M2**; M1 does not expand into `ui/**` because M2
+  already owns the shared event client.

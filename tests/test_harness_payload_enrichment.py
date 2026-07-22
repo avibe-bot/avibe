@@ -17,6 +17,7 @@ from sqlalchemy import update
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import workbench_sessions_service
+from storage.agent_session_rows import create_agent_session_row
 from storage.background import SQLiteBackgroundTaskStore, compute_next_run_at
 from storage.db import create_sqlite_engine
 from storage.models import agent_sessions, scope_settings
@@ -122,6 +123,52 @@ def test_scheduled_task_payload_resolves_workbench_session(tmp_path: Path) -> No
         assert store2.get_scheduled_task("task_wb")["session_title"] == "重构鉴权模块"
     finally:
         store2.close()
+
+
+def test_scheduled_task_payload_treats_standalone_session_as_openable_workbench(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_id="ses_standalone",
+                session_anchor=None,
+                agent_backend="claude",
+                agent_name="default",
+                workdir=str(tmp_path),
+                title="Standalone audit",
+                now=NOW,
+            )
+    finally:
+        engine.dispose()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "task_standalone",
+                "session_id": session_id,
+                "prompt": "hello",
+                "schedule_type": "cron",
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+                "enabled": True,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        task = store.get_scheduled_task("task_standalone")
+    finally:
+        store.close()
+
+    assert task["session_is_workbench"] is True
+    assert task["session_platform"] is None
+    assert task["session_scope_kind"] is None
+    assert task["session_title"] == "Standalone audit"
+    assert task["session_label"] == "Standalone audit"
 
 
 def test_scheduled_task_payload_resolves_im_channel_name(tmp_path: Path) -> None:

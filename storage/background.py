@@ -1931,6 +1931,7 @@ class SQLiteBackgroundTaskStore:
             if session_id:
                 row = conn.execute(
                     select(
+                        agent_sessions.c.scope_id,
                         agent_sessions.c.title,
                         scopes.c.platform,
                         scopes.c.scope_type,
@@ -1946,7 +1947,11 @@ class SQLiteBackgroundTaskStore:
                 if row is not None:
                     platform = (row["platform"] or "").strip()
                     scope_type = (row["scope_type"] or "").strip()
-                    is_workbench = platform == "avibe" or scope_type == "project"
+                    is_workbench = (
+                        row["scope_id"] is None
+                        or platform == "avibe"
+                        or scope_type == "project"
+                    )
                     summary["session_platform"] = platform or None
                     summary["session_scope_kind"] = scope_type or None
                     summary["session_is_workbench"] = is_workbench
