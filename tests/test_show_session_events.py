@@ -432,8 +432,7 @@ def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_stat
                 "type": "assistant.mark.resolved",
                 "mark": {
                     "id": "mark_1",
-                    "target": "summary",
-                    "body": "Resolved.",
+                    "updatedAt": created["payload"]["updatedAt"],
                 },
             },
         )
@@ -445,6 +444,118 @@ def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_stat
     assert created["id"] != "mark_1"
     assert resolved["id"] != "mark_1"
     assert created["id"] != resolved["id"]
+
+
+def test_show_event_store_hydrates_read_receipt_from_active_mark(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        created = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"id": "mark_1", "target": "summary", "body": "Server body."},
+                "anchor": {"selector": "#summary", "text": "Summary"},
+            },
+        )
+        resolved = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.resolved",
+                "mark": {
+                    "id": "mark_1",
+                    "updatedAt": created["payload"]["updatedAt"],
+                    "target": "forged",
+                    "body": "Forged body.",
+                },
+                "anchor": {"selector": "#forged"},
+            },
+            author={"kind": "user", "email": "reader@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert resolved["payload"]["target"] == "summary"
+    assert resolved["payload"]["body"] == "Server body."
+    assert resolved["anchor"] == {"selector": "#summary", "text": "Summary"}
+    assert resolved["payload"]["author"] == {"kind": "user", "email": "reader@example.com"}
+    assert resolved["transcript_text"] == ""
+    assert resolved["message_id"] is None
+    assert resolved["message"] is None
+
+
+@pytest.mark.parametrize(
+    ("mark", "expected_code"),
+    [
+        ({"id": "missing", "updatedAt": "2026-07-23T00:00:00Z"}, "mark_not_active"),
+        ({"id": "mark_1"}, "mark_version_required"),
+    ],
+)
+def test_show_event_store_rejects_invalid_mark_resolution(isolated_state, mark, expected_code):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"id": "mark_1", "target": "summary", "body": "Current."},
+            },
+        )
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append("ses_mark", {"type": "assistant.mark.resolved", "mark": mark})
+    finally:
+        store.close()
+
+    assert exc_info.value.code == expected_code
+
+
+def test_show_event_store_rejects_stale_mark_read_receipt(isolated_state):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        original = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {
+                    "id": "mark_1",
+                    "target": "summary",
+                    "body": "Original.",
+                    "createdAt": "2026-07-23T00:00:00Z",
+                    "updatedAt": "2026-07-23T00:00:00Z",
+                },
+            },
+        )
+        store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.updated",
+                "mark": {
+                    "id": "mark_1",
+                    "target": "summary",
+                    "body": "Replacement.",
+                    "createdAt": original["payload"]["createdAt"],
+                    "updatedAt": "2026-07-23T00:00:01Z",
+                },
+            },
+        )
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {
+                    "type": "assistant.mark.resolved",
+                    "mark": {"id": "mark_1", "updatedAt": original["payload"]["updatedAt"]},
+                },
+                author={"kind": "local"},
+            )
+        active = store.active_marks("ses_mark")
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "mark_version_conflict"
+    assert [(mark["id"], mark["body"]) for mark in active] == [("mark_1", "Replacement.")]
 
 
 def test_show_event_store_records_intent_dispatch_payload(isolated_state):

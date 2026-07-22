@@ -2034,7 +2034,7 @@ def test_private_show_page_accepts_mark_read_receipt_and_records_reader(monkeypa
     _create_show_page("ses123", "private")
     store = ShowSessionEventStore()
     try:
-        store.append(
+        created = store.append(
             "ses123",
             {
                 "type": "assistant.mark.created",
@@ -2065,8 +2065,9 @@ def test_private_show_page_accepts_mark_read_receipt_and_records_reader(monkeypa
             "type": "assistant.mark.resolved",
             "mark": {
                 "id": "mark_read",
-                "target": "#summary",
-                "body": "Read this.",
+                "updatedAt": created["payload"]["updatedAt"],
+                "target": "#forged",
+                "body": "Forged body.",
                 "author": {"kind": "user", "email": "forged@example.com"},
             },
         },
@@ -2076,8 +2077,12 @@ def test_private_show_page_accepts_mark_read_receipt_and_records_reader(monkeypa
     event = response.get_json()["event"]
     assert event["actor"] == "assistant"
     assert event["payload"]["role"] == "assistant"
+    assert event["payload"]["target"] == "#summary"
+    assert event["payload"]["body"] == "Read this."
     assert event["payload"]["author"] == {"kind": "user", "email": "reader@example.com"}
-    assert event["message"]["metadata"]["author"] == {"kind": "user", "email": "reader@example.com"}
+    assert event["transcript_text"] == ""
+    assert event["message_id"] is None
+    assert event["message"] is None
     store = ShowSessionEventStore()
     try:
         assert store.active_marks("ses123") == []
@@ -2687,7 +2692,7 @@ def test_public_show_page_accepts_mark_read_receipt_and_records_reader(monkeypat
     share_id = _create_show_page("ses123", "public")
     store = ShowSessionEventStore()
     try:
-        store.append(
+        created = store.append(
             "ses123",
             {
                 "type": "assistant.mark.created",
@@ -2714,8 +2719,9 @@ def test_public_show_page_accepts_mark_read_receipt_and_records_reader(monkeypat
             "type": "assistant.mark.resolved",
             "mark": {
                 "id": "mark_public_read",
-                "target": "#summary",
-                "body": "Read this.",
+                "updatedAt": created["payload"]["updatedAt"],
+                "target": "#forged",
+                "body": "Forged body.",
                 "author": {"kind": "local"},
             },
         },
@@ -2724,14 +2730,51 @@ def test_public_show_page_accepts_mark_read_receipt_and_records_reader(monkeypat
     assert response.status_code == 201
     public_event = response.get_json()["event"]
     assert public_event["actor"] == "assistant"
+    assert public_event["payload"]["target"] == "#summary"
+    assert public_event["payload"]["body"] == "Read this."
     assert public_event["payload"]["author"] == {"kind": "user"}
     assert published[0]["payload"]["author"] == {"kind": "user", "email": "reader@example.com"}
-    assert published[0]["message"]["author"] == "agent"
+    assert published[0]["message"] is None
     store = ShowSessionEventStore()
     try:
         assert store.active_marks("ses123") == []
     finally:
         store.close()
+
+
+def test_public_show_page_rejects_resolution_for_unknown_mark(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    published = []
+    monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "reader@example.com", "user-2"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers=_public_show_write_headers(share_id),
+        json={
+            "type": "assistant.mark.resolved",
+            "mark": {
+                "id": "mark_unknown",
+                "updatedAt": "2026-07-23T00:00:00Z",
+                "target": "#forged",
+                "body": "Forged body.",
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "mark_not_active"
+    assert published == []
 
 
 def test_public_show_page_events_accept_injected_share_session_id(monkeypatch, tmp_path):

@@ -83,7 +83,7 @@ def test_show_without_subcommand_prints_help(capsys):
     captured = capsys.readouterr()
     assert "Manage the one visual Show Page attached to an Agent Session." in captured.out
     assert "usage: vibe show [-h]" in captured.out
-    assert "{list,path,status,update,mark,reply,marks,unmark,event,annotate} ..." in captured.out
+    assert "{list,path,status,update,mark,reply,marks,unmark,event,annotate} ..." in " ".join(captured.out.split())
     assert "vibe show list" in captured.out
     assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
 
@@ -2411,7 +2411,7 @@ def test_show_marks_filters_resolved_and_unmark_reports_partial_success(monkeypa
     second_id = stable_assistant_mark_id(scope="default", target="#second")
     store = ShowSessionEventStore()
     try:
-        store.append(
+        first = store.append(
             "ses123",
             {"type": "assistant.mark.created", "mark": {"id": first_id, "target": "#first", "body": "First."}},
         )
@@ -2421,7 +2421,10 @@ def test_show_marks_filters_resolved_and_unmark_reports_partial_success(monkeypa
         )
         store.append(
             "ses123",
-            {"type": "assistant.mark.resolved", "mark": {"id": first_id, "target": "#first", "body": "First."}},
+            {
+                "type": "assistant.mark.resolved",
+                "mark": {"id": first_id, "updatedAt": first["payload"]["updatedAt"]},
+            },
         )
     finally:
         store.close()

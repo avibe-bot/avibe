@@ -88,16 +88,8 @@ class ShowSessionEventStore:
         validate_show_event_payload_session(session_id, payload)
         event_type = _validate_event_type(payload.get("type"))
         actor = _actor_for_event(event_type)
-        event_payload = _normalize_event_payload(event_type, payload)
         records_author = actor == "human" or (event_type == "assistant.mark.resolved" and author is not None)
-        if records_author:
-            event_payload.pop("author", None)
-        anchor = _event_anchor(event_type, payload, event_payload)
-        scope = _event_scope(event_type, event_payload)
-        transcript_text = _format_transcript_text(event_type, event_payload, anchor)
-        if records_author:
-            event_payload["author"] = _normalize_human_author(author)
-        event_id = _event_id(payload, event_payload)
+        event_id = _event_id(payload, {})
         created_at = _utc_now_iso()
 
         with self.engine.begin() as conn:
@@ -112,6 +104,22 @@ class ShowSessionEventStore:
             # events (which dispatch as new agent work) into an archived session.
             if session["status"] == "archived":
                 raise ShowSessionEventError("Agent session is archived.", code="session_archived")
+
+            stored_payload = payload
+            if event_type == "assistant.mark.resolved":
+                stored_payload = _prepare_mark_resolution(conn, session_id, payload)
+            event_payload = _normalize_event_payload(event_type, stored_payload)
+            if records_author:
+                event_payload.pop("author", None)
+            anchor = _event_anchor(event_type, stored_payload, event_payload)
+            scope = _event_scope(event_type, event_payload)
+            transcript_text = (
+                ""
+                if event_type == "assistant.mark.resolved" and author is not None
+                else _format_transcript_text(event_type, event_payload, anchor)
+            )
+            if records_author:
+                event_payload["author"] = _normalize_human_author(author)
 
             conn.execute(
                 show_session_events.insert().values(
@@ -223,16 +231,7 @@ class ShowSessionEventStore:
 
     def active_marks(self, session_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as conn:
-            rows = conn.execute(
-                select(show_session_events)
-                .where(
-                    show_session_events.c.session_id == session_id,
-                    show_session_events.c.event_type.in_(ASSISTANT_MARK_EVENT_TYPES),
-                )
-                .order_by(show_session_events.c.created_at.asc(), show_session_events.c.id.asc())
-            ).mappings().all()
-        events = [_row_to_payload(dict(row)) for row in rows]
-        return project_active_assistant_marks(events)
+            return _active_marks_from_connection(conn, session_id)
 
 
 def stable_assistant_mark_id(*, scope: str, target: str | None = None, reply_to: str | None = None) -> str:
@@ -285,6 +284,46 @@ def project_active_assistant_marks(events: list[dict[str, Any]]) -> list[dict[st
         key_by_mark_id[mark_id] = key
 
     return list(active_by_key.values())
+
+
+def _active_marks_from_connection(conn: Any, session_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        select(show_session_events)
+        .where(
+            show_session_events.c.session_id == session_id,
+            show_session_events.c.event_type.in_(ASSISTANT_MARK_EVENT_TYPES),
+        )
+        .order_by(show_session_events.c.created_at.asc(), show_session_events.c.id.asc())
+    ).mappings().all()
+    return project_active_assistant_marks([_row_to_payload(dict(row)) for row in rows])
+
+
+def _prepare_mark_resolution(conn: Any, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    requested_mark = _normalize_json_object(payload.get("mark") or payload.get("payload"))
+    mark_id = _required_text(requested_mark.get("id"), "mark.id")
+    active_mark = next(
+        (mark for mark in _active_marks_from_connection(conn, session_id) if mark.get("id") == mark_id),
+        None,
+    )
+    if active_mark is None:
+        raise ShowSessionEventError("Assistant mark is not active.", code="mark_not_active")
+
+    requested_version = _text_or_none(requested_mark.get("updatedAt"))
+    if requested_version is None:
+        raise ShowSessionEventError("mark.updatedAt is required.", code="mark_version_required")
+    if requested_version != _text_or_none(active_mark.get("updatedAt")):
+        raise ShowSessionEventError("Assistant mark has changed.", code="mark_version_conflict")
+
+    mark = {
+        key: active_mark[key]
+        for key in ("id", "scope", "target", "body", "createdAt", "updatedAt", "replyTo")
+        if active_mark.get(key) is not None
+    }
+    return {
+        "type": "assistant.mark.resolved",
+        "mark": mark,
+        "anchor": dict(active_mark.get("anchor") or {}),
+    }
 
 
 def _assistant_mark_replacement_key(payload: dict[str, Any]) -> tuple[str, str, str]:
