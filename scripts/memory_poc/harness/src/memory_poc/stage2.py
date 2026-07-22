@@ -145,6 +145,7 @@ class _Probe:
             metrics_path=self.metrics_path,
             egress_path=self.egress_path,
             owner_id=_OWNER_ID,
+            socket_dir=suite.run_dir,
         )
         self._sampler: _RssSampler | None = None
         self._rss_samples: list[int] = []

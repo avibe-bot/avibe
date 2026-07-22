@@ -86,12 +86,30 @@ class SocketLocation:
     actual_path: Path
 
 
+_SOCKET_NAME_CANDIDATES: tuple[str, ...] = (".uds", ".u2", ".u3", ".u4", ".u5", ".u6", ".u7", ".u8")
+
+
 def new_socket_path(run_dir: Path, *, state_root: Path) -> SocketLocation:
-    """Allocate the shortest practical UDS path directly inside one run."""
+    """Allocate the shortest practical UDS path directly inside one run.
+
+    Uses .uds by default; if that name is already taken by a concurrent probe
+    sharing the run directory, advances through short unique alternatives. Raises
+    uds_path_too_long only when the directory itself leaves no room for any name.
+    """
     ensure_owner_directory(run_dir, anchor=state_root)
-    socket_path = run_dir / ".uds"
-    validate_socket_path(socket_path)
-    return SocketLocation(connect_path=socket_path, actual_path=socket_path)
+    last_error: LaunchError | None = None
+    for name in _SOCKET_NAME_CANDIDATES:
+        socket_path = run_dir / name
+        try:
+            validate_socket_path(socket_path)
+        except LaunchError as exc:
+            last_error = exc
+            continue
+        if not socket_path.exists():
+            return SocketLocation(connect_path=socket_path, actual_path=socket_path)
+    if last_error is not None:
+        raise last_error
+    raise LaunchError("uds_path_unavailable")
 
 
 def _signal_owned_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
@@ -389,6 +407,7 @@ class EverOSProcess:
     metrics_path: Path
     owner_id: str
     egress_path: Path | None = None
+    socket_dir: Path | None = None
     startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS
     request_timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS
     process: subprocess.Popen[bytes] | None = field(default=None, init=False)
@@ -405,7 +424,8 @@ class EverOSProcess:
         ensure_owner_directory(self.child_home, anchor=self.state_root)
         self.uds_only_verified = False
         try:
-            self.socket_location = new_socket_path(self.everos_root.parent, state_root=self.state_root)
+            socket_parent = self.socket_dir if self.socket_dir is not None else self.everos_root.parent
+            self.socket_location = new_socket_path(socket_parent, state_root=self.state_root)
             self.socket_path = self.socket_location.connect_path
             child_env = child_environment(
                 self.settings,
