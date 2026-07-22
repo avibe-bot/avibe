@@ -1,0 +1,50 @@
+{"query_id": "q001", "type": "positive", "query": "我一开始给项目定的目标是几个月内做出能用的 MVP？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [1], "text_hint": "三个月"}, "forbid": []}
+{"query_id": "q002", "type": "positive", "query": "MVP 我给自己定的上线死线是哪一天？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [1], "text_hint": "2026-09-30"}, "forbid": []}
+{"query_id": "q003", "type": "positive", "query": "我希望这个项目每个月能赚到多少钱？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [10], "text_hint": "$1000"}, "forbid": []}
+{"query_id": "q004", "type": "positive", "query": "写代码我更偏向哪种带静态类型的语言？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [7], "text_hint": "TypeScript"}, "forbid": []}
+{"query_id": "q005", "type": "positive", "query": "我平时装依赖用的是哪个包管理器？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [8], "text_hint": "pnpm"}, "forbid": []}
+{"query_id": "q006", "type": "positive", "query": "我日常敲代码用的编辑器是哪个？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [9], "text_hint": "Neovim"}, "forbid": []}
+{"query_id": "q007", "type": "positive", "query": "搭前端脚手架时用的构建打包工具是什么？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [11], "text_hint": "Vite"}, "forbid": []}
+{"query_id": "q008", "type": "positive", "query": "项目前端的 UI 框架用的是啥？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [11], "text_hint": "React"}, "forbid": []}
+{"query_id": "q009", "type": "positive", "query": "样式我用的是哪个 CSS 工具库？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [11], "text_hint": "Tailwind"}, "forbid": []}
+{"query_id": "q010", "type": "positive", "query": "我提交代码时遵循的那套信息规范叫什么？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [5], "text_hint": "Conventional Commits"}, "forbid": []}
+{"query_id": "q011", "type": "positive", "query": "界面配色我是喜欢亮色还是偏暗的那种？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [6], "text_hint": "深色"}, "forbid": []}
+{"query_id": "q012", "type": "positive", "query": "接下来准备给项目加的多语言支持能力叫什么？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [7], "text_hint": "i18n"}, "forbid": []}
+{"query_id": "q013", "type": "positive", "query": "内测大概安排在什么时候开跑？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [8], "text_hint": "2026-08-01"}, "forbid": []}
+{"query_id": "q014", "type": "positive", "query": "上周三我搞定的那个登录问题跟什么协议有关？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [1], "text_hint": "OAuth"}, "forbid": []}
+{"query_id": "q015", "type": "positive", "query": "有用户抱怨哪个功能在数据多的时候很慢？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [10], "text_hint": "搜索功能"}, "forbid": []}
+{"query_id": "q016", "type": "positive", "query": "这个周末我动手重构的是哪个模块？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [1], "text_hint": "payment"}, "forbid": []}
+{"query_id": "q017", "type": "positive", "query": "处理收款我接入的是哪家支付服务？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [7], "text_hint": "Stripe"}, "forbid": []}
+{"query_id": "q018", "type": "positive", "query": "代码缩进我习惯用几个空格？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [2], "text_hint": "空格"}, "forbid": []}
+{"query_id": "q019", "type": "positive", "query": "工作时我喜欢放哪种风格的背景音乐？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [3], "text_hint": "lo-fi"}, "forbid": []}
+{"query_id": "q020", "type": "positive", "query": "我打算今年年底之前学哪门新的编程语言？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [4], "text_hint": "Rust"}, "forbid": []}
+{"query_id": "q021", "type": "positive", "query": "我想用新语言重写项目里性能敏感的哪一块？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [4], "text_hint": "搜索索引"}, "forbid": []}
+{"query_id": "q022", "type": "positive", "query": "项目上线用的域名地址是什么？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [5], "text_hint": "seagull.example"}, "forbid": []}
+{"query_id": "q023", "type": "positive", "query": "域名每年在几月几号需要续费？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [5], "text_hint": "3月15日"}, "forbid": []}
+{"query_id": "q024", "type": "positive", "query": "我参加过什么线上比赛式的活动做过 demo？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [12], "text_hint": "hackathon"}, "forbid": []}
+{"query_id": "q025", "type": "positive", "query": "第一次把服务正式发布那天我做了什么？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [9], "text_hint": "部署上线"}, "forbid": []}
+{"query_id": "q026", "type": "positive", "query": "我审代码时对单个函数的长度有什么硬性要求？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [11], "text_hint": "50行"}, "forbid": []}
+{"query_id": "q027", "type": "positive", "query": "我的 Neovim 是基于哪个配置发行版搭的？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [9], "text_hint": "LazyVim"}, "forbid": []}
+{"query_id": "q028", "type": "positive", "query": "我在考虑给项目加一个做时间管理的小功能，是什么？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [8], "text_hint": "番茄钟"}, "forbid": []}
+{"query_id": "q029", "type": "positive", "query": "项目最后定下来的收费方案是怎样的？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [6], "text_hint": "$5"}, "forbid": []}
+{"query_id": "q030", "type": "positive", "query": "现在生产环境里跑的那个关系型数据库是哪个？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [2], "text_hint": "PostgreSQL"}, "forbid": []}
+{"query_id": "q031", "type": "positive", "query": "项目当前部署在哪个托管平台上？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [3], "text_hint": "Fly.io"}, "forbid": []}
+{"query_id": "q032", "type": "positive", "query": "现在项目里用的状态管理库是哪一个？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [4], "text_hint": "Zustand"}, "forbid": []}
+{"query_id": "q033", "type": "positive", "query": "我这个项目希望达到怎样的月度经常性收入目标？", "expect": {"kind": "episode", "session_key": "s1", "seq_refs": [10], "text_hint": "MRR"}, "forbid": []}
+{"query_id": "q034", "type": "positive", "query": "Google 登录那个偶发失败是因为丢了哪个 OAuth 回调参数？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [1], "text_hint": "state 参数"}, "forbid": []}
+{"query_id": "q035", "type": "temporal", "query": "我现在到底该用哪个数据库，是不是还停在 MongoDB？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [2], "text_hint": "PostgreSQL"}, "forbid": [{"text_hint": "MongoDB"}]}
+{"query_id": "q036", "type": "temporal", "query": "Seagull 最后是部署在 Heroku 还是别的平台？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [3], "text_hint": "Fly.io"}, "forbid": [{"text_hint": "Heroku"}]}
+{"query_id": "q037", "type": "temporal", "query": "项目现在的状态管理还是当初那个 Redux 吗？", "expect": {"kind": "episode", "session_key": "s2", "seq_refs": [4], "text_hint": "Zustand"}, "forbid": [{"text_hint": "Redux"}]}
+{"query_id": "q038", "type": "temporal", "query": "定价最后是收费还是当初说的捐赠模式？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [6], "text_hint": "$5"}, "forbid": [{"text_hint": "捐赠"}]}
+{"query_id": "q039", "type": "temporal", "query": "第一版支付最终只接一家还是像最早说的支持支付宝？", "expect": {"kind": "episode", "session_key": "s3", "seq_refs": [7], "text_hint": "Stripe"}, "forbid": [{"text_hint": "支付宝"}]}
+{"query_id": "q040", "type": "negative", "query": "我养了什么宠物？", "forbid": [{"text_hint": "猫"}, {"text_hint": "狗"}]}
+{"query_id": "q041", "type": "negative", "query": "我平时最爱做的运动是什么？", "forbid": [{"text_hint": "篮球"}, {"text_hint": "跑步"}]}
+{"query_id": "q042", "type": "negative", "query": "我现在住在哪个城市？", "forbid": [{"text_hint": "北京"}, {"text_hint": "上海"}]}
+{"query_id": "q043", "type": "negative", "query": "我开发用的操作系统是不是 Windows？", "forbid": [{"text_hint": "Windows"}]}
+{"query_id": "q044", "type": "negative", "query": "项目后端框架用的是 Django 吗？", "forbid": [{"text_hint": "Django"}]}
+{"query_id": "q045", "type": "negative", "query": "项目是用 Kubernetes 编排部署的吗？", "forbid": [{"text_hint": "Kubernetes"}]}
+{"query_id": "q046", "type": "negative", "query": "我用的云服务商是 AWS 吗？", "forbid": [{"text_hint": "AWS"}]}
+{"query_id": "q047", "type": "negative", "query": "我每天喝几杯咖啡？", "forbid": [{"text_hint": "咖啡"}]}
+{"query_id": "q048", "type": "negative", "query": "数据库最后是不是敲定用 MongoDB 了？", "forbid": [{"text_hint": "最终定了 MongoDB"}, {"text_hint": "现在生产环境就是 MongoDB"}]}
+{"query_id": "q049", "type": "negative", "query": "部署平台最后是不是敲定留在 Heroku 了？", "forbid": [{"text_hint": "最终换成了 Heroku"}, {"text_hint": "现在 Seagull 就跑在 Heroku"}]}
+{"query_id": "q050", "type": "negative", "query": "定价最后是不是决定走免费捐赠那条路？", "forbid": [{"text_hint": "最终决定免费"}, {"text_hint": "改成了免费捐赠"}]}

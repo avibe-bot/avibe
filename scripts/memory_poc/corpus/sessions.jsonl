@@ -1,0 +1,31 @@
+{"session_key": "s1", "seq": 1, "text": "我最近开始做一个个人 side project，代号叫 Seagull，目标是三个月内做出一个能用的 MVP，最晚不能晚于 2026-09-30 上线。", "occurred_offset_ms": 0, "tags": ["goal", "date"]}
+{"session_key": "s1", "seq": 2, "text": "后端数据库我打算先用 MongoDB，图它 schema 灵活、上手快。", "occurred_offset_ms": 60000, "tags": ["temporal-old"]}
+{"session_key": "s1", "seq": 3, "text": "部署平台先放在 Heroku 上，免费额度暂时够用。", "occurred_offset_ms": 120000, "tags": ["temporal-old"]}
+{"session_key": "s1", "seq": 4, "text": "前端状态管理我先上 Redux，自己之前比较熟。", "occurred_offset_ms": 180000, "tags": ["temporal-old"]}
+{"session_key": "s1", "seq": 5, "text": "商业模式我一开始想让 Seagull 完全免费，靠用户自愿捐赠来维持。", "occurred_offset_ms": 240000, "tags": ["temporal-old"]}
+{"session_key": "s1", "seq": 6, "text": "支付第一版我想同时支持支付宝和微信支付两种渠道。", "occurred_offset_ms": 300000, "tags": ["temporal-old"]}
+{"session_key": "s1", "seq": 7, "text": "写代码我强烈偏好 TypeScript，纯 JavaScript 基本不碰了，类型安全对我太重要。", "occurred_offset_ms": 360000, "tags": ["preference"]}
+{"session_key": "s1", "seq": 8, "text": "包管理我一直用 pnpm，不用 npm 也不用 yarn，磁盘占用小很多。", "occurred_offset_ms": 420000, "tags": ["preference"]}
+{"session_key": "s1", "seq": 9, "text": "编辑器我用 Neovim，配置基于 LazyVim，习惯了 vim 键位改不回去。", "occurred_offset_ms": 480000, "tags": ["preference"]}
+{"session_key": "s1", "seq": 10, "text": "我希望这个项目最终能做到每月 $1000 MRR，算是能养活自己的第一步。", "occurred_offset_ms": 540000, "tags": ["goal"]}
+{"session_key": "s1", "seq": 11, "text": "今天把脚手架搭好了，技术栈是 Vite + React + Tailwind，本地能跑起来还挺开心。", "occurred_offset_ms": 600000, "tags": ["episodic"]}
+{"session_key": "s1", "seq": 12, "text": "上个月我参加了一个线上 hackathon，用两天赶了个小 demo 出来，学到不少东西。", "occurred_offset_ms": 660000, "tags": ["episodic"]}
+{"session_key": "s2", "seq": 1, "text": "上周三我修掉了一个特别烦人的 bug，是 Google OAuth 登录回调偶尔丢掉 state 参数导致登录失败。", "occurred_offset_ms": 1209600000, "tags": ["episodic"]}
+{"session_key": "s2", "seq": 2, "text": "数据库最终定了 PostgreSQL，关系型查询和事务的需求太多，之前那个方案撑不住。现在生产环境就是 PostgreSQL。", "occurred_offset_ms": 1209660000, "tags": ["temporal-new"]}
+{"session_key": "s2", "seq": 3, "text": "部署平台最终换成了 Fly.io，之前那家的免费套餐取消了。现在 Seagull 就跑在 Fly.io 上。", "occurred_offset_ms": 1209720000, "tags": ["temporal-new"]}
+{"session_key": "s2", "seq": 4, "text": "状态管理最终收敛到 Zustand，样板代码少太多了，之前那一套已经全删掉。现在项目里只有 Zustand。", "occurred_offset_ms": 1209780000, "tags": ["temporal-new"]}
+{"session_key": "s2", "seq": 5, "text": "我写 commit 一直坚持 Conventional Commits 规范，feat/fix/docs 这种前缀，历史看着清爽。", "occurred_offset_ms": 1209840000, "tags": ["preference"]}
+{"session_key": "s2", "seq": 6, "text": "界面我只用深色主题（dark mode），白底看久了眼睛实在受不了。", "occurred_offset_ms": 1209900000, "tags": ["preference"]}
+{"session_key": "s2", "seq": 7, "text": "接下来一个大目标是给 Seagull 加 i18n，至少要支持中文和英文两种语言。", "occurred_offset_ms": 1209960000, "tags": ["goal"]}
+{"session_key": "s2", "seq": 8, "text": "Beta 内测我定在 2026-08-01 开始，先拉一小批朋友进来试用。", "occurred_offset_ms": 1210020000, "tags": ["date"]}
+{"session_key": "s2", "seq": 9, "text": "昨天第一次把服务正式部署上线，还特意发了条动态庆祝一下，虽然基本只有我自己看。", "occurred_offset_ms": 1210080000, "tags": ["episodic"]}
+{"session_key": "s2", "seq": 10, "text": "刚收到一个早期用户的反馈，说搜索功能在数据量一大的时候特别慢，得抽时间优化索引。", "occurred_offset_ms": 1210140000, "tags": ["episodic", "kill-case"]}
+{"session_key": "s2", "seq": 11, "text": "我 review 代码时特别在意单个函数不要超过50行，太长了就必须拆开。", "occurred_offset_ms": 1210200000, "tags": ["preference"]}
+{"session_key": "s3", "seq": 1, "text": "这周末我把整个 payment 模块重构了一遍，把收款相关的调用都收敛到一个 service 层里，测试好写多了。", "occurred_offset_ms": 1814400000, "tags": ["episodic"]}
+{"session_key": "s3", "seq": 2, "text": "缩进我坚持用 2 个空格，不用 tab 也不用 4 空格，我自己的项目就这么定。", "occurred_offset_ms": 1814460000, "tags": ["preference"]}
+{"session_key": "s3", "seq": 3, "text": "工作的时候我喜欢放 lo-fi 音乐，太安静了反而静不下心。", "occurred_offset_ms": 1814520000, "tags": ["preference"]}
+{"session_key": "s3", "seq": 4, "text": "我计划年底之前认真学一下 Rust，想用它重写 Seagull 里性能敏感的搜索索引部分。", "occurred_offset_ms": 1814580000, "tags": ["goal"]}
+{"session_key": "s3", "seq": 5, "text": "域名 seagull.example 每年3月15日续费，我特意设了个提醒免得忘。", "occurred_offset_ms": 1814640000, "tags": ["date"]}
+{"session_key": "s3", "seq": 6, "text": "定价我最后拍板了：不再走之前那种不收钱的路子，改成每月 $5 的订阅制。", "occurred_offset_ms": 1814700000, "tags": ["temporal-new"]}
+{"session_key": "s3", "seq": 7, "text": "支付这块也想清楚了，第一版只接 Stripe 一家，其它渠道都放到以后再说。", "occurred_offset_ms": 1814760000, "tags": ["temporal-new"]}
+{"session_key": "s3", "seq": 8, "text": "另外我在琢磨要不要给 Seagull 加一个番茄钟（Pomodoro）功能，细节还没定……", "occurred_offset_ms": 1814820000, "tags": ["buffered-tail"]}
