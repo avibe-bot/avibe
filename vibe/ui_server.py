@@ -3112,6 +3112,56 @@ async def running_agents_end():
     return jsonify(body), (result.get("status_code") or 200)
 
 
+# NOTE: this static route MUST be registered before ``/api/agents/<name>``
+# below — the compat router matches in registration order, so a dynamic
+# ``<name>`` rule declared first would swallow ``/api/agents/graph`` as
+# ``name="graph"``.
+@app.route("/api/agents/graph", methods=["GET"])
+async def agents_graph_get():
+    """Read-only run-graph payload for the Agents → 运行 tab.
+
+    Assembles ``agent_sessions`` + ``agent_runs`` + ``scopes`` into the frozen
+    contract §3 shape (``docs/plans/agents-run-graph-contract.md``). Liveness is
+    controller-owned, so it is fetched from the internal running-agents snapshot
+    and merged in; when the controller is unreachable the graph still renders
+    from the DB (all nodes non-live) with a ``live_unreachable`` hint so the tab
+    can show a "runtime unreachable — history only" state instead of a
+    misleading empty graph."""
+    from core.services import agent_graph
+    from vibe import internal_client
+
+    def _flag(value, default: bool) -> bool:
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    window = request.args.get("window") or agent_graph.DEFAULT_WINDOW
+    project = request.args.get("project") or "all"
+    include_ended = _flag(request.args.get("include_ended"), True)
+    include_background = _flag(request.args.get("include_background"), True)
+
+    live_agents: list = []
+    live_unreachable = False
+    try:
+        result = await internal_client.list_running_agents()
+        live_agents = (result.get("body") or {}).get("agents") or []
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        # Controller down: fall back to a DB-only graph (history stays visible).
+        live_unreachable = True
+
+    payload = await asyncio.to_thread(
+        agent_graph.build_graph,
+        live_agents=live_agents,
+        window=window,
+        project=project,
+        include_ended=include_ended,
+        include_background=include_background,
+    )
+    if live_unreachable:
+        payload["live_unreachable"] = True
+    return jsonify(payload)
+
+
 @app.route("/api/agents/<name>", methods=["GET"])
 def vibe_agent_get(name):
     from vibe import api

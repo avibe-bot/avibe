@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
+import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
   WorkbenchEventReconnectLoop,
@@ -676,6 +677,13 @@ export type ApiContextType = {
   listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
   getHarnessRun: (runId: string) => Promise<{ ok: boolean; run: HarnessRun }>;
   getRunningAgents: () => Promise<RunningAgentsResult>;
+  // Agents · 运行图 graph payload (contract §3). Realtime — refetched off SSE,
+  // so it bypasses the read cache. ``live_unreachable`` is set when the
+  // controller is down and the graph fell back to DB-only (history).
+  getAgentsGraph: (params?: AgentGraphParams) => Promise<AgentGraphResult & { live_unreachable?: boolean }>;
+  // Foreground/background toggle from the graph detail panel (contract §2,
+  // M1-owned PATCH). Returns the updated session payload.
+  setSessionVisibility: (sessionId: string, visibility: AgentGraphVisibility) => Promise<WorkbenchSession>;
   endRunningAgent: (payload: {
     backend?: string | null;
     state?: string | null;
@@ -1221,6 +1229,12 @@ export type HarnessRun = {
   source_kind: string | null;
   source_actor: string | null;
   parent_run_id: string | null;
+  // Callback (report-back) lineage — serialized by the backend run row but
+  // previously unrendered; the run detail surfaces these (Part B).
+  callback_session_id: string | null;
+  callback_run_id: string | null;
+  callback_status: string | null;
+  callback_error: string | null;
   agent_name: string | null;
   agent_id: string | null;
   agent_backend: string | null;
@@ -2841,6 +2855,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       };
     },
+    getAgentsGraph: (params) => {
+      const search = new URLSearchParams();
+      if (params?.window) search.set('window', params.window);
+      if (params?.project) search.set('project', params.project);
+      if (params?.includeEnded === false) search.set('include_ended', '0');
+      if (params?.includeBackground === false) search.set('include_background', '0');
+      const qs = search.toString();
+      return getJson(qs ? `/api/agents/graph?${qs}` : '/api/agents/graph');
+    },
+    setSessionVisibility: (sessionId, visibility) =>
+      patchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { visibility }),
     getRunningAgents: async () => {
       const res = await apiFetch('/api/running-agents');
       // 503/504 means controller is down; surface as unreachable instead of throwing.

@@ -1229,6 +1229,77 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
           <code className="font-mono text-[11px] text-muted">{run.definition_id}</code>
         </DetailField>
       )}
+      {/* Session + lineage (Part B): the run row already carries these; surface
+          them instead of hiding the who-started-whom / where-it-reports story. */}
+      {run.session_id && (
+        <DetailField label={t('harness.detail.session')}>
+          <Link
+            to={`/chat/${encodeURIComponent(run.session_id)}`}
+            className="inline-flex min-w-0 items-center gap-1.5 text-[12px] font-medium text-cyan hover:underline"
+          >
+            <MessageSquare className="size-3.5 shrink-0" />
+            <span className="min-w-0 truncate font-mono">{run.session_id}</span>
+            <ArrowUpRight className="size-3 shrink-0" />
+          </Link>
+        </DetailField>
+      )}
+      {(run.source_kind || run.source_actor) && (
+        <DetailField label={t('harness.detail.source')}>
+          <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] text-foreground">
+            {run.source_kind && (
+              <span className="rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
+                {run.source_kind}
+              </span>
+            )}
+            {run.source_actor &&
+              (run.source_kind === 'agent' ? (
+                <Link
+                  to={`/chat/${encodeURIComponent(run.source_actor)}`}
+                  className="inline-flex items-center gap-1 font-mono text-[11px] text-cyan hover:underline"
+                >
+                  {run.source_actor}
+                  <ArrowUpRight className="size-3" />
+                </Link>
+              ) : (
+                <span className="font-mono text-[11px] text-muted">{run.source_actor}</span>
+              ))}
+          </span>
+        </DetailField>
+      )}
+      {run.parent_run_id && (
+        <DetailField label={t('harness.detail.parentRun')}>
+          <Link
+            to={`/harness?tab=runs&run=${encodeURIComponent(run.parent_run_id)}`}
+            className="inline-flex items-center gap-1 font-mono text-[11px] text-violet hover:underline"
+          >
+            {run.parent_run_id}
+            <ArrowUpRight className="size-3" />
+          </Link>
+        </DetailField>
+      )}
+      {run.callback_session_id && (
+        <DetailField label={t('harness.detail.callback')}>
+          <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
+            <Link
+              to={`/chat/${encodeURIComponent(run.callback_session_id)}`}
+              className="inline-flex min-w-0 items-center gap-1 font-mono text-[11px] text-cyan hover:underline"
+            >
+              <span className="min-w-0 truncate">{run.callback_session_id}</span>
+              <ArrowUpRight className="size-3 shrink-0" />
+            </Link>
+            {run.callback_status && (
+              <span className="rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
+                {run.callback_status}
+              </span>
+            )}
+          </span>
+          {run.callback_error && (
+            <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
+              {run.callback_error}
+            </div>
+          )}
+        </DetailField>
+      )}
       {(run.message || run.prompt) && (
         <DetailField label={t('harness.detail.message')}>
           <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">

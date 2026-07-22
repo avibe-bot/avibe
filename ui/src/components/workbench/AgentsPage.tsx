@@ -23,7 +23,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
-import { RunningAgentsTab } from './RunningAgentsTab';
+import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
 import { RunAgentDialog } from './RunAgentDialog';
@@ -127,7 +127,9 @@ export const AgentsPage: React.FC = () => {
     try {
       const result = await api.getRunningAgents();
       if (result.ok && result.counts) {
-        setRunningActiveCount((result.counts as any).active ?? 0);
+        // Badge reflects the live-session count (active + idle + orphan), which
+        // matches the graph tab's ``counts.live``.
+        setRunningActiveCount((result.counts as any).total ?? 0);
       } else {
         setRunningActiveCount(null);
       }
@@ -395,8 +397,8 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* Running tab body */}
-      {agentsTab === 'running' && <RunningAgentsTab onActiveCountChange={handleRunningActiveCountChange} />}
+      {/* 运行 tab body — the run graph (replaces the old flat running list). */}
+      {agentsTab === 'running' && <AgentGraphTab onLiveCountChange={handleRunningActiveCountChange} />}
 
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
       <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
