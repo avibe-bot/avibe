@@ -148,6 +148,8 @@ class EverOSClient:
                 trust_env=False,
             ) as client:
                 response = client.request(method, path, json=payload, headers={"X-Memory-Poc-Phase": phase})
+        except httpx.TimeoutException as exc:
+            raise LaunchError(f"provider_{method.lower()}_timeout") from exc
         except httpx.HTTPError as exc:
             raise LaunchError(f"provider_{method.lower()}_transport_failed") from exc
         body: Any = None

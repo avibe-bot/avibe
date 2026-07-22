@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+import pytest
+
+from memory_poc.errors import LaunchError
 from memory_poc.provider import EverOSClient, _closed_code
 
 
@@ -189,3 +193,16 @@ def test_client_records_redacted_public_http_shapes(monkeypatch) -> None:
 
 def test_closed_code_reads_the_canonical_nested_error_envelope() -> None:
     assert _closed_code({"error": {"code": "invalid_api_key"}}) == "invalid_api_key"
+
+
+def test_client_preserves_a_timeout_as_a_distinct_closed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _TimeoutClient(_Client):
+        @staticmethod
+        def request(*_args: object, **_kwargs: object) -> _Response:
+            raise httpx.ReadTimeout("synthetic timeout")
+
+    monkeypatch.setattr("memory_poc.provider.httpx.HTTPTransport", lambda **_kwargs: object())
+    monkeypatch.setattr("memory_poc.provider.httpx.Client", _TimeoutClient)
+
+    with pytest.raises(LaunchError, match="provider_post_timeout"):
+        EverOSClient(Path("/tmp/everos.sock")).add(session_id="session", messages=[])

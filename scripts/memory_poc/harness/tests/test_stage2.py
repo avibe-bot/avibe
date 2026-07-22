@@ -46,6 +46,19 @@ def test_ambiguous_duplicate_outcome_cannot_be_called_official() -> None:
     assert recommendation_for_report(report) == "fork"
 
 
+def test_incomplete_timed_retry_or_duplicate_total_blocks_official() -> None:
+    criteria = _criteria("pass")
+
+    timed_retry = {"criteria": criteria, "duplicates": {"observed": "timed retry exercised false", "count": 0}}
+    unknown_total = {
+        "criteria": _criteria("pass"),
+        "duplicates": {"observed": "total logical count not measured", "count": 0},
+    }
+
+    assert recommendation_for_report(timed_retry) == "fork"
+    assert recommendation_for_report(unknown_total) == "fork"
+
+
 def test_percentile_uses_nearest_rank_and_preserves_timeout_values() -> None:
     assert percentile((1, 2, 3, 4, 5), 0.95) == 5
     assert percentile((100, 300001), 0.95) == 300001

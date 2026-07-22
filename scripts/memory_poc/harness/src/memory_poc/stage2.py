@@ -411,7 +411,12 @@ def recommendation_for_report(report: dict[str, Any]) -> str:
     observed = duplicates.get("observed") if isinstance(duplicates, dict) else ""
     if not isinstance(observed, str):
         return "fork"
-    if "same timestamp distinct false" in observed or "retry searchable false" in observed:
+    if (
+        "same timestamp distinct false" in observed
+        or "retry searchable false" in observed
+        or "timed retry exercised false" in observed
+        or "total logical count not measured" in observed
+    ):
         return "fork"
     return "official"
 
@@ -947,6 +952,7 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
     episode_matches = 0
     fact_matches = 0
     timed_retry_outcome = "not run"
+    timed_retry_exercised = False
     try:
         client = probe.start()
         clients.append(client)
@@ -1026,7 +1032,7 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
         client.flush(session_id=same_session)
         same_timestamp = _wait_same_timestamp_distinct(client)
 
-        timed_retry_outcome, timed_retry_clients = _timed_retry_probe(
+        timed_retry_outcome, timed_retry_exercised, timed_retry_clients = _timed_retry_probe(
             probe,
             started_epoch_ms=started_epoch_ms,
         )
@@ -1044,9 +1050,11 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
     )
     report["duplicates"] = {
         "observed": (
-            f"simulated response loss retry episodes {episode_matches} facts {fact_matches} "
+            f"simulated response loss public top8 episodes {episode_matches} facts {fact_matches} "
+            f"observed extra {duplicate_count} total logical count not measured "
             f"retry searchable {str(retry_searchable_ms is not None).lower()} "
-            f"same timestamp distinct {str(same_timestamp.distinct).lower()} timed retry {timed_retry_outcome}"
+            f"same timestamp distinct {str(same_timestamp.distinct).lower()} "
+            f"timed retry exercised {str(timed_retry_exercised).lower()} outcome {timed_retry_outcome}"
         ),
         "count": duplicate_count,
     }
@@ -1059,8 +1067,9 @@ def _run_duplicate(suite: Stage2Suite) -> Path:
             f"duplicate flush searchable ms {buffered_searchable_ms}",
             f"duplicate unflushed restart preserves {str(restart_preserves).lower()} searchable ms {_display_latency(restart_searchable_ms)}",
             f"duplicate simulated response loss retry public top8 episode matches {episode_matches} fact matches {fact_matches} searchable ms {_display_latency(retry_searchable_ms)}",
+            f"duplicate total logical count not measured duplicates count is public top8 observed extra items {duplicate_count}",
             f"duplicate same millisecond alpha identities {same_timestamp.alpha_identities} bravo identities {same_timestamp.bravo_identities} distinct {str(same_timestamp.distinct).lower()}",
-            f"duplicate timed retry outcome {timed_retry_outcome}",
+            f"duplicate timed retry exercised {str(timed_retry_exercised).lower()} outcome {timed_retry_outcome}",
             duplicate_consequence,
             *error_lines,
         )
@@ -1072,7 +1081,7 @@ def _synthetic_message(content: str, timestamp: int) -> dict[str, Any]:
     return {"sender_id": _OWNER_ID, "role": "user", "timestamp": timestamp, "content": content}
 
 
-def _timed_retry_probe(probe: _Probe, *, started_epoch_ms: int) -> tuple[str, tuple[EverOSClient, ...]]:
+def _timed_retry_probe(probe: _Probe, *, started_epoch_ms: int) -> tuple[str, bool, tuple[EverOSClient, ...]]:
     """Issue one retry immediately after a deliberately short flush timeout."""
     prepared = probe.process.client()
     first = probe.process.client(timeout_seconds=0.05)
@@ -1084,15 +1093,17 @@ def _timed_retry_probe(probe: _Probe, *, started_epoch_ms: int) -> tuple[str, tu
         first.flush(session_id=session_id)
     except HarnessError as exc:
         first_outcome = _safe_failure_code(exc)
+        first_timed_out = first_outcome.endswith("_timeout")
     else:
         first_outcome = "completed before timeout"
+        first_timed_out = False
     try:
         retry.flush(session_id=session_id)
     except HarnessError as exc:
         retry_outcome = _safe_failure_code(exc)
     else:
         retry_outcome = "completed"
-    return f"flush first {first_outcome} retry {retry_outcome}", (prepared, first, retry)
+    return f"flush first {first_outcome} retry {retry_outcome}", first_timed_out, (prepared, first, retry)
 
 
 class _FakeUpstream:
