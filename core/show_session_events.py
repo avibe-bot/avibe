@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -48,6 +49,11 @@ ANNOTATION_PRIMARY_ANCHORS = {
     "area",
     "screenshot",
 }
+ASSISTANT_MARK_EVENT_TYPES = {
+    "assistant.mark.created",
+    "assistant.mark.updated",
+    "assistant.mark.resolved",
+}
 
 
 class ShowSessionEventError(ValueError):
@@ -83,12 +89,13 @@ class ShowSessionEventStore:
         event_type = _validate_event_type(payload.get("type"))
         actor = _actor_for_event(event_type)
         event_payload = _normalize_event_payload(event_type, payload)
-        if actor == "human":
+        records_author = actor == "human" or (event_type == "assistant.mark.resolved" and author is not None)
+        if records_author:
             event_payload.pop("author", None)
         anchor = _event_anchor(event_type, payload, event_payload)
         scope = _event_scope(event_type, event_payload)
         transcript_text = _format_transcript_text(event_type, event_payload, anchor)
-        if actor == "human":
+        if records_author:
             event_payload["author"] = _normalize_human_author(author)
         event_id = _event_id(payload, event_payload)
         created_at = _utc_now_iso()
@@ -136,7 +143,7 @@ class ShowSessionEventStore:
                         "show_event_id": event_id,
                         "show_event_type": event_type,
                         "show_event_scope": scope,
-                        **({"author": event_payload["author"]} if actor == "human" else {}),
+                        **({"author": event_payload["author"]} if "author" in event_payload else {}),
                     },
                     native_message_id=f"show:{event_id}",
                 )
@@ -186,6 +193,106 @@ class ShowSessionEventStore:
             "events": rows,
             "next_after_id": rows[-1]["id"] if len(rows) == effective_limit else None,
         }
+
+    def get_annotation_event(self, session_id: str, event_id: str) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(show_session_events)
+                .where(
+                    show_session_events.c.session_id == session_id,
+                    show_session_events.c.id == event_id,
+                    show_session_events.c.event_type == "human.annotation.created",
+                )
+                .limit(1)
+            ).mappings().first()
+        return _row_to_payload(dict(row)) if row is not None else None
+
+    def recent_annotation_event_ids(self, session_id: str, *, limit: int = 10) -> list[str]:
+        effective_limit = min(max(int(limit), 1), 50)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(show_session_events.c.id)
+                .where(
+                    show_session_events.c.session_id == session_id,
+                    show_session_events.c.event_type == "human.annotation.created",
+                )
+                .order_by(show_session_events.c.created_at.desc(), show_session_events.c.id.desc())
+                .limit(effective_limit)
+            ).all()
+        return [str(row[0]) for row in rows]
+
+    def active_marks(self, session_id: str) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(show_session_events)
+                .where(
+                    show_session_events.c.session_id == session_id,
+                    show_session_events.c.event_type.in_(ASSISTANT_MARK_EVENT_TYPES),
+                )
+                .order_by(show_session_events.c.created_at.asc(), show_session_events.c.id.asc())
+            ).mappings().all()
+        events = [_row_to_payload(dict(row)) for row in rows]
+        return project_active_assistant_marks(events)
+
+
+def stable_assistant_mark_id(*, scope: str, target: str | None = None, reply_to: str | None = None) -> str:
+    normalized_scope = _text_or_none(scope) or DEFAULT_MARK_SCOPE
+    if reply_to:
+        identity = f"reply:{reply_to.strip()}"
+    elif target:
+        identity = f"note:{target.strip()}"
+    else:
+        raise ValueError("target or reply_to is required")
+    digest = hashlib.sha256(f"{normalized_scope}\0{identity}".encode()).hexdigest()[:16]
+    return f"mark_{digest}"
+
+
+def project_active_assistant_marks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    key_by_mark_id: dict[str, tuple[str, str, str]] = {}
+
+    for event in events:
+        event_type = str(event.get("type") or "")
+        if event_type not in ASSISTANT_MARK_EVENT_TYPES:
+            continue
+        payload = event.get("payload") or event.get("mark")
+        if not isinstance(payload, dict):
+            continue
+        mark_id = _text_or_none(payload.get("id"))
+        if not mark_id:
+            continue
+
+        if event_type == "assistant.mark.resolved" or payload.get("status") == "resolved":
+            key = key_by_mark_id.pop(mark_id, None)
+            if key is not None:
+                active_by_key.pop(key, None)
+            continue
+
+        key = _assistant_mark_replacement_key(payload)
+        previous = active_by_key.pop(key, None)
+        if previous is not None:
+            key_by_mark_id.pop(str(previous["id"]), None)
+        mark = {
+            **payload,
+            "id": mark_id,
+            "kind": "reply" if _text_or_none(payload.get("replyTo")) else "note",
+            "anchor": dict(event.get("anchor") or {}),
+            "event_id": event.get("id"),
+            "read_state": "unread",
+        }
+        mark.pop("author", None)
+        active_by_key[key] = mark
+        key_by_mark_id[mark_id] = key
+
+    return list(active_by_key.values())
+
+
+def _assistant_mark_replacement_key(payload: dict[str, Any]) -> tuple[str, str, str]:
+    scope = _text_or_none(payload.get("scope")) or DEFAULT_MARK_SCOPE
+    reply_to = _text_or_none(payload.get("replyTo"))
+    if reply_to:
+        return (scope, "reply", reply_to)
+    return (scope, "note", _text_or_none(payload.get("target")) or "")
 
 
 def show_event_payload_session_mismatch(session_id: str, payload: dict[str, Any]) -> str | None:
@@ -244,7 +351,7 @@ def _normalize_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
         target = _required_text(mark.get("target"), "mark.target")
         body = _required_text(mark.get("body") or mark.get("comment"), "mark.body")
         created_at = _text_or_none(mark.get("createdAt")) or _utc_now_iso()
-        return {
+        normalized = {
             "id": _text_or_none(mark.get("id")) or _new_id("mark"),
             "role": "assistant",
             "scope": _text_or_none(mark.get("scope")) or DEFAULT_MARK_SCOPE,
@@ -255,6 +362,10 @@ def _normalize_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
             "updatedAt": _text_or_none(mark.get("updatedAt")) or created_at,
             "resolvedAt": _text_or_none(mark.get("resolvedAt")) if event_type != "assistant.mark.resolved" else _text_or_none(mark.get("resolvedAt")) or _utc_now_iso(),
         }
+        reply_to = _text_or_none(mark.get("replyTo"))
+        if reply_to:
+            normalized["replyTo"] = reply_to
+        return normalized
     if event_type == "human.intent.submitted":
         intent_payload = _normalize_json_object(payload.get("payload") or payload)
         created_at = _text_or_none(intent_payload.get("createdAt")) or _utc_now_iso()

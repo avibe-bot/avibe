@@ -8591,7 +8591,7 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
         return
     dispatch_payload = {
         "session_id": session_id,
-        "text": transcript_text,
+        "text": _show_event_dispatch_text(event_payload),
         "scope_id": scope_id,
         "user_message_id": event_payload.get("message_id"),
         "message_id": event_payload.get("message_id"),
@@ -8610,6 +8610,27 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("show event dispatch failed")
         _publish_show_dispatch_event(event_payload, "stream.error", {"reason": "dispatch_failed", "detail": str(exc)})
+
+
+def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
+    transcript_text = str(event_payload.get("transcript_text") or "").strip()
+    if event_payload.get("type") != "human.annotation.created":
+        return transcript_text
+
+    event_id = str(event_payload.get("id") or "").strip()
+    if not event_id:
+        return transcript_text
+    lines = [transcript_text, "", f"Show event id: {event_id}"]
+    payload = event_payload.get("payload")
+    if isinstance(payload, dict) and payload.get("intent") == "question":
+        lines.extend(
+            [
+                "",
+                "用户在页面上提出了疑问。请优先把回答放回页面上用户指的位置（chat 里保留一句简短结论即可）：",
+                f"  vibe show reply {event_id} --message '<你的回答>'",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str, data: Any) -> None:
@@ -9587,13 +9608,14 @@ async def serve_public_show_page(share_id, asset_path):
             if not _public_show_event_write_authorized(share_id, page.session_id):
                 return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
             payload = _sanitize_public_show_event_payload(_show_events_payload_from_request())
-            if str(payload.get("type") or "").strip() not in HUMAN_EVENT_TYPES:
+            event_type = str(payload.get("type") or "").strip()
+            if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
                 return (
                     jsonify(
                         {
                             "ok": False,
                             "code": "unsupported_event_type",
-                            "error": "Public Show Page writes require a supported human event type.",
+                            "error": "Public Show Page writes require a supported human event or mark resolution type.",
                         }
                     ),
                     400,

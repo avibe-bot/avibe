@@ -872,6 +872,9 @@ def _show_examples_text() -> str:
           status   Inspect local path, visibility, active URL, and share state.
           update   Switch visibility, set a custom public link, rotate share links, or take the page offline.
           mark     Add an assistant mark event to the session.
+          reply    Reply to a dispatched page annotation at its original anchor.
+          marks    List active assistant marks.
+          unmark   Resolve active assistant marks by id or target.
           event    Record a generic annotation-layer event.
           annotate Control the page's annotation overlay.
 
@@ -887,7 +890,10 @@ def _show_examples_text() -> str:
           vibe show status --session-id sesk8m4q2p7x --json
           vibe show update --session-id sesk8m4q2p7x --visibility public
           vibe show update --session-id sesk8m4q2p7x --visibility offline
-          vibe show mark --session-id sesk8m4q2p7x --target mark-default-summary --body "Review this summary."
+          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
+          vibe show reply show_evt_1a2b3c4d --message "The source changed in W30."
+          vibe show marks --json
+          vibe show unmark mark_1 mark-default-summary
           vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json --json
           vibe show annotate --session-id sesk8m4q2p7x --on --mode screenshot
 
@@ -897,6 +903,9 @@ def _show_examples_text() -> str:
           vibe show status --help
           vibe show update --help
           vibe show mark --help
+          vibe show reply --help
+          vibe show marks --help
+          vibe show unmark --help
           vibe show event --help
           vibe show annotate --help
         """
@@ -965,8 +974,9 @@ def _show_mark_examples_text() -> str:
         a value produced by @avibe/show-sdk's mark helpers.
 
         Examples:
-          vibe show mark --session-id sesk8m4q2p7x --target mark-default-summary --body "Review this summary."
-          vibe show mark --session-id sesk8m4q2p7x --scope default --target summary --body-file ./comment.txt --json
+          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
+          vibe show mark summary --session-id sesk8m4q2p7x --scope default --message-file ./comment.txt --json
+          vibe show mark --target summary --body "Legacy option aliases still work."
         """
     )
 
@@ -10080,6 +10090,9 @@ def _print_show_page_error(exc: Exception) -> None:
     hint = getattr(exc, "hint", None)
     if hint:
         payload["hint"] = hint
+    details = getattr(exc, "details", None)
+    if details:
+        payload["details"] = details
     print(json.dumps(payload, indent=2), file=sys.stderr)
 
 
@@ -10281,7 +10294,13 @@ def cmd_show_update(args):
         store.close()
 
 
-def _read_cli_text_argument(*, value: str | None, file_path: str | None, field_name: str) -> str:
+def _read_cli_text_argument(
+    *,
+    value: str | None,
+    file_path: str | None,
+    field_name: str,
+    help_command: str = "vibe show mark --help",
+) -> str:
     if file_path:
         source = sys.stdin.read() if file_path == "-" else Path(file_path).read_text(encoding="utf-8")
         text = source.strip()
@@ -10291,7 +10310,7 @@ def _read_cli_text_argument(*, value: str | None, file_path: str | None, field_n
         raise TaskCliError(
             f"{field_name} is required",
             code="invalid_arguments",
-            help_command="vibe show mark --help",
+            help_command=help_command,
         )
     return text
 
@@ -10493,11 +10512,21 @@ def _read_event_json_argument(value: str | None, file_path: str | None) -> dict:
             help_command="vibe show event --help",
         )
     if file_path is not None:
-        raw = _read_cli_text_argument(value=None, file_path=file_path, field_name="--event-json-file")
+        raw = _read_cli_text_argument(
+            value=None,
+            file_path=file_path,
+            field_name="--event-json-file",
+            help_command="vibe show event --help",
+        )
     else:
         raw = value or ""
         if raw.startswith("@"):
-            raw = _read_cli_text_argument(value=None, file_path=raw[1:], field_name="--event-json")
+            raw = _read_cli_text_argument(
+                value=None,
+                file_path=raw[1:],
+                field_name="--event-json",
+                help_command="vibe show event --help",
+            )
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -10515,21 +10544,87 @@ def _read_event_json_argument(value: str | None, file_path: str | None) -> dict:
     return payload
 
 
+def _show_mark_target(args) -> str:
+    positional = (getattr(args, "target", None) or "").strip()
+    option = (getattr(args, "target_option", None) or "").strip()
+    if positional and option and positional != option:
+        raise TaskCliError(
+            "positional target and --target must match when both are provided",
+            code="conflicting_mark_targets",
+            help_command="vibe show mark --help",
+        )
+    return _read_cli_text_argument(
+        value=positional or option,
+        file_path=None,
+        field_name="target",
+        help_command="vibe show mark --help",
+    )
+
+
+def _record_show_mark_event(session_id: str, payload: dict, event_store) -> dict:
+    event = _post_show_mark_to_live_ui(session_id, payload)
+    return event if event is not None else event_store.append(session_id, payload)
+
+
+def _reply_target_from_annotation(annotation: dict) -> str:
+    anchor = annotation.get("anchor") if isinstance(annotation.get("anchor"), dict) else {}
+    payload = annotation.get("payload") if isinstance(annotation.get("payload"), dict) else {}
+    scope = str(payload.get("scope") or "default").strip() or "default"
+    for key in ("target", "selector"):
+        value = str(anchor.get(key) or "").strip()
+        if value:
+            return value
+    mark = str(anchor.get("mark") or "").strip()
+    if mark:
+        return f"mark-{scope}-{mark}"
+    anchor_id = str(anchor.get("id") or "").strip()
+    if anchor_id and anchor.get("kind") == "mark":
+        return f"mark-{scope}-{anchor_id}"
+    return f"annotation:{annotation['id']}"
+
+
+def _show_mark_body_head(body: object, *, limit: int = 80) -> str:
+    text = " ".join(str(body or "").split())
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def _show_mark_listing(mark: dict) -> dict:
+    return {
+        "id": mark.get("id"),
+        "kind": mark.get("kind"),
+        "target": mark.get("target"),
+        "body_head": _show_mark_body_head(mark.get("body")),
+        "read_state": mark.get("read_state") or "unread",
+    }
+
+
 def cmd_show_mark(args):
     from core.show_pages import ShowPageStore
-    from core.show_session_events import ShowSessionEventStore
+    from core.show_session_events import ShowSessionEventStore, stable_assistant_mark_id
 
     page_store = ShowPageStore()
-    event_store = None
+    event_store = ShowSessionEventStore()
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show mark --help")
         page = page_store.ensure(session_id)
-        target = _read_cli_text_argument(value=args.target, file_path=None, field_name="--target")
-        body = _read_cli_text_argument(value=args.body, file_path=args.body_file, field_name="--body")
+        target = _show_mark_target(args)
+        body = _read_cli_text_argument(
+            value=args.body,
+            file_path=args.body_file,
+            field_name="--message",
+            help_command="vibe show mark --help",
+        )
+        scope = args.scope or "default"
+        mark_id = stable_assistant_mark_id(scope=scope, target=target)
+        replaced = any(
+            mark.get("kind") == "note" and mark.get("scope") == scope and mark.get("target") == target
+            for mark in event_store.active_marks(session_id)
+        )
         payload = {
             "type": "assistant.mark.created",
             "mark": {
-                "scope": args.scope or "default",
+                "id": mark_id,
+                "scope": scope,
                 "target": target,
                 "body": body,
             },
@@ -10538,18 +10633,17 @@ def cmd_show_mark(args):
             payload["anchor"] = {"selector": args.anchor_selector}
             if args.anchor_text:
                 payload["anchor"]["text"] = args.anchor_text
-        event = _post_show_mark_to_live_ui(session_id, payload)
-        if event is None:
-            event_store = ShowSessionEventStore()
-            event = event_store.append(session_id, payload)
+        event = _record_show_mark_event(session_id, payload, event_store)
         result = _show_page_result(
             page,
-            message="Assistant mark recorded.",
+            message="Assistant mark replaced." if replaced else "Assistant mark recorded.",
             extra={
                 **({"session_default_notice": session_default_notice} if session_default_notice else {}),
                 "event": event,
                 "event_id": event["id"],
+                "mark_id": mark_id,
                 "message_id": event.get("message_id"),
+                "replaced": replaced,
             },
         )
         if getattr(args, "json", False):
@@ -10567,8 +10661,198 @@ def cmd_show_mark(args):
         return 1
     finally:
         page_store.close()
-        if event_store is not None:
-            event_store.close()
+        event_store.close()
+
+
+def cmd_show_reply(args):
+    from core.show_pages import ShowPageStore
+    from core.show_session_events import ShowSessionEventStore, stable_assistant_mark_id
+
+    page_store = ShowPageStore()
+    event_store = ShowSessionEventStore()
+    try:
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show reply --help")
+        annotation = event_store.get_annotation_event(session_id, args.show_event_id)
+        if annotation is None:
+            recent_ids = event_store.recent_annotation_event_ids(session_id)
+            recent_text = ", ".join(recent_ids) if recent_ids else "none"
+            raise TaskCliError(
+                f"Annotation event {args.show_event_id!r} was not found in this session. "
+                f"Recent annotation event ids: {recent_text}.",
+                code="show_annotation_not_found",
+                hint="Use an event id dispatched for this Agent Session.",
+                help_command="vibe show reply --help",
+                details={"recent_annotation_event_ids": recent_ids},
+            )
+
+        page = page_store.ensure(session_id)
+        body = _read_cli_text_argument(
+            value=args.message,
+            file_path=args.message_file,
+            field_name="--message",
+            help_command="vibe show reply --help",
+        )
+        annotation_payload = annotation.get("payload") or {}
+        scope = str(annotation_payload.get("scope") or "default").strip() or "default"
+        target = _reply_target_from_annotation(annotation)
+        mark_id = stable_assistant_mark_id(scope=scope, reply_to=annotation["id"])
+        replaced = any(mark.get("replyTo") == annotation["id"] for mark in event_store.active_marks(session_id))
+        payload = {
+            "type": "assistant.mark.created",
+            "mark": {
+                "id": mark_id,
+                "scope": scope,
+                "target": target,
+                "body": body,
+                "replyTo": annotation["id"],
+            },
+            "anchor": dict(annotation.get("anchor") or {}),
+        }
+        event = _record_show_mark_event(session_id, payload, event_store)
+        replacement_notice = None
+        if replaced:
+            replacement_notice = "This annotation already had a reply; the active reply was replaced. Run: vibe show marks"
+        result = _show_page_result(
+            page,
+            message="Show Page reply replaced." if replaced else "Show Page reply recorded.",
+            extra={
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+                "event": event,
+                "event_id": event["id"],
+                "mark_id": mark_id,
+                "reply_to": annotation["id"],
+                "replaced": replaced,
+                **({"replacement_notice": replacement_notice} if replacement_notice else {}),
+            },
+        )
+        if getattr(args, "json", False):
+            _print_json(result)
+        else:
+            _print_show_page_result(result)
+            print("")
+            print("Reply:")
+            print(f"  Event: {event['id']}")
+            print(f"  Mark: {mark_id}")
+            print(f"  Reply to: {annotation['id']}")
+            print(f"  Target: {target}")
+            if replacement_notice:
+                print(f"  Note: {replacement_notice}")
+        return 0
+    except Exception as exc:
+        _print_show_page_error(exc)
+        return 1
+    finally:
+        page_store.close()
+        event_store.close()
+
+
+def cmd_show_marks(args):
+    from core.show_session_events import ShowSessionEventStore
+
+    event_store = ShowSessionEventStore()
+    try:
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show marks --help")
+        marks = [_show_mark_listing(mark) for mark in event_store.active_marks(session_id)]
+        result = {
+            "ok": True,
+            "session_id": session_id,
+            "count": len(marks),
+            "marks": marks,
+            **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+        }
+        if getattr(args, "json", False):
+            _print_json(result)
+        else:
+            print(f"Assistant marks ({len(marks)} active):")
+            if not marks:
+                print("  none")
+            for mark in marks:
+                print(f"- {mark['id']}  {mark['kind']}  {mark['read_state']}")
+                print(f"  Target: {mark['target']}")
+                print(f"  Body: {mark['body_head']}")
+        return 0
+    except Exception as exc:
+        _print_show_page_error(exc)
+        return 1
+    finally:
+        event_store.close()
+
+
+def cmd_show_unmark(args):
+    from core.show_session_events import ShowSessionEventStore
+
+    event_store = ShowSessionEventStore()
+    try:
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show unmark --help")
+        active_marks = event_store.active_marks(session_id)
+        results = []
+        succeeded = 0
+        for identifier in args.identifiers:
+            matches = [
+                mark for mark in active_marks if mark.get("id") == identifier or mark.get("target") == identifier
+            ]
+            if not matches:
+                results.append({"input": identifier, "ok": False, "error": "active mark not found"})
+                continue
+
+            resolved_ids = []
+            event_ids = []
+            errors = []
+            for mark in matches:
+                mark_payload = {
+                    key: mark[key]
+                    for key in ("id", "scope", "target", "body", "createdAt", "updatedAt", "replyTo")
+                    if mark.get(key) is not None
+                }
+                try:
+                    event = _record_show_mark_event(
+                        session_id,
+                        {"type": "assistant.mark.resolved", "mark": mark_payload, "anchor": mark.get("anchor") or {}},
+                        event_store,
+                    )
+                except Exception as exc:
+                    errors.append(str(exc))
+                    continue
+                resolved_ids.append(mark["id"])
+                event_ids.append(event["id"])
+                active_marks = [candidate for candidate in active_marks if candidate.get("id") != mark["id"]]
+
+            item_ok = bool(resolved_ids)
+            if item_ok:
+                succeeded += 1
+            results.append(
+                {
+                    "input": identifier,
+                    "ok": item_ok,
+                    "mark_ids": resolved_ids,
+                    "event_ids": event_ids,
+                    **({"errors": errors} if errors else {}),
+                }
+            )
+
+        result = {
+            "ok": succeeded > 0,
+            "session_id": session_id,
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": results,
+            **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+        }
+        if getattr(args, "json", False):
+            _print_json(result)
+        else:
+            for item in results:
+                if item["ok"]:
+                    print(f"Resolved {item['input']}: {', '.join(item['mark_ids'])}")
+                else:
+                    detail = "; ".join(item.get("errors") or []) or item.get("error") or "failed"
+                    print(f"Failed {item['input']}: {detail}", file=sys.stderr)
+        return 0 if succeeded > 0 else 1
+    except Exception as exc:
+        _print_show_page_error(exc)
+        return 1
+    finally:
+        event_store.close()
 
 
 def cmd_show_event(args):
@@ -10704,6 +10988,12 @@ def cmd_show(args):
         return cmd_show_update(args)
     if args.show_command == "mark":
         return cmd_show_mark(args)
+    if args.show_command == "reply":
+        return cmd_show_reply(args)
+    if args.show_command == "marks":
+        return cmd_show_marks(args)
+    if args.show_command == "unmark":
+        return cmd_show_unmark(args)
     if args.show_command == "event":
         return cmd_show_event(args)
     if args.show_command == "annotate":
@@ -11942,7 +12232,7 @@ def build_parser():
     show_parser.set_defaults(show_help_parser=show_parser)
     show_subparsers = show_parser.add_subparsers(
         dest="show_command",
-        metavar="{list,path,status,update,mark,event,annotate}",
+        metavar="{list,path,status,update,mark,reply,marks,unmark,event,annotate}",
     )
     show_subparsers.required = False
 
@@ -12053,17 +12343,59 @@ def build_parser():
         epilog=_show_mark_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show mark --help",
-        error_hint="Pass --target and --body or --body-file. Pass --session-id outside an Avibe Agent shell.",
+        error_hint="Pass target and --message or --message-file. Pass --session-id outside an Avibe Agent shell.",
     )
     show_mark_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_mark_parser.add_argument("--scope", default="default", help='Mark scope. Defaults to "default".')
-    show_mark_parser.add_argument("--target", required=True, help="Target mark id or selector.")
+    show_mark_parser.add_argument("target", nargs="?", help="Target mark id or selector.")
+    show_mark_parser.add_argument("--target", dest="target_option", help="Alias for the positional target.")
     mark_body_group = show_mark_parser.add_mutually_exclusive_group(required=True)
-    mark_body_group.add_argument("--body", help="Assistant mark body text.")
-    mark_body_group.add_argument("--body-file", help="Read assistant mark body from a UTF-8 file, or '-' for stdin.")
+    mark_body_group.add_argument("--message", "--body", dest="body", help="Assistant mark body text.")
+    mark_body_group.add_argument(
+        "--message-file",
+        "--body-file",
+        dest="body_file",
+        help="Read assistant mark body from a UTF-8 file, or '-' for stdin.",
+    )
     show_mark_parser.add_argument("--anchor-selector", help="Optional DOM selector for the anchored element.")
     show_mark_parser.add_argument("--anchor-text", help="Optional selected or summarized anchor text.")
     show_mark_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+
+    show_reply_parser = show_subparsers.add_parser(
+        "reply",
+        help="Reply to a human Show Page annotation",
+        description="Create or replace the assistant reply mark paired with one annotation event in this session.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe show reply --help",
+        error_hint="Pass the dispatched annotation event id and --message or --message-file.",
+    )
+    show_reply_parser.add_argument("show_event_id", help="Human annotation event id from the dispatched message.")
+    show_reply_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
+    reply_message_group = show_reply_parser.add_mutually_exclusive_group(required=True)
+    reply_message_group.add_argument("--message", help="Reply body text.")
+    reply_message_group.add_argument("--message-file", help="Read reply text from a UTF-8 file, or '-' for stdin.")
+    show_reply_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+
+    show_marks_parser = show_subparsers.add_parser(
+        "marks",
+        help="List active assistant marks",
+        description="List non-resolved assistant reply and note marks for this Agent Session.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe show marks --help",
+    )
+    show_marks_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
+    show_marks_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+
+    show_unmark_parser = show_subparsers.add_parser(
+        "unmark",
+        help="Resolve assistant marks",
+        description="Resolve one or more active assistant marks by mark id or exact target.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe show unmark --help",
+    )
+    show_unmark_parser.add_argument("identifiers", nargs="+", metavar="ID_OR_TARGET")
+    show_unmark_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
+    show_unmark_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     show_event_parser = show_subparsers.add_parser(
         "event",
