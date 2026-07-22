@@ -105,6 +105,29 @@ class EverOSClient:
             phase="read",
         )
 
+    def research_buffer(self, *, owner_id: str, session_id: str) -> dict[str, Any]:
+        """Inspect an in-flight session through public ``/search`` only.
+
+        This is a POC-only diagnostic. Production retrieval continues to use
+        :meth:`search`, whose request shape does not include filters.
+        """
+        return self._request(
+            "POST",
+            "/api/v1/memory/search",
+            {
+                "user_id": owner_id,
+                "app_id": APP_ID,
+                "project_id": PROJECT_ID,
+                "query": "memory-poc-buffer-observation",
+                "method": "hybrid",
+                "top_k": 8,
+                "include_profile": True,
+                "enable_llm_rerank": False,
+                "filters": {"session_id": session_id},
+            },
+            phase="research",
+        )
+
     def _request(
         self,
         method: str,
@@ -125,6 +148,8 @@ class EverOSClient:
                 trust_env=False,
             ) as client:
                 response = client.request(method, path, json=payload, headers={"X-Memory-Poc-Phase": phase})
+        except httpx.TimeoutException as exc:
+            raise LaunchError(f"provider_{method.lower()}_timeout") from exc
         except httpx.HTTPError as exc:
             raise LaunchError(f"provider_{method.lower()}_transport_failed") from exc
         body: Any = None
@@ -207,10 +232,15 @@ def _schema_paths(value: Any) -> tuple[str, ...]:
 def _closed_code(value: Any) -> int | str | None:
     if not isinstance(value, dict):
         return None
-    for key in ("code", "error_code"):
-        candidate = value.get(key)
-        if isinstance(candidate, int) and not isinstance(candidate, bool) and -999_999 <= candidate <= 999_999:
-            return candidate
-        if isinstance(candidate, str) and _safe_schema_key(candidate):
-            return candidate
+    candidates = [value]
+    nested_error = value.get("error")
+    if isinstance(nested_error, dict):
+        candidates.append(nested_error)
+    for candidate_map in candidates:
+        for key in ("code", "error_code"):
+            candidate = candidate_map.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and -999_999 <= candidate <= 999_999:
+                return candidate
+            if isinstance(candidate, str) and _safe_schema_key(candidate):
+                return candidate
     return None

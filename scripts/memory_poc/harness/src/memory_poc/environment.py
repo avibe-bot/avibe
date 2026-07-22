@@ -241,6 +241,7 @@ def assert_clean_harness_source(root: Path | None = None) -> None:
             "--untracked-files=all",
             "--",
             "scripts/memory_poc/harness",
+            "scripts/memory_poc/corpus",
         ],
         check=False,
         capture_output=True,
@@ -260,6 +261,7 @@ def child_environment(
     child_home: Path,
     metrics_path: Path,
     owner_id: str,
+    egress_path: Path | None = None,
     anchor: Path | None = None,
 ) -> dict[str, str]:
     """Build the only environment inherited by the provider child process."""
@@ -290,6 +292,8 @@ def child_environment(
         "XDG_DATA_HOME": str(xdg_data),
         "XDG_STATE_HOME": str(xdg_state),
     }
+    if egress_path is not None:
+        env["MEMORY_POC_EGRESS_METRICS"] = str(egress_path)
     for key in PROXY_AND_TLS_ENV_KEYS:
         env.pop(key, None)
     return env

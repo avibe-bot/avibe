@@ -31,6 +31,22 @@ def test_cli_requires_the_locked_harness_interpreter(monkeypatch: pytest.MonkeyP
     assert "harness_interpreter_not_locked" in capsys.readouterr().err
 
 
+def test_cli_dispatches_a_stage2_probe_without_reclassifying_it_as_sanity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("memory_poc.cli.checked_workspace_root", lambda: Path("/workspace"))
+    monkeypatch.setattr("memory_poc.cli.verify_harness_interpreter", lambda _workspace: Path(sys.executable))
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "memory_poc.cli.run_stage2",
+        lambda *, stage, run_id: calls.append((stage, run_id)) or Path("/workspace/report.json"),
+    )
+
+    assert main(["run", "--stage", "quality", "--run-id", "stage2-final"]) == 0
+    assert calls == [("quality", "stage2-final")]
+    assert "stage2-final" in capsys.readouterr().out
+
+
 def test_report_command_rejects_fixture_text_in_a_persisted_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

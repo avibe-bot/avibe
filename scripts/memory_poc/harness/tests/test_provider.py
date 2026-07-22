@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_poc.provider import EverOSClient
+import httpx
+import pytest
+
+from memory_poc.errors import LaunchError
+from memory_poc.provider import EverOSClient, _closed_code
 
 
 class _Response:
@@ -66,6 +70,45 @@ def test_search_uses_hybrid_to_receive_nested_atomic_facts(monkeypatch) -> None:
             "top_k": 8,
             "include_profile": True,
             "enable_llm_rerank": False,
+        }
+    ]
+
+
+def test_research_buffer_search_uses_the_public_search_route_with_a_single_session_filter(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    headers: list[dict[str, str]] = []
+
+    class _BufferResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, dict[str, list[object]]]:
+            return {"data": {"episodes": [], "unprocessed_messages": []}}
+
+    class _BufferClient(_Client):
+        @staticmethod
+        def request(*_args: object, **kwargs: object) -> _BufferResponse:
+            calls.append(kwargs["json"])  # type: ignore[arg-type]
+            headers.append(kwargs["headers"])  # type: ignore[arg-type]
+            return _BufferResponse()
+
+    monkeypatch.setattr("memory_poc.provider.httpx.HTTPTransport", lambda **_kwargs: object())
+    monkeypatch.setattr("memory_poc.provider.httpx.Client", _BufferClient)
+
+    EverOSClient(Path("/tmp/everos.sock")).research_buffer(owner_id="owner", session_id="session")
+
+    assert headers == [{"X-Memory-Poc-Phase": "research"}]
+    assert calls == [
+        {
+            "user_id": "owner",
+            "app_id": "avibe",
+            "project_id": "personal",
+            "query": "memory-poc-buffer-observation",
+            "method": "hybrid",
+            "top_k": 8,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+            "filters": {"session_id": "session"},
         }
     ]
 
@@ -146,3 +189,20 @@ def test_client_records_redacted_public_http_shapes(monkeypatch) -> None:
     assert "data.episodes[].atomic_facts[].id:string" in client.observed_http_shapes[0].response_schema_paths
     assert "data.episodes[].atomic_facts[].content:string" in client.observed_http_shapes[0].response_schema_paths
     assert "synthetic fact" not in " ".join(client.observed_http_shapes[0].response_schema_paths)
+
+
+def test_closed_code_reads_the_canonical_nested_error_envelope() -> None:
+    assert _closed_code({"error": {"code": "invalid_api_key"}}) == "invalid_api_key"
+
+
+def test_client_preserves_a_timeout_as_a_distinct_closed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _TimeoutClient(_Client):
+        @staticmethod
+        def request(*_args: object, **_kwargs: object) -> _Response:
+            raise httpx.ReadTimeout("synthetic timeout")
+
+    monkeypatch.setattr("memory_poc.provider.httpx.HTTPTransport", lambda **_kwargs: object())
+    monkeypatch.setattr("memory_poc.provider.httpx.Client", _TimeoutClient)
+
+    with pytest.raises(LaunchError, match="provider_post_timeout"):
+        EverOSClient(Path("/tmp/everos.sock")).add(session_id="session", messages=[])

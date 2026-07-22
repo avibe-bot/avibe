@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -86,12 +88,55 @@ class SocketLocation:
     actual_path: Path
 
 
+_SOCKET_NAME_CANDIDATES: tuple[str, ...] = (".uds", ".u2", ".u3", ".u4", ".u5", ".u6", ".u7", ".u8")
+
+
+def _short_fallback_socket_path(run_dir: Path) -> Path:
+    """A short, unique UDS path in the system temp dir for long run-dir paths.
+
+    Used only when no name fits inside the run directory. The path is derived from
+    a hash of the run dir so it is stable per run and unique across concurrent runs;
+    EverOSProcess.stop() unlinks self.socket_path, so it is still cleaned up with
+    the run regardless of where it lives.
+    """
+    digest = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()[:12]
+    base = Path(tempfile.gettempdir())
+    return base / f"avibe-mpoc-{digest}.sock"
+
+
 def new_socket_path(run_dir: Path, *, state_root: Path) -> SocketLocation:
-    """Allocate the shortest practical UDS path directly inside one run."""
+    """Allocate the shortest practical UDS path directly inside one run.
+
+    Prefers the run directory so the socket is removed with the run. Uses .uds by
+    default, advancing through short unique alternatives for concurrent probes
+    sharing the run directory. If NO name fits inside the run directory (long
+    workspace path + long run id on Darwin's 104-byte limit), falls back to a
+    short hash-named path in the system temp dir; that path is still unlinked by
+    EverOSProcess.stop() on cleanup.
+    """
     ensure_owner_directory(run_dir, anchor=state_root)
-    socket_path = run_dir / ".uds"
-    validate_socket_path(socket_path)
-    return SocketLocation(connect_path=socket_path, actual_path=socket_path)
+    last_error: LaunchError | None = None
+    for name in _SOCKET_NAME_CANDIDATES:
+        socket_path = run_dir / name
+        try:
+            validate_socket_path(socket_path)
+        except LaunchError as exc:
+            last_error = exc
+            continue
+        if not socket_path.exists():
+            return SocketLocation(connect_path=socket_path, actual_path=socket_path)
+    # No name fit inside the run dir — use a short temp-dir fallback.
+    fallback = _short_fallback_socket_path(run_dir)
+    try:
+        validate_socket_path(fallback)
+    except LaunchError:
+        # Even the fallback is too long (extreme temp dir); surface the original.
+        if last_error is not None:
+            raise last_error
+        raise
+    if fallback.exists():
+        raise LaunchError("uds_path_unavailable")
+    return SocketLocation(connect_path=fallback, actual_path=fallback)
 
 
 def _signal_owned_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
@@ -388,6 +433,8 @@ class EverOSProcess:
     settings: ProviderSettings
     metrics_path: Path
     owner_id: str
+    egress_path: Path | None = None
+    socket_dir: Path | None = None
     startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS
     request_timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS
     process: subprocess.Popen[bytes] | None = field(default=None, init=False)
@@ -404,7 +451,8 @@ class EverOSProcess:
         ensure_owner_directory(self.child_home, anchor=self.state_root)
         self.uds_only_verified = False
         try:
-            self.socket_location = new_socket_path(self.everos_root.parent, state_root=self.state_root)
+            socket_parent = self.socket_dir if self.socket_dir is not None else self.everos_root.parent
+            self.socket_location = new_socket_path(socket_parent, state_root=self.state_root)
             self.socket_path = self.socket_location.connect_path
             child_env = child_environment(
                 self.settings,
@@ -413,6 +461,7 @@ class EverOSProcess:
                 child_home=self.child_home,
                 metrics_path=self.metrics_path,
                 owner_id=self.owner_id,
+                egress_path=self.egress_path,
                 anchor=self.state_root,
             )
             self.process = subprocess.Popen(
@@ -449,11 +498,15 @@ class EverOSProcess:
         raise LaunchError("sidecar_socket_timeout")
 
     def _client(self) -> EverOSClient:
+        return self.client()
+
+    def client(self, *, timeout_seconds: float | None = None) -> EverOSClient:
+        """Build a UDS client with an optional bounded probe timeout."""
         assert self.socket_path is not None
         assert self.tcp_monitor is not None
         return EverOSClient(
             self.socket_path,
-            timeout_seconds=self.request_timeout_seconds,
+            timeout_seconds=self.request_timeout_seconds if timeout_seconds is None else timeout_seconds,
             safety_check=self.tcp_monitor.assert_safe,
         )
 
@@ -525,6 +578,14 @@ class EverOSProcess:
                 return None
             if last_error is None:
                 last_error = LaunchError("sidecar_process_termination_failed")
+        # Final reconciliation: if the child and all tracked descendants are gone
+        # after the bounded retries, treat cleanup as successful even if a transient
+        # signal/reap error was observed mid-loop (the owned tree is reaped, which is
+        # the actual ownership guarantee). Only a genuinely surviving process blocks.
+        if _process_has_exited(process) and not _tracked_descendants_alive(
+            process, monitor, process_group=process_group
+        ):
+            return None
         return last_error
 
     def _stop_monitor_with_retries(self) -> LaunchError | None:

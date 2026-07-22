@@ -8,7 +8,7 @@ from memory_poc.environment import ProviderSettings
 from memory_poc.errors import ReportValidationError
 from memory_poc.metrics import CallMetrics
 from memory_poc.readiness import SearchReadiness
-from memory_poc.reports import build_report, load_report, validate_report, write_report, write_summary
+from memory_poc.reports import build_report, load_report, validate_report, write_report, write_stage2_summary, write_summary
 
 
 def _settings(tmp_path: Path) -> ProviderSettings:
@@ -100,6 +100,15 @@ def test_report_rejects_zero_based_quality_rank(tmp_path: Path, monkeypatch: pyt
         validate_report(report, fixture_texts=())
 
 
+def test_report_rejects_negative_latency_sentinels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["latency"]["searchable_ms"]["q1-s1-1"] = -1
+
+    with pytest.raises(ReportValidationError, match="report_latency_value_invalid"):
+        validate_report(report, fixture_texts=())
+
+
 def test_report_and_summary_redact_model_metadata_containing_an_api_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -178,6 +187,31 @@ def test_short_key_does_not_block_report_or_summary_writes(tmp_path: Path, monke
     assert "stage1-mini" in report_text
     assert "EverOS POC Stage 1 Sanity" in summary_text
     assert "qwen" in summary_text
+
+
+def test_stage2_summary_keeps_evidence_redacted_and_uses_the_final_recommendation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    settings = _settings(tmp_path)
+    report = build_report(run_id="r1", settings=settings, corpus_revision="2026-07-22.2")
+    report["recommendation"] = "fork"
+
+    write_stage2_summary(
+        tmp_path / "summary.md",
+        settings=settings,
+        report=report,
+        completed_stages=("quality", "pool"),
+        evidence_lines=("quality trials 3 positive top8 rates 0.91 0.94 0.97", "egress hosts dashscope.aliyuncs.com"),
+        fixture_texts=("synthetic fixture body",),
+        anchor=tmp_path,
+    )
+
+    summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "EverOS POC Stage 2" in summary
+    assert "Recommendation - fork" in summary
+    assert "dashscope.aliyuncs.com" in summary
+    assert "synthetic fixture body" not in summary
 
 
 def test_summary_records_a_safe_failure_outcome(tmp_path: Path) -> None:
