@@ -929,7 +929,16 @@ export type WorkbenchEventHandlers = {
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
-  onSessionActivity?: (data: { session_id: string; scope_id: string | null; event: string; title?: string | null }) => void;
+  // ``visibility`` (contract A6): the backend carries the session's current
+  // foreground/background on visibility/scope changes so the Inbox can drop /
+  // restore the card live. Absent on pre-M1 backends ⇒ consumers no-op.
+  onSessionActivity?: (data: {
+    session_id: string;
+    scope_id: string | null;
+    event: string;
+    title?: string | null;
+    visibility?: 'foreground' | 'background';
+  }) => void;
   onInboxUnreadChanged?: (data: {
     session_id?: string;
     scope_id?: string | null;

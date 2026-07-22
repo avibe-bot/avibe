@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
+import { sessionActivityInboxAction } from '../lib/inboxActivity';
 
 const PAGE_SIZE = 30;
 
@@ -217,9 +218,18 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         }
       },
       onSessionActivity: (data) => {
-        // Terminal archive (here or in another tab) — drop the card + its unread
-        // live, instead of waiting for the next reconnect/refresh to filter it.
-        if (data.event !== 'archived') return;
+        // Contract A6: react to visibility/scope changes carried on the event.
+        // background ⇒ drop the card (like an archive); foreground ⇒ re-pull so
+        // a restored session reappears; no visibility (pre-M1) ⇒ no-op except an
+        // explicit archive. See lib/inboxActivity.
+        const action = sessionActivityInboxAction(data);
+        if (action === 'reconcile') {
+          void reconcile();
+          return;
+        }
+        if (action === 'ignore') return;
+        // action === 'drop': remove the card + its unread live, instead of
+        // waiting for the next reconnect/refresh to filter it.
         setInboxSessions((prev) => prev.filter((s) => s.session_id !== data.session_id));
         setUnreadBySession((prev) => {
           if (!(data.session_id in prev)) return prev;
