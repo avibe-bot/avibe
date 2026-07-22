@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 def register_agent_reply_media(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: str | None,
     session_id: str | None,
     kind: str,
     local_path: str,
@@ -50,7 +50,7 @@ def register_agent_reply_media(
     )
 
 
-def rewrite_agent_media(conn: Connection, *, scope_id: str, session_id: str, text: str) -> str:
+def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: str, text: str) -> str:
     """Return *text* with ``file://`` links rewritten to media-proxy URLs.
 
     Registers each referenced file in ``media_objects`` (same transaction as the

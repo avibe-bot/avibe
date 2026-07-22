@@ -160,6 +160,9 @@ def upgrade() -> None:
     if "agent_events" in tables and _columns(bind, "agent_events")["scope_id"][3]:
         with op.batch_alter_table("agent_events") as batch_op:
             batch_op.alter_column("scope_id", existing_type=sa.String(), nullable=True)
+    if "media_objects" in tables and _columns(bind, "media_objects")["scope_id"][3]:
+        with op.batch_alter_table("media_objects") as batch_op:
+            batch_op.alter_column("scope_id", existing_type=sa.String(), nullable=True)
 
     _backfill_legacy_sessions(bind)
 
@@ -174,6 +177,10 @@ def downgrade() -> None:
     if "agent_events" in tables:
         bind.exec_driver_sql("delete from agent_events where scope_id is null")
         with op.batch_alter_table("agent_events") as batch_op:
+            batch_op.alter_column("scope_id", existing_type=sa.String(), nullable=False)
+    if "media_objects" in tables:
+        bind.exec_driver_sql("delete from media_objects where scope_id is null")
+        with op.batch_alter_table("media_objects") as batch_op:
             batch_op.alter_column("scope_id", existing_type=sa.String(), nullable=False)
     op.drop_index("ix_agent_sessions_visibility", table_name="agent_sessions")
     op.drop_column("agent_sessions", "visibility")

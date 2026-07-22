@@ -275,6 +275,7 @@ def test_update_session_present_null_clears_model_and_effort(isolated_state):
 
 def test_update_session_scope_move_drops_stale_legacy_mapping(isolated_state):
     from config import paths
+    from core.scheduled_tasks import resolve_session_id_target
     from storage.sessions_service import SQLiteSessionsService
 
     engine = create_sqlite_engine()
@@ -298,6 +299,11 @@ def test_update_session_scope_move_drops_stale_legacy_mapping(isolated_state):
     assert moved["scope_id"] == target_scope_id
     assert moved["metadata"]["kept"] is True
     assert "legacy_scope_key" not in moved["metadata"]
+    assert moved["session_anchor"] == f"avibe_proj_moved:session_{session['id']}"
+
+    target = resolve_session_id_target(session["id"])
+    assert target.scope_id == target_scope_id
+    assert target.session_key.thread_id is None
 
     legacy = SQLiteSessionsService(paths.get_sqlite_state_path())
     try:

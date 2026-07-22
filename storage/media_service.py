@@ -62,7 +62,7 @@ def _probe_image_dimensions(
 def register(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: Optional[str],
     session_id: Optional[str],
     kind: str,
     source: str,

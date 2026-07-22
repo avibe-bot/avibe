@@ -1919,6 +1919,15 @@ def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Opt
             help_command="vibe agent run --help",
         )
         return _require_scope_id_from_session_id(caller_session_id, help_command="vibe agent run --help")
+    if source_session_id:
+        # An explicit fork follows the source Session by default, even when it
+        # is launched from a caller in another project. --scope-id remains the
+        # opt-in move; --same-scope above provides the explicit error for a
+        # standalone source.
+        return _scope_id_from_session_id(
+            source_session_id,
+            help_command="vibe agent run --help",
+        )
     if caller_context is not None:
         try:
             return _scope_id_from_session_id(
@@ -4794,7 +4803,7 @@ def cmd_session_update(args):
         with engine.begin() as conn:
             # Validate first so an archived/missing id is a clean not-found rather
             # than silently writing a title onto a soft-deleted row.
-            sessions_service.get_active_session(conn, session_id)
+            previous_session = sessions_service.get_active_session(conn, session_id)
             payload = sessions_service.update_session(conn, session_id, **updates)
     except LookupError:
         _print_task_error(
@@ -4811,7 +4820,11 @@ def cmd_session_update(args):
         return 1
     # The DB write is committed above; ping a running UI so the rename shows live
     # (best-effort — never affects this command's result).
-    _post_session_activity_to_live_ui(session_id)
+    _post_session_activity_to_live_ui(
+        session_id,
+        previous_scope_id=previous_session.get("scope_id"),
+        previous_visibility=previous_session.get("visibility"),
+    )
     _print_cli_payload(
         "agent_session",
         updated=True,
@@ -10544,7 +10557,12 @@ def _post_show_mark_to_live_ui(session_id: str, payload: dict) -> dict | None:
     return _post_show_event_to_live_ui(session_id, payload)
 
 
-def _post_session_activity_to_live_ui(session_id: str) -> None:
+def _post_session_activity_to_live_ui(
+    session_id: str,
+    *,
+    previous_scope_id: Optional[str],
+    previous_visibility: Optional[str],
+) -> None:
     """Best-effort: ping a running UI so it broadcasts a ``session.activity`` update
     for this session (e.g. after ``vibe session update`` renames it). The CLI writes
     the DB in a separate process from the in-proc SSE broker, so without this the
@@ -10563,9 +10581,15 @@ def _post_session_activity_to_live_ui(session_id: str) -> None:
     if not status.get("ui_pid") or not port:
         return
     url = f"http://{_ui_show_events_host(config)}:{int(port)}/api/sessions/{quote(session_id, safe='')}/cli-activity"
+    body = json.dumps(
+        {
+            "previous_scope_id": previous_scope_id,
+            "previous_visibility": previous_visibility,
+        }
+    ).encode("utf-8")
     http_request = urllib.request.Request(
         url,
-        data=b"{}",
+        data=body,
         method="POST",
         headers={
             "Content-Type": "application/json",

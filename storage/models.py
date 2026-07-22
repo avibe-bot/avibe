@@ -413,7 +413,7 @@ media_objects = Table(
     "media_objects",
     metadata,
     Column("token", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
     Column("message_id", String, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True),
     Column("kind", String, nullable=False),

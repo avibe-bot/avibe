@@ -2615,6 +2615,17 @@ class ScheduledTaskService:
         scope_id = ""
         if isinstance(metadata, dict):
             scope_id = str(metadata.get("session_scope_id") or "").strip()
+        if not scope_id and deliver_key:
+            # Definitions created before session_scope_id stored placement only
+            # in deliver_key. Preserve those recurring definitions while new
+            # definitions continue to persist the explicit metadata field.
+            try:
+                scope_id = parse_scope_id(deliver_key).session_scope
+            except ValueError:
+                try:
+                    scope_id = parse_session_key(deliver_key).session_scope
+                except ValueError:
+                    pass
         from config import paths as config_paths
         from core.vibe_agents import VibeAgentStore
         from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config

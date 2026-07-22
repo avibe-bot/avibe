@@ -6015,6 +6015,64 @@ def _backend_locked_response(err):
     )
 
 
+def _publish_session_update_activity(
+    broker,
+    *,
+    session_id: str,
+    session: dict,
+    previous_session: dict | None = None,
+) -> None:
+    """Publish one canonical title/placement reconciliation sequence."""
+    broker.publish(
+        "session.activity",
+        {
+            "session_id": session_id,
+            "scope_id": session.get("scope_id"),
+            "event": "updated",
+            "title": session.get("title"),
+            "visibility": session.get("visibility"),
+        },
+    )
+    if previous_session is None:
+        return
+
+    previous_scope_id = previous_session.get("scope_id")
+    current_scope_id = session.get("scope_id")
+    placement_changed = (
+        previous_scope_id != current_scope_id
+        or previous_session.get("visibility") != session.get("visibility")
+    )
+    if not placement_changed:
+        return
+
+    # The current sidebar listener patches title-only `updated` events, then
+    # reconciles project windows for ordering activity. Reconcile the old scope
+    # to remove the row, and treat a foreground row in its new scope as newly
+    # visible so an empty loaded project also fetches it.
+    if previous_scope_id and (
+        previous_scope_id != current_scope_id or session.get("visibility") == "background"
+    ):
+        broker.publish(
+            "session.activity",
+            {
+                "session_id": session_id,
+                "scope_id": previous_scope_id,
+                "event": "user_message",
+                "reason": "session_placement_changed",
+            },
+        )
+    if current_scope_id and session.get("visibility") == "foreground":
+        broker.publish(
+            "session.activity",
+            {
+                "session_id": session_id,
+                "scope_id": current_scope_id,
+                "event": "created",
+                "reason": "session_placement_changed",
+            },
+        )
+
+
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
@@ -6099,52 +6157,14 @@ async def sessions_update(session_id: str):
         # but not across backends.
         return _backend_locked_response(err)
     # Broadcast so other surfaces (e.g. the sidebar session list) reflect the
-    # edit live — renaming a session in the chat header should rename its
-    # sidebar row without a manual refresh.
-    broker.publish(
-        "session.activity",
-        {
-            "session_id": session_id,
-            "scope_id": session.get("scope_id"),
-            "event": "updated",
-            "title": session.get("title"),
-            "visibility": session.get("visibility"),
-        },
+    # edit live. The local CLI route below uses this same sequence after its
+    # out-of-process DB write.
+    _publish_session_update_activity(
+        broker,
+        session_id=session_id,
+        session=session,
+        previous_session=previous_session,
     )
-    if previous_session is not None:
-        previous_scope_id = previous_session.get("scope_id")
-        current_scope_id = session.get("scope_id")
-        placement_changed = (
-            previous_scope_id != current_scope_id
-            or previous_session.get("visibility") != session.get("visibility")
-        )
-        if placement_changed:
-            # The current sidebar listener patches title-only `updated` events,
-            # then reconciles project windows for ordering activity. Reconcile
-            # the old scope to remove the row, and treat a foreground row in its
-            # new scope as newly visible so an empty loaded project also fetches it.
-            if previous_scope_id and (
-                previous_scope_id != current_scope_id or session.get("visibility") == "background"
-            ):
-                broker.publish(
-                    "session.activity",
-                    {
-                        "session_id": session_id,
-                        "scope_id": previous_scope_id,
-                        "event": "user_message",
-                        "reason": "session_placement_changed",
-                    },
-                )
-            if current_scope_id and session.get("visibility") == "foreground":
-                broker.publish(
-                    "session.activity",
-                    {
-                        "session_id": session_id,
-                        "scope_id": current_scope_id,
-                        "event": "created",
-                        "reason": "session_placement_changed",
-                    },
-                )
     return jsonify(session)
 
 
@@ -6161,20 +6181,25 @@ def sessions_cli_activity(session_id: str):
     from core.services import sessions as workbench_sessions_service
     from vibe.sse_broker import broker
 
+    payload = request.json or {}
+    previous_session = None
+    if "previous_scope_id" in payload and "previous_visibility" in payload:
+        previous_session = {
+            "scope_id": payload.get("previous_scope_id"),
+            "visibility": payload.get("previous_visibility"),
+        }
+
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
             session = workbench_sessions_service.get_session(conn, session_id)
     except LookupError:
         return jsonify({"error": "not found"}), 404
-    broker.publish(
-        "session.activity",
-        {
-            "session_id": session_id,
-            "scope_id": session.get("scope_id"),
-            "event": "updated",
-            "title": session.get("title"),
-        },
+    _publish_session_update_activity(
+        broker,
+        session_id=session_id,
+        session=session,
+        previous_session=previous_session,
     )
     return jsonify({"ok": True})
 

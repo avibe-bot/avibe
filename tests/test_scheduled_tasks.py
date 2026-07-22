@@ -1222,7 +1222,7 @@ def test_runtime_session_reservation_without_scope_creates_background_standalone
     assert expected_workdir.is_dir()
 
 
-def test_runtime_session_reservation_ignores_unresolved_legacy_scope_backend(
+def test_runtime_session_reservation_preserves_legacy_deliver_key_scope(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1277,7 +1277,8 @@ def test_runtime_session_reservation_ignores_unresolved_legacy_scope_backend(
 
     assert target.agent_backend == default_agent.backend
     assert target.agent_name == default_agent.name
-    assert target.scope_id is None
+    assert target.scope_id == "slack::channel::C123"
+    assert target.visibility == "background"
 
 
 def test_runtime_session_reservation_uses_default_agent_without_scope_agent(

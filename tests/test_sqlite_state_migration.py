@@ -121,9 +121,13 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         media_columns = {
             row[1] for row in conn.execute("pragma table_info(media_objects)")
         }
+        media_scope_not_null = {
+            row[1]: row[3] for row in conn.execute("pragma table_info(media_objects)")
+        }["scope_id"]
         assert "mtime_ns" in media_columns  # 20260603_0014: dedup fingerprint
         assert "width_px" in media_columns  # 20260604_0015: zero-shift image box
         assert "height_px" in media_columns
+        assert media_scope_not_null == 0  # standalone sessions can own uploads
         background_columns = {
             row[1]
             for row in conn.execute(
@@ -177,6 +181,18 @@ def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp
 
         conn.execute(
             """
+            insert into media_objects (
+                token, scope_id, session_id, kind, source, local_path, created_at
+            ) values (
+                'media_existing', 'scope_real', 'ses_caller', 'file',
+                'user_upload', '/tmp/existing.txt', ?
+            )
+            """,
+            (now,),
+        )
+
+        conn.execute(
+            """
             insert into agent_runs (
                 id, run_type, status, source_kind, source_actor, session_id,
                 cancel_requested, created_at, updated_at, metadata_json
@@ -216,6 +232,23 @@ def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp
         unique_index = conn.execute(
             "select [unique] from pragma_index_list('agent_sessions') where name = 'uq_agent_sessions_scope_anchor'"
         ).fetchone()
+        media_scope_not_null = {
+            row[1]: row[3] for row in conn.execute("pragma table_info(media_objects)")
+        }["scope_id"]
+        existing_media = conn.execute(
+            "select scope_id, session_id from media_objects where token = 'media_existing'"
+        ).fetchone()
+        conn.execute(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, kind, source, local_path, created_at
+            ) values (
+                'media_standalone', null, 'ses_legacy_c', 'file',
+                'user_upload', '/tmp/standalone.txt', ?
+            )
+            """,
+            (now,),
+        )
 
     assert rows == [
         ("ses_legacy_a", "scope_real", "ses_legacy_a", "background", "/legacy-a"),
@@ -224,6 +257,8 @@ def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp
     ]
     assert pseudo_scope_count == 3
     assert unique_index == (1,)
+    assert media_scope_not_null == 0
+    assert existing_media == ("scope_real", "ses_caller")
 
 
 def test_run_migrations_serializes_alembic_context(monkeypatch, tmp_path: Path) -> None:

@@ -918,6 +918,44 @@ def test_patch_session_rejects_unknown_target_scope_as_invalid_value(isolated_st
     assert response.status_code == 400
 
 
+def test_standalone_session_accepts_attachment_upload(isolated_state):
+    import base64
+
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.models import media_objects
+    from vibe.ui_server import app
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = sessions_service.create_session(
+            conn,
+            scope_id=None,
+            agent_backend="codex",
+            visibility="foreground",
+        )
+
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session['id']}/attachments",
+        json={
+            "name": "standalone.txt",
+            "mime": "text/plain",
+            "data": base64.b64encode(b"standalone upload").decode("ascii"),
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 201
+    token = response.get_json()["token"]
+    with engine.connect() as conn:
+        row = conn.execute(
+            media_objects.select().where(media_objects.c.token == token)
+        ).mappings().one()
+    assert row["scope_id"] is None
+    assert row["session_id"] == session["id"]
+
+
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
     """A selected Vibe Agent implies its backend. The UI often sends only
     ``agent_name`` when changing the picker, so the route must derive the

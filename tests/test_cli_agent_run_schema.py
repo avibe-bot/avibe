@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -1129,6 +1130,38 @@ def test_agent_run_same_scope_rejects_standalone_fork_source(monkeypatch) -> Non
         )
 
     assert exc_info.value.code == "standalone_session_has_no_scope"
+
+
+def test_agent_run_fork_defaults_to_source_scope_not_caller_scope(monkeypatch) -> None:
+    args = _parse_agent_run(
+        [
+            "--agent",
+            "worker",
+            "--fork-session",
+            "ses-source",
+            "--async",
+            "--no-callback",
+            "--message",
+            "hi",
+        ]
+    )
+    scopes = {
+        "ses-source": "avibe::project::proj_source",
+        "ses-caller": "avibe::project::proj_caller",
+    }
+    monkeypatch.setattr(
+        cli,
+        "_scope_id_from_session_id",
+        lambda session_id, **_kwargs: scopes[session_id],
+    )
+
+    scope_id = cli._resolve_agent_run_scope_key(
+        args,
+        caller_context=SimpleNamespace(session_id="ses-caller"),
+        source_session_id="ses-source",
+    )
+
+    assert scope_id == "avibe::project::proj_source"
 
 
 def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:

@@ -226,7 +226,13 @@ def list_sessions_page(
         agent_sessions.c.visibility == "foreground",
     )
     if platform:
-        query = query.where(agent_sessions.c.scope_id.like(f"{platform}::%"))
+        platform_filter = agent_sessions.c.scope_id.like(f"{platform}::%")
+        if platform == "avibe":
+            # Standalone sessions are Web/Workbench sessions without project
+            # placement. Keep them visible through the agent-facing avibe type
+            # filter even though their payload correctly has no platform.
+            platform_filter = or_(agent_sessions.c.scope_id.is_(None), platform_filter)
+        query = query.where(platform_filter)
     query = (
         query.order_by(
             agent_sessions.c.last_active_at.desc(),
@@ -461,9 +467,15 @@ def update_session(
         values["visibility"] = visibility_value
     if scope_id is not _UNSET:
         target_scope_id = str(scope_id) if scope_id is not None else None
+        target_scope = None
         if scope_id is not None:
             scope = conn.execute(
-                select(scopes.c.id, scope_settings.c.enabled)
+                select(
+                    scopes.c.id,
+                    scopes.c.platform,
+                    scopes.c.native_id,
+                    scope_settings.c.enabled,
+                )
                 .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
                 .where(scopes.c.id == target_scope_id)
             ).first()
@@ -471,6 +483,7 @@ def update_session(
                 raise ValueError(f"Scope not found: {scope_id}")
             if scope.enabled == 0:
                 raise PermissionError(f"Scope is archived: {scope_id}")
+            target_scope = scope
         values["scope_id"] = target_scope_id
         if target_scope_id != existing.scope_id:
             # Legacy IM caches still consult this metadata key first. A scope
@@ -478,6 +491,16 @@ def update_session(
             # the override lets the loader derive the key from the new scope.
             existing_metadata.pop("legacy_scope_key", None)
             values["metadata_json"] = _dumps_metadata(existing_metadata)
+            # A session anchor encodes its delivery thread relative to its
+            # scope. Carrying the old anchor across a move can reinterpret the
+            # old channel id as a thread under the new scope. Standalone rows
+            # self-anchor; scoped rows use a unique suffix whose base resolves
+            # to the destination scope (and therefore no thread).
+            values["session_anchor"] = (
+                session_id
+                if target_scope is None
+                else f"{target_scope.platform}_{target_scope.native_id}:session_{session_id}"
+            )
 
     stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
     if backend_changes:
