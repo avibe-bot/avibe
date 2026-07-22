@@ -167,7 +167,11 @@ export const AgentsPage: React.FC = () => {
   }, [api, fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (eventBridgeConnected) return;
+    // Reconcile the badge even while SSE is connected: process death / orphan /
+    // reap is a sampled snapshot with no run/session SSE event, so a slow
+    // liveness poll keeps the count fresh (30s connected, 8s disconnected),
+    // mirroring the old running list.
+    const intervalMs = eventBridgeConnected ? 30000 : 8000;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -176,7 +180,7 @@ export const AgentsPage: React.FC = () => {
     const tick = async () => {
       if (cancelled) return;
       if (document.visibilityState !== 'visible') {
-        timer = window.setTimeout(tick, 8000);
+        timer = window.setTimeout(tick, intervalMs);
         return;
       }
       if (inFlight) {
@@ -196,14 +200,14 @@ export const AgentsPage: React.FC = () => {
         void tick();
         return;
       }
-      timer = window.setTimeout(tick, 8000);
+      timer = window.setTimeout(tick, intervalMs);
     };
 
     const refreshNow = () => {
       if (document.visibilityState === 'visible') void tick();
     };
 
-    void tick();
+    timer = window.setTimeout(tick, intervalMs);
     document.addEventListener('visibilitychange', refreshNow);
     window.addEventListener('focus', refreshNow);
     return () => {

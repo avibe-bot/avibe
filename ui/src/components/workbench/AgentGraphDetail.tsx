@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import {
@@ -58,6 +58,10 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
   const { showToast } = useToast();
   const [busy, setBusy] = useState(false);
   const [armEnd, setArmEnd] = useState(false);
+  // The panel stays mounted across node switches (only the prop changes), so
+  // clear a pending destructive-confirm when the selected session changes — a
+  // click on the new node must not skip its first confirmation.
+  useEffect(() => setArmEnd(false), [node.session_id]);
 
   const lineage = deriveLineage(node.session_id, edges, triggersById);
   const meta = statusMeta(node.status);
