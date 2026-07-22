@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_poc.metrics import append_request_metric, classify_request_path, read_call_metrics
+from memory_poc.metrics import append_egress_metric, append_request_metric, classify_request_path, read_call_metrics, read_egress_hosts
 
 
 def test_metric_log_contains_only_counts_and_tokens(tmp_path: Path) -> None:
@@ -29,3 +29,17 @@ def test_metric_log_contains_only_counts_and_tokens(tmp_path: Path) -> None:
     assert metrics.ingestion_llm_usage_records == 1
     assert "content" not in path.read_text(encoding="utf-8")
     assert classify_request_path("/v1/embeddings") == "embedding"
+
+
+def test_egress_log_keeps_only_unique_hostname_values(tmp_path: Path) -> None:
+    path = tmp_path / "egress.jsonl"
+
+    append_egress_metric(path, hostname="DashScope.AliYuncs.com")
+    append_egress_metric(path, hostname="127.0.0.1")
+    append_egress_metric(path, hostname="https://not-a-host.invalid/path")
+    append_egress_metric(path, hostname="dashscope.aliyuncs.com")
+
+    assert read_egress_hosts(path) == ("dashscope.aliyuncs.com",)
+    rendered = path.read_text(encoding="utf-8")
+    assert "https://" not in rendered
+    assert "127.0.0.1" not in rendered

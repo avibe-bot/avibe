@@ -10,19 +10,20 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import socket
 from contextvars import ContextVar
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
 from .constants import EVEROS_VERSION
-from .metrics import append_request_metric, classify_request_path
+from .metrics import append_egress_metric, append_request_metric, classify_request_path
 from .request_guard import validate_request
 
 _REQUEST_PHASE: ContextVar[str] = ContextVar("memory_poc_request_phase", default="unattributed")
 
 
-def _install_request_counter(metrics_path: Path) -> None:
+def _install_request_counter(metrics_path: Path, *, egress_path: Path | None = None) -> None:
     import httpx
 
     original_async_send = httpx.AsyncClient.send
@@ -39,6 +40,8 @@ def _install_request_counter(metrics_path: Path) -> None:
 
     async def tracked_async_send(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
         kind = classify_request_path(str(request.url.path))
+        if egress_path is not None:
+            append_egress_metric(egress_path, hostname=getattr(request.url, "host", None))
         try:
             response = await original_async_send(self, request, *args, **kwargs)
         except Exception:  # noqa: BLE001
@@ -54,6 +57,8 @@ def _install_request_counter(metrics_path: Path) -> None:
 
     def tracked_sync_send(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
         kind = classify_request_path(str(request.url.path))
+        if egress_path is not None:
+            append_egress_metric(egress_path, hostname=getattr(request.url, "host", None))
         try:
             response = original_sync_send(self, request, *args, **kwargs)
         except Exception:  # noqa: BLE001
@@ -69,6 +74,19 @@ def _install_request_counter(metrics_path: Path) -> None:
 
     httpx.AsyncClient.send = tracked_async_send
     httpx.Client.send = tracked_sync_send
+    if egress_path is not None:
+        _install_hostname_resolver_counter(egress_path)
+
+
+def _install_hostname_resolver_counter(egress_path: Path) -> None:
+    """Record hostname arguments passed to the child resolver, never IPs or URLs."""
+    original_getaddrinfo = socket.getaddrinfo
+
+    def tracked_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        append_egress_metric(egress_path, hostname=host if isinstance(host, str) else None)
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    socket.getaddrinfo = tracked_getaddrinfo
 
 
 def serve(uds: Path) -> None:
@@ -84,7 +102,8 @@ def serve(uds: Path) -> None:
     os.umask(0o077)
     metrics_value = os.environ.get("MEMORY_POC_REQUEST_METRICS")
     if metrics_value:
-        _install_request_counter(Path(metrics_value))
+        egress_value = os.environ.get("MEMORY_POC_EGRESS_METRICS")
+        _install_request_counter(Path(metrics_value), egress_path=Path(egress_value) if egress_value else None)
 
     from starlette.responses import JSONResponse
     import uvicorn

@@ -388,6 +388,7 @@ class EverOSProcess:
     settings: ProviderSettings
     metrics_path: Path
     owner_id: str
+    egress_path: Path | None = None
     startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS
     request_timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS
     process: subprocess.Popen[bytes] | None = field(default=None, init=False)
@@ -413,6 +414,7 @@ class EverOSProcess:
                 child_home=self.child_home,
                 metrics_path=self.metrics_path,
                 owner_id=self.owner_id,
+                egress_path=self.egress_path,
                 anchor=self.state_root,
             )
             self.process = subprocess.Popen(
@@ -449,11 +451,15 @@ class EverOSProcess:
         raise LaunchError("sidecar_socket_timeout")
 
     def _client(self) -> EverOSClient:
+        return self.client()
+
+    def client(self, *, timeout_seconds: float | None = None) -> EverOSClient:
+        """Build a UDS client with an optional bounded probe timeout."""
         assert self.socket_path is not None
         assert self.tcp_monitor is not None
         return EverOSClient(
             self.socket_path,
-            timeout_seconds=self.request_timeout_seconds,
+            timeout_seconds=self.request_timeout_seconds if timeout_seconds is None else timeout_seconds,
             safety_check=self.tcp_monitor.assert_safe,
         )
 

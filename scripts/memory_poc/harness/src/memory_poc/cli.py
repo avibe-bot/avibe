@@ -6,11 +6,12 @@ import sys
 from pathlib import Path
 
 from .constants import STAGES
-from .errors import ConfigurationError, HarnessError, StageNotImplementedError
+from .errors import ConfigurationError, HarnessError
 from .environment import checked_workspace_root, discover_provider_settings, verify_harness_interpreter
 from .paths import ensure_owner_directory, read_private_text, runtime_root
 from .reports import load_report
 from .sanity import load_sanity_fixture, run_sanity
+from .stage2 import run_stage2
 from .identifiers import validate_run_id
 
 
@@ -61,9 +62,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_stage(stage: str, run_id: str) -> int:
-    if stage != "sanity":
-        raise StageNotImplementedError(f"stage_not_implemented:{stage}")
-    report_path = run_sanity(run_id=run_id)
+    if stage == "sanity":
+        report_path = run_sanity(run_id=run_id)
+    else:
+        report_path = run_stage2(stage=stage, run_id=run_id)
     print(json.dumps({"run_id": run_id, "report": str(report_path)}, ensure_ascii=True))
     return 0
 
@@ -74,9 +76,25 @@ def _fixture_texts_for_report(run_directory: Path) -> tuple[str, ...]:
         metadata = json.loads(read_private_text(run_directory / "run.json"))
     except (HarnessError, OSError, ValueError) as exc:
         raise HarnessError("report_fixture_source_unknown") from exc
-    if metadata != {"stage": "sanity", "fixture_set": "stage1-mini"}:
-        raise HarnessError("report_fixture_source_unknown")
-    return tuple(message["content"] for message in load_sanity_fixture().messages)
+    if metadata == {"stage": "sanity", "fixture_set": "stage1-mini"}:
+        return tuple(message["content"] for message in load_sanity_fixture().messages)
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("stage") == "stage2"
+        and isinstance(metadata.get("corpus_revision"), str)
+        and isinstance(metadata.get("completed_stages"), list)
+        and all(isinstance(item, str) for item in metadata["completed_stages"])
+    ):
+        try:
+            workspace = run_directory.parents[3]
+            from .corpus import load_corpus
+
+            corpus = load_corpus(workspace)
+        except HarnessError as exc:
+            raise HarnessError("report_fixture_source_unknown") from exc
+        if metadata["corpus_revision"] == corpus.revision:
+            return tuple(message.text for message in corpus.messages)
+    raise HarnessError("report_fixture_source_unknown")
 
 
 def _report_secret_values(workspace: Path) -> tuple[str, ...]:

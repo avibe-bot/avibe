@@ -161,3 +161,25 @@ def test_get_is_rejected_from_the_production_read_phase_and_allowed_only_for_res
 
     assert validate_request("POST", "/api/v1/memory/get", _body(get), owner_id=OWNER_ID, phase="read") == "route_not_allowed"
     assert validate_request("POST", "/api/v1/memory/get", _body(get), owner_id=OWNER_ID, phase="research") is None
+
+
+def test_research_buffer_search_allows_only_one_session_filter() -> None:
+    payload = {
+        "user_id": OWNER_ID,
+        "app_id": "avibe",
+        "project_id": "personal",
+        "query": "memory-poc-buffer-observation",
+        "method": "hybrid",
+        "top_k": 8,
+        "include_profile": True,
+        "enable_llm_rerank": False,
+        "filters": {"session_id": "s1"},
+    }
+
+    assert validate_request("POST", "/api/v1/memory/search", _body(payload), owner_id=OWNER_ID, phase="research") is None
+    assert validate_request("POST", "/api/v1/memory/search", _body(payload), owner_id=OWNER_ID, phase="read") == "search_filters_rejected"
+    payload["filters"] = {"session_id": "s1", "owner_id": OWNER_ID}
+    assert (
+        validate_request("POST", "/api/v1/memory/search", _body(payload), owner_id=OWNER_ID, phase="research")
+        == "search_filters_rejected"
+    )

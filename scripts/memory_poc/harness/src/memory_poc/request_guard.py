@@ -27,7 +27,7 @@ def validate_request(
     phase_routes = {
         "ingestion": {"/api/v1/memory/add", "/api/v1/memory/flush"},
         "read": {"/api/v1/memory/search"},
-        "research": {"/api/v1/memory/get"},
+        "research": {"/api/v1/memory/get", "/api/v1/memory/search"},
     }
     if method != "POST" or path not in phase_routes.get(phase, set()):
         return "route_not_allowed"
@@ -42,9 +42,10 @@ def validate_request(
     validators = {
         "/api/v1/memory/add": _validate_add,
         "/api/v1/memory/flush": _validate_flush,
-        "/api/v1/memory/search": _validate_search,
         "/api/v1/memory/get": _validate_get,
     }
+    if path == "/api/v1/memory/search":
+        return _validate_search(payload, owner_id, allow_session_filter=phase == "research")
     return validators[path](payload, owner_id)
 
 
@@ -99,8 +100,12 @@ def _validate_flush(payload: dict[str, Any], _owner_id: str) -> str | None:
     return None
 
 
-def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
+def _validate_search(payload: dict[str, Any], owner_id: str, *, allow_session_filter: bool = False) -> str | None:
     allowed = {"user_id", "app_id", "project_id", "query", "method", "top_k", "include_profile", "enable_llm_rerank"}
+    if "filters" in payload and not allow_session_filter:
+        return "search_filters_rejected"
+    if allow_session_filter:
+        allowed.add("filters")
     required = {"user_id", "app_id", "project_id", "query", "method", "top_k", "include_profile", "enable_llm_rerank"}
     if not _keys_are(payload, allowed, required):
         return "search_shape_rejected"
@@ -114,6 +119,16 @@ def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
         return "search_options_rejected"
     if payload.get("enable_llm_rerank") is not False:
         return "search_rerank_rejected"
+    if "filters" in payload:
+        filters = payload["filters"]
+        if not (
+            allow_session_filter
+            and isinstance(filters, dict)
+            and set(filters) == {"session_id"}
+            and isinstance(filters.get("session_id"), str)
+            and filters["session_id"]
+        ):
+            return "search_filters_rejected"
     return None
 
 

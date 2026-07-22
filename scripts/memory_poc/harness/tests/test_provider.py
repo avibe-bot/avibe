@@ -70,6 +70,45 @@ def test_search_uses_hybrid_to_receive_nested_atomic_facts(monkeypatch) -> None:
     ]
 
 
+def test_research_buffer_search_uses_the_public_search_route_with_a_single_session_filter(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    headers: list[dict[str, str]] = []
+
+    class _BufferResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, dict[str, list[object]]]:
+            return {"data": {"episodes": [], "unprocessed_messages": []}}
+
+    class _BufferClient(_Client):
+        @staticmethod
+        def request(*_args: object, **kwargs: object) -> _BufferResponse:
+            calls.append(kwargs["json"])  # type: ignore[arg-type]
+            headers.append(kwargs["headers"])  # type: ignore[arg-type]
+            return _BufferResponse()
+
+    monkeypatch.setattr("memory_poc.provider.httpx.HTTPTransport", lambda **_kwargs: object())
+    monkeypatch.setattr("memory_poc.provider.httpx.Client", _BufferClient)
+
+    EverOSClient(Path("/tmp/everos.sock")).research_buffer(owner_id="owner", session_id="session")
+
+    assert headers == [{"X-Memory-Poc-Phase": "research"}]
+    assert calls == [
+        {
+            "user_id": "owner",
+            "app_id": "avibe",
+            "project_id": "personal",
+            "query": "memory-poc-buffer-observation",
+            "method": "hybrid",
+            "top_k": 8,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+            "filters": {"session_id": "session"},
+        }
+    ]
+
+
 def test_get_is_available_only_through_the_explicit_research_helper(monkeypatch) -> None:
     headers: list[dict[str, str]] = []
 

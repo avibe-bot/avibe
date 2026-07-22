@@ -105,6 +105,29 @@ class EverOSClient:
             phase="read",
         )
 
+    def research_buffer(self, *, owner_id: str, session_id: str) -> dict[str, Any]:
+        """Inspect an in-flight session through public ``/search`` only.
+
+        This is a POC-only diagnostic. Production retrieval continues to use
+        :meth:`search`, whose request shape does not include filters.
+        """
+        return self._request(
+            "POST",
+            "/api/v1/memory/search",
+            {
+                "user_id": owner_id,
+                "app_id": APP_ID,
+                "project_id": PROJECT_ID,
+                "query": "memory-poc-buffer-observation",
+                "method": "hybrid",
+                "top_k": 8,
+                "include_profile": True,
+                "enable_llm_rerank": False,
+                "filters": {"session_id": session_id},
+            },
+            phase="research",
+        )
+
     def _request(
         self,
         method: str,

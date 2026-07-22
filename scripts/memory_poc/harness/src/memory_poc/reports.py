@@ -77,12 +77,12 @@ def set_criterion(criteria: list[dict[str, Any]], criterion_id: str, *, state: s
     raise ReportValidationError("unknown_criterion")
 
 
-def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
+def build_report(*, run_id: str, settings: ProviderSettings, corpus_revision: str = "stage1-mini") -> dict[str, Any]:
     secret_values = _configured_secret_values(settings)
     return {
         "run_id": run_id,
         "harness_commit": _git_commit(),
-        "corpus_revision": "stage1-mini",
+        "corpus_revision": corpus_revision,
         "environment": {
             "os": os.uname().sysname,
             "machine_class": os.uname().machine,
@@ -253,6 +253,44 @@ def write_summary(
     write_private_text(path, rendered, anchor=anchor)
 
 
+def write_stage2_summary(
+    path: Path,
+    *,
+    settings: ProviderSettings,
+    report: dict[str, Any],
+    completed_stages: tuple[str, ...],
+    evidence_lines: tuple[str, ...],
+    fixture_texts: tuple[str, ...],
+    anchor: Path | None = None,
+) -> None:
+    """Write redacted suite evidence alongside the frozen Stage-2 report."""
+    secret_values = _configured_secret_values(settings)
+    validate_report(report, fixture_texts=fixture_texts, secret_values=secret_values)
+    if not completed_stages or not all(_safe_identifier(stage) for stage in completed_stages):
+        raise ReportValidationError("stage2_summary_stages_invalid")
+    if not all(_safe_stage2_line(line) for line in evidence_lines):
+        raise ReportValidationError("stage2_summary_evidence_invalid")
+    rendered = "\n".join(
+        (
+            "# EverOS POC Stage 2",
+            "",
+            f"Completed stages - {', '.join(completed_stages)}",
+            f"Recommendation - {report['recommendation']}",
+            "",
+            "Evidence",
+            *(f"- {line}" for line in evidence_lines),
+            "",
+        )
+    )
+    if _URI_PATTERN.search(rendered):
+        raise ReportValidationError("summary_contains_uri")
+    normalized = _normalize_text(rendered)
+    if any(_normalize_text(text) in normalized for text in fixture_texts if text):
+        raise ReportValidationError("summary_contains_fixture_text")
+    _assert_text_secret_free(rendered, secret_values, error_code="summary_contains_secret")
+    write_private_text(path, rendered, anchor=anchor)
+
+
 def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...]:
     if readiness is None:
         return ()
@@ -411,6 +449,13 @@ def _safe_identifier(value: Any, *, allow_unknown: bool = False) -> bool:
     if allow_unknown and value == "unknown":
         return True
     return bool(_SAFE_IDENTIFIER.fullmatch(value))
+
+
+def _safe_stage2_line(value: Any) -> bool:
+    """Accept bounded prose that cannot carry a URL or fixture body accidentally."""
+    if not isinstance(value, str) or not value or len(value) > 512:
+        return False
+    return all(character.isascii() and (character.isalnum() or character in " .,_()/%=-") for character in value)
 
 
 def _numeric(value: Any) -> bool:
