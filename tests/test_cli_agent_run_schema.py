@@ -970,6 +970,7 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
     assert row["native_session_id"] == ""
     assert row["model"] == "gpt-5.2"
     assert row["reasoning_effort"] == "low"
+    assert row["scope_id"] == "avibe::project::proj_fork_cli"
     assert row["session_anchor"] == payload["session_id"]
 
 
@@ -1145,14 +1146,11 @@ def test_agent_run_fork_defaults_to_source_scope_not_caller_scope(monkeypatch) -
             "hi",
         ]
     )
-    scopes = {
-        "ses-source": "avibe::project::proj_source",
-        "ses-caller": "avibe::project::proj_caller",
-    }
+    resolved: list[str] = []
     monkeypatch.setattr(
         cli,
         "_scope_id_from_session_id",
-        lambda session_id, **_kwargs: scopes[session_id],
+        lambda session_id, **_kwargs: resolved.append(session_id) or "avibe::project::proj_caller",
     )
 
     scope_id = cli._resolve_agent_run_scope_key(
@@ -1161,7 +1159,10 @@ def test_agent_run_fork_defaults_to_source_scope_not_caller_scope(monkeypatch) -
         source_session_id="ses-source",
     )
 
-    assert scope_id == "avibe::project::proj_source"
+    # None is intentional: reserve_forked_session interprets it as inherit the
+    # source scope. Reaching the caller resolver here would override placement.
+    assert scope_id is None
+    assert resolved == []
 
 
 def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:

@@ -1920,14 +1920,11 @@ def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Opt
         )
         return _require_scope_id_from_session_id(caller_session_id, help_command="vibe agent run --help")
     if source_session_id:
-        # An explicit fork follows the source Session by default, even when it
-        # is launched from a caller in another project. --scope-id remains the
-        # opt-in move; --same-scope above provides the explicit error for a
-        # standalone source.
-        return _scope_id_from_session_id(
-            source_session_id,
-            help_command="vibe agent run --help",
-        )
+        # Leave placement implicit so reserve_forked_session inherits the
+        # source Session's scope (including standalone) and preserves its
+        # anchor semantics. Most importantly, do not fall through to a caller
+        # in another project. --scope-id remains the opt-in move.
+        return None
     if caller_context is not None:
         try:
             return _scope_id_from_session_id(
