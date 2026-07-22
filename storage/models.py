@@ -120,6 +120,7 @@ agent_sessions = Table(
     Column("native_session_id", Text, nullable=False),
     Column("title", Text, nullable=True),
     Column("status", String, nullable=False),
+    Column("visibility", String, nullable=False, server_default="foreground"),
     # Live agent-runtime status, distinct from the lifecycle ``status``
     # (active/archived). One of ``idle`` / ``running`` / ``failed`` —
     # ``running`` while a turn is in flight, ``failed`` when the most recent
@@ -132,6 +133,7 @@ agent_sessions = Table(
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
+    Index("ix_agent_sessions_visibility", "visibility"),
     Index("ix_agent_sessions_scope_status_activity", "scope_id", "status", "last_active_at", "created_at", "id"),
     Index("ix_agent_sessions_native_session", "native_session_id"),
 )
@@ -295,7 +297,7 @@ agent_events = Table(
     "agent_events",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
     Column("turn_id", String, nullable=True),
     Column("run_id", String, nullable=True),
@@ -328,7 +330,7 @@ messages = Table(
     "messages",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
     Column("platform", String, nullable=False),
     Column("author", String, nullable=False),

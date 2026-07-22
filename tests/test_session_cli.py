@@ -221,6 +221,40 @@ def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
     assert payload["session"]["title"] is None
 
 
+def test_update_visibility_and_make_standalone_keeps_workdir(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", title="Old")
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "sesaaa")
+            .values(workdir=str(tmp_path / "original-workdir"))
+        )
+        original_workdir = conn.execute(
+            agent_sessions.select().where(agent_sessions.c.id == "sesaaa")
+        ).mappings().one()["workdir"]
+
+    code, payload = _run(
+        cli.cmd_session_update,
+        [
+            "session",
+            "update",
+            "sesaaa",
+            "--visibility",
+            "background",
+            "--scope-id",
+            "none",
+        ],
+        capsys,
+    )
+
+    assert code == 0
+    assert payload["session"]["visibility"] == "background"
+    assert payload["session"]["scope_id"] is None
+    assert payload["session"]["project_id"] is None
+    assert payload["session"]["workdir"] == original_workdir
+
+
 def test_update_archived_is_not_found(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesarch", status="archived", title="Old")

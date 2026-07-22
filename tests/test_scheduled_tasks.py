@@ -1177,6 +1177,47 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
     assert target.agent_id
 
 
+def test_runtime_session_reservation_without_scope_creates_background_standalone(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    agent_store = VibeAgentStore()
+    try:
+        agent_store.ensure_builtin_default_agents(["codex"])
+        agent_store.set_default_agent_name("codex")
+    finally:
+        agent_store.close()
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(agent_router=SimpleNamespace(global_default="codex")),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    session_id = service._reserve_runtime_session(agent_name=None, deliver_key=None)
+
+    with create_sqlite_engine().connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.scope_id,
+                agent_sessions.c.visibility,
+                agent_sessions.c.workdir,
+            ).where(agent_sessions.c.id == session_id)
+        ).one()
+    expected_workdir = home / "show" / session_id
+    assert row.scope_id is None
+    assert row.visibility == "background"
+    assert row.workdir == str(expected_workdir)
+    assert expected_workdir.is_dir()
+
+
 def test_runtime_session_reservation_ignores_unresolved_legacy_scope_backend(
     tmp_path: Path,
     monkeypatch,
@@ -3323,14 +3364,14 @@ def test_recovered_silent_directive_activity_settles_without_emit() -> None:
     service.controller.emit_agent_message.assert_not_awaited()
 
 
-def test_restart_no_delivery_activity_settles_real_run_without_emit(
+def test_restart_background_activity_persists_without_outward_delivery(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     session_id = _make_avibe_session(
         monkeypatch,
         tmp_path,
-        metadata={"no_delivery": True},
+        visibility="background",
     )
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -3370,7 +3411,12 @@ def test_restart_no_delivery_activity_settles_real_run_without_emit(
         handle_scheduled_message=lambda *_args, **_kwargs: None,
     )
     controller.agent_service = SimpleNamespace(activities=recovered_registry)
-    controller.emit_agent_message = AsyncMock()
+    async def emit_background(context, *_args, **_kwargs):
+        assert context.platform_specific["suppress_delivery"] is True
+        assert request_store.settle_deferred_run(request.id) is True
+        return "msg-background"
+
+    controller.emit_agent_message = AsyncMock(side_effect=emit_background)
     service = ScheduledTaskService(
         controller=controller,
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
@@ -3384,7 +3430,7 @@ def test_restart_no_delivery_activity_settles_real_run_without_emit(
     assert terminal["status"] == "succeeded"
     assert terminal["result_text"] in {None, ""}
     assert not terminal["result_payload"].get("outputs")
-    controller.emit_agent_message.assert_not_awaited()
+    controller.emit_agent_message.assert_awaited_once()
     assert activity_store.list_activities() == []
 
 
@@ -4676,6 +4722,7 @@ def _make_avibe_session(
     tmp_path,
     *,
     metadata: dict | None = None,
+    visibility: str = "foreground",
 ) -> str:
     """Create a real avibe workbench session so ``resolve_session_id_target``
     resolves it to ``platform='avibe'`` (the gate trigger)."""
@@ -4715,6 +4762,7 @@ def _make_avibe_session(
             scope_id=scope_id,
             agent_backend="claude",
             agent_name="worker",
+            visibility=visibility,
             metadata=metadata,
         )
     return session["id"]

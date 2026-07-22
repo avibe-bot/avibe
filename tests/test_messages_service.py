@@ -622,6 +622,46 @@ def test_list_inbox_sessions_per_session_feed(isolated_state):
     assert b["unread_count"] == by_session["ses_b"]
 
 
+def test_inbox_and_unread_queries_exclude_background_sessions(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_foreground", "Foreground")
+        _seed_titled_session(conn, scope_id, "ses_background", "Background")
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "ses_background")
+            .values(visibility="background")
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_foreground",
+            "agent",
+            "visible",
+            "2026-05-30T10:00:00Z",
+            read=False,
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_background",
+            "agent",
+            "hidden",
+            "2026-05-30T10:01:00Z",
+            read=False,
+        )
+
+    with engine.connect() as conn:
+        feed = messages_service.list_inbox_sessions(conn, platform="avibe")
+        unread = messages_service.unread_counts_by_session(conn, platform="avibe")
+        hidden = messages_service.get_inbox_session(conn, "ses_background")
+
+    assert [row["session_id"] for row in feed["sessions"]] == ["ses_foreground"]
+    assert unread == {"ses_foreground": 1}
+    assert hidden is None
+
+
 def test_list_inbox_sessions_includes_notify_only_failed_turn(isolated_state):
     """A turn that fails before producing any ``result`` persists only a terminal
     ``notify``; that failed conversation must still surface in the inbox (with the

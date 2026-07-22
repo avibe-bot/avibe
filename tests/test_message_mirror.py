@@ -760,6 +760,64 @@ def test_harness_inbound_avibe_session_scoped(isolated_state):
     assert row["content_text"] == "the watched condition fired"
 
 
+def test_background_standalone_persists_full_turn_without_realtime_delivery(isolated_state):
+    from core import inbox_events
+
+    engine = create_sqlite_engine()
+    now = "2026-07-23T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_background",
+                scope_id=None,
+                visibility="background",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_background",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="ses_background",
+        platform="avibe",
+        message_id="scheduled:def_bg:exec_1",
+        platform_specific={
+            "agent_session_id": "ses_background",
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "def_bg",
+            "suppress_delivery": True,
+        },
+    )
+
+    async def scenario():
+        sub_id, queue = inbox_events.bus.subscribe()
+        try:
+            mirror_harness_inbound(context, "background prompt")
+            persist_agent_message(context, "result", "background result")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(queue.get(), timeout=0.1)
+        finally:
+            inbox_events.bus.unsubscribe(sub_id)
+
+    asyncio.run(scenario())
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(messages).where(messages.c.session_id == "ses_background").order_by(messages.c.author)
+        ).mappings().all()
+    assert [(row["author"], row["content_text"]) for row in rows] == [
+        ("agent", "background result"),
+        ("harness", "background prompt"),
+    ]
+    assert {row["scope_id"] for row in rows} == {None}
+
+
 def test_harness_inbound_im_scope_keyed(isolated_state):
     """A harness turn delivered to an IM channel with NO source session resolved
     falls back to a scope-keyed row (null session_id), tagged source='harness'.

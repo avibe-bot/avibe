@@ -800,6 +800,32 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(controller.agent_service.requests), 1)
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
 
+    async def test_background_im_session_suppresses_outward_delivery(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.sessions.find_session_for_anchor = Mock(
+            return_value={
+                "id": "ses_background",
+                "agent_name": None,
+                "agent_backend": "codex",
+                "visibility": "background",
+            }
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "continue")
+
+        self.assertEqual(len(controller.agent_service.requests), 1)
+        agent_name, request = controller.agent_service.requests[0]
+        self.assertTrue(request.context.platform_specific["suppress_delivery"])
+        self.assertEqual(agent_name, "codex")
+
     async def test_lark_typing_preference_uses_registry_reaction_capability(self):
         controller = _StubController(platform="lark", ack_mode="typing", typing_result=True)
         handler = MessageHandler(controller)

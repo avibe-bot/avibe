@@ -68,7 +68,7 @@ PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
 HEAD_REQUIRED_COLUMNS = {
     "agents": {"enabled"},
     "scope_settings": {"agent_name"},
-    "agent_sessions": {"agent_id", "agent_name"},
+    "agent_sessions": {"agent_id", "agent_name", "visibility"},
     "messages": {"type", "source"},
     "run_definitions": {
         "deleted_at",
@@ -599,6 +599,12 @@ def _repair_initial_required_columns(conn: sqlite3.Connection, tables: set[str])
         if "agent_name" not in columns:
             conn.execute('alter table "agent_sessions" add column "agent_name" VARCHAR')
             changed = True
+        if "visibility" not in columns:
+            conn.execute(
+                'alter table "agent_sessions" add column "visibility" '
+                "VARCHAR not null default 'foreground'"
+            )
+            changed = True
     return changed
 
 
@@ -617,6 +623,10 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
     if "agent_sessions" in tables:
+        conn.execute(
+            "create index if not exists ix_agent_sessions_visibility "
+            "on agent_sessions (visibility)"
+        )
         conn.execute(
             "create index if not exists ix_agent_sessions_scope_status_activity "
             "on agent_sessions (scope_id, status, last_active_at, created_at, id)"

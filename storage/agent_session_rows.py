@@ -12,6 +12,7 @@ from storage.models import agent_sessions, scope_settings
 
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
+SESSION_VISIBILITIES = frozenset({"foreground", "background"})
 
 
 def utc_now_iso() -> str:
@@ -63,6 +64,7 @@ def create_agent_session_row(
     conn: Connection,
     *,
     scope_id: str | None,
+    session_id: str | None = None,
     session_anchor: str | None,
     agent_backend: str,
     agent_variant: str | None = None,
@@ -74,6 +76,7 @@ def create_agent_session_row(
     native_session_id: Any = "",
     title: str | None = None,
     status: str = "active",
+    visibility: str = "foreground",
     agent_status: str = "idle",
     metadata: dict[str, Any] | None = None,
     now: str | None = None,
@@ -90,7 +93,11 @@ def create_agent_session_row(
     if require_workdir and not resolved_workdir:
         raise ValueError(f"cannot create agent session without workdir for scope_id={scope_id!r}")
 
-    row_id = new_session_id(conn)
+    visibility_value = str(visibility or "").strip()
+    if visibility_value not in SESSION_VISIBILITIES:
+        raise ValueError(f"invalid session visibility: {visibility!r}")
+
+    row_id = str(session_id or new_session_id(conn))
     anchor = str(session_anchor) if session_anchor is not None else row_id
     now_value = now or utc_now_iso()
     backend = str(agent_backend or "")
@@ -111,6 +118,7 @@ def create_agent_session_row(
             native_session_id=encode_session_value(native_session_id),
             title=title_value,
             status=status,
+            visibility=visibility_value,
             agent_status=agent_status,
             metadata_json=json.dumps(dict(metadata or {}), separators=(",", ":"), ensure_ascii=False),
             created_at=now_value,

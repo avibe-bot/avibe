@@ -17,12 +17,18 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
-from storage.agent_session_rows import create_agent_session_row
+from config import paths
+from storage.agent_session_rows import (
+    SESSION_VISIBILITIES,
+    create_agent_session_row,
+    new_session_id,
+)
 from storage.db import escape_sql_like
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
@@ -78,6 +84,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "model": row.get("model"),
         "reasoning_effort": row.get("reasoning_effort"),
         "status": row.get("status"),
+        "visibility": row.get("visibility") or "foreground",
         # Live agent-runtime status (idle/running/failed), separate from the
         # lifecycle ``status``. Older rows predating the column read as ``idle``.
         "agent_status": row.get("agent_status") or "idle",
@@ -125,7 +132,7 @@ def list_sessions(
     case-insensitive title LIKE match (LIKE metacharacters escaped).
     """
 
-    query = select(agent_sessions)
+    query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
     if scope_id is not None:
         query = query.where(agent_sessions.c.scope_id == scope_id)
     if status is not None and status != "all":
@@ -214,7 +221,10 @@ def list_sessions_page(
     without a second COUNT query.
     """
     request = PageRequest(page=max(int(page), 1), limit=max(int(limit), 1))
-    query = select(agent_sessions).where(agent_sessions.c.status == "active")
+    query = select(agent_sessions).where(
+        agent_sessions.c.status == "active",
+        agent_sessions.c.visibility == "foreground",
+    )
     if platform:
         query = query.where(agent_sessions.c.scope_id.like(f"{platform}::%"))
     query = (
@@ -234,7 +244,7 @@ def list_sessions_page(
 def create_session(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: Optional[str],
     agent_backend: str,
     agent_name: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -242,36 +252,40 @@ def create_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     title: Optional[str] = None,
+    visibility: str = "foreground",
     metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Create a workbench session inside the given project scope.
+    """Create a session in a Scope or as a standalone session.
 
     Pulls ``workdir`` from ``scope_settings`` so Agent runs already know
     where to cd. ``native_session_id`` stays empty — Claude / OpenCode /
     Codex fill it on their first turn.
     """
 
-    scope_row = conn.execute(
-        select(
-            scopes.c.id,
-            scope_settings.c.workdir,
-            scope_settings.c.enabled,
-            scope_settings.c.agent_name,
-            agents.c.backend.label("agent_backend"),
-            scope_settings.c.agent_variant,
-            scope_settings.c.model,
-            scope_settings.c.reasoning_effort,
-        )
-        .select_from(
-            scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
-            .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
-        )
-        .where(scopes.c.id == scope_id)
-    ).mappings().first()
-    if scope_row is None:
-        raise LookupError(f"Scope not found: {scope_id}")
-    if scope_row.get("enabled") == 0:
-        raise PermissionError(f"Scope is archived: {scope_id}")
+    scope_row: dict[str, Any] = {}
+    if scope_id is not None:
+        found = conn.execute(
+            select(
+                scopes.c.id,
+                scope_settings.c.workdir,
+                scope_settings.c.enabled,
+                scope_settings.c.agent_name,
+                agents.c.backend.label("agent_backend"),
+                scope_settings.c.agent_variant,
+                scope_settings.c.model,
+                scope_settings.c.reasoning_effort,
+            )
+            .select_from(
+                scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
+                .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+            )
+            .where(scopes.c.id == scope_id)
+        ).mappings().first()
+        if found is None:
+            raise LookupError(f"Scope not found: {scope_id}")
+        scope_row = dict(found)
+        if scope_row.get("enabled") == 0:
+            raise PermissionError(f"Scope is archived: {scope_id}")
     if agent_name and not agent_backend:
         agent_backend = _backend_for_agent_name(conn, str(agent_name))
     # Inherit the project's default Agent when the caller didn't pin a backend.
@@ -299,8 +313,14 @@ def create_session(
     if metadata:
         metadata_payload.update(metadata)
 
-    session_id = create_agent_session_row(
+    session_id = new_session_id(conn)
+    workdir = scope_row.get("workdir") or os.getcwd()
+    if scope_id is None:
+        workdir = str(paths.get_show_page_dir(session_id))
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+    create_agent_session_row(
         conn,
+        session_id=session_id,
         scope_id=scope_id,
         agent_id=agent_id,
         agent_name=agent_name,
@@ -310,8 +330,9 @@ def create_session(
         reasoning_effort=reasoning_effort,
         # Workbench sessions self-anchor; IM platforms use the parent message ts.
         session_anchor=None,
-        workdir=scope_row.get("workdir") or os.getcwd(),
+        workdir=workdir,
         title=title,
+        visibility=visibility,
         metadata=metadata_payload,
         now=now,
     )
@@ -348,6 +369,8 @@ def update_session(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    visibility: Any = _UNSET,
+    scope_id: Any = _UNSET,
 ) -> dict[str, Any]:
     existing = conn.execute(
         select(
@@ -430,6 +453,23 @@ def update_session(
         values["model"] = model or None
     if reasoning_effort is not _UNSET:
         values["reasoning_effort"] = reasoning_effort or None
+    if visibility is not _UNSET:
+        visibility_value = str(visibility or "").strip()
+        if visibility_value not in SESSION_VISIBILITIES:
+            raise ValueError(f"invalid session visibility: {visibility!r}")
+        values["visibility"] = visibility_value
+    if scope_id is not _UNSET:
+        if scope_id is not None:
+            scope = conn.execute(
+                select(scopes.c.id, scope_settings.c.enabled)
+                .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(scopes.c.id == str(scope_id))
+            ).first()
+            if scope is None:
+                raise LookupError(f"Scope not found: {scope_id}")
+            if scope.enabled == 0:
+                raise PermissionError(f"Scope is archived: {scope_id}")
+        values["scope_id"] = scope_id
 
     stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
     if backend_changes:

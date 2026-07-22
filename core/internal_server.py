@@ -160,22 +160,21 @@ def create_app(controller: "Controller") -> FastAPI:
             engine = get_cached_sqlite_engine()
             with engine.begin() as conn:
                 scope_id = _scope_id_for_session(conn, session_id)
-                if scope_id is not None:
-                    try:
-                        messages_service.append(
-                            conn,
-                            scope_id=scope_id,
-                            session_id=session_id,
-                            platform="avibe",
-                            author="harness",
-                            source="harness",
-                            message_type=messages_service.QUEUED_TYPE,
-                            text=text,
-                            metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
-                            native_message_id=native_message_id or None,
-                        )
-                    except IntegrityError:
-                        logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
+                try:
+                    messages_service.append(
+                        conn,
+                        scope_id=scope_id,
+                        session_id=session_id,
+                        platform="avibe",
+                        author="harness",
+                        source="harness",
+                        message_type=messages_service.QUEUED_TYPE,
+                        text=text,
+                        metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
+                        native_message_id=native_message_id or None,
+                    )
+                except IntegrityError:
+                    logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
 
         return await manager.submit(session_id, context, text, source=SOURCE_SCHEDULED, enqueue=_enqueue)
 
@@ -753,6 +752,7 @@ def _build_session_context(
             "session_anchor": session_row.get("session_anchor"),
         }
         platform_specific["agent_session_target"] = target
+        platform_specific["suppress_delivery"] = session_row.get("visibility") == "background"
         if session_row.get("agent_name"):
             platform_specific["vibe_agent_name"] = session_row["agent_name"]
 

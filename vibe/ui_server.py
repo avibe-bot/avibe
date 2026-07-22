@@ -6032,6 +6032,8 @@ async def sessions_update(session_id: str):
             "agent_variant",
             "model",
             "reasoning_effort",
+            "visibility",
+            "scope_id",
         )
         if key in payload
     }
@@ -6084,6 +6086,8 @@ async def sessions_update(session_id: str):
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except (ValueError, PermissionError) as err:
+        return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:
         # A session is pinned to its backend once it has a conversation (or a
         # running turn); the UI may switch the agent within the same backend,

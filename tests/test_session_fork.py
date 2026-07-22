@@ -780,8 +780,8 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
     assert row["session_anchor"].startswith("slack_C999:fork_")
     assert metadata["fork_target_scope_id"] == target_scope_id
     assert metadata["legacy_scope_key"] == target_scope_id
-    assert "private_agent_run" not in metadata
-    assert "no_delivery" not in metadata
+    assert metadata["private_agent_run"] is True
+    assert metadata["no_delivery"] is True
     assert rows[0]["session_anchor"] != rows[1]["session_anchor"]
 
     resolved = resolve_session_id_target(first_result.session_id, db_path=db_path)

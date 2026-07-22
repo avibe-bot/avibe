@@ -188,6 +188,7 @@ def search_messages(
         .where(messages.c.content_text.ilike(f"%{like}%", escape="\\"))
         # Archived sessions are soft-deleted — never surface their messages.
         .where(agent_sessions.c.status != "archived")
+        .where(agent_sessions.c.visibility == "foreground")
         # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
         # sessions stay active), so exclude a disabled scope's messages too. A
         # missing scope_settings row (legacy / folder-less project) is enabled.
@@ -234,7 +235,7 @@ def search_messages(
 def append(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: Optional[str],
     session_id: Optional[str],
     platform: str,
     author: str,
@@ -762,7 +763,13 @@ def get_draft(conn: Connection, session_id: str) -> Optional[dict[str, Any]]:
     return _row_to_payload(dict(row)) if row else None
 
 
-def set_draft(conn: Connection, *, scope_id: str, session_id: str, text: Optional[str]) -> Optional[dict[str, Any]]:
+def set_draft(
+    conn: Connection,
+    *,
+    scope_id: Optional[str],
+    session_id: str,
+    text: Optional[str],
+) -> Optional[dict[str, Any]]:
     """Upsert the session's draft (one row per session). Blank text clears it."""
     conn.execute(
         delete(messages).where(messages.c.session_id == session_id).where(messages.c.type == DRAFT_TYPE)
@@ -816,7 +823,12 @@ def unread_counts(
             or_(
                 messages.c.session_id.is_(None),
                 messages.c.session_id.not_in(
-                    select(agent_sessions.c.id).where(agent_sessions.c.status == "archived")
+                    select(agent_sessions.c.id).where(
+                        or_(
+                            agent_sessions.c.status == "archived",
+                            agent_sessions.c.visibility != "foreground",
+                        )
+                    )
                 ),
             )
         )
@@ -850,7 +862,16 @@ def unread_counts_by_session(
         .where(messages.c.session_id.is_not(None))
         # Archived sessions are inert — their unread results must not light the
         # sidebar / global badge.
-        .where(messages.c.session_id.not_in(select(agent_sessions.c.id).where(agent_sessions.c.status == "archived")))
+        .where(
+            messages.c.session_id.not_in(
+                select(agent_sessions.c.id).where(
+                    or_(
+                        agent_sessions.c.status == "archived",
+                        agent_sessions.c.visibility != "foreground",
+                    )
+                )
+            )
+        )
         .group_by(messages.c.session_id)
     )
     if platform is not None:
@@ -987,7 +1008,10 @@ def list_inbox_sessions(
         )
     )
     # Archived sessions are hidden everywhere — keep them out of the inbox feed too.
-    session_rows = session_rows.where(agent_sessions.c.status != "archived")
+    session_rows = session_rows.where(
+        agent_sessions.c.status != "archived",
+        agent_sessions.c.visibility == "foreground",
+    )
     if only_session:
         session_rows = session_rows.where(agent_sessions.c.id == only_session)
 

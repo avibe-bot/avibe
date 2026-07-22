@@ -1044,9 +1044,11 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
-          Omit --session-id/--fork-self/--fork-session to create a private background Session for --agent.
-          Use --same-scope to place a new Session in the caller/source Session's scope.
+          Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
+          Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
+          Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
           Use --scope-id <scopes.id> to place a new Session in a specific existing scope.
+          New and forked delegated Sessions default to --visibility background; pass foreground to enable outward delivery.
           --cwd only applies to new Sessions; existing Sessions keep their own cwd.
 
         Callback:
@@ -1874,9 +1876,9 @@ def _validate_existing_scope_id(scope_id: str, *, help_command: str):
     return target
 
 
-def _scope_id_from_session_id(session_id: str, *, help_command: str) -> str:
+def _scope_id_from_session_id(session_id: str, *, help_command: str) -> Optional[str]:
     resolved = resolve_session_id_target(session_id)
-    return resolved.session_key.to_key(include_thread=False)
+    return resolved.scope_id
 
 
 def _legacy_scope_key_from_target(value: Optional[str]) -> str:
@@ -1904,6 +1906,16 @@ def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Opt
             help_command="vibe agent run --help",
         )
         return _scope_id_from_session_id(caller_session_id, help_command="vibe agent run --help")
+    if caller_context is not None:
+        try:
+            return _scope_id_from_session_id(
+                caller_context.session_id,
+                help_command="vibe agent run --help",
+            )
+        except ValueError:
+            # A stale/injected caller id that is not present in this state DB is
+            # not a usable placement context; fall back to standalone creation.
+            return None
     return None
 
 
@@ -1957,7 +1969,7 @@ def _scope_id_payload_from_session(session_id: Optional[str]) -> Optional[str]:
     if not session_id:
         return None
     try:
-        return resolve_session_id_target(session_id).session_key.to_key(include_thread=False)
+        return resolve_session_id_target(session_id).scope_id
     except ValueError:
         return None
 
@@ -2849,9 +2861,9 @@ def cmd_task_update(args):
         else:
             cwd = task.cwd
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
-        if session_policy in {"create_once", "create_per_run"} and not scope_key:
+        if session_policy == "create_once" and not scope_key:
             raise TaskCliError(
-                "--scope-id or --same-scope is required when a stored definition creates sessions",
+                "--scope-id or --same-scope is required when a stored definition creates one reusable Session",
                 code="missing_delivery_target",
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
@@ -3446,6 +3458,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     scope_id = (getattr(args, "scope_id", None) or "").strip()
     deliver_key = (getattr(args, "deliver_key", None) or "").strip()
     agent_name = (getattr(args, "agent", None) or "").strip()
+    visibility = (getattr(args, "visibility", None) or "").strip()
     if bool(getattr(args, "async_run", False)) and bool(getattr(args, "sync_run", False)):
         raise TaskCliError(
             "use either --async or --sync, not both",
@@ -3519,6 +3532,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="An existing --session-id keeps its original scope.",
             help_command=help_command,
         )
+    if session_id and visibility:
+        raise TaskCliError(
+            "--visibility only applies when creating or forking a Session",
+            code="visibility_with_existing_session",
+            hint="Use `vibe session update --visibility ...` to change an existing Session.",
+            help_command=help_command,
+        )
     if session_id and (create_session or create_per_run):
         raise TaskCliError(
             "use either --session-id or --create-session, not both",
@@ -3583,9 +3603,9 @@ def _validate_definition_session_policy(
             hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
             help_command=help_command,
         )
-    if (create_session or create_per_run) and not (deliver_key or scope_id or same_scope):
+    if create_session and not (deliver_key or scope_id or same_scope):
         raise TaskCliError(
-            "--scope-id or --same-scope is required when a stored definition creates sessions",
+            "--scope-id or --same-scope is required when a stored definition creates one reusable Session",
             code="missing_delivery_target",
             hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
             help_command=help_command,
@@ -3717,12 +3737,14 @@ def _validate_definition_delivery_target(
 ):
     if session_policy == "create_per_run":
         if not scope_key:
-            raise TaskCliError(
-                "--scope-id or --same-scope is required when a stored definition creates sessions",
-                code="missing_delivery_target",
-                hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
-                help_command=help_command,
-            )
+            if post_to or deliver_key:
+                raise TaskCliError(
+                    "delivery overrides require a scoped Session target",
+                    code="missing_delivery_target",
+                    hint="Add --scope-id/--same-scope, or omit delivery overrides for a standalone background Session.",
+                    help_command=help_command,
+                )
+            return None, None
         session_target = _parse_validated_scope_id(scope_key, help_command=help_command)
         return _validate_delivery_override_for_target(
             session_target,
@@ -3744,13 +3766,15 @@ def _resolve_run_cwd(
     *,
     session_policy: str,
     scoped_session: bool = False,
+    invocation_cwd_default: bool = False,
     help_command: str,
 ) -> Optional[str]:
     """Working directory for a session this run RESERVES.
 
     An explicit ``--cwd`` must exist and always wins for blank session creation.
-    Without it, scoped sessions snapshot the scope's default workdir, while
-    private/background sessions follow the CLI invocation's cwd.
+    Without it, explicit scope placement snapshots the scope default. A new
+    delegated Session follows the caller shell cwd; a caller-less standalone
+    Session gets its own Show workspace from the reservation service.
     Existing and forked sessions keep their own cwd, so ``--cwd`` is an error.
     """
     raw = (getattr(args, "cwd", None) or "").strip()
@@ -3775,7 +3799,7 @@ def _resolve_run_cwd(
         return resolved
     if scoped_session:
         return None
-    return os.getcwd()
+    return os.getcwd() if invocation_cwd_default else None
 
 
 def _resolve_definition_session_cwd(
@@ -3801,6 +3825,8 @@ def _resolve_definition_session_cwd(
     if existing_cwd:
         return existing_cwd
     if scoped_session:
+        return None
+    if session_policy == "create_per_run":
         return None
     return os.getcwd()
 
@@ -3906,6 +3932,7 @@ def _reserve_cli_session(
     workdir: Optional[str] = None,
     metadata: Optional[dict] = None,
     session_anchor_target=None,
+    visibility: str = "background",
 ) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
@@ -3925,13 +3952,12 @@ def _reserve_cli_session(
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
+            visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
         )
     else:
-        platform = _primary_platform()
-        session_anchor = f"{platform}_private-agent-{uuid4().hex[:12]}"
-        session_id = sessions_service.reserve_private_agent_session(
-            platform=platform,
+        session_anchor = f"standalone_{uuid4().hex[:12]}"
+        session_id = sessions_service.reserve_standalone_agent_session(
             agent_backend=agent.backend,
             session_anchor=session_anchor,
             agent_id=agent.id,
@@ -3939,6 +3965,7 @@ def _reserve_cli_session(
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
+            visibility=visibility,
             metadata=metadata,
         )
     if not session_id:
@@ -3969,6 +3996,7 @@ def _reserve_forked_cli_session(
     model: Optional[str],
     reasoning_effort: Optional[str],
     scope_key: Optional[str],
+    visibility: str,
 ):
     from core.services.session_fork import SessionForkError, reserve_forked_session
 
@@ -3979,6 +4007,7 @@ def _reserve_forked_cli_session(
             model=model,
             reasoning_effort=reasoning_effort,
             scope_id=scope_key,
+            visibility=visibility,
             db_path=paths.get_sqlite_state_path(),
         )
     except SessionForkError as exc:
@@ -4027,6 +4056,7 @@ def _reserve_definition_session(
         model=agent.model if agent else None,
         reasoning_effort=agent.reasoning_effort if agent else None,
         workdir=workdir,
+        visibility="background",
     )
     if not session_id:
         raise TaskCliError(
@@ -4040,6 +4070,7 @@ def _reserve_definition_session(
 def cmd_agent_run(args):
     try:
         caller_context = caller_context_from_env()
+        visibility = (getattr(args, "visibility", None) or "background").strip()
         run_async = _agent_run_is_async(args)
         message = _resolve_message_input(
             args,
@@ -4079,7 +4110,22 @@ def cmd_agent_run(args):
             )
         session_id = (args.session_id or "").strip() or None
         session_key = ""
-        scope_key = _resolve_agent_run_scope_key(args, caller_context=caller_context, source_session_id=source_session_id)
+        scope_key = (
+            _resolve_agent_run_scope_key(
+                args,
+                caller_context=caller_context,
+                source_session_id=source_session_id,
+            )
+            if session_policy != "existing"
+            else None
+        )
+        has_resolved_caller_placement = False
+        if caller_context is not None and session_policy != "existing":
+            try:
+                resolve_session_id_target(caller_context.session_id)
+                has_resolved_caller_placement = True
+            except ValueError:
+                pass
         legacy_reservation_target = None
         if not scope_key and (args.deliver_key or "").strip():
             # Hidden legacy compatibility: external docs and prompts should use
@@ -4090,7 +4136,12 @@ def cmd_agent_run(args):
         run_cwd = _resolve_run_cwd(
             args,
             session_policy=session_policy,
-            scoped_session=bool(scope_key),
+            scoped_session=bool(
+                _has_modern_scope_target(args) or (args.deliver_key or "").strip()
+            ),
+            invocation_cwd_default=has_resolved_caller_placement
+            and not _has_modern_scope_target(args)
+            and not (args.deliver_key or "").strip(),
             help_command="vibe agent run --help",
         )
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
@@ -4126,6 +4177,7 @@ def cmd_agent_run(args):
                 workdir=run_cwd,
                 metadata=session_metadata,
                 session_anchor_target=legacy_reservation_target,
+                visibility=visibility,
             )
         elif session_policy == "none":
             session_id = _reserve_cli_session(
@@ -4133,6 +4185,7 @@ def cmd_agent_run(args):
                 scope_key=scope_key,
                 workdir=run_cwd,
                 metadata=session_metadata,
+                visibility=visibility,
             )
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
@@ -4141,6 +4194,7 @@ def cmd_agent_run(args):
                 model=args.model,
                 reasoning_effort=args.reasoning_effort,
                 scope_key=scope_key,
+                visibility=visibility,
             )
             session_id = fork_result.session_id
             if agent_name:
@@ -4200,6 +4254,7 @@ def cmd_agent_run(args):
             "session_policy": session_policy,
             "session_id": session_id,
             "scope_id": resolved_scope_id,
+            "visibility": target.visibility if session_id else visibility,
             "deliver_key": legacy_deliver_key,
             "callback_session_id": callback_session_id,
             "async": run_async,
@@ -4212,6 +4267,7 @@ def cmd_agent_run(args):
                 "agent_name": agent.name if agent else None,
                 "session_id": session_id,
                 "scope_id": resolved_scope_id,
+                "visibility": target.visibility if session_id else visibility,
                 "callback_session_id": callback_session_id,
                 "source_kind": source_kind,
                 "source_actor": source_actor,
@@ -4555,7 +4611,7 @@ def cmd_data_query(args):
 
 
 # ``vibe session`` — Agent-facing session management. ``list`` / ``get`` are
-# read-only; ``update`` renames a title only. All three go through the shared
+# read-only; ``update`` edits title, visibility, or scope placement. All three go through the shared
 # ``core.services.sessions`` business API (same entry the UI server uses) and
 # never surface archived (soft-deleted) sessions.
 _SESSION_PAGE_SIZE = 10
@@ -4692,6 +4748,30 @@ def cmd_session_update(args):
     from core.services import sessions as sessions_service
 
     try:
+        updates = {}
+        if getattr(args, "title", None) is not None:
+            updates["title"] = args.title
+            updates["title_source"] = "agent"
+        if getattr(args, "visibility", None) is not None:
+            updates["visibility"] = args.visibility
+        raw_scope_id = getattr(args, "scope_id", None)
+        if raw_scope_id is not None:
+            cleaned_scope_id = str(raw_scope_id).strip()
+            updates["scope_id"] = (
+                None
+                if cleaned_scope_id.lower() == "none"
+                else _validate_existing_scope_id(
+                    cleaned_scope_id,
+                    help_command="vibe session update --help",
+                ).session_scope
+            )
+        if not updates:
+            raise TaskCliError(
+                "no update field supplied",
+                code="missing_session_update",
+                hint="Pass --title, --visibility, or --scope-id.",
+                help_command="vibe session update --help",
+            )
         session_id, session_default_notice = _resolve_caller_session_id(
             args,
             purpose="Session",
@@ -4702,12 +4782,7 @@ def cmd_session_update(args):
             # Validate first so an archived/missing id is a clean not-found rather
             # than silently writing a title onto a soft-deleted row.
             sessions_service.get_active_session(conn, session_id)
-            # title_source="agent": this is the agent setting its own session title (vs
-            # "user" for a human Web UI edit). Both are deliberate, so neither gets
-            # auto-overwritten nor re-nudged — see DELIBERATE_TITLE_SOURCES.
-            payload = sessions_service.update_session(
-                conn, session_id, title=args.title, title_source="agent"
-            )
+            payload = sessions_service.update_session(conn, session_id, **updates)
     except LookupError:
         _print_task_error(
             TaskCliError(
@@ -7874,9 +7949,9 @@ def cmd_watch_update(args):
             else None
         )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
-        if session_policy in {"create_once", "create_per_run"} and not scope_key:
+        if session_policy == "create_once" and not scope_key:
             raise TaskCliError(
-                "--scope-id or --same-scope is required when a stored definition creates sessions",
+                "--scope-id or --same-scope is required when a stored definition creates one reusable Session",
                 code="missing_delivery_target",
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
@@ -11804,14 +11879,19 @@ def build_parser():
     agent_run_parser.add_argument("--create-session-per-run", action="store_true", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
     agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
+    agent_run_parser.add_argument(
+        "--visibility",
+        choices=("foreground", "background"),
+        help="Visibility for the new or forked Session (default: background)",
+    )
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
     agent_run_parser.add_argument("--reasoning-effort", help="Reasoning effort override for the new forked Session")
     agent_run_parser.add_argument(
         "--cwd",
         help=(
-            "Working directory for the NEW session. Private sessions default to the invocation "
-            "directory; scoped sessions default to the scope workdir. Invalid with --session-id "
+            "Working directory for the NEW session. Caller-delegated sessions default to the invocation "
+            "directory; explicit scoped sessions use the scope workdir; standalone sessions use their Show workspace. Invalid with --session-id "
             "(an existing session keeps its own working directory)."
         ),
     )
@@ -11906,14 +11986,23 @@ def build_parser():
     _add_json_noop(session_get_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
-        help="Update a session's title (title only)",
-        description="Update only the title of one active session. No other field can be changed here.",
+        help="Update a session's title, visibility, or scope",
+        description="Update one active Session. Moving scope never changes its stored working directory.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session update --help",
     )
     session_update_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     session_update_parser.add_argument(
-        "--title", required=True, help="New title. Pass an empty string to clear it (reverts to id-based display)."
+        "--title", help="New title. Pass an empty string to clear it (reverts to id-based display)."
+    )
+    session_update_parser.add_argument(
+        "--visibility",
+        choices=("foreground", "background"),
+        help="Show the Session in normal chat lists or keep it background-only.",
+    )
+    session_update_parser.add_argument(
+        "--scope-id",
+        help="Move to an existing scopes.id, or pass 'none' to make the Session standalone.",
     )
     _add_json_noop(session_update_parser)
 

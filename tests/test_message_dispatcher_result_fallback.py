@@ -494,19 +494,21 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 
-    async def test_suppressed_delivery_is_not_persisted(self):
-        """Suppressed scheduled output is intentionally private — it must NOT
-        leak into the cross-platform messages history."""
+    async def test_suppressed_delivery_is_persisted_without_platform_send(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(
             user_id="U1", channel_id="C1", platform="slack",
             platform_specific={"suppress_delivery": True},
         )
-        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value={"id": "msg-background"},
+        ) as persist:
             message_id = await dispatcher.emit_agent_message(context, "result", "private output")
-        persist.assert_not_called()
-        self.assertTrue(message_id.startswith("suppressed:"))
+        persist.assert_called_once()
+        self.assertEqual(message_id, "msg-background")
+        self.assertEqual(controller.im_client.sent_messages, [])
 
     async def test_suppressed_result_records_folded_footer(self):
         """A suppressed (private) result can't ride subtext, so the footnote must
@@ -808,11 +810,7 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
         marker.assert_not_called()
 
-    async def test_suppress_delivery_writes_no_marker(self):
-        # A private/background run (``suppress_delivery``) intentionally leaves NO
-        # message history — no silent marker, so it never pollutes the cross-platform
-        # store / activity / fork state (mirrors the suppressed-delivery path that
-        # already skips ``persist_agent_message``).
+    async def test_suppress_delivery_writes_local_marker(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
         ctx = MessageContext(
@@ -823,7 +821,7 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             "core.message_dispatcher.persist_silent_completion_marker"
         ) as marker:
             await dispatcher.emit_agent_message(ctx, "result", "")
-        marker.assert_not_called()
+        marker.assert_called_once_with(ctx)
 
     async def test_silent_backend_failure_collapses_status_as_failed(self):
         controller = _AvibeStatusController()

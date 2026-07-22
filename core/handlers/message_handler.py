@@ -157,11 +157,9 @@ class MessageHandler(BaseHandler):
                 from core.message_mirror import mirror_inbound
 
                 mirror_inbound(context, control_message)
-            elif not (context.platform_specific or {}).get("suppress_delivery"):
-                # Harness turn (scheduled / watch / webhook). Skip the mirror when
-                # the run suppresses delivery (a ``no_delivery`` target): the
-                # dispatcher keeps that run's output private, so persisting its
-                # prompt would leak the input into the visible transcript.
+            else:
+                # Harness turns retain a complete local transcript even when their
+                # session is background-only; visibility gates outward delivery.
                 from core.message_mirror import mirror_harness_inbound
 
                 mirror_harness_inbound(context, message)
@@ -233,6 +231,13 @@ class MessageHandler(BaseHandler):
                 if existing_thread:
                     requested_vibe_agent = existing_thread.get("agent_name") or requested_vibe_agent
                     session_agent_backend = existing_thread.get("agent_backend") or session_agent_backend
+                    # Scope is only placement. A persisted session's visibility is
+                    # the single outward-delivery gate, including ordinary IM turns
+                    # after an agent promotes or backgrounds the session via CLI/API.
+                    platform_payload["suppress_delivery"] = (
+                        existing_thread.get("visibility") == "background"
+                    )
+                    context.platform_specific = platform_payload
             resolve_vibe_agent = getattr(self.controller, "resolve_vibe_agent_for_context", None)
             vibe_agent = None
             if requested_vibe_agent and callable(resolve_vibe_agent):

@@ -71,7 +71,7 @@ __all__ = [
     "touch_session",
     "update_session",
     "reserve_agent_session",
-    "reserve_private_agent_session",
+    "reserve_standalone_agent_session",
 ]
 
 
@@ -122,6 +122,7 @@ def reserve_agent_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     workdir: Optional[str] = None,
+    visibility: str = "foreground",
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
 ) -> Optional[str]:
@@ -143,15 +144,15 @@ def reserve_agent_session(
             model=model,
             reasoning_effort=reasoning_effort,
             workdir=workdir,
+            visibility=visibility,
             metadata=metadata,
         )
     finally:
         service.close()
 
 
-def reserve_private_agent_session(
+def reserve_standalone_agent_session(
     *,
-    platform: str,
     agent_backend: str,
     session_anchor: str,
     agent_id: Optional[str] = None,
@@ -159,18 +160,15 @@ def reserve_private_agent_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     workdir: Optional[str] = None,
+    visibility: str = "background",
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
 ) -> Optional[str]:
-    """Reserve a private (no IM scope) session, e.g. when ``vibe agent run``
-    is invoked without ``--deliver-key``. Mirrors
-    ``SQLiteSessionsService.reserve_private_agent_session``.
-    """
+    """Reserve a background-capable session with no Scope."""
 
     service = _open_legacy_service(db_path)
     try:
-        return service.reserve_private_agent_session(
-            platform=platform,
+        return service.reserve_standalone_agent_session(
             agent_backend=agent_backend,
             session_anchor=session_anchor,
             agent_id=agent_id,
@@ -178,6 +176,7 @@ def reserve_private_agent_session(
             model=model,
             reasoning_effort=reasoning_effort,
             workdir=workdir,
+            visibility=visibility,
             metadata=metadata,
         )
     finally:

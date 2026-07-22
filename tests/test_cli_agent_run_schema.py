@@ -56,6 +56,7 @@ _EXPECTED_KEYS = {
     "session_id",
     "deliver_key",
     "scope_id",
+    "visibility",
     "callback_session_id",
     "caller_context",
     "callback_notice",
@@ -70,6 +71,7 @@ _EXPECTED_RUN_KEYS_QUEUED = {
     "agent_name",
     "session_id",
     "scope_id",
+    "visibility",
     "callback_session_id",
     "source_kind",
     "source_actor",
@@ -1256,13 +1258,8 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
     assert payload["code"] == "session_fork_failed"
 
 
-def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path, capsys, monkeypatch) -> None:
-    """A private (no --deliver-key) reservation snapshots the CLI invocation's
-    cwd as the new session's workdir — like every other CLI tool — instead of
-    leaving it blank and falling to the global default cwd at dispatch."""
-
-    import os
-
+def test_agent_run_callerless_session_workdir_uses_show_workspace(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A caller-less run reserves a standalone Session in its Show workspace."""
     from storage.importer import ensure_sqlite_state
 
     state_home = tmp_path / "home"
@@ -1276,7 +1273,6 @@ def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hi"])
         monkeypatch.chdir(invoke_dir)
-        expected = os.getcwd()
 
         with (
             patch("vibe.cli._agent_store", return_value=agent_store),
@@ -1288,7 +1284,9 @@ def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert _read_session_workdir(db_path, payload["session_id"]) == expected
+    expected = state_home / "show" / payload["session_id"]
+    assert _read_session_workdir(db_path, payload["session_id"]) == str(expected)
+    assert expected.is_dir()
 
 
 def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -1350,14 +1348,22 @@ def test_agent_run_cwd_rejected_with_existing_session(capsys) -> None:
 
 
 def test_resolve_run_cwd_defaults_by_session_target(monkeypatch, tmp_path: Path) -> None:
-    """Without --cwd, private sessions snapshot the caller cwd, while scoped
-    sessions leave cwd unset so creation snapshots the selected scope workdir."""
+    """Caller placement uses its cwd; standalone/scoped reservations derive theirs."""
 
     from types import SimpleNamespace
 
     monkeypatch.chdir(tmp_path)
     args = SimpleNamespace(cwd=None)
-    assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") == str(tmp_path)
+    assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") is None
+    assert (
+        cli._resolve_run_cwd(
+            args,
+            session_policy="create",
+            invocation_cwd_default=True,
+            help_command="x",
+        )
+        == str(tmp_path)
+    )
     assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") is None
 
     args = SimpleNamespace(cwd=str(tmp_path), deliver_key="slack::channel::C123")

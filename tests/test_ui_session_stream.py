@@ -826,6 +826,56 @@ def test_patch_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_p
     in_flight.assert_awaited_once()
 
 
+def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_path):
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    original_scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        original_workdir = conn.execute(
+            agent_sessions.select().where(agent_sessions.c.id == session_id)
+        ).mappings().one()["workdir"]
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    visibility_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"visibility": "background"},
+        headers=headers,
+    )
+    assert visibility_response.status_code == 200
+    assert visibility_response.get_json()["visibility"] == "background"
+    assert visibility_response.get_json()["scope_id"] == original_scope_id
+
+    scope_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"scope_id": None},
+        headers=headers,
+    )
+    assert scope_response.status_code == 200
+    body = scope_response.get_json()
+    assert body["visibility"] == "background"
+    assert body["scope_id"] is None
+    assert body["project_id"] is None
+    assert body["workdir"] == original_workdir
+
+
+def test_patch_session_rejects_invalid_visibility(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"visibility": "hidden"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+
+
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
     """A selected Vibe Agent implies its backend. The UI often sends only
     ``agent_name`` when changing the picker, so the route must derive the

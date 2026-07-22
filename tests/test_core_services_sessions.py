@@ -82,7 +82,7 @@ def test_public_surface_is_stable():
         "update_session",
         # Legacy IM-style reservation helpers added in C2 for the CLI:
         "reserve_agent_session",
-        "reserve_private_agent_session",
+            "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
     }
@@ -170,6 +170,34 @@ def test_update_then_list_reflects_changes(isolated_state):
     assert len(page["sessions"]) == 1
     assert page["sessions"][0]["title"] == "renamed"
     assert page["sessions"][0]["model"] == "claude-sonnet-4-6"
+
+
+def test_session_lists_only_include_foreground_sessions(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        foreground = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            title="Foreground",
+        )
+        background = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            title="Background",
+            visibility="background",
+        )
+
+    with engine.connect() as conn:
+        workbench = sessions_service.list_sessions(conn, scope_id=scope_id)
+        cli_page = sessions_service.list_sessions_page(conn)
+        direct = sessions_service.get_session(conn, background["id"])
+
+    assert [row["id"] for row in workbench["sessions"]] == [foreground["id"]]
+    assert [row["id"] for row in cli_page.items] == [foreground["id"]]
+    assert direct["visibility"] == "background"
 
 
 def test_list_sessions_title_query_filters_by_title(isolated_state):

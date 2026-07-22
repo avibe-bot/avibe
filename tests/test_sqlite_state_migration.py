@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260721_0031"
+HEAD_REVISION = "20260723_0032"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -133,6 +133,97 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260721_0031")
+    now = "2026-07-23T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        for scope_id, native_type in (
+            ("scope_real", None),
+            ("scope_private_a", "private_agent_run"),
+            ("scope_private_b", "private_agent_run"),
+            ("scope_private_c", "private_agent_run"),
+        ):
+            conn.execute(
+                """
+                insert into scopes (
+                    id, platform, scope_type, native_id, native_type, is_private,
+                    supports_threads, metadata_json, first_seen_at, last_seen_at, updated_at
+                ) values (?, 'avibe', 'project', ?, ?, 0, 0, '{}', ?, ?, ?)
+                """,
+                (scope_id, scope_id, native_type, now, now, now),
+            )
+
+        def insert_session(session_id: str, scope_id: str, anchor: str, workdir: str) -> None:
+            conn.execute(
+                """
+                insert into agent_sessions (
+                    id, scope_id, agent_backend, agent_variant, session_anchor,
+                    workdir, native_session_id, status, agent_status, metadata_json,
+                    created_at, updated_at, last_active_at
+                ) values (?, ?, 'codex', 'codex', ?, ?, '', 'active', 'idle', '{}', ?, ?, ?)
+                """,
+                (session_id, scope_id, anchor, workdir, now, now, now),
+            )
+
+        insert_session("ses_caller", "scope_real", "caller", "/caller")
+        insert_session("ses_source", "scope_real", "source", "/source")
+        insert_session("ses_legacy_a", "scope_private_a", "same-anchor", "/legacy-a")
+        insert_session("ses_legacy_b", "scope_private_b", "same-anchor", "/legacy-b")
+        insert_session("ses_legacy_c", "scope_private_c", "unresolved", "/legacy-c")
+
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, source_actor, session_id,
+                cancel_requested, created_at, updated_at, metadata_json
+            ) values (
+                'run_source_actor', 'agent_run', 'succeeded', 'agent', 'ses_caller',
+                'ses_legacy_a', 0, ?, ?, '{}'
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, source_actor, session_id,
+                cancel_requested, created_at, updated_at, metadata_json
+            ) values (
+                'run_metadata', 'agent_run', 'succeeded', 'agent', 'agent:worker',
+                'ses_legacy_b', 0, ?, ?, ?
+            )
+            """,
+            (now, now, json.dumps({"caller_context": {"session_id": "ses_source"}})),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            select id, scope_id, session_anchor, visibility, workdir
+            from agent_sessions where id like 'ses_legacy_%' order by id
+            """
+        ).fetchall()
+        pseudo_scope_count = conn.execute(
+            "select count(*) from scopes where native_type = 'private_agent_run'"
+        ).fetchone()[0]
+        unique_index = conn.execute(
+            "select [unique] from pragma_index_list('agent_sessions') where name = 'uq_agent_sessions_scope_anchor'"
+        ).fetchone()
+
+    assert rows == [
+        ("ses_legacy_a", "scope_real", "ses_legacy_a", "background", "/legacy-a"),
+        ("ses_legacy_b", "scope_real", "ses_legacy_b", "background", "/legacy-b"),
+        ("ses_legacy_c", None, "ses_legacy_c", "background", "/legacy-c"),
+    ]
+    assert pseudo_scope_count == 3
+    assert unique_index == (1,)
 
 
 def test_run_migrations_serializes_alembic_context(monkeypatch, tmp_path: Path) -> None:

@@ -193,6 +193,7 @@ def _session_row(conn, session_id: str) -> Optional[dict]:
             agent_sessions.c.scope_id,
             agent_sessions.c.agent_name,
             agent_sessions.c.agent_backend,
+            agent_sessions.c.visibility,
         ).where(agent_sessions.c.id == session_id)
     ).mappings().first()
     return dict(row) if row else None
@@ -270,6 +271,7 @@ def persist_silent_completion_marker(context: MessageContext) -> None:
     if not context.platform:
         return
     session_id = (context.platform_specific or {}).get("agent_session_id")
+    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery"))
     engine = get_cached_sqlite_engine()
     inbox_row = None
     with engine.begin() as conn:
@@ -279,7 +281,7 @@ def persist_silent_completion_marker(context: MessageContext) -> None:
         else:
             session_row = None
             scope_id = _resolve_scope_id(conn, context)
-        if scope_id is None:
+        if scope_id is None and session_row is None:
             return
         agent_name, _backend = _agent_provenance_from_context(context, session_row)
         _append_quietly(
@@ -299,7 +301,7 @@ def persist_silent_completion_marker(context: MessageContext) -> None:
         )
         # Recompute the session's inbox row so the awaiting/replied flag clears live.
         # avibe-only (the workbench inbox is avibe-scoped; IM rows aren't shown there).
-        if context.platform == "avibe" and session_id:
+        if context.platform == "avibe" and session_id and not suppress_delivery:
             inbox_row = messages_service.get_inbox_session(conn, session_id)
     if inbox_row is not None:
         # Same ``inbox.session.updated`` event a visible reply publishes — but NOT
@@ -347,6 +349,7 @@ def persist_agent_message(
     if (canonical_type or "") == "system":
         return
     session_id = (context.platform_specific or {}).get("agent_session_id")
+    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery"))
     try:
         engine = get_cached_sqlite_engine()
         inbox_row = None
@@ -374,7 +377,7 @@ def persist_agent_message(
                 session_row = None
                 scope_id = _resolve_scope_id(conn, context)
                 row_session_id = session_id
-            if scope_id is None:
+            if scope_id is None and session_row is None:
                 return
             # Provenance: every agent reply is source='agent'; name = the
             # session's agent (from the dispatch context). source_id (author_id)
@@ -407,7 +410,12 @@ def persist_agent_message(
                 # (the dispatcher uploads those to the platform separately). Scoped to
                 # the user-visible result/notify rows so we don't mint tokens for the
                 # hidden intermediate assistant stream.
-                if context.platform == "avibe" and message_type in ("result", "notify", "error") and row_session_id:
+                if (
+                    context.platform == "avibe"
+                    and scope_id is not None
+                    and message_type in ("result", "notify", "error")
+                    and row_session_id
+                ):
                     try:
                         from core.workbench_media import rewrite_agent_media
 
@@ -441,14 +449,14 @@ def persist_agent_message(
                 # Recompute the session's inbox row so the realtime event can patch
                 # the browser without a refetch. avibe-only: the workbench inbox is
                 # scoped to avibe sessions (IM rows persist but aren't shown there).
-                if context.platform == "avibe" and session_id:
+                if context.platform == "avibe" and session_id and not suppress_delivery:
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
         # tool_call rows never enter ``messages``/TRANSCRIPT_TYPES; when the Chat
         # activity panel is enabled they fan out here as a synthesized
         # ``message.new`` so an open Chat page shows the step live. Default off →
         # no publish (strict no-op). Return None to preserve the tool_call contract.
         if is_tool_call:
-            if context.platform == "avibe" and _activity_streaming_enabled():
+            if context.platform == "avibe" and not suppress_delivery and _activity_streaming_enabled():
                 _publish_activity_event(tool_event_row)
             return None
         # Fan the row out to an open Chat page (session-scoped stream), then bump
@@ -460,7 +468,7 @@ def persist_agent_message(
         # avibe-only: IM rows now carry a session_id too, but the workbench Chat is
         # avibe-only, so keep the live fan-out scoped to avibe (an IM session has no
         # open Chat consumer; publishing it would be dead traffic).
-        if context.platform == "avibe" and (
+        if context.platform == "avibe" and not suppress_delivery and (
             message_type in messages_service.TRANSCRIPT_TYPES
             or (message_type == "assistant" and _activity_streaming_enabled())
         ):
@@ -529,13 +537,15 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
     trigger_kind = spec.get("task_trigger_kind")
     definition_id = spec.get("task_definition_id")
     session_id = spec.get("agent_session_id")
+    suppress_delivery = bool(spec.get("suppress_delivery"))
     try:
         engine = get_cached_sqlite_engine()
         appended_row = None
         inbox_row = None
         with engine.begin() as conn:
             if context.platform == "avibe":
-                scope_id = _scope_id_for_session(conn, session_id) if session_id else None
+                session_row = _session_row(conn, session_id) if session_id else None
+                scope_id = session_row["scope_id"] if session_row else None
                 row_session_id = session_id
             else:
                 # Attribute the prompt to the SAME scope the reply lands in. A
@@ -558,7 +568,8 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
                 # session_id too so the harness prompt joins to its session, the
                 # same way the agent reply does in ``persist_agent_message``.
                 row_session_id = session_id
-            if scope_id is None:
+                session_row = None
+            if scope_id is None and session_row is None:
                 return
             appended_row = _append_quietly(
                 conn,
@@ -577,12 +588,12 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
             # Recompute the inbox card so the harness prompt re-ranks the session
             # + flips its activity for other open views (avibe only; the inbox is
             # avibe-scoped). No-op until the session has a result row.
-            if context.platform == "avibe" and row_session_id:
+            if context.platform == "avibe" and row_session_id and not suppress_delivery:
                 inbox_row = messages_service.get_inbox_session(conn, row_session_id)
         # Surface the harness-triggered prompt on an open Chat page immediately,
         # so the upcoming agent reply isn't shown with no originating turn.
         # avibe-only: IM rows carry a session_id now but have no open Chat consumer.
-        if context.platform == "avibe":
+        if context.platform == "avibe" and not suppress_delivery:
             _publish_session_message(appended_row)
         if inbox_row is not None:
             from core.inbox_events import bus

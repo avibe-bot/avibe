@@ -112,6 +112,7 @@ def reserve_forked_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     scope_id: Optional[str] = None,
+    visibility: str = "foreground",
     trim_latest_running_turn: bool = False,
     native_turn_started: bool = False,
     db_path: Optional[Path] = None,
@@ -238,8 +239,6 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
-                metadata.pop("private_agent_run", None)
-                metadata.pop("no_delivery", None)
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,
@@ -256,6 +255,7 @@ def reserve_forked_session(
                 workdir=row["workdir"],
                 native_session_id="",
                 title=target_title,
+                visibility=visibility,
                 metadata=metadata,
                 now=now,
                 require_workdir=False,
