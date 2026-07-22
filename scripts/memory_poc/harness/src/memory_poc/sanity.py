@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +22,7 @@ from .paths import ensure_owner_directory, runtime_root, write_private_text
 from .reports import build_report, set_criterion, write_report, write_summary
 from .reports import local_timezone_name
 
-_READINESS_TIMEOUT_SECONDS = 300.0
-_READINESS_POLL_SECONDS = 0.5
+_READINESS_TIMEOUT_SECONDS = 600.0
 _SEARCH_POLL_SECONDS = 5.0
 
 
@@ -34,6 +33,34 @@ class SanityFixture:
     query: str
     fact_hint: str
     messages: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class SearchReadiness:
+    """First public-hybrid-search observations after a successful flush."""
+
+    profile_ms: int | None
+    episode_ms: int | None
+    atomic_fact_ms: int | None
+    timeout_ms: int
+
+    @property
+    def complete(self) -> bool:
+        return self.profile_ms is not None and self.episode_ms is not None and self.atomic_fact_ms is not None
+
+    @property
+    def max_observed_ms(self) -> int | None:
+        values = (self.profile_ms, self.episode_ms, self.atomic_fact_ms)
+        observed = [value for value in values if value is not None]
+        return max(observed) if observed else None
+
+    def summary_timing(self) -> dict[str, int | None]:
+        return {
+            "profile_ms": self.profile_ms,
+            "episode_ms": self.episode_ms,
+            "atomic_fact_ms": self.atomic_fact_ms,
+            "timeout_ms": self.timeout_ms,
+        }
 
 
 def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
@@ -76,6 +103,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     add_ms: int | None = None
     flush_ms: int | None = None
     first_searchable_ms: int | None = None
+    readiness: SearchReadiness | None = None
     failure: HarnessError | None = None
     try:
         client = None
@@ -85,8 +113,12 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
             add_ms = _elapsed_ms(lambda: client.add(session_id=fixture.session_id, messages=fixture.messages))
             flush_started = time.monotonic()
             client.flush(session_id=fixture.session_id)
-            flush_ms = int((time.monotonic() - flush_started) * 1000)
-            first_searchable_ms = _read_required_memory(client, fixture, started_at=flush_started)
+            flush_completed_at = time.monotonic()
+            flush_ms = int((flush_completed_at - flush_started) * 1000)
+            readiness = _read_required_memory(client, fixture, started_at=flush_completed_at)
+            if not readiness.complete:
+                raise HarnessError("sanity_memory_not_ready")
+            first_searchable_ms = readiness.max_observed_ms
         finally:
             if client is not None:
                 first_shapes = client.observed_http_shapes
@@ -104,7 +136,9 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         restarted_client = None
         try:
             restarted_client = second.start()
-            _read_required_memory(restarted_client, fixture)
+            restart_readiness = _read_required_memory(restarted_client, fixture)
+            if not restart_readiness.complete:
+                raise HarnessError("sanity_memory_not_ready")
             restart_preserved = True
         finally:
             if restarted_client is not None:
@@ -141,6 +175,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         message_count=len(fixture.messages),
         http_shapes=first_shapes + restarted_shapes,
         outcome="completed" if failure is None else _failure_outcome(failure),
+        readiness_timing=readiness.summary_timing() if readiness is not None else None,
         anchor=state,
     )
     if failure is not None:
@@ -193,40 +228,95 @@ def _failure_outcome(error: HarnessError) -> str:
     return "harness_failure"
 
 
-def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: float | None = None) -> int:
+def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: float | None = None) -> SearchReadiness:
     measurement_start = time.monotonic() if started_at is None else started_at
-    deadline = time.monotonic() + _READINESS_TIMEOUT_SECONDS
-    next_search_at = measurement_start
+    deadline = measurement_start + _READINESS_TIMEOUT_SECONDS
+    readiness = SearchReadiness(
+        profile_ms=None,
+        episode_ms=None,
+        atomic_fact_ms=None,
+        timeout_ms=int(_READINESS_TIMEOUT_SECONDS * 1000),
+    )
     while time.monotonic() < deadline:
         try:
-            profile = client.get(owner_id=fixture.owner_id, memory_type="profile")
-            episodes = client.get(owner_id=fixture.owner_id, memory_type="episode")
+            result = client.search(owner_id=fixture.owner_id, query=fixture.query)
         except LaunchError:
-            time.sleep(_READINESS_POLL_SECONDS)
+            _sleep_until_next_search(deadline)
             continue
-        profile_ready = _contains_owned_items(profile, key="profiles", owner_id=fixture.owner_id)
-        episodes_ready = _contains_owned_items(episodes, key="episodes", owner_id=fixture.owner_id)
         now = time.monotonic()
-        if profile_ready and episodes_ready and now >= next_search_at:
-            try:
-                facts = client.search(owner_id=fixture.owner_id, query=fixture.query)
-            except LaunchError:
-                time.sleep(_READINESS_POLL_SECONDS)
-                continue
-            if _contains_atomic_fact(facts, owner_id=fixture.owner_id, fact_hint=fixture.fact_hint):
-                return int((time.monotonic() - measurement_start) * 1000)
-            next_search_at = now + _SEARCH_POLL_SECONDS
-        time.sleep(_READINESS_POLL_SECONDS)
-    raise HarnessError("sanity_memory_not_ready")
+        if now > deadline:
+            return readiness
+        elapsed_ms = int((now - measurement_start) * 1000)
+        if readiness.profile_ms is None and _contains_search_profile(
+            result,
+            owner_id=fixture.owner_id,
+            content_hint=fixture.query,
+        ):
+            readiness = replace(readiness, profile_ms=elapsed_ms)
+        if readiness.episode_ms is None and _contains_search_episode(
+            result,
+            owner_id=fixture.owner_id,
+            content_hint=fixture.query,
+        ):
+            readiness = replace(readiness, episode_ms=elapsed_ms)
+        if readiness.atomic_fact_ms is None and _contains_atomic_fact(
+            result,
+            owner_id=fixture.owner_id,
+            fact_hint=fixture.fact_hint,
+        ):
+            readiness = replace(readiness, atomic_fact_ms=elapsed_ms)
+        if readiness.complete:
+            return readiness
+        _sleep_until_next_search(deadline)
+    return readiness
 
 
-def _contains_owned_items(value: Any, *, key: str, owner_id: str) -> bool:
+def _sleep_until_next_search(deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        time.sleep(min(_SEARCH_POLL_SECONDS, remaining))
+
+
+def _contains_search_profile(value: Any, *, owner_id: str, content_hint: str) -> bool:
     if not isinstance(value, dict):
         return False
-    items = value.get(key)
-    return isinstance(items, list) and any(
-        isinstance(item, dict) and item.get("user_id") == owner_id for item in items
+    profiles = value.get("profiles")
+    if not isinstance(profiles, list):
+        return False
+    return any(
+        isinstance(profile, dict)
+        and profile.get("user_id") == owner_id
+        and _contains_text(profile.get("profile_data"), content_hint)
+        for profile in profiles
     )
+
+
+def _contains_search_episode(value: Any, *, owner_id: str, content_hint: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    episodes = value.get("episodes")
+    if not isinstance(episodes, list):
+        return False
+    for episode in episodes:
+        if not isinstance(episode, dict) or episode.get("user_id") != owner_id:
+            continue
+        content = {key: episode.get(key) for key in ("summary", "subject", "episode")}
+        if _contains_text(content, content_hint):
+            return True
+    return False
+
+
+def _contains_text(value: Any, hint: str, *, depth: int = 0) -> bool:
+    expected = hint.casefold()
+    if not expected or depth > 6:
+        return False
+    if isinstance(value, str):
+        return expected in value.casefold()
+    if isinstance(value, dict):
+        return any(_contains_text(item, hint, depth=depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_text(item, hint, depth=depth + 1) for item in value)
+    return False
 
 
 def _contains_atomic_fact(value: Any, *, owner_id: str, fact_hint: str) -> bool:

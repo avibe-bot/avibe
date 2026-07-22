@@ -6,6 +6,7 @@ import platform
 import re
 import subprocess
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -183,6 +184,7 @@ def write_summary(
     message_count: int,
     http_shapes: tuple[HttpShape, ...],
     outcome: str = "completed",
+    readiness_timing: Mapping[str, int | None] | None = None,
     anchor: Path | None = None,
 ) -> None:
     if not _SAFE_IDENTIFIER.fullmatch(outcome):
@@ -191,6 +193,7 @@ def write_summary(
     usage_lines = _ingestion_usage_lines(metrics, divisor)
     cost_line = _rough_cost_line(settings, metrics, message_count)
     shape_lines = _http_shape_lines(http_shapes)
+    readiness_lines = _search_readiness_lines(readiness_timing)
     write_private_text(
         path,
         "\n".join(
@@ -206,6 +209,8 @@ def write_summary(
                 *usage_lines,
                 cost_line,
                 "",
+                *readiness_lines,
+                "",
                 "Observed public HTTP shapes (redacted keys only):",
                 *shape_lines,
                 "",
@@ -213,6 +218,38 @@ def write_summary(
         ),
         anchor=anchor,
     )
+
+
+def _search_readiness_lines(readiness_timing: Mapping[str, int | None] | None) -> tuple[str, ...]:
+    if readiness_timing is None:
+        return ()
+    expected_keys = {"profile_ms", "episode_ms", "atomic_fact_ms", "timeout_ms"}
+    if set(readiness_timing) != expected_keys:
+        raise ReportValidationError("summary_readiness_timing_invalid")
+    timeout_ms = readiness_timing["timeout_ms"]
+    if type(timeout_ms) is not int or timeout_ms <= 0:
+        raise ReportValidationError("summary_readiness_timing_invalid")
+    observations: list[int] = []
+    labels = (
+        ("Profile content", "profile_ms"),
+        ("Episode content", "episode_ms"),
+        ("Atomic fact", "atomic_fact_ms"),
+    )
+    lines = ["Search readiness timing (first observation after flush completion):"]
+    for label, key in labels:
+        observed_ms = readiness_timing[key]
+        if observed_ms is None:
+            lines.append(f"- {label} via search: not observed within {timeout_ms} ms after flush completion.")
+            continue
+        if type(observed_ms) is not int or observed_ms < 0 or observed_ms > timeout_ms:
+            raise ReportValidationError("summary_readiness_timing_invalid")
+        observations.append(observed_ms)
+        lines.append(f"- {label} via search: first observed {observed_ms} ms after flush completion.")
+    if observations:
+        lines.append(f"- Max observed cascade lag via search: {max(observations)} ms.")
+    else:
+        lines.append("- Max observed cascade lag via search: not observed.")
+    return tuple(lines)
 
 
 def _ingestion_usage_lines(metrics: CallMetrics, divisor: int) -> tuple[str, ...]:

@@ -133,3 +133,27 @@ def test_summary_records_a_safe_failure_outcome(tmp_path: Path) -> None:
             http_shapes=(),
             outcome="unsafe outcome",
         )
+
+
+def test_summary_records_redacted_search_readiness_timing(tmp_path: Path) -> None:
+    path = tmp_path / "summary.md"
+
+    write_summary(
+        path,
+        settings=_settings(tmp_path),
+        metrics=CallMetrics(),
+        message_count=1,
+        http_shapes=(),
+        readiness_timing={
+            "profile_ms": 5000,
+            "episode_ms": None,
+            "atomic_fact_ms": 15000,
+            "timeout_ms": 600000,
+        },
+    )
+
+    summary = path.read_text(encoding="utf-8")
+    assert "Profile content via search: first observed 5000 ms after flush completion." in summary
+    assert "Episode content via search: not observed within 600000 ms after flush completion." in summary
+    assert "Atomic fact via search: first observed 15000 ms after flush completion." in summary
+    assert "Max observed cascade lag via search: 15000 ms." in summary

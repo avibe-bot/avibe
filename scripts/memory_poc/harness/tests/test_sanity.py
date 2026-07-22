@@ -9,26 +9,33 @@ import memory_poc.sanity as sanity
 from memory_poc.environment import ProviderSettings
 from memory_poc.errors import HarnessError
 from memory_poc.metrics import CallMetrics
-from memory_poc.sanity import SanityFixture, _contains_atomic_fact, _contains_owned_items, _failure_outcome
+from memory_poc.sanity import (
+    SanityFixture,
+    SearchReadiness,
+    _contains_atomic_fact,
+    _contains_search_episode,
+    _contains_search_profile,
+    _failure_outcome,
+)
 
 OWNER_ID = "00000000-0000-4000-8000-000000000001"
 
 
 def test_sanity_checks_the_pinned_hybrid_atomic_fact_shape() -> None:
-    profile = {"profiles": [{"id": "profile-1", "user_id": OWNER_ID, "profile_data": {"language": "Python"}}]}
-    episodes = {"episodes": [{"id": "episode-1", "user_id": OWNER_ID}]}
     search = {
+        "profiles": [{"id": "profile-1", "user_id": OWNER_ID, "profile_data": {"language": "Python"}}],
         "episodes": [
             {
                 "id": "episode-1",
                 "user_id": OWNER_ID,
+                "summary": "The owner uses Python.",
                 "atomic_facts": [{"id": "fact-1", "content": "The owner uses Python.", "score": 0.9}],
             }
         ]
     }
 
-    assert _contains_owned_items(profile, key="profiles", owner_id=OWNER_ID)
-    assert _contains_owned_items(episodes, key="episodes", owner_id=OWNER_ID)
+    assert _contains_search_profile(search, owner_id=OWNER_ID, content_hint="Python")
+    assert _contains_search_episode(search, owner_id=OWNER_ID, content_hint="Python")
     assert _contains_atomic_fact(search, owner_id=OWNER_ID, fact_hint="Python")
 
 
@@ -48,18 +55,17 @@ def test_sanity_does_not_accept_legacy_kind_markers_or_another_owner() -> None:
 
 
 class _ReadinessClient:
-    def __init__(self, *, profile: dict[str, object], episodes: dict[str, object], facts: dict[str, object]) -> None:
-        self.profile = profile
-        self.episodes = episodes
-        self.facts = facts
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = responses
         self.search_calls = 0
 
-    def get(self, *, memory_type: str, **_kwargs: object) -> dict[str, object]:
-        return self.profile if memory_type == "profile" else self.episodes
+    def get(self, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("readiness_must_not_use_get")
 
     def search(self, **_kwargs: object) -> dict[str, object]:
+        index = min(self.search_calls, len(self.responses) - 1)
         self.search_calls += 1
-        return self.facts
+        return self.responses[index]
 
 
 def _fixture() -> SanityFixture:
@@ -79,28 +85,65 @@ def _install_test_clock(monkeypatch: pytest.MonkeyPatch, *, timeout_seconds: flo
     monkeypatch.setattr(sanity.time, "sleep", lambda duration: clock.__setitem__(0, clock[0] + duration))
 
 
-def test_sanity_waits_for_profile_and_episodes_before_search(monkeypatch: pytest.MonkeyPatch) -> None:
+def _search_response(*, profile: bool = False, episode: bool = False, fact: bool = False) -> dict[str, object]:
+    profiles: list[dict[str, object]] = []
+    episodes: list[dict[str, object]] = []
+    if profile:
+        profiles.append({"user_id": OWNER_ID, "profile_data": {"language": "Python"}})
+    if episode or fact:
+        entry: dict[str, object] = {"user_id": OWNER_ID}
+        if episode:
+            entry["summary"] = "The owner uses Python."
+        if fact:
+            entry["atomic_facts"] = [{"id": "fact-1", "content": "The owner uses Python."}]
+        episodes.append(entry)
+    return {"profiles": profiles, "episodes": episodes}
+
+
+def test_sanity_readiness_uses_search_without_get(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_test_clock(monkeypatch, timeout_seconds=1.0)
-    client = _ReadinessClient(profile={"profiles": []}, episodes={"episodes": []}, facts={"episodes": []})
+    client = _ReadinessClient([_search_response()])
 
-    with pytest.raises(HarnessError, match="sanity_memory_not_ready"):
-        sanity._read_required_memory(client, _fixture())
+    readiness = sanity._read_required_memory(client, _fixture())
 
-    assert client.search_calls == 0
+    assert readiness == SearchReadiness(profile_ms=None, episode_ms=None, atomic_fact_ms=None, timeout_ms=1000)
+    assert client.search_calls == 1
 
 
-def test_sanity_bounds_searches_while_facts_are_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_test_clock(monkeypatch, timeout_seconds=1.0)
+def test_sanity_records_first_search_appearance_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_test_clock(monkeypatch, timeout_seconds=30.0)
     client = _ReadinessClient(
-        profile={"profiles": [{"user_id": OWNER_ID}]},
-        episodes={"episodes": [{"user_id": OWNER_ID}]},
-        facts={"episodes": []},
+        [
+            _search_response(),
+            _search_response(profile=True),
+            _search_response(profile=True, episode=True),
+            _search_response(profile=True, episode=True, fact=True),
+        ],
     )
 
-    with pytest.raises(HarnessError, match="sanity_memory_not_ready"):
-        sanity._read_required_memory(client, _fixture())
+    readiness = sanity._read_required_memory(client, _fixture())
 
-    assert client.search_calls == 1
+    assert readiness == SearchReadiness(profile_ms=5000, episode_ms=10000, atomic_fact_ms=15000, timeout_ms=30000)
+    assert readiness.max_observed_ms == 15000
+    assert readiness.complete
+    assert client.search_calls == 4
+
+
+def test_sanity_does_not_count_search_results_after_the_readiness_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(sanity, "_READINESS_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(sanity.time, "monotonic", lambda: clock[0])
+
+    class SlowClient:
+        def search(self, **_kwargs: object) -> dict[str, object]:
+            clock[0] += 2.0
+            return _search_response(profile=True, episode=True, fact=True)
+
+    readiness = sanity._read_required_memory(SlowClient(), _fixture())
+
+    assert readiness == SearchReadiness(profile_ms=None, episode_ms=None, atomic_fact_ms=None, timeout_ms=1000)
 
 
 def test_sanity_failure_outcome_never_carries_unstructured_error_text() -> None:
@@ -158,7 +201,12 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
     monkeypatch.setattr(
         sanity,
         "_read_required_memory",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(HarnessError("sanity_memory_not_ready")),
+        lambda *_args, **_kwargs: SearchReadiness(
+            profile_ms=5000,
+            episode_ms=None,
+            atomic_fact_ms=None,
+            timeout_ms=600000,
+        ),
     )
     monkeypatch.setattr(sanity, "read_call_metrics", lambda _path: CallMetrics(llm_calls=2, embedding_calls=3))
 
@@ -184,4 +232,6 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
     assert report["resources"]["llm_calls"] == 2
     assert report["resources"]["embedding_calls"] == 3
     assert "Run outcome: sanity_memory_not_ready" in summary
+    assert "Profile content via search: first observed 5000 ms after flush completion." in summary
+    assert "Episode content via search: not observed within 600000 ms after flush completion." in summary
     assert "synthetic fixture body" not in summary
