@@ -324,13 +324,13 @@ def test_sanity_passes_core_retrieval_with_a_profile_warning(tmp_path: Path, mon
     criteria = {item["id"]: item for item in report["criteria"]}
     assert criteria["searchable_p95_min"] == {
         "id": "searchable_p95_min",
-        "state": "pass",
-        "value": pytest.approx(49143 / 60000),
-        "threshold": 5.0,
+        "state": "not_measured",
+        "value": None,
+        "threshold": None,
     }
     assert criteria["restart_preserves"]["state"] == "pass"
     assert criteria["no_internals_needed"]["state"] == "pass"
     assert "Run outcome: pass_with_profile_warning" in summary
     assert "profile content not retrievable via /search within the window; episode+fact retrieval succeeded; profile treated as known-absent" in summary
-    assert "profile not published/readable via public search in 1.1.3 + qwen3.7; accepted as known behavior for MVP." in summary
+    assert "profile not published/readable via public search in 1.1.3 + llm-model; accepted as known behavior for MVP." in summary
     assert "sanity_memory_not_ready" not in summary

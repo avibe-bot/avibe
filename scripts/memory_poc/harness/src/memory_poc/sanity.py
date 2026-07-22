@@ -78,7 +78,6 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     flush_ms: int | None = None
     first_searchable_ms: int | None = None
     readiness = SearchReadiness.not_measured(timeout_ms=_readiness_timeout_ms())
-    profile_known_absent = False
     failure: HarnessError | None = None
     try:
         client = None
@@ -96,7 +95,6 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
             first_searchable_ms = readiness.max_retrieval_ms
             if first_searchable_ms is None or first_searchable_ms > _retrieval_gate_threshold_ms():
                 raise HarnessError("sanity_retrieval_gate_failed")
-            profile_known_absent = not readiness.profile_retrieved
         finally:
             if client is not None:
                 first_shapes = client.observed_http_shapes
@@ -132,15 +130,6 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     report = build_report(run_id=run_id, settings=settings)
     if first_started:
         set_criterion(report["criteria"], "launcher_uds_only", state="pass", value=1, threshold=1)
-    if first_searchable_ms is not None:
-        searchable_minutes = first_searchable_ms / 60000
-        set_criterion(
-            report["criteria"],
-            "searchable_p95_min",
-            state="pass" if searchable_minutes <= _RETRIEVAL_GATE_THRESHOLD_MINUTES else "fail",
-            value=searchable_minutes,
-            threshold=_RETRIEVAL_GATE_THRESHOLD_MINUTES,
-        )
     if restart_preserved:
         set_criterion(report["criteria"], "restart_preserves", state="pass", value=1, threshold=1)
         set_criterion(report["criteria"], "no_internals_needed", state="pass", value=1, threshold=1)
@@ -161,9 +150,8 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         metrics=metrics,
         message_count=len(fixture.messages),
         http_shapes=first_shapes + restarted_shapes,
-        outcome=_summary_outcome(failure, profile_known_absent=profile_known_absent),
+        outcome=_summary_outcome(failure, readiness),
         readiness=readiness,
-        profile_known_absent=profile_known_absent,
         anchor=state,
     )
     if failure is not None:
@@ -274,10 +262,10 @@ def _retrieval_gate_threshold_ms() -> int:
     return int(_RETRIEVAL_GATE_THRESHOLD_MINUTES * 60000)
 
 
-def _summary_outcome(failure: HarnessError | None, *, profile_known_absent: bool) -> str:
+def _summary_outcome(failure: HarnessError | None, readiness: SearchReadiness) -> str:
     if failure is not None:
         return _failure_outcome(failure)
-    return "pass_with_profile_warning" if profile_known_absent else "pass"
+    return "pass_with_profile_warning" if readiness.profile_known_absent else "pass"
 
 
 def _contains_search_profile(value: Any, *, owner_id: str, content_hint: str) -> bool:

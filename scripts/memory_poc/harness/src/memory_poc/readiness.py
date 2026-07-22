@@ -40,6 +40,10 @@ class SearchReadiness:
         return self.measurement_started and self.profile_ms is not None
 
     @property
+    def profile_known_absent(self) -> bool:
+        return self.retrieval_complete and not self.profile_retrieved
+
+    @property
     def max_retrieval_ms(self) -> int | None:
         values = (self.episode_ms, self.atomic_fact_ms)
         observed = [value for value in values if value is not None]

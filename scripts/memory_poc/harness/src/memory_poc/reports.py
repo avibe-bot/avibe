@@ -185,7 +185,6 @@ def write_summary(
     http_shapes: tuple[HttpShape, ...],
     outcome: str = "completed",
     readiness: SearchReadiness | None = None,
-    profile_known_absent: bool = False,
     anchor: Path | None = None,
 ) -> None:
     if not _SAFE_IDENTIFIER.fullmatch(outcome):
@@ -195,7 +194,7 @@ def write_summary(
     cost_line = _rough_cost_line(settings, metrics, message_count)
     shape_lines = _http_shape_lines(http_shapes)
     readiness_lines = _search_readiness_lines(readiness)
-    profile_lines = _profile_known_absent_lines(profile_known_absent)
+    profile_lines = _profile_known_absent_lines(readiness, model_name=settings.llm_model)
     write_private_text(
         path,
         "\n".join(
@@ -263,15 +262,15 @@ def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...
     return tuple(lines)
 
 
-def _profile_known_absent_lines(profile_known_absent: bool) -> tuple[str, ...]:
-    if type(profile_known_absent) is not bool:
-        raise ReportValidationError("summary_profile_known_absent_invalid")
-    if not profile_known_absent:
+def _profile_known_absent_lines(readiness: SearchReadiness | None, *, model_name: str) -> tuple[str, ...]:
+    if readiness is None or not readiness.profile_known_absent:
         return ()
+    if not _safe_identifier(model_name):
+        raise ReportValidationError("summary_model_invalid")
     return (
         "WARNING: profile content not retrievable via /search within the window; episode+fact retrieval succeeded; "
         "profile treated as known-absent.",
-        "Conclusion: profile not published/readable via public search in 1.1.3 + qwen3.7; accepted as known behavior for MVP.",
+        f"Conclusion: profile not published/readable via public search in 1.1.3 + {model_name}; accepted as known behavior for MVP.",
     )
 
 
