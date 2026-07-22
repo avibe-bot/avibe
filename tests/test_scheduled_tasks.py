@@ -1169,7 +1169,11 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
     )
 
-    session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
+    session_id = service._reserve_runtime_session(
+        agent_name=None,
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
     target = resolve_session_id_target(session_id, db_path=db_path)
 
     assert target.agent_backend == default_agent.backend
@@ -1273,6 +1277,7 @@ def test_runtime_session_reservation_ignores_unresolved_legacy_scope_backend(
 
     assert target.agent_backend == default_agent.backend
     assert target.agent_name == default_agent.name
+    assert target.scope_id is None
 
 
 def test_runtime_session_reservation_uses_default_agent_without_scope_agent(
@@ -1325,7 +1330,11 @@ def test_runtime_session_reservation_uses_default_agent_without_scope_agent(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
     )
 
-    session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C456")
+    session_id = service._reserve_runtime_session(
+        agent_name=None,
+        deliver_key="slack::channel::C456",
+        metadata={"session_scope_id": "slack::channel::C456"},
+    )
     target = resolve_session_id_target(session_id, db_path=db_path)
 
     assert target.agent_backend == "codex"
@@ -1382,8 +1391,13 @@ def test_runtime_session_reservation_uses_unique_anchors_for_reused_scope(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
     )
 
-    first_session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C789")
-    second_session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C789")
+    reservation = {
+        "agent_name": None,
+        "deliver_key": "slack::channel::C789",
+        "metadata": {"session_scope_id": "slack::channel::C789"},
+    }
+    first_session_id = service._reserve_runtime_session(**reservation)
+    second_session_id = service._reserve_runtime_session(**reservation)
 
     with create_sqlite_engine(db_path).connect() as conn:
         rows = list(

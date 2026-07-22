@@ -2613,12 +2613,8 @@ class ScheduledTaskService:
         workdir: Optional[str] = None,
     ) -> str:
         scope_id = ""
-        legacy_delivery_target: Optional[ParsedSessionKey] = None
         if isinstance(metadata, dict):
             scope_id = str(metadata.get("session_scope_id") or "").strip()
-        if not scope_id:
-            legacy_delivery_target = parse_session_key(str(deliver_key or "").strip()) if deliver_key else None
-            scope_id = legacy_delivery_target.session_scope if legacy_delivery_target is not None else ""
         from config import paths as config_paths
         from core.vibe_agents import VibeAgentStore
         from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
