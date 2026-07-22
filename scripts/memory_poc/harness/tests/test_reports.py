@@ -105,7 +105,7 @@ def test_report_and_summary_redact_model_metadata_containing_an_api_key(
 ) -> None:
     monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
     settings = _settings(tmp_path)
-    secret = "test-api-key"
+    secret = "test-api-key-0123456789"
     settings = ProviderSettings(
         llm_base_url=settings.llm_base_url,
         llm_model=f"alias-{secret}",
@@ -142,6 +142,42 @@ def test_report_and_summary_redact_model_metadata_containing_an_api_key(
     report["environment"]["llm_model"] = f"alias-{secret}"
     with pytest.raises(ReportValidationError, match="report_contains_secret"):
         validate_report(report, fixture_texts=(), secret_values=(secret, settings.embedding_api_key))
+
+
+def test_short_key_does_not_block_report_or_summary_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    settings = ProviderSettings(
+        llm_base_url="https://example.invalid/v1",
+        llm_model="qwen",
+        llm_api_key="1",
+        embedding_base_url="https://example.invalid/v1",
+        embedding_model="embedding",
+        embedding_api_key="2",
+        source=tmp_path / ".env.poc",
+    )
+    report = build_report(run_id="r1", settings=settings)
+
+    write_report(
+        tmp_path / "report.json",
+        report,
+        fixture_texts=(),
+        secret_values=(settings.llm_api_key, settings.embedding_api_key),
+    )
+    write_summary(
+        tmp_path / "summary.md",
+        settings=settings,
+        metrics=CallMetrics(),
+        message_count=1,
+        http_shapes=(),
+        readiness=SearchReadiness(profile_ms=None, episode_ms=1, atomic_fact_ms=1, timeout_ms=600000),
+    )
+
+    report_text = (tmp_path / "report.json").read_text(encoding="utf-8")
+    summary_text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert report["environment"]["llm_model"] == "qwen"
+    assert "stage1-mini" in report_text
+    assert "EverOS POC Stage 1 Sanity" in summary_text
+    assert "qwen" in summary_text
 
 
 def test_summary_records_a_safe_failure_outcome(tmp_path: Path) -> None:

@@ -123,6 +123,30 @@ def test_discovery_rejects_a_model_value_that_contains_any_api_key(tmp_path: Pat
         discover_provider_settings(tmp_path)
 
 
+def test_discovery_allows_model_overlap_with_a_short_key(tmp_path: Path) -> None:
+    local = tmp_path / ".runtime" / "memory-poc"
+    local.mkdir(parents=True)
+    dotenv = local / ".env.poc"
+    dotenv.write_text(
+        "\n".join(
+            (
+                "LLM_BASE_URL=local",
+                "LLM_MODEL=local-model",
+                "LLM_API_KEY=local",
+                "EMBEDDING_BASE_URL=local",
+                "EMBEDDING_MODEL=embedding",
+                "EMBEDDING_API_KEY=1",
+            )
+        ),
+        encoding="utf-8",
+    )
+    dotenv.chmod(0o600)
+
+    settings = discover_provider_settings(tmp_path)
+
+    assert settings.llm_model == "local-model"
+
+
 def test_child_environment_is_allowlisted_and_drops_proxy_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "not-used")
     settings = ProviderSettings(

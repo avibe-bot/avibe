@@ -27,6 +27,7 @@ from .reports import local_timezone_name
 _READINESS_TIMEOUT_SECONDS = 600.0
 _SEARCH_POLL_SECONDS = 5.0
 _RETRIEVAL_GATE_THRESHOLD_MINUTES = 5.0
+_STOP_CONFIRM_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
             if client is not None:
                 first_shapes = client.observed_http_shapes
             try:
-                first.stop()
+                _stop_and_confirm_child(first)
             finally:
                 first_uds_only_verified = first.uds_only_verified
 
@@ -135,7 +136,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
             if restarted_client is not None:
                 restarted_shapes = restarted_client.observed_http_shapes
             try:
-                second.stop()
+                _stop_and_confirm_child(second)
             finally:
                 restart_uds_only_verified = second.uds_only_verified
 
@@ -226,6 +227,23 @@ def _elapsed_ms(callback: Any) -> int:
     started = time.monotonic()
     callback()
     return int((time.monotonic() - started) * 1000)
+
+
+def _stop_and_confirm_child(process: EverOSProcess) -> None:
+    """Do not finish a stage lifecycle until its owned child has exited."""
+    cleanup_error: LaunchError | None = None
+    for _attempt in range(_STOP_CONFIRM_ATTEMPTS):
+        try:
+            process.stop()
+        except LaunchError as exc:
+            cleanup_error = exc
+        else:
+            cleanup_error = None
+        if process.child_reaped:
+            if cleanup_error is not None:
+                raise cleanup_error
+            return
+    raise HarnessError("sidecar_child_not_reaped") from cleanup_error
 
 
 def _failure_outcome(error: HarnessError) -> str:

@@ -6,6 +6,7 @@ import re
 import stat
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,6 +18,8 @@ from .paths import ensure_owner_directory, harness_root, runtime_root, workspace
 _DOTENV_ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _PLACEHOLDER = "REPLACE_ME"
 _FALLBACK_WORKTREE = Path("/Users/rk/work/chainbot/avibe-bot/avibe")
+# Literal matching below this floor is too noisy against fixed report and summary text.
+SECRET_SUBSTRING_MATCH_MIN_LENGTH = 16
 
 
 @dataclass(frozen=True)
@@ -136,9 +139,18 @@ def _settings_from_values(values: dict[str, str], source: Path) -> ProviderSetti
 
 def _assert_model_names_do_not_contain_keys(values: dict[str, str]) -> None:
     model_values = (values["LLM_MODEL"], values["EMBEDDING_MODEL"])
-    key_values = (values["LLM_API_KEY"], values["EMBEDDING_API_KEY"])
-    if any(key and key in model for model in model_values for key in key_values):
+    key_values = matchable_secret_values((values["LLM_API_KEY"], values["EMBEDDING_API_KEY"]))
+    if any(key in model for model in model_values for key in key_values):
         raise ConfigurationError("provider_model_contains_secret")
+
+
+def matchable_secret_values(values: Iterable[str]) -> tuple[str, ...]:
+    """Return deduplicated secrets safe for literal checks in identity fields only.
+
+    Short values are deliberately excluded: they occur in fixed report prose and
+    cannot be distinguished reliably from non-secret text.
+    """
+    return tuple(dict.fromkeys(value for value in values if len(value) >= SECRET_SUBSTRING_MATCH_MIN_LENGTH))
 
 
 def locked_environment_python(root: Path | None = None) -> Path:

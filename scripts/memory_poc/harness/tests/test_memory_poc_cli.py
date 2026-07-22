@@ -82,7 +82,7 @@ def test_report_command_rejects_a_persisted_secret_substring(
     settings = ProviderSettings(
         llm_base_url="https://example.invalid/v1",
         llm_model="llm-model",
-        llm_api_key="test-api-key",
+        llm_api_key="test-api-key-0123456789",
         embedding_base_url="https://example.invalid/v1",
         embedding_model="embedding-model",
         embedding_api_key="also-not-a-real-key",

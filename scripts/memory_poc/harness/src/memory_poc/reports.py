@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import CRITERIA_IDS
-from .environment import ProviderSettings, lock_id
+from .environment import ProviderSettings, lock_id, matchable_secret_values
 from .errors import HarnessError, ReportValidationError
 from .identifiers import validate_run_id
 from .metrics import CallMetrics
@@ -127,7 +127,7 @@ def validate_report(
         raise ReportValidationError("report_harness_commit_invalid")
     if not _safe_identifier(report["corpus_revision"]):
         raise ReportValidationError("report_corpus_revision_invalid")
-    _validate_environment(report["environment"])
+    _validate_environment(report["environment"], secret_values=secret_values)
 
     criteria = report.get("criteria")
     if not isinstance(criteria, list) or len(criteria) != len(CRITERIA_IDS):
@@ -153,7 +153,6 @@ def validate_report(
         raise ReportValidationError("report_recommendation_invalid")
 
     rendered = json.dumps(report, ensure_ascii=False, sort_keys=True)
-    _assert_secret_free(rendered, secret_values, code="report_contains_secret")
     if _URI_PATTERN.search(rendered):
         raise ReportValidationError("report_contains_uri")
     for fixture_text in fixture_texts:
@@ -238,7 +237,6 @@ def write_summary(
             "",
         )
     )
-    _assert_secret_free(rendered, secret_values, code="summary_contains_secret")
     write_private_text(path, rendered, anchor=anchor)
 
 
@@ -411,7 +409,7 @@ def _is_strict_int(value: Any) -> bool:
 
 
 def _configured_secret_values(settings: ProviderSettings) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(value for value in (settings.llm_api_key, settings.embedding_api_key) if value))
+    return matchable_secret_values((settings.llm_api_key, settings.embedding_api_key))
 
 
 def _redacted_model_name(model_name: str, *, secret_values: tuple[str, ...]) -> str:
@@ -419,21 +417,18 @@ def _redacted_model_name(model_name: str, *, secret_values: tuple[str, ...]) -> 
 
 
 def _contains_secret(value: str, secret_values: tuple[str, ...]) -> bool:
-    return any(secret in value for secret in secret_values if secret)
+    return any(secret in value for secret in matchable_secret_values(secret_values))
 
 
-def _assert_secret_free(value: str, secret_values: tuple[str, ...], *, code: str) -> None:
-    if _contains_secret(value, secret_values):
-        raise ReportValidationError(code)
-
-
-def _validate_environment(value: Any) -> None:
+def _validate_environment(value: Any, *, secret_values: tuple[str, ...]) -> None:
     if not isinstance(value, dict) or set(value) != _ENVIRONMENT_KEYS:
         raise ReportValidationError("report_environment_schema_invalid")
     if not all(isinstance(item, str) and item for item in value.values()):
         raise ReportValidationError("report_environment_value_invalid")
     if value["endpoint_locality"] not in {"remote", "loopback"}:
         raise ReportValidationError("report_endpoint_locality_invalid")
+    if any(_contains_secret(value[field], secret_values) for field in ("llm_model", "embedding_model")):
+        raise ReportValidationError("report_contains_secret")
 
 
 def _validate_quality(value: Any) -> None:

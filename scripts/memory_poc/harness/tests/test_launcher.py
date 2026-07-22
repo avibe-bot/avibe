@@ -57,23 +57,28 @@ def test_socket_location_resolves_inside_the_per_run_directory(tmp_path: Path, m
 
     location = new_socket_path(run_dir, state_root=state)
 
-    assert location.actual_path.parent == run_dir / "socket"
-    assert location.connect_path.parent.resolve() == location.actual_path.parent
-    assert location.actual_path.name.endswith(".sock")
+    assert location.actual_path == run_dir / ".uds"
+    assert location.connect_path == location.actual_path
 
 
-def test_short_socket_alias_still_targets_the_per_run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    state = tmp_path / "state"
-    state.mkdir()
-    run_dir = state / "runs" / "r1"
-    alias_candidate = state / "s" / "a" / "00000000.sock"
-    monkeypatch.setattr("memory_poc.launcher._socket_path_limit", lambda: len(os.fsencode(alias_candidate)) + 1)
+def test_darwin_socket_path_stays_under_the_realistic_run_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="memory-poc-", dir="/tmp") as directory:
+        base = Path(directory)
+        direct_suffix = "/runs/stage1/.uds"
+        padding = "x" * max(1, 98 - len(os.fsencode(base)) - len(direct_suffix))
+        state = base / padding
+        state.mkdir()
+        run_dir = state / "runs" / "stage1"
+        old_nested_path = run_dir / "socket" / "00000000.sock"
+        monkeypatch.setattr("memory_poc.launcher.sys.platform", "darwin")
 
-    location = new_socket_path(run_dir, state_root=state)
+        assert len(os.fsencode(old_nested_path)) + 1 > 104
+        assert len(os.fsencode(run_dir / ".uds")) + 1 <= 104
+        location = new_socket_path(run_dir, state_root=state)
 
-    assert location.alias_path is not None
-    assert location.actual_path.parent == run_dir / "socket"
-    assert location.connect_path.parent.resolve() == location.actual_path.parent
+        assert location.actual_path.is_relative_to(run_dir)
+        assert location.connect_path.is_relative_to(run_dir)
+        assert len(os.fsencode(location.connect_path)) + 1 <= 104
 
 
 def _process_for_stop(tmp_path: Path) -> EverOSProcess:
@@ -96,7 +101,7 @@ def _process_for_stop(tmp_path: Path) -> EverOSProcess:
     )
 
 
-def test_stop_keeps_owned_handles_when_monitor_cleanup_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_retries_monitor_cleanup_before_releasing_owned_handles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     process = _process_for_stop(tmp_path)
     child = SimpleNamespace()
 
@@ -120,21 +125,52 @@ def test_stop_keeps_owned_handles_when_monitor_cleanup_fails(tmp_path: Path, mon
     process.tcp_monitor = monitor  # type: ignore[assignment]
     monkeypatch.setattr("memory_poc.launcher.terminate_owned_process", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(LaunchError, match="tcp_listener_monitor_shutdown_timeout"):
-        process.stop()
-
-    assert process.process is child
-    assert process.tcp_monitor is monitor
-
     process.stop()
 
+    assert monitor.calls == 2
     assert process.process is None
     assert process.tcp_monitor is None
 
 
-def test_stop_keeps_owned_handles_when_termination_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_removes_the_owned_socket_even_when_monitor_shutdown_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     process = _process_for_stop(tmp_path)
     child = SimpleNamespace()
+
+    class Monitor:
+        process_group = None
+
+        def known_processes(self) -> dict[int, float]:
+            return {}
+
+        def stop(self) -> dict[int, float]:
+            raise LaunchError("tcp_listener_monitor_shutdown_timeout")
+
+    with tempfile.TemporaryDirectory(prefix="memory-poc-", dir="/tmp") as directory:
+        socket_path = Path(directory) / "sidecar.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        try:
+            process.process = child  # type: ignore[assignment]
+            process.tcp_monitor = Monitor()  # type: ignore[assignment]
+            process.socket_path = socket_path
+            monkeypatch.setattr("memory_poc.launcher.terminate_owned_process", lambda *_args, **_kwargs: None)
+
+            with pytest.raises(LaunchError, match="tcp_listener_monitor_shutdown_timeout"):
+                process.stop()
+
+            assert not socket_path.exists()
+        finally:
+            listener.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process cleanup requires POSIX")
+def test_stop_retries_after_a_first_termination_failure_and_reaps_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _process_for_stop(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
 
     class Monitor:
         process_group = None
@@ -147,26 +183,26 @@ def test_stop_keeps_owned_handles_when_termination_fails(tmp_path: Path, monkeyp
 
     monitor = Monitor()
     calls = [0]
+    actual_terminate = terminate_owned_process
 
     def terminate(*_args: object, **_kwargs: object) -> None:
         calls[0] += 1
         if calls[0] == 1:
             raise LaunchError("sidecar_process_termination_failed")
+        actual_terminate(child, timeout_seconds=1)
 
-    process.process = child  # type: ignore[assignment]
+    process.process = child
     process.tcp_monitor = monitor  # type: ignore[assignment]
     monkeypatch.setattr("memory_poc.launcher.terminate_owned_process", terminate)
 
-    with pytest.raises(LaunchError, match="sidecar_process_termination_failed"):
+    try:
         process.stop()
-
-    assert process.process is child
-    assert process.tcp_monitor is monitor
-
-    process.stop()
-
-    assert process.process is None
-    assert process.tcp_monitor is None
+        assert calls[0] >= 2
+        assert child.poll() is not None
+        assert process.process is None
+        assert process.tcp_monitor is None
+    finally:
+        actual_terminate(child, timeout_seconds=1)
 
 
 def test_sidecar_startup_and_request_timeouts_are_separate(tmp_path: Path) -> None:

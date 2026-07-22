@@ -7,7 +7,7 @@ import pytest
 
 import memory_poc.sanity as sanity
 from memory_poc.environment import ProviderSettings
-from memory_poc.errors import HarnessError
+from memory_poc.errors import HarnessError, LaunchError
 from memory_poc.metrics import CallMetrics
 from memory_poc.readiness import SearchReadiness
 from memory_poc.research_inspection import ResearchInspection
@@ -17,6 +17,7 @@ from memory_poc.sanity import (
     _contains_search_episode,
     _contains_search_profile,
     _failure_outcome,
+    _stop_and_confirm_child,
 )
 
 OWNER_ID = "00000000-0000-4000-8000-000000000001"
@@ -53,6 +54,27 @@ def test_sanity_does_not_accept_legacy_kind_markers_or_another_owner() -> None:
 
     assert not _contains_atomic_fact(unsupported_shape, owner_id=OWNER_ID, fact_hint="Python")
     assert not _contains_atomic_fact(wrong_owner, owner_id=OWNER_ID, fact_hint="Python")
+
+
+def test_sanity_retries_cleanup_when_the_first_stop_does_not_reap_the_child() -> None:
+    class Process:
+        child_reaped = False
+
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise LaunchError("sidecar_process_termination_failed")
+            self.child_reaped = True
+
+    process = Process()
+
+    _stop_and_confirm_child(process)  # type: ignore[arg-type]
+
+    assert process.stop_calls == 2
+    assert process.child_reaped
 
 
 class _ReadinessClient:
@@ -208,12 +230,14 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
         def __init__(self, **_kwargs: object) -> None:
             self.client = Client()
             self.uds_only_verified = False
+            self.child_reaped = False
 
         def start(self) -> Client:
             return self.client
 
         def stop(self) -> None:
             self.uds_only_verified = True
+            self.child_reaped = True
             return None
 
     monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)
@@ -302,12 +326,14 @@ def test_sanity_passes_core_retrieval_with_a_profile_warning(tmp_path: Path, mon
         def __init__(self, **_kwargs: object) -> None:
             self.client = Client()
             self.uds_only_verified = False
+            self.child_reaped = False
 
         def start(self) -> Client:
             return self.client
 
         def stop(self) -> None:
             self.uds_only_verified = True
+            self.child_reaped = True
             return None
 
     readiness = iter(
@@ -388,12 +414,14 @@ def test_sanity_marks_an_attempted_restart_read_failure_as_failed(tmp_path: Path
         def __init__(self, **_kwargs: object) -> None:
             self.client = Client()
             self.uds_only_verified = False
+            self.child_reaped = False
 
         def start(self) -> Client:
             return self.client
 
         def stop(self) -> None:
             self.uds_only_verified = True
+            self.child_reaped = True
 
     readiness = iter(
         (
@@ -460,11 +488,13 @@ def test_sanity_decides_the_uds_gate_after_teardown(tmp_path: Path, monkeypatch:
         def __init__(self, **_kwargs: object) -> None:
             self.client = Client()
             self.uds_only_verified = False
+            self.child_reaped = False
 
         def start(self) -> Client:
             return self.client
 
         def stop(self) -> None:
+            self.child_reaped = True
             return None
 
     monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)

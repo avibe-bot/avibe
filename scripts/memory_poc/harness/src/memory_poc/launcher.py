@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
-import secrets
 import signal
 import stat
-import string
 import subprocess
 import sys
 import threading
@@ -23,7 +21,7 @@ from .provider import EverOSClient
 _STARTUP_TIMEOUT_SECONDS = 30.0
 # EverOS 1.1.3 permits a single memorize call to hold its session lock for 360s.
 _REQUEST_TIMEOUT_SECONDS = 390.0
-_SOCKET_ALIAS_NAMES = string.ascii_lowercase + string.ascii_uppercase + string.digits
+_STOP_ATTEMPTS = 2
 
 
 def _socket_path_limit() -> int:
@@ -82,47 +80,18 @@ def assert_no_tcp_listener(
 
 @dataclass(frozen=True)
 class SocketLocation:
-    """A short client path for a socket node physically owned by one run."""
+    """A run-owned UDS location with no shared indirection."""
 
     connect_path: Path
     actual_path: Path
-    alias_path: Path | None
 
 
 def new_socket_path(run_dir: Path, *, state_root: Path) -> SocketLocation:
-    """Allocate a UDS whose socket node is under the run, even on Darwin."""
-    socket_dir = ensure_owner_directory(run_dir / "socket", anchor=state_root)
-    actual_path = socket_dir / f"{secrets.token_hex(4)}.sock"
-    try:
-        validate_socket_path(actual_path)
-    except LaunchError:
-        return _short_socket_alias(actual_path, state_root=state_root)
-    return SocketLocation(connect_path=actual_path, actual_path=actual_path, alias_path=None)
-
-
-def _short_socket_alias(actual_path: Path, *, state_root: Path) -> SocketLocation:
-    """Use an owner-owned short symlink only for the UDS address length limit."""
-    alias_root = ensure_owner_directory(state_root / "s", anchor=state_root)
-    target = os.path.relpath(actual_path.parent, alias_root)
-    for name in _SOCKET_ALIAS_NAMES:
-        alias_path = alias_root / name
-        try:
-            os.symlink(target, alias_path, target_is_directory=True)
-        except FileExistsError:
-            continue
-        except OSError as exc:
-            raise LaunchError("uds_socket_alias_create_failed") from exc
-        connect_path = alias_path / actual_path.name
-        try:
-            validate_socket_path(connect_path)
-        except LaunchError:
-            try:
-                alias_path.unlink()
-            except OSError:
-                pass
-            raise
-        return SocketLocation(connect_path=connect_path, actual_path=actual_path, alias_path=alias_path)
-    raise LaunchError("uds_socket_alias_unavailable")
+    """Allocate the shortest practical UDS path directly inside one run."""
+    ensure_owner_directory(run_dir, anchor=state_root)
+    socket_path = run_dir / ".uds"
+    validate_socket_path(socket_path)
+    return SocketLocation(connect_path=socket_path, actual_path=socket_path)
 
 
 def _signal_owned_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
@@ -214,6 +183,17 @@ def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
             continue
         live[process_id] = created_at
     return live
+
+
+def _process_has_exited(process: subprocess.Popen[bytes]) -> bool:
+    """Confirm a concrete child has been reaped; test doubles model a completed terminator."""
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return True
+    try:
+        return poll() is not None
+    except OSError:
+        return False
 
 
 def _signal_owned_processes(identities: Mapping[int, float], signum: int) -> None:
@@ -432,23 +412,74 @@ class EverOSProcess:
             safety_check=self.tcp_monitor.assert_safe,
         )
 
-    def stop(self) -> None:
+    @property
+    def child_reaped(self) -> bool:
         process = self.process
-        monitor = self.tcp_monitor
-        known_processes = monitor.known_processes() if monitor is not None else {}
-        if process is not None:
-            terminate_owned_process(
-                process,
-                known_processes=known_processes,
-                process_group=monitor.process_group if monitor is not None else None,
-            )
-        if monitor is not None:
-            monitor.stop()
-        self._remove_owned_socket()
+        return process is None or _process_has_exited(process)
+
+    def stop(self) -> None:
+        """Boundedly reap the child and clean its UDS even if monitoring failed."""
+        self.uds_only_verified = False
+        termination_error = self._terminate_child_with_retries()
+        monitor_error = self._stop_monitor_with_retries()
+        try:
+            self._remove_owned_socket()
+        except LaunchError as exc:
+            socket_error: LaunchError | None = exc
+        else:
+            socket_error = None
+
+        failure = termination_error or monitor_error or socket_error
+        if failure is not None:
+            raise failure
+
         self.process = None
         self.tcp_monitor = None
         self.socket_location = None
         self.uds_only_verified = True
+
+    def _terminate_child_with_retries(self) -> LaunchError | None:
+        process = self.process
+        if process is None or _process_has_exited(process):
+            return None
+        monitor = self.tcp_monitor
+        last_error: LaunchError | None = None
+        for _attempt in range(_STOP_ATTEMPTS):
+            known_processes: dict[int, float] = {}
+            process_group: int | None = None
+            if monitor is not None:
+                try:
+                    known_processes = monitor.known_processes()
+                    process_group = monitor.process_group
+                except LaunchError as exc:
+                    last_error = exc
+            try:
+                terminate_owned_process(
+                    process,
+                    known_processes=known_processes,
+                    process_group=process_group,
+                )
+            except LaunchError as exc:
+                last_error = exc
+            if _process_has_exited(process):
+                return None
+            if last_error is None:
+                last_error = LaunchError("sidecar_process_termination_failed")
+        return last_error
+
+    def _stop_monitor_with_retries(self) -> LaunchError | None:
+        monitor = self.tcp_monitor
+        if monitor is None:
+            return None
+        last_error: LaunchError | None = None
+        for _attempt in range(_STOP_ATTEMPTS):
+            try:
+                monitor.stop()
+            except LaunchError as exc:
+                last_error = exc
+                continue
+            return None
+        return last_error
 
     def _remove_owned_socket(self) -> None:
         socket_path = self.socket_path
@@ -458,12 +489,6 @@ class EverOSProcess:
                     info = socket_path.lstat()
                     if stat.S_ISSOCK(info.st_mode) and (not hasattr(os, "getuid") or info.st_uid == os.getuid()):
                         socket_path.unlink()
-                except FileNotFoundError:
-                    pass
-            alias_path = self.socket_location.alias_path if self.socket_location is not None else None
-            if alias_path is not None:
-                try:
-                    alias_path.unlink()
                 except FileNotFoundError:
                     pass
         except OSError as exc:
