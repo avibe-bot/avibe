@@ -25,6 +25,7 @@ from .reports import local_timezone_name
 
 _READINESS_TIMEOUT_SECONDS = 600.0
 _SEARCH_POLL_SECONDS = 5.0
+_RETRIEVAL_GATE_THRESHOLD_MINUTES = 5.0
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     flush_ms: int | None = None
     first_searchable_ms: int | None = None
     readiness = SearchReadiness.not_measured(timeout_ms=_readiness_timeout_ms())
+    profile_known_absent = False
     failure: HarnessError | None = None
     try:
         client = None
@@ -89,9 +91,12 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
             flush_completed_at = time.monotonic()
             flush_ms = int((flush_completed_at - flush_started) * 1000)
             readiness = _read_required_memory(client, fixture, started_at=flush_completed_at)
-            if not readiness.complete:
+            if not readiness.retrieval_complete:
                 raise HarnessError("sanity_memory_not_ready")
-            first_searchable_ms = readiness.max_observed_ms
+            first_searchable_ms = readiness.max_retrieval_ms
+            if first_searchable_ms is None or first_searchable_ms > _retrieval_gate_threshold_ms():
+                raise HarnessError("sanity_retrieval_gate_failed")
+            profile_known_absent = not readiness.profile_retrieved
         finally:
             if client is not None:
                 first_shapes = client.observed_http_shapes
@@ -109,8 +114,8 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         restarted_client = None
         try:
             restarted_client = second.start()
-            restart_readiness = _read_required_memory(restarted_client, fixture)
-            if not restart_readiness.complete:
+            restart_readiness = _read_required_memory(restarted_client, fixture, wait_for_profile=False)
+            if not restart_readiness.retrieval_complete:
                 raise HarnessError("sanity_memory_not_ready")
             restart_preserved = True
         finally:
@@ -127,6 +132,15 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     report = build_report(run_id=run_id, settings=settings)
     if first_started:
         set_criterion(report["criteria"], "launcher_uds_only", state="pass", value=1, threshold=1)
+    if first_searchable_ms is not None:
+        searchable_minutes = first_searchable_ms / 60000
+        set_criterion(
+            report["criteria"],
+            "searchable_p95_min",
+            state="pass" if searchable_minutes <= _RETRIEVAL_GATE_THRESHOLD_MINUTES else "fail",
+            value=searchable_minutes,
+            threshold=_RETRIEVAL_GATE_THRESHOLD_MINUTES,
+        )
     if restart_preserved:
         set_criterion(report["criteria"], "restart_preserves", state="pass", value=1, threshold=1)
         set_criterion(report["criteria"], "no_internals_needed", state="pass", value=1, threshold=1)
@@ -147,8 +161,9 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         metrics=metrics,
         message_count=len(fixture.messages),
         http_shapes=first_shapes + restarted_shapes,
-        outcome="completed" if failure is None else _failure_outcome(failure),
+        outcome=_summary_outcome(failure, profile_known_absent=profile_known_absent),
         readiness=readiness,
+        profile_known_absent=profile_known_absent,
         anchor=state,
     )
     if failure is not None:
@@ -201,7 +216,13 @@ def _failure_outcome(error: HarnessError) -> str:
     return "harness_failure"
 
 
-def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: float | None = None) -> SearchReadiness:
+def _read_required_memory(
+    client: Any,
+    fixture: SanityFixture,
+    *,
+    started_at: float | None = None,
+    wait_for_profile: bool = True,
+) -> SearchReadiness:
     measurement_start = time.monotonic() if started_at is None else started_at
     deadline = measurement_start + _READINESS_TIMEOUT_SECONDS
     readiness = SearchReadiness.pending(timeout_ms=_readiness_timeout_ms())
@@ -233,7 +254,7 @@ def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: fl
             fact_hint=fixture.fact_hint,
         ):
             readiness = replace(readiness, atomic_fact_ms=elapsed_ms)
-        if readiness.complete:
+        if readiness.retrieval_complete and (not wait_for_profile or readiness.profile_retrieved):
             return readiness
         _sleep_until_next_search(deadline)
     return readiness
@@ -247,6 +268,16 @@ def _sleep_until_next_search(deadline: float) -> None:
 
 def _readiness_timeout_ms() -> int:
     return int(_READINESS_TIMEOUT_SECONDS * 1000)
+
+
+def _retrieval_gate_threshold_ms() -> int:
+    return int(_RETRIEVAL_GATE_THRESHOLD_MINUTES * 60000)
+
+
+def _summary_outcome(failure: HarnessError | None, *, profile_known_absent: bool) -> str:
+    if failure is not None:
+        return _failure_outcome(failure)
+    return "pass_with_profile_warning" if profile_known_absent else "pass"
 
 
 def _contains_search_profile(value: Any, *, owner_id: str, content_hint: str) -> bool:

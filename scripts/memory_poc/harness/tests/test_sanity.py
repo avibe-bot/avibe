@@ -124,9 +124,32 @@ def test_sanity_records_first_search_appearance_times(monkeypatch: pytest.Monkey
     readiness = sanity._read_required_memory(client, _fixture())
 
     assert readiness == SearchReadiness(profile_ms=5000, episode_ms=10000, atomic_fact_ms=15000, timeout_ms=30000)
-    assert readiness.max_observed_ms == 15000
-    assert readiness.complete
+    assert readiness.max_retrieval_ms == 15000
+    assert readiness.retrieval_complete
+    assert readiness.profile_retrieved
     assert client.search_calls == 4
+
+
+def test_sanity_keeps_profile_observation_open_after_retrieval_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_test_clock(monkeypatch, timeout_seconds=20.0)
+    client = _ReadinessClient([_search_response(episode=True, fact=True)])
+
+    readiness = sanity._read_required_memory(client, _fixture())
+
+    assert readiness == SearchReadiness(profile_ms=None, episode_ms=0, atomic_fact_ms=0, timeout_ms=20000)
+    assert readiness.retrieval_complete
+    assert not readiness.profile_retrieved
+    assert client.search_calls == 4
+
+
+def test_sanity_restart_readiness_skips_the_profile_warning_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_test_clock(monkeypatch, timeout_seconds=30.0)
+    client = _ReadinessClient([_search_response(episode=True, fact=True)])
+
+    readiness = sanity._read_required_memory(client, _fixture(), wait_for_profile=False)
+
+    assert readiness.retrieval_complete
+    assert client.search_calls == 1
 
 
 def test_sanity_does_not_count_search_results_after_the_readiness_deadline(
@@ -235,3 +258,79 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
     assert "Profile content via search: first observed 5000 ms after flush completion." in summary
     assert "Episode content via search: not observed within 600000 ms after flush completion." in summary
     assert "synthetic fixture body" not in summary
+
+
+def test_sanity_passes_core_retrieval_with_a_profile_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settings = ProviderSettings(
+        llm_base_url="https://example.invalid/v1",
+        llm_model="llm-model",
+        llm_api_key="not-a-real-key",
+        embedding_base_url="https://example.invalid/v1",
+        embedding_model="embedding-model",
+        embedding_api_key="not-a-real-key",
+        source=tmp_path / ".env.poc",
+    )
+    fixture = SanityFixture(
+        session_id="stage1-session",
+        owner_id=OWNER_ID,
+        query="Which language does the synthetic owner use?",
+        fact_hint="Python",
+        messages=[{"content": "synthetic fixture body"}],
+    )
+
+    class Client:
+        observed_http_shapes: tuple[object, ...] = ()
+
+        def add(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+        def flush(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    class Process:
+        def __init__(self, **_kwargs: object) -> None:
+            self.client = Client()
+
+        def start(self) -> Client:
+            return self.client
+
+        def stop(self) -> None:
+            return None
+
+    readiness = iter(
+        (
+            SearchReadiness(profile_ms=None, episode_ms=6103, atomic_fact_ms=49143, timeout_ms=600000),
+            SearchReadiness(profile_ms=None, episode_ms=500, atomic_fact_ms=500, timeout_ms=600000),
+        )
+    )
+    monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)
+    monkeypatch.setattr(sanity, "discover_provider_settings", lambda _workspace: settings)
+    monkeypatch.setattr(sanity, "assert_clean_harness_source", lambda _workspace: None)
+    monkeypatch.setattr(sanity, "locked_environment_python", lambda _workspace: tmp_path / "python")
+    monkeypatch.setattr(sanity, "verify_locked_environment", lambda python: python)
+    monkeypatch.setattr(sanity, "load_sanity_fixture", lambda: fixture)
+    monkeypatch.setattr(sanity, "write_generated_config", lambda **_kwargs: None)
+    monkeypatch.setattr(sanity, "EverOSProcess", Process)
+    monkeypatch.setattr(sanity, "_read_required_memory", lambda *_args, **_kwargs: next(readiness))
+    monkeypatch.setattr(sanity, "_storage_exists", lambda _root: True)
+    monkeypatch.setattr(sanity, "read_call_metrics", lambda _path: CallMetrics(llm_calls=2, embedding_calls=3))
+
+    report_path = sanity.run_sanity(run_id="r2", workspace=workspace)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    summary = (report_path.parent / "summary.md").read_text(encoding="utf-8")
+    criteria = {item["id"]: item for item in report["criteria"]}
+    assert criteria["searchable_p95_min"] == {
+        "id": "searchable_p95_min",
+        "state": "pass",
+        "value": pytest.approx(49143 / 60000),
+        "threshold": 5.0,
+    }
+    assert criteria["restart_preserves"]["state"] == "pass"
+    assert criteria["no_internals_needed"]["state"] == "pass"
+    assert "Run outcome: pass_with_profile_warning" in summary
+    assert "profile content not retrievable via /search within the window; episode+fact retrieval succeeded; profile treated as known-absent" in summary
+    assert "profile not published/readable via public search in 1.1.3 + qwen3.7; accepted as known behavior for MVP." in summary
+    assert "sanity_memory_not_ready" not in summary

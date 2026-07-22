@@ -23,7 +23,9 @@ then the primary checkout path frozen in `../CONTRACT.md`. It never copies that
 file, prints its values, or writes its values to reports or logs.
 
 Stage 1 readiness uses only the production-style public hybrid `/search` call
-with profiles included. It polls for fixture-derived profile, episode, and
-atomic-fact evidence for up to 600 seconds after a successful flush. The
-redacted `summary.md` records each first observed time and the maximum observed
-cascade lag; it never includes fixture content.
+with profiles included. Episode and atomic-fact retrieval are the scored gate;
+the initial run continues profile observation for up to 600 seconds after a
+successful flush. A missing profile is recorded as a known-absent warning in
+the redacted `summary.md`, not a retrieval failure. The summary records each
+first observed time and the maximum observed cascade lag without fixture
+content.

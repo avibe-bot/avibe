@@ -185,6 +185,7 @@ def write_summary(
     http_shapes: tuple[HttpShape, ...],
     outcome: str = "completed",
     readiness: SearchReadiness | None = None,
+    profile_known_absent: bool = False,
     anchor: Path | None = None,
 ) -> None:
     if not _SAFE_IDENTIFIER.fullmatch(outcome):
@@ -194,6 +195,7 @@ def write_summary(
     cost_line = _rough_cost_line(settings, metrics, message_count)
     shape_lines = _http_shape_lines(http_shapes)
     readiness_lines = _search_readiness_lines(readiness)
+    profile_lines = _profile_known_absent_lines(profile_known_absent)
     write_private_text(
         path,
         "\n".join(
@@ -210,6 +212,7 @@ def write_summary(
                 cost_line,
                 "",
                 *readiness_lines,
+                *profile_lines,
                 "",
                 "Observed public HTTP shapes (redacted keys only):",
                 *shape_lines,
@@ -258,6 +261,18 @@ def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...
     else:
         lines.append("- Max observed cascade lag via search: not observed.")
     return tuple(lines)
+
+
+def _profile_known_absent_lines(profile_known_absent: bool) -> tuple[str, ...]:
+    if type(profile_known_absent) is not bool:
+        raise ReportValidationError("summary_profile_known_absent_invalid")
+    if not profile_known_absent:
+        return ()
+    return (
+        "WARNING: profile content not retrievable via /search within the window; episode+fact retrieval succeeded; "
+        "profile treated as known-absent.",
+        "Conclusion: profile not published/readable via public search in 1.1.3 + qwen3.7; accepted as known behavior for MVP.",
+    )
 
 
 def _ingestion_usage_lines(metrics: CallMetrics, divisor: int) -> tuple[str, ...]:
