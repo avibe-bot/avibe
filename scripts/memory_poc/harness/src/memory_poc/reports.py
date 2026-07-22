@@ -6,7 +6,6 @@ import platform
 import re
 import subprocess
 import unicodedata
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +17,7 @@ from .metrics import CallMetrics
 from .paths import read_private_text, workspace_root, write_private_text
 from .pricing import estimate_ingestion_cost
 from .provider import HttpShape
+from .readiness import SearchReadiness
 
 _URI_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}:(?://)?", re.IGNORECASE)
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -184,7 +184,7 @@ def write_summary(
     message_count: int,
     http_shapes: tuple[HttpShape, ...],
     outcome: str = "completed",
-    readiness_timing: Mapping[str, int | None] | None = None,
+    readiness: SearchReadiness | None = None,
     anchor: Path | None = None,
 ) -> None:
     if not _SAFE_IDENTIFIER.fullmatch(outcome):
@@ -193,7 +193,7 @@ def write_summary(
     usage_lines = _ingestion_usage_lines(metrics, divisor)
     cost_line = _rough_cost_line(settings, metrics, message_count)
     shape_lines = _http_shape_lines(http_shapes)
-    readiness_lines = _search_readiness_lines(readiness_timing)
+    readiness_lines = _search_readiness_lines(readiness)
     write_private_text(
         path,
         "\n".join(
@@ -220,15 +220,21 @@ def write_summary(
     )
 
 
-def _search_readiness_lines(readiness_timing: Mapping[str, int | None] | None) -> tuple[str, ...]:
-    if readiness_timing is None:
+def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...]:
+    if readiness is None:
         return ()
-    expected_keys = {"profile_ms", "episode_ms", "atomic_fact_ms", "timeout_ms"}
-    if set(readiness_timing) != expected_keys:
+    if type(readiness.timeout_ms) is not int or readiness.timeout_ms <= 0:
         raise ReportValidationError("summary_readiness_timing_invalid")
-    timeout_ms = readiness_timing["timeout_ms"]
-    if type(timeout_ms) is not int or timeout_ms <= 0:
+    if type(readiness.measurement_started) is not bool:
         raise ReportValidationError("summary_readiness_timing_invalid")
+    if not readiness.measurement_started:
+        return (
+            "Search readiness timing: not measured because flush did not complete.",
+            "- Profile content via search: not measured.",
+            "- Episode content via search: not measured.",
+            "- Atomic fact via search: not measured.",
+            "- Max observed cascade lag via search: not measured.",
+        )
     observations: list[int] = []
     labels = (
         ("Profile content", "profile_ms"),
@@ -237,11 +243,13 @@ def _search_readiness_lines(readiness_timing: Mapping[str, int | None] | None) -
     )
     lines = ["Search readiness timing (first observation after flush completion):"]
     for label, key in labels:
-        observed_ms = readiness_timing[key]
+        observed_ms = getattr(readiness, key)
         if observed_ms is None:
-            lines.append(f"- {label} via search: not observed within {timeout_ms} ms after flush completion.")
+            lines.append(
+                f"- {label} via search: not observed within {readiness.timeout_ms} ms after flush completion."
+            )
             continue
-        if type(observed_ms) is not int or observed_ms < 0 or observed_ms > timeout_ms:
+        if type(observed_ms) is not int or observed_ms < 0 or observed_ms > readiness.timeout_ms:
             raise ReportValidationError("summary_readiness_timing_invalid")
         observations.append(observed_ms)
         lines.append(f"- {label} via search: first observed {observed_ms} ms after flush completion.")

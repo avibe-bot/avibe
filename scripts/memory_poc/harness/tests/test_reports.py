@@ -7,6 +7,7 @@ import pytest
 from memory_poc.environment import ProviderSettings
 from memory_poc.errors import ReportValidationError
 from memory_poc.metrics import CallMetrics
+from memory_poc.readiness import SearchReadiness
 from memory_poc.reports import build_report, validate_report, write_report, write_summary
 
 
@@ -144,12 +145,7 @@ def test_summary_records_redacted_search_readiness_timing(tmp_path: Path) -> Non
         metrics=CallMetrics(),
         message_count=1,
         http_shapes=(),
-        readiness_timing={
-            "profile_ms": 5000,
-            "episode_ms": None,
-            "atomic_fact_ms": 15000,
-            "timeout_ms": 600000,
-        },
+        readiness=SearchReadiness(profile_ms=5000, episode_ms=None, atomic_fact_ms=15000, timeout_ms=600000),
     )
 
     summary = path.read_text(encoding="utf-8")
@@ -157,3 +153,21 @@ def test_summary_records_redacted_search_readiness_timing(tmp_path: Path) -> Non
     assert "Episode content via search: not observed within 600000 ms after flush completion." in summary
     assert "Atomic fact via search: first observed 15000 ms after flush completion." in summary
     assert "Max observed cascade lag via search: 15000 ms." in summary
+
+
+def test_summary_marks_search_readiness_unmeasured_before_flush(tmp_path: Path) -> None:
+    path = tmp_path / "summary.md"
+
+    write_summary(
+        path,
+        settings=_settings(tmp_path),
+        metrics=CallMetrics(),
+        message_count=1,
+        http_shapes=(),
+        readiness=SearchReadiness.not_measured(timeout_ms=600000),
+    )
+
+    summary = path.read_text(encoding="utf-8")
+    assert "Search readiness timing: not measured because flush did not complete." in summary
+    assert "Profile content via search: not measured." in summary
+    assert "Max observed cascade lag via search: not measured." in summary

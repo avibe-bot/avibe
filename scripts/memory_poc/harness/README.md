@@ -21,3 +21,9 @@ Run the frozen contract CLI with that environment's Python:
 The harness discovers `.runtime/memory-poc/.env.poc` in this worktree first,
 then the primary checkout path frozen in `../CONTRACT.md`. It never copies that
 file, prints its values, or writes its values to reports or logs.
+
+Stage 1 readiness uses only the production-style public hybrid `/search` call
+with profiles included. It polls for fixture-derived profile, episode, and
+atomic-fact evidence for up to 600 seconds after a successful flush. The
+redacted `summary.md` records each first observed time and the maximum observed
+cascade lag; it never includes fixture content.

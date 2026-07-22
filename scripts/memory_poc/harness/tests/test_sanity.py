@@ -9,9 +9,9 @@ import memory_poc.sanity as sanity
 from memory_poc.environment import ProviderSettings
 from memory_poc.errors import HarnessError
 from memory_poc.metrics import CallMetrics
+from memory_poc.readiness import SearchReadiness
 from memory_poc.sanity import (
     SanityFixture,
-    SearchReadiness,
     _contains_atomic_fact,
     _contains_search_episode,
     _contains_search_profile,
@@ -72,7 +72,7 @@ def _fixture() -> SanityFixture:
     return SanityFixture(
         session_id="stage1-session",
         owner_id=OWNER_ID,
-        query="Python",
+        query="Which language does the synthetic owner use?",
         fact_hint="Python",
         messages=[],
     )

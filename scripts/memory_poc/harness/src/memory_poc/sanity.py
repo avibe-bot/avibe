@@ -19,6 +19,7 @@ from .identifiers import validate_run_id
 from .launcher import EverOSProcess
 from .metrics import read_call_metrics
 from .paths import ensure_owner_directory, runtime_root, write_private_text
+from .readiness import SearchReadiness
 from .reports import build_report, set_criterion, write_report, write_summary
 from .reports import local_timezone_name
 
@@ -33,34 +34,6 @@ class SanityFixture:
     query: str
     fact_hint: str
     messages: list[dict[str, Any]]
-
-
-@dataclass(frozen=True)
-class SearchReadiness:
-    """First public-hybrid-search observations after a successful flush."""
-
-    profile_ms: int | None
-    episode_ms: int | None
-    atomic_fact_ms: int | None
-    timeout_ms: int
-
-    @property
-    def complete(self) -> bool:
-        return self.profile_ms is not None and self.episode_ms is not None and self.atomic_fact_ms is not None
-
-    @property
-    def max_observed_ms(self) -> int | None:
-        values = (self.profile_ms, self.episode_ms, self.atomic_fact_ms)
-        observed = [value for value in values if value is not None]
-        return max(observed) if observed else None
-
-    def summary_timing(self) -> dict[str, int | None]:
-        return {
-            "profile_ms": self.profile_ms,
-            "episode_ms": self.episode_ms,
-            "atomic_fact_ms": self.atomic_fact_ms,
-            "timeout_ms": self.timeout_ms,
-        }
 
 
 def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
@@ -103,7 +76,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     add_ms: int | None = None
     flush_ms: int | None = None
     first_searchable_ms: int | None = None
-    readiness: SearchReadiness | None = None
+    readiness = SearchReadiness.not_measured(timeout_ms=_readiness_timeout_ms())
     failure: HarnessError | None = None
     try:
         client = None
@@ -175,7 +148,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         message_count=len(fixture.messages),
         http_shapes=first_shapes + restarted_shapes,
         outcome="completed" if failure is None else _failure_outcome(failure),
-        readiness_timing=readiness.summary_timing() if readiness is not None else None,
+        readiness=readiness,
         anchor=state,
     )
     if failure is not None:
@@ -231,12 +204,7 @@ def _failure_outcome(error: HarnessError) -> str:
 def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: float | None = None) -> SearchReadiness:
     measurement_start = time.monotonic() if started_at is None else started_at
     deadline = measurement_start + _READINESS_TIMEOUT_SECONDS
-    readiness = SearchReadiness(
-        profile_ms=None,
-        episode_ms=None,
-        atomic_fact_ms=None,
-        timeout_ms=int(_READINESS_TIMEOUT_SECONDS * 1000),
-    )
+    readiness = SearchReadiness.pending(timeout_ms=_readiness_timeout_ms())
     while time.monotonic() < deadline:
         try:
             result = client.search(owner_id=fixture.owner_id, query=fixture.query)
@@ -250,13 +218,13 @@ def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: fl
         if readiness.profile_ms is None and _contains_search_profile(
             result,
             owner_id=fixture.owner_id,
-            content_hint=fixture.query,
+            content_hint=fixture.fact_hint,
         ):
             readiness = replace(readiness, profile_ms=elapsed_ms)
         if readiness.episode_ms is None and _contains_search_episode(
             result,
             owner_id=fixture.owner_id,
-            content_hint=fixture.query,
+            content_hint=fixture.fact_hint,
         ):
             readiness = replace(readiness, episode_ms=elapsed_ms)
         if readiness.atomic_fact_ms is None and _contains_atomic_fact(
@@ -277,6 +245,10 @@ def _sleep_until_next_search(deadline: float) -> None:
         time.sleep(min(_SEARCH_POLL_SECONDS, remaining))
 
 
+def _readiness_timeout_ms() -> int:
+    return int(_READINESS_TIMEOUT_SECONDS * 1000)
+
+
 def _contains_search_profile(value: Any, *, owner_id: str, content_hint: str) -> bool:
     if not isinstance(value, dict):
         return False
@@ -292,14 +264,7 @@ def _contains_search_profile(value: Any, *, owner_id: str, content_hint: str) ->
 
 
 def _contains_search_episode(value: Any, *, owner_id: str, content_hint: str) -> bool:
-    if not isinstance(value, dict):
-        return False
-    episodes = value.get("episodes")
-    if not isinstance(episodes, list):
-        return False
-    for episode in episodes:
-        if not isinstance(episode, dict) or episode.get("user_id") != owner_id:
-            continue
+    for episode in _owned_episodes(value, owner_id=owner_id):
         content = {key: episode.get(key) for key in ("summary", "subject", "episode")}
         if _contains_text(content, content_hint):
             return True
@@ -321,15 +286,8 @@ def _contains_text(value: Any, hint: str, *, depth: int = 0) -> bool:
 
 def _contains_atomic_fact(value: Any, *, owner_id: str, fact_hint: str) -> bool:
     """Check the EverOS 1.1.3 public hybrid shape, not private storage details."""
-    if not isinstance(value, dict):
-        return False
-    episodes = value.get("episodes")
-    if not isinstance(episodes, list):
-        return False
     expected = fact_hint.casefold()
-    for episode in episodes:
-        if not isinstance(episode, dict) or episode.get("user_id") != owner_id:
-            continue
+    for episode in _owned_episodes(value, owner_id=owner_id):
         facts = episode.get("atomic_facts")
         if not isinstance(facts, list):
             continue
@@ -341,6 +299,19 @@ def _contains_atomic_fact(value: Any, *, owner_id: str, fact_hint: str) -> bool:
             if isinstance(fact_id, str) and fact_id and isinstance(content, str) and expected in content.casefold():
                 return True
     return False
+
+
+def _owned_episodes(value: Any, *, owner_id: str) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, dict):
+        return ()
+    episodes = value.get("episodes")
+    if not isinstance(episodes, list):
+        return ()
+    return tuple(
+        episode
+        for episode in episodes
+        if isinstance(episode, dict) and episode.get("user_id") == owner_id
+    )
 
 
 def _storage_exists(everos_root: Path) -> bool:
