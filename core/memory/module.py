@@ -237,6 +237,11 @@ class MemoryModule:
             return await self._status("clearing", meta=meta, stats=stats)
         if not self._is_enabled():
             return await self._status("disabled", meta=meta, stats=stats)
+        # Compute the active persisted error ONCE: a historical memory_low_disk_space
+        # is treated as resolved (disk pressure is re-checked below) and must not be
+        # echoed as the current condition by any downstream state (tech §15).
+        historical = meta.last_error if meta is not None else None
+        active_error = None if historical == "memory_low_disk_space" else historical
         runtime_error = self._runtime_error()
         if runtime_error is not None:
             return await self._status("error", meta=meta, stats=stats, error=runtime_error)
@@ -246,16 +251,11 @@ class MemoryModule:
             # An active provider outage is the cause; do not echo a stale persisted
             # last_error (e.g. a resolved memory_low_disk_space) that would misreport
             # the current condition (tech §15 precedence).
-            active = (
-                None
-                if (meta is not None and meta.last_error == "memory_low_disk_space")
-                else (meta.last_error if meta is not None else None)
-            )
             return await self._status(
                 "down",
                 meta=meta,
                 stats=stats,
-                error=active or "memory_sidecar_unavailable",
+                error=active_error or "memory_sidecar_unavailable",
             )
         if not await self._has_minimum_free_disk():
             return await self._status(
@@ -264,11 +264,6 @@ class MemoryModule:
                 stats=stats,
                 error="memory_low_disk_space",
             )
-        historical = meta.last_error if meta is not None else None
-        # A historical low-disk error must not pin status degraded once disk pressure
-        # has cleared (it was already re-checked above); only currently-active causes
-        # and dead work render degraded (tech §15 reachable-provider fallback to ready).
-        active_error = None if historical == "memory_low_disk_space" else historical
         if active_error is not None or stats.dead:
             return await self._status("degraded", meta=meta, stats=stats, error=active_error)
         if stats.pending or stats.processing:
