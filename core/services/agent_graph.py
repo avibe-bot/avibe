@@ -54,8 +54,9 @@ DEFAULT_WINDOW = "24h"
 # ``truncated`` so the client can surface it (contract §3).
 NODE_CAP = 300
 
-# Recent runs embedded per node for the detail-panel timeline.
-RUNS_PER_NODE = 8
+# Recent runs embedded per node for the detail-panel timeline (contract A1:
+# newest first, capped at 10).
+RUNS_PER_NODE = 10
 
 # Trigger definition types that produce a trigger chip.
 _TRIGGER_RUN_TYPES = {"scheduled", "watch"}
@@ -98,19 +99,6 @@ def _iso_z(value: Any) -> Optional[str]:
     if dt is None:
         return value if isinstance(value, str) and value else None
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _run_elapsed_seconds(
-    started_at: Optional[str],
-    completed_at: Optional[str],
-    created_at: Optional[str],
-    now: datetime,
-) -> Optional[float]:
-    base = _parse_iso(started_at) or _parse_iso(created_at)
-    if base is None:
-        return None
-    end = _parse_iso(completed_at) or now
-    return max(0.0, round((end - base).total_seconds(), 1))
 
 
 # ── status resolution ────────────────────────────────────────────────────────
@@ -209,15 +197,17 @@ def build_graph(
     project: str = "all",
     include_ended: bool = True,
     include_background: bool = True,
+    live_unreachable: bool = False,
     now: Optional[datetime] = None,
     node_cap: int = NODE_CAP,
     engine: Optional[Engine] = None,
 ) -> dict[str, Any]:
-    """Assemble the run-graph payload (contract §3).
+    """Assemble the run-graph payload (contract §3 + amendments A1/A2).
 
     ``live_agents`` is the controller's running-agents snapshot list (each row
     has at least ``session_id`` + ``state``); the route injects it so this stays
-    testable. ``now`` is injectable for deterministic tests.
+    testable. ``live_unreachable`` (A2) is set by the route when the controller
+    is down and ``live_agents`` is empty. ``now`` is injectable for tests.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -235,10 +225,10 @@ def build_graph(
         with engine.connect() as conn:
             candidate_ids = _resolve_candidates(conn, live_ids, cutoff_iso, include_ended)
             if not candidate_ids:
-                return _empty_payload(now, window)
+                return _empty_payload(now, window, live_unreachable)
 
             session_rows = _load_sessions(conn, candidate_ids)
-            runs_by_session = _load_runs(conn, candidate_ids, now)
+            runs_by_session = _load_runs(conn, candidate_ids)
             edges, trigger_ids = _build_edges(runs_by_session, candidate_ids)
             trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
     finally:
@@ -258,6 +248,7 @@ def build_graph(
         "ok": True,
         "generated_at": _iso_z(now),
         "window": window,
+        "live_unreachable": live_unreachable,
         "counts": _counts(nodes),
         "nodes": nodes,
         "trigger_nodes": trigger_nodes,
@@ -266,11 +257,12 @@ def build_graph(
     }
 
 
-def _empty_payload(now: datetime, window: str) -> dict[str, Any]:
+def _empty_payload(now: datetime, window: str, live_unreachable: bool) -> dict[str, Any]:
     return {
         "ok": True,
         "generated_at": _iso_z(now),
         "window": window,
+        "live_unreachable": live_unreachable,
         "counts": _counts([]),
         "nodes": [],
         "trigger_nodes": [],
@@ -335,7 +327,7 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
     return [dict(row) for row in conn.execute(stmt).mappings()]
 
 
-def _load_runs(conn, candidate_ids: set[str], now: datetime) -> dict[str, list[dict[str, Any]]]:
+def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
     """Every run belonging to a candidate session, newest first, grouped by
     session. Full lineage (not window-limited) so aggregates + edges are
     accurate for a session once it is in scope."""
@@ -362,9 +354,6 @@ def _load_runs(conn, candidate_ids: set[str], now: datetime) -> dict[str, list[d
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in conn.execute(stmt).mappings():
         data = dict(row)
-        data["_elapsed"] = _run_elapsed_seconds(
-            data.get("started_at"), data.get("completed_at"), data.get("created_at"), now
-        )
         grouped.setdefault(data["session_id"], []).append(data)
     return grouped
 
@@ -473,11 +462,12 @@ def _build_nodes(
         run_count_running = sum(1 for r in runs if normalize_run_status(r["status"]) == "running")
         recent = [
             {
-                "run_id": r["id"],
+                "id": r["id"],
                 "status": normalize_run_status(r["status"]),
                 "run_type": r.get("run_type"),
                 "created_at": _iso_z(r.get("created_at")),
-                "elapsed_seconds": r.get("_elapsed"),
+                "started_at": _iso_z(r.get("started_at")),
+                "completed_at": _iso_z(r.get("completed_at")),
             }
             for r in runs[:RUNS_PER_NODE]
         ]

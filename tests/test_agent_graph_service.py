@@ -329,9 +329,22 @@ def test_node_runs_timeline(seeded):
     nodes = _nodes_by_id(agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded))
     child_a = nodes["ses_child_a"]
     assert child_a["run_counts"]["total"] == 2
-    # recent runs newest-first with normalized status + elapsed
-    assert [r["run_id"] for r in child_a["runs"]] == ["run_a2", "run_a1"]
-    assert all(r["created_at"].endswith("Z") for r in child_a["runs"])
+    # A1 run-row shape: newest first, id + status + run_type + created/started/
+    # completed (Z-normalized), capped at 10.
+    assert [r["id"] for r in child_a["runs"]] == ["run_a2", "run_a1"]
+    assert len(child_a["runs"]) <= agent_graph.RUNS_PER_NODE == 10
+    row = child_a["runs"][0]
+    assert set(row) == {"id", "status", "run_type", "created_at", "started_at", "completed_at"}
+    assert row["created_at"].endswith("Z") and row["started_at"].endswith("Z")
+
+
+def test_live_unreachable_flag(seeded):
+    # A2: always present, default False; the route flips it True when the
+    # controller is down.
+    default = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded)
+    assert default["live_unreachable"] is False
+    degraded = agent_graph.build_graph(live_agents=[], now=NOW, engine=seeded, live_unreachable=True)
+    assert degraded["live_unreachable"] is True
 
 
 def test_counts(seeded):

@@ -3156,9 +3156,8 @@ async def agents_graph_get():
         project=project,
         include_ended=include_ended,
         include_background=include_background,
+        live_unreachable=live_unreachable,
     )
-    if live_unreachable:
-        payload["live_unreachable"] = True
     return jsonify(payload)
 
 

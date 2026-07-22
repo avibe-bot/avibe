@@ -21,13 +21,15 @@ export type AgentGraphStatus = AgentGraphLiveStatus | AgentGraphTerminalStatus;
 
 export type AgentGraphVisibility = 'foreground' | 'background';
 
-// One recent run for a session (additive; drives the detail-panel timeline).
+// One recent run for a session (contract amendment A1; drives the detail-panel
+// timeline). Elapsed is derived client-side from started/completed.
 export type AgentGraphRunRow = {
-  run_id: string;
+  id: string;
   status: string;
   run_type: string | null;
   created_at: string | null;
-  elapsed_seconds: number | null;
+  started_at: string | null;
+  completed_at: string | null;
 };
 
 export type AgentGraphNode = {
@@ -169,6 +171,18 @@ export function formatElapsed(seconds: number | null | undefined): string {
   if (s < 60) return `${Math.round(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;
+}
+
+// Elapsed seconds for a run row: completed − started, or now − started while
+// still open. Derived client-side since A1 carries timestamps, not a duration.
+export function runElapsedSeconds(
+  run: Pick<AgentGraphRunRow, 'started_at' | 'completed_at'>,
+): number | null {
+  if (!run.started_at) return null;
+  const start = Date.parse(run.started_at);
+  if (Number.isNaN(start)) return null;
+  const end = run.completed_at ? Date.parse(run.completed_at) : Date.now();
+  return Math.max(0, (end - start) / 1000);
 }
 
 // Fallback label when a node has no title: agent name + short session suffix.

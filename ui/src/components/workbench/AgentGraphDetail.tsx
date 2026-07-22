@@ -28,6 +28,7 @@ import {
   formatElapsed,
   isBackground,
   nodeDisplayTitle,
+  runElapsedSeconds,
   statusMeta,
 } from '../../lib/agentGraph';
 
@@ -224,15 +225,15 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
           <div className="flex flex-col gap-1">
             {node.runs.map((run) => (
               <Link
-                key={run.run_id}
-                to={`/harness?tab=runs&run=${encodeURIComponent(run.run_id)}`}
+                key={run.id}
+                to={`/harness?tab=runs&run=${encodeURIComponent(run.id)}`}
                 className="flex items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[11px] transition hover:border-border-strong"
               >
                 <span className={clsx('size-1.5 shrink-0 rounded-full', statusMeta(runStatus(run.status)).dotClass)} />
-                <code className="font-mono text-foreground">{run.run_id}</code>
+                <code className="font-mono text-foreground">{run.id}</code>
                 <span className="text-muted">{t(statusMeta(runStatus(run.status)).labelKey)}</span>
                 <span className="flex-1" />
-                <span className="font-mono text-[10px] text-muted">{formatElapsed(run.elapsed_seconds)}</span>
+                <span className="font-mono text-[10px] text-muted">{formatElapsed(runElapsedSeconds(run))}</span>
               </Link>
             ))}
           </div>
