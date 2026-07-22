@@ -100,9 +100,11 @@ def _reset_oauth_runtime_state():
         yield
         return
     caches = (remote_access._oauth_handshakes, ui_server._oauth_diag_log_state, ui_server._auth_ratelimit)
+    remote_access._clear_active_hostnames_cache()
     for cache in caches:
         cache.clear()
     yield
+    remote_access._clear_active_hostnames_cache()
     for cache in caches:
         cache.clear()
 

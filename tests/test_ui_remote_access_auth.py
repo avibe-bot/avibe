@@ -119,6 +119,136 @@ def test_remote_host_redirects_to_vibe_cloud_login(monkeypatch, tmp_path):
     assert state_payload["retry"] is False
 
 
+def test_custom_hostname_uses_remote_auth_until_heartbeat_removes_it(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    responses = iter(
+        [
+            {"ok": True, "active_hostnames": ["max.fileguard.io"]},
+            {"ok": True, "active_hostnames": []},
+        ]
+    )
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: next(responses))
+    client = app.test_client()
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    allowed = client.get(
+        "/dashboard",
+        base_url="https://max.fileguard.io",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert allowed.status_code == 302
+    assert httpx.URL(allowed.headers["Location"]).params["redirect_uri"] == (
+        "https://max.fileguard.io/auth/callback"
+    )
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    removed = client.get(
+        "/dashboard",
+        base_url="https://max.fileguard.io",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert removed.status_code == 503
+    assert removed.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_persisted_custom_hostname_is_allowed_before_process_cache_warms(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    remote_access._replace_active_hostnames(config, ["max.fileguard.io"])
+    remote_access._clear_active_hostnames_cache()
+
+    response = app.test_client().get(
+        "/dashboard",
+        base_url="https://max.fileguard.io",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert remote_access.active_hostnames(config) == frozenset({"max.fileguard.io"})
+
+
+def test_custom_hostname_oauth_flow_reuses_redirect_uri_for_exchange(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    remote_access._replace_active_hostnames(config, ["max.fileguard.io"])
+    client = app.test_client()
+
+    login = client.get(
+        "/dashboard",
+        base_url="https://max.fileguard.io",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+    authorize_params = httpx.URL(login.headers["Location"]).params
+    oauth_cookie_header = next(
+        header
+        for header in login.headers.getlist("Set-Cookie")
+        if header.startswith(f"{ui_server.REMOTE_OAUTH_COOKIE_NAME}=")
+    )
+    oauth_cookie = oauth_cookie_header.split(";", 1)[0].split("=", 1)[1]
+    handshake = ui_server._read_oauth_cookie(config.remote_access.vibe_cloud.session_secret, oauth_cookie)
+    assert handshake is not None
+    state_payload = ui_server._read_oauth_state(
+        config.remote_access.vibe_cloud.session_secret,
+        authorize_params["state"],
+    )
+    assert state_payload is not None
+    stored = remote_access._oauth_handshakes[state_payload["r"]]
+
+    assert authorize_params["redirect_uri"] == "https://max.fileguard.io/auth/callback"
+    assert handshake["redirect_uri"] == "https://max.fileguard.io/auth/callback"
+    assert stored["redirect_uri"] == "https://max.fileguard.io/auth/callback"
+
+    exchanged = {}
+
+    def exchange(cfg, code, verifier, redirect_uri=None):
+        exchanged.update({"code": code, "verifier": verifier, "redirect_uri": redirect_uri})
+        return {
+            "claims": {
+                "email": "alex@example.com",
+                "sub": "user-1",
+                "nonce": handshake["nonce"],
+            }
+        }
+
+    monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
+    client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="max.fileguard.io")
+
+    callback = client.get(
+        f"/auth/callback?code=test-code&state={authorize_params['state']}",
+        base_url="https://max.fileguard.io",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["Location"] == "/dashboard"
+    assert exchanged == {
+        "code": "test-code",
+        "verifier": handshake["code_verifier"],
+        "redirect_uri": "https://max.fileguard.io/auth/callback",
+    }
+
+
+def test_oauth_redirect_uri_falls_back_for_unlisted_request_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+
+    with app.test_request_context("/dashboard", base_url="https://unlisted.example"):
+        response = ui_server._redirect_to_vibe_cloud_login(config)
+
+    params = httpx.URL(response.headers["Location"]).params
+    assert params["redirect_uri"] == config.remote_access.vibe_cloud.redirect_uri
+
+
 def test_login_redirect_sets_persistent_handshake_cookie(monkeypatch, tmp_path):
     # iOS standalone PWAs drop session-scoped cookies (no Max-Age) across the
     # cross-origin authorize excursion, so the callback can't read the handshake
@@ -1065,6 +1195,29 @@ def test_remote_config_post_accepts_public_origin_default_https_port(monkeypatch
     assert response.status_code == 200
 
 
+def test_custom_hostname_config_post_accepts_same_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    remote_access._replace_active_hostnames(config, ["max.fileguard.io"])
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="max.fileguard.io",
+    )
+    headers = csrf_headers(client, "https://max.fileguard.io")
+
+    response = client.post(
+        "/api/config",
+        json=api.config_to_payload(config),
+        headers=headers,
+        base_url="https://max.fileguard.io",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+
+
 def test_config_post_returns_saved_config_when_remote_reconcile_fails(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -1148,7 +1301,7 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(
         remote_access,
         "exchange_oauth_code",
-        lambda cfg, code, verifier: {
+        lambda cfg, code, verifier, redirect_uri=None: {
             "claims": {
                 "email": "alex@example.com",
                 "sub": "user-1",
@@ -1178,7 +1331,7 @@ def test_remote_callback_explains_pairing_mismatch(monkeypatch, tmp_path):
     oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
     client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
 
-    def exchange(cfg, code, verifier):
+    def exchange(cfg, code, verifier, redirect_uri=None):
         raise remote_access.OAuthCodeExchangeError("invalid_instance_id")
 
     monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
@@ -1206,7 +1359,7 @@ def test_remote_callback_explains_clock_mismatch(monkeypatch, tmp_path):
     oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
     client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
 
-    def exchange(cfg, code, verifier):
+    def exchange(cfg, code, verifier, redirect_uri=None):
         raise remote_access.OAuthCodeExchangeError("expired_id_token")
 
     monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
@@ -1230,7 +1383,7 @@ def test_remote_callback_redacts_quoted_oauth_details(monkeypatch, tmp_path):
     oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
     client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
 
-    def exchange(cfg, code, verifier):
+    def exchange(cfg, code, verifier, redirect_uri=None):
         raise remote_access.OAuthCodeExchangeError(
             "token_endpoint_rejected",
             '{"code":"secret-code","code_verifier":"secret-verifier","detail":"bad code"}',
@@ -1260,7 +1413,7 @@ def test_remote_callback_log_omits_raw_oauth_rejection_detail(monkeypatch, tmp_p
     oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
     client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
 
-    def exchange(cfg, code, verifier):
+    def exchange(cfg, code, verifier, redirect_uri=None):
         raise remote_access.OAuthCodeExchangeError("token_endpoint_rejected", '{"code":"secret-code"}')
 
     monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
@@ -1411,6 +1564,7 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
         code_verifier="verifier-approved",
         next_target="/dashboard",
         device_hash=ui_server._oauth_device_hash(secret, device_id),
+        redirect_uri="https://alex.avibe.bot/auth/callback",
     )
 
     # A stale-but-valid cookie from a *different* GET / generation (different state).
@@ -1430,8 +1584,9 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
 
     captured = {}
 
-    def exchange(cfg, code, verifier):
+    def exchange(cfg, code, verifier, redirect_uri=None):
         captured["verifier"] = verifier
+        captured["redirect_uri"] = redirect_uri
         return {"claims": {"email": "alex@example.com", "sub": "user-1", "nonce": "nonce-approved"}}
 
     monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
@@ -1446,6 +1601,7 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
     assert response.headers["Location"] == "/dashboard"
     # Used the server-side record's verifier, not the stale cookie's.
     assert captured["verifier"] == "verifier-approved"
+    assert captured["redirect_uri"] == "https://alex.avibe.bot/auth/callback"
     # Handshake is single-use: consumed by the callback.
     assert remote_access.pop_oauth_handshake(rid) is None
 
@@ -1750,7 +1906,7 @@ def test_remote_callback_accepts_html_escaped_state_separator(monkeypatch, tmp_p
     exchange_calls = []
     client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
 
-    def exchange(cfg, code, verifier):
+    def exchange(cfg, code, verifier, redirect_uri=None):
         exchange_calls.append((code, verifier))
         return {
             "claims": {
@@ -1788,7 +1944,7 @@ def test_remote_callback_sanitizes_protocol_relative_next(monkeypatch, tmp_path)
     monkeypatch.setattr(
         remote_access,
         "exchange_oauth_code",
-        lambda cfg, code, verifier: {
+        lambda cfg, code, verifier, redirect_uri=None: {
             "claims": {
                 "email": "alex@example.com",
                 "sub": "user-1",
@@ -2072,6 +2228,39 @@ def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp
         headers={
             "host": "alex.avibe.bot",
             "origin": origin,
+            "x-forwarded-for": "203.0.113.10",
+        },
+    ):
+        pass
+
+    assert accepted is True
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_accepts_active_custom_hostname(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    remote_access._replace_active_hostnames(config, ["max.fileguard.io"])
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id, *, initial_cwd=None):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="max.fileguard.io",
+    )
+
+    with client.websocket_connect(
+        "wss://max.fileguard.io/api/terminal/test",
+        headers={
+            "host": "max.fileguard.io",
+            "origin": "https://max.fileguard.io",
             "x-forwarded-for": "203.0.113.10",
         },
     ):

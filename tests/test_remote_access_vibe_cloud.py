@@ -251,6 +251,34 @@ def test_exchange_oauth_code_wraps_token_endpoint_rejection(monkeypatch) -> None
     assert exc_info.value.detail == "invalid_code"
 
 
+def test_exchange_oauth_code_uses_flow_redirect_uri(monkeypatch) -> None:
+    config = _config()
+    captured = {}
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    def post(url, *, data, headers, timeout):
+        captured.update({"url": url, "data": data, "headers": headers, "timeout": timeout})
+        return ResponseStub()
+
+    monkeypatch.setattr(remote_access.requests, "post", post)
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="missing_id_token"):
+        remote_access.exchange_oauth_code(
+            config,
+            "code-1",
+            "verifier-1",
+            redirect_uri="https://max.fileguard.io/auth/callback",
+        )
+
+    assert captured["data"]["redirect_uri"] == "https://max.fileguard.io/auth/callback"
+
+
 def test_oauth_code_exchange_error_string_omits_rejection_detail() -> None:
     error = remote_access.OAuthCodeExchangeError("token_endpoint_rejected", '{"code":"secret-code"}')
 
@@ -983,6 +1011,91 @@ def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
             5.0,
         )
     ]
+
+
+def test_report_runtime_status_replaces_normalized_active_hostnames(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(remote_access.time, "time", lambda: 1_700_000_000.25)
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "active_hostnames": [
+                " Max-App.Avibe.Tech ",
+                "MAX.FILEGUARD.IO.",
+                "max.fileguard.io",
+                "bad.example:443",
+                "https://evil.example",
+                "",
+                "   ",
+                7,
+                None,
+            ],
+        },
+    )
+
+    result = remote_access.report_runtime_status(config)
+    persisted = json.loads(remote_access._active_hostnames_state_path().read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert remote_access.active_hostnames(config) == frozenset({"max-app.avibe.tech", "max.fileguard.io"})
+    assert persisted == {
+        "schema_version": 1,
+        "instance_id": "inst_123",
+        "active_hostnames": ["max-app.avibe.tech", "max.fileguard.io"],
+        "source_updated_at": 1_700_000_000.25,
+    }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({"ok": True}, id="legacy-response"),
+        pytest.param({"ok": True, "active_hostnames": "max.fileguard.io"}, id="invalid-type"),
+    ],
+)
+def test_report_runtime_status_missing_or_invalid_hostnames_clears_snapshot(
+    monkeypatch,
+    tmp_path,
+    response,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    remote_access._replace_active_hostnames(config, ["max.fileguard.io"])
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
+
+    result = remote_access.report_runtime_status(config)
+    persisted = json.loads(remote_access._active_hostnames_state_path().read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert remote_access.active_hostnames(config) == frozenset()
+    assert persisted["active_hostnames"] == []
+
+
+def test_report_runtime_status_does_not_consume_hostnames_from_http_backend(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "http://backend.test"
+    cloud.instance_secret = "instance-secret"
+    calls = []
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: calls.append(args))
+
+    result = remote_access.report_runtime_status(config)
+
+    assert result == {"ok": False, "error": "remote_status_backend_url_invalid"}
+    assert calls == []
+    assert remote_access.active_hostnames(config) == frozenset()
 
 
 def test_report_runtime_status_posts_when_remote_access_is_disabled(monkeypatch, tmp_path) -> None:
