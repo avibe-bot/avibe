@@ -4075,7 +4075,7 @@ def _reserve_definition_session(
         model=agent.model if agent else None,
         reasoning_effort=agent.reasoning_effort if agent else None,
         workdir=workdir,
-        visibility="background",
+        visibility="foreground",
     )
     if not session_id:
         raise TaskCliError(

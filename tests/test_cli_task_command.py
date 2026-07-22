@@ -735,6 +735,8 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert payload["task"]["session_policy"] == "create_once"
     target = cli.resolve_session_id_target(payload["task"]["session_id"], db_path=db_path)
     assert target.session_key.session_scope == "avibe::project::proj-once-task"
+    assert target.visibility == "foreground"
+    assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
     assert payload["task"]["cwd"] is None
     assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"

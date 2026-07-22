@@ -463,6 +463,8 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     target = cli.resolve_session_id_target(payload["watch"]["session_id"], db_path=db_path)
+    assert target.visibility == "foreground"
+    assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
     assert payload["watch"]["cwd"] == str(invoke_dir)
     assert "session_workdir" not in payload["watch"]["metadata"]
