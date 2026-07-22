@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -89,12 +91,28 @@ class SocketLocation:
 _SOCKET_NAME_CANDIDATES: tuple[str, ...] = (".uds", ".u2", ".u3", ".u4", ".u5", ".u6", ".u7", ".u8")
 
 
+def _short_fallback_socket_path(run_dir: Path) -> Path:
+    """A short, unique UDS path in the system temp dir for long run-dir paths.
+
+    Used only when no name fits inside the run directory. The path is derived from
+    a hash of the run dir so it is stable per run and unique across concurrent runs;
+    EverOSProcess.stop() unlinks self.socket_path, so it is still cleaned up with
+    the run regardless of where it lives.
+    """
+    digest = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()[:12]
+    base = Path(tempfile.gettempdir())
+    return base / f"avibe-mpoc-{digest}.sock"
+
+
 def new_socket_path(run_dir: Path, *, state_root: Path) -> SocketLocation:
     """Allocate the shortest practical UDS path directly inside one run.
 
-    Uses .uds by default; if that name is already taken by a concurrent probe
-    sharing the run directory, advances through short unique alternatives. Raises
-    uds_path_too_long only when the directory itself leaves no room for any name.
+    Prefers the run directory so the socket is removed with the run. Uses .uds by
+    default, advancing through short unique alternatives for concurrent probes
+    sharing the run directory. If NO name fits inside the run directory (long
+    workspace path + long run id on Darwin's 104-byte limit), falls back to a
+    short hash-named path in the system temp dir; that path is still unlinked by
+    EverOSProcess.stop() on cleanup.
     """
     ensure_owner_directory(run_dir, anchor=state_root)
     last_error: LaunchError | None = None
@@ -107,9 +125,18 @@ def new_socket_path(run_dir: Path, *, state_root: Path) -> SocketLocation:
             continue
         if not socket_path.exists():
             return SocketLocation(connect_path=socket_path, actual_path=socket_path)
-    if last_error is not None:
-        raise last_error
-    raise LaunchError("uds_path_unavailable")
+    # No name fit inside the run dir — use a short temp-dir fallback.
+    fallback = _short_fallback_socket_path(run_dir)
+    try:
+        validate_socket_path(fallback)
+    except LaunchError:
+        # Even the fallback is too long (extreme temp dir); surface the original.
+        if last_error is not None:
+            raise last_error
+        raise
+    if fallback.exists():
+        raise LaunchError("uds_path_unavailable")
+    return SocketLocation(connect_path=fallback, actual_path=fallback)
 
 
 def _signal_owned_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
