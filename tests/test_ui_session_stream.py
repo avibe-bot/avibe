@@ -826,12 +826,15 @@ def test_patch_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_p
     in_flight.assert_awaited_once()
 
 
-def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_path):
+def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_path, monkeypatch):
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions
+    import vibe.sse_broker as sse_broker
     from vibe.ui_server import app
 
     original_scope_id, session_id = _make_session(tmp_path)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(sse_broker.broker, "publish", lambda topic, data: published.append((topic, data)))
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         original_workdir = conn.execute(
@@ -848,7 +851,17 @@ def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_
     assert visibility_response.status_code == 200
     assert visibility_response.get_json()["visibility"] == "background"
     assert visibility_response.get_json()["scope_id"] == original_scope_id
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert activity[-2]["event"] == "updated"
+    assert activity[-2]["visibility"] == "background"
+    assert activity[-1] == {
+        "session_id": session_id,
+        "scope_id": original_scope_id,
+        "event": "user_message",
+        "reason": "session_placement_changed",
+    }
 
+    published.clear()
     scope_response = client.patch(
         f"/api/sessions/{session_id}",
         json={"scope_id": None},
@@ -860,6 +873,21 @@ def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_
     assert body["scope_id"] is None
     assert body["project_id"] is None
     assert body["workdir"] == original_workdir
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert [event["event"] for event in activity] == ["updated", "user_message"]
+    assert activity[-1]["scope_id"] == original_scope_id
+
+    published.clear()
+    foreground_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"visibility": "foreground", "scope_id": original_scope_id},
+        headers=headers,
+    )
+    assert foreground_response.status_code == 200
+    assert foreground_response.get_json()["workdir"] == original_workdir
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert [event["event"] for event in activity] == ["updated", "created"]
+    assert activity[-1]["scope_id"] == original_scope_id
 
 
 def test_patch_session_rejects_invalid_visibility(isolated_state, tmp_path):

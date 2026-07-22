@@ -375,6 +375,7 @@ def update_session(
     existing = conn.execute(
         select(
             agent_sessions.c.id,
+            agent_sessions.c.scope_id,
             agent_sessions.c.agent_backend,
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
@@ -459,17 +460,24 @@ def update_session(
             raise ValueError(f"invalid session visibility: {visibility!r}")
         values["visibility"] = visibility_value
     if scope_id is not _UNSET:
+        target_scope_id = str(scope_id) if scope_id is not None else None
         if scope_id is not None:
             scope = conn.execute(
                 select(scopes.c.id, scope_settings.c.enabled)
                 .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
-                .where(scopes.c.id == str(scope_id))
+                .where(scopes.c.id == target_scope_id)
             ).first()
             if scope is None:
                 raise ValueError(f"Scope not found: {scope_id}")
             if scope.enabled == 0:
                 raise PermissionError(f"Scope is archived: {scope_id}")
-        values["scope_id"] = scope_id
+        values["scope_id"] = target_scope_id
+        if target_scope_id != existing.scope_id:
+            # Legacy IM caches still consult this metadata key first. A scope
+            # move must stop pinning the session to the old channel; removing
+            # the override lets the loader derive the key from the new scope.
+            existing_metadata.pop("legacy_scope_key", None)
+            values["metadata_json"] = _dumps_metadata(existing_metadata)
 
     stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
     if backend_changes:

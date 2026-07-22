@@ -273,6 +273,41 @@ def test_update_session_present_null_clears_model_and_effort(isolated_state):
     assert kept["title"] == "renamed"
 
 
+def test_update_session_scope_move_drops_stale_legacy_mapping(isolated_state):
+    from config import paths
+    from storage.sessions_service import SQLiteSessionsService
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        original_scope_id = _seed_avibe_scope(conn)
+        target_scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_moved",
+            now="2026-05-26T13:00:00Z",
+        )
+        session = sessions_service.create_session(
+            conn,
+            scope_id=original_scope_id,
+            agent_backend="claude",
+            metadata={"legacy_scope_key": original_scope_id, "kept": True},
+        )
+        moved = sessions_service.update_session(conn, session["id"], scope_id=target_scope_id)
+
+    assert moved["scope_id"] == target_scope_id
+    assert moved["metadata"]["kept"] is True
+    assert "legacy_scope_key" not in moved["metadata"]
+
+    legacy = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        mappings = legacy.load_state().session_mappings
+    finally:
+        legacy.close()
+    assert "avibe::proj_moved" in mappings
+    assert original_scope_id not in mappings
+
+
 def test_update_session_present_null_clears_agent_route(isolated_state):
     """The Chat header's "Default" item sends present nulls; update_session must
     clear an unpinned route instead of treating null as "field omitted"."""

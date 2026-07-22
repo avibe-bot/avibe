@@ -6083,6 +6083,11 @@ async def sessions_update(session_id: str):
 
     try:
         with engine.begin() as conn:
+            previous_session = (
+                workbench_sessions_service.get_session(conn, session_id)
+                if {"visibility", "scope_id"}.intersection(updatable)
+                else None
+            )
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -6103,8 +6108,43 @@ async def sessions_update(session_id: str):
             "scope_id": session.get("scope_id"),
             "event": "updated",
             "title": session.get("title"),
+            "visibility": session.get("visibility"),
         },
     )
+    if previous_session is not None:
+        previous_scope_id = previous_session.get("scope_id")
+        current_scope_id = session.get("scope_id")
+        placement_changed = (
+            previous_scope_id != current_scope_id
+            or previous_session.get("visibility") != session.get("visibility")
+        )
+        if placement_changed:
+            # The current sidebar listener patches title-only `updated` events,
+            # then reconciles project windows for ordering activity. Reconcile
+            # the old scope to remove the row, and treat a foreground row in its
+            # new scope as newly visible so an empty loaded project also fetches it.
+            if previous_scope_id and (
+                previous_scope_id != current_scope_id or session.get("visibility") == "background"
+            ):
+                broker.publish(
+                    "session.activity",
+                    {
+                        "session_id": session_id,
+                        "scope_id": previous_scope_id,
+                        "event": "user_message",
+                        "reason": "session_placement_changed",
+                    },
+                )
+            if current_scope_id and session.get("visibility") == "foreground":
+                broker.publish(
+                    "session.activity",
+                    {
+                        "session_id": session_id,
+                        "scope_id": current_scope_id,
+                        "event": "created",
+                        "reason": "session_placement_changed",
+                    },
+                )
     return jsonify(session)
 
 

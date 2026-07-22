@@ -1881,6 +1881,19 @@ def _scope_id_from_session_id(session_id: str, *, help_command: str) -> Optional
     return resolved.scope_id
 
 
+def _require_scope_id_from_session_id(session_id: str, *, help_command: str) -> str:
+    scope_id = _scope_id_from_session_id(session_id, help_command=help_command)
+    if scope_id is None:
+        raise TaskCliError(
+            f"session has no scope: {session_id}",
+            code="standalone_session_has_no_scope",
+            hint="Use --scope-id to choose a scope, or omit --same-scope to create another standalone Session.",
+            help_command=help_command,
+            details={"session_id": session_id},
+        )
+    return scope_id
+
+
 def _legacy_scope_key_from_target(value: Optional[str]) -> str:
     if not value:
         return ""
@@ -1899,13 +1912,13 @@ def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Opt
         return _validate_existing_scope_id(raw_scope_id, help_command="vibe agent run --help").session_scope
     if bool(getattr(args, "same_scope", False)):
         if source_session_id:
-            return _scope_id_from_session_id(source_session_id, help_command="vibe agent run --help")
+            return _require_scope_id_from_session_id(source_session_id, help_command="vibe agent run --help")
         caller_session_id = _require_caller_session_id(
             caller_context,
             purpose="--same-scope",
             help_command="vibe agent run --help",
         )
-        return _scope_id_from_session_id(caller_session_id, help_command="vibe agent run --help")
+        return _require_scope_id_from_session_id(caller_session_id, help_command="vibe agent run --help")
     if caller_context is not None:
         try:
             return _scope_id_from_session_id(
@@ -1945,7 +1958,7 @@ def _resolve_definition_scope_key(args, *, caller_context, help_command: str) ->
             purpose="--same-scope",
             help_command=help_command,
         )
-        return _scope_id_from_session_id(caller_session_id, help_command=help_command)
+        return _require_scope_id_from_session_id(caller_session_id, help_command=help_command)
     if legacy_deliver_key:
         return _parse_validated_session_key(legacy_deliver_key, help_command=help_command).session_scope
     return None

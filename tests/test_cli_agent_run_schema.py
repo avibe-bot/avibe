@@ -1068,6 +1068,69 @@ def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, cap
     assert row["workdir"] == str(tmp_path)
 
 
+def test_agent_run_same_scope_rejects_standalone_caller(tmp_path: Path, capsys) -> None:
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        with create_sqlite_engine(db_path).begin() as conn:
+            caller_session_id = sessions_service.create_session(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                agent_name="worker",
+            )["id"]
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            ["--agent", "worker", "--same-scope", "--async", "--no-callback", "--message", "hi"]
+        )
+
+        with (
+            patch.dict("os.environ", {"AVIBE_SESSION_ID": caller_session_id}),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "standalone_session_has_no_scope"
+    assert payload["details"]["session_id"] == caller_session_id
+
+
+def test_agent_run_same_scope_rejects_standalone_fork_source(monkeypatch) -> None:
+    args = _parse_agent_run(
+        [
+            "--agent",
+            "worker",
+            "--fork-session",
+            "ses-standalone",
+            "--same-scope",
+            "--async",
+            "--no-callback",
+            "--message",
+            "hi",
+        ]
+    )
+    monkeypatch.setattr(cli, "_scope_id_from_session_id", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._resolve_agent_run_scope_key(
+            args,
+            caller_context=None,
+            source_session_id="ses-standalone",
+        )
+
+    assert exc_info.value.code == "standalone_session_has_no_scope"
+
+
 def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
     from sqlalchemy import select
 
