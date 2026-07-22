@@ -1230,17 +1230,15 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
         </DetailField>
       )}
       {/* Session + lineage (Part B): the run row already carries these; surface
-          them instead of hiding the who-started-whom / where-it-reports story. */}
+          them instead of hiding the who-started-whom / where-it-reports story.
+          Render the id as plain text — the run payload has no openability flag,
+          and a private ``vibe agent run`` session lives on the internal
+          private_agent_run pseudo-scope that is intentionally NOT chat-openable,
+          so an unconditional /chat link would dead-link. The openable-gated
+          chat entry point lives in the Agents 运行 graph detail panel. */}
       {run.session_id && (
         <DetailField label={t('harness.detail.session')}>
-          <Link
-            to={`/chat/${encodeURIComponent(run.session_id)}`}
-            className="inline-flex min-w-0 items-center gap-1.5 text-[12px] font-medium text-cyan hover:underline"
-          >
-            <MessageSquare className="size-3.5 shrink-0" />
-            <span className="min-w-0 truncate font-mono">{run.session_id}</span>
-            <ArrowUpRight className="size-3 shrink-0" />
-          </Link>
+          <code className="min-w-0 truncate font-mono text-[11px] text-muted">{run.session_id}</code>
         </DetailField>
       )}
       {(run.source_kind || run.source_actor) && (

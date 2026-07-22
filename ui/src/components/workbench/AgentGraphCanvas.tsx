@@ -266,6 +266,9 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
+        // Read-only graph: keep click selection but disable Delete/Backspace, or
+        // the change handlers would drop a selected node/edge until next refresh.
+        deleteKeyCode={null}
         proOptions={{ hideAttribution: true }}
         minZoom={0.2}
         maxZoom={1.75}

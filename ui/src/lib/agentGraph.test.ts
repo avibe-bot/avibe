@@ -119,6 +119,18 @@ describe('buildGraphForest', () => {
     expect(rows[0].trigger?.definition_id).toBe('def_1');
   });
 
+  it('keeps the latest trigger per session by last_at', () => {
+    const nodes = [node('t')];
+    const tr2: AgentGraphTriggerNode = { ...trigger, definition_id: 'def_2', name: 'Newer' };
+    const edges: AgentGraphEdge[] = [
+      { kind: 'trigger', from: 'def:def_1', to: 't', last_at: '2026-07-23T00:00:00Z' },
+      { kind: 'trigger', from: 'def:def_2', to: 't', last_at: '2026-07-23T05:00:00Z' },
+    ];
+    expect(buildGraphForest(nodes, edges, [trigger, tr2])[0].trigger?.definition_id).toBe('def_2');
+    // Order-independent: the newest wins regardless of edge iteration order.
+    expect(buildGraphForest(nodes, [...edges].reverse(), [trigger, tr2])[0].trigger?.definition_id).toBe('def_2');
+  });
+
   it('guards cycles so every node appears exactly once', () => {
     const nodes = [node('x'), node('y')];
     const edges: AgentGraphEdge[] = [

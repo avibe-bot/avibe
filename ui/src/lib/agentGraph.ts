@@ -271,6 +271,7 @@ export function buildGraphForest(
   const parentOf = new Map<string, string>();
   const parentEdgeAt = new Map<string, string | null | undefined>();
   const triggerOf = new Map<string, AgentGraphTriggerNode>();
+  const triggerAtOf = new Map<string, string | null | undefined>();
   const childrenOf = new Map<string, string[]>();
 
   for (const edge of edges) {
@@ -282,7 +283,13 @@ export function buildGraphForest(
       }
     } else if (edge.kind === 'trigger' && byId.has(edge.to)) {
       const tr = triggersById.get(definitionIdFromRef(edge.from));
-      if (tr) triggerOf.set(edge.to, tr);
+      // A session reused by multiple tasks/watches gets one trigger edge per
+      // definition; keep the latest by last_at so the mobile chip matches the
+      // detail panel's lineage (which also picks the newest trigger).
+      if (tr && (!triggerOf.has(edge.to) || laterAt(edge.last_at, triggerAtOf.get(edge.to)) > 0)) {
+        triggerOf.set(edge.to, tr);
+        triggerAtOf.set(edge.to, edge.last_at);
+      }
     }
   }
   for (const [child, parent] of parentOf) {
