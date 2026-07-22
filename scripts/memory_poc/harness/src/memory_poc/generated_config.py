@@ -41,6 +41,10 @@ def write_generated_config(*, everos_root: Path, timezone: str, anchor: Path | N
                 "[memorize]",
                 'mode = "chat"',
                 "",
+                "[rerank]",
+                'model = ""',
+                'base_url = ""',
+                "",
                 "[multimodal]",
                 f"file_uri_allow_dirs = [{_toml_string(str(ingest_dir))}]",
                 "",
@@ -74,6 +78,9 @@ def _validate_generated_config(everos_toml: Path, ome_toml: Path, timezone: str)
         raise HarnessError("generated_config_mode_invalid")
     if provider.get("memory", {}).get("timezone") != timezone:
         raise HarnessError("generated_config_timezone_invalid")
+    rerank = provider.get("rerank", {})
+    if rerank.get("model") != "" or rerank.get("base_url") != "":
+        raise HarnessError("generated_config_rerank_enabled")
     strategies = ome.get("strategies", {})
     if strategies.get("reflect_episodes", {}).get("enabled") is not False:
         raise HarnessError("generated_config_reflection_enabled")

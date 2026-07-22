@@ -64,6 +64,32 @@ def test_non_hybrid_search_is_rejected() -> None:
     assert validate_request("POST", "/api/v1/memory/search", _body(search), owner_id=OWNER_ID) == "search_method_rejected"
 
 
+def test_search_and_get_reject_non_mvp_pagination_options() -> None:
+    search = {
+        "user_id": OWNER_ID,
+        "app_id": "avibe",
+        "project_id": "personal",
+        "query": "synthetic",
+        "method": "hybrid",
+        "top_k": 9,
+        "include_profile": True,
+        "enable_llm_rerank": False,
+    }
+    get = {
+        "user_id": OWNER_ID,
+        "app_id": "avibe",
+        "project_id": "personal",
+        "memory_type": "episode",
+        "page": 2,
+        "page_size": 20,
+        "sort_by": "timestamp",
+        "sort_order": "desc",
+    }
+
+    assert validate_request("POST", "/api/v1/memory/search", _body(search), owner_id=OWNER_ID) == "search_options_rejected"
+    assert validate_request("POST", "/api/v1/memory/get", _body(get), owner_id=OWNER_ID) == "get_options_rejected"
+
+
 def test_reads_and_user_messages_are_bound_to_the_synthetic_owner() -> None:
     search = {
         "user_id": "different-owner",

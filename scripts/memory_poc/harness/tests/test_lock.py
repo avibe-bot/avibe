@@ -3,7 +3,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from memory_poc.environment import _locked_package_versions
+from memory_poc.lock_check import active_lock_packages
 
 
 def test_lock_pins_the_reviewed_everos_wheel() -> None:
@@ -18,7 +18,20 @@ def test_lock_pins_the_reviewed_everos_wheel() -> None:
 
 
 def test_lock_version_index_contains_the_harness_and_provider() -> None:
-    versions = _locked_package_versions()
+    lock_path = Path(__file__).resolve().parents[1] / "uv.lock"
+    versions = active_lock_packages(lock_path)
 
     assert versions["everos"] == "1.1.3"
     assert versions["memory-poc-harness"] == "0.1.0"
+
+
+def test_active_lock_closure_includes_the_requested_provider_extra_and_dev_group() -> None:
+    lock_path = Path(__file__).resolve().parents[1] / "uv.lock"
+
+    packages = active_lock_packages(lock_path)
+
+    assert packages["memory-poc-harness"] == "0.1.0"
+    assert packages["everos"] == "1.1.3"
+    assert packages["uvicorn"] == "0.51.0"
+    assert packages["httptools"] == "0.8.0"
+    assert packages["pytest"] == "9.0.3"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import subprocess
 import unicodedata
@@ -12,7 +13,10 @@ from .constants import CRITERIA_IDS
 from .environment import ProviderSettings, lock_id
 from .errors import HarnessError, ReportValidationError
 from .identifiers import validate_run_id
+from .metrics import CallMetrics
 from .paths import read_private_text, workspace_root, write_private_text
+from .pricing import estimate_ingestion_cost
+from .provider import HttpShape
 
 _URI_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}:(?://)?", re.IGNORECASE)
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -55,7 +59,7 @@ _DUPLICATE_KEYS = {"observed", "count"}
 
 
 def pending_criteria() -> list[dict[str, Any]]:
-    return [{"id": criterion_id, "pass": False, "value": None, "threshold": None} for criterion_id in CRITERIA_IDS]
+    return [{"id": criterion_id, "pass": False, "value": 0, "threshold": 0} for criterion_id in CRITERIA_IDS]
 
 
 def set_criterion(criteria: list[dict[str, Any]], criterion_id: str, *, passed: bool, value: Any, threshold: Any) -> None:
@@ -67,6 +71,7 @@ def set_criterion(criteria: list[dict[str, Any]], criterion_id: str, *, passed: 
 
 
 def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
+    _assert_model_names_are_not_keys(settings)
     return {
         "run_id": run_id,
         "harness_commit": _git_commit(),
@@ -74,7 +79,7 @@ def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
         "environment": {
             "os": os.uname().sysname,
             "machine_class": os.uname().machine,
-            "python": "3.12",
+            "python": platform.python_version(),
             "lock_id": lock_id(),
             "llm_model": settings.llm_model,
             "embedding_model": settings.embedding_model,
@@ -98,7 +103,7 @@ def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
     }
 
 
-def validate_report(report: dict[str, Any], *, fixture_texts: tuple[str, ...] = ()) -> None:
+def validate_report(report: dict[str, Any], *, fixture_texts: tuple[str, ...]) -> None:
     if not isinstance(report, dict) or set(report) != _TOP_LEVEL_KEYS:
         raise ReportValidationError("report_top_level_schema_invalid")
     try:
@@ -118,9 +123,9 @@ def validate_report(report: dict[str, Any], *, fixture_texts: tuple[str, ...] = 
     for expected_id, item in zip(CRITERIA_IDS, criteria, strict=True):
         if not isinstance(item, dict) or set(item) != _CRITERION_KEYS or item.get("id") != expected_id:
             raise ReportValidationError("report_criteria_schema_invalid")
-        if type(item.get("pass")) is not bool or not _numeric_or_none(item.get("value")):
+        if type(item.get("pass")) is not bool or not _numeric(item.get("value")):
             raise ReportValidationError("report_criteria_value_invalid")
-        if not _numeric_or_none(item.get("threshold")):
+        if not _numeric(item.get("threshold")):
             raise ReportValidationError("report_criteria_threshold_invalid")
 
     _validate_quality(report["quality"])
@@ -145,45 +150,102 @@ def write_report(
     report: dict[str, Any],
     *,
     anchor: Path | None = None,
-    fixture_texts: tuple[str, ...] = (),
+    fixture_texts: tuple[str, ...],
 ) -> None:
     validate_report(report, fixture_texts=fixture_texts)
     write_private_text(path, json.dumps(report, ensure_ascii=True, indent=2, sort_keys=False) + "\n", anchor=anchor)
 
 
-def load_report(path: Path) -> dict[str, Any]:
+def load_report(path: Path, *, fixture_texts: tuple[str, ...]) -> dict[str, Any]:
     try:
         payload = json.loads(read_private_text(path))
     except (HarnessError, OSError, ValueError) as exc:
         raise ReportValidationError("report_unreadable") from exc
     if not isinstance(payload, dict):
         raise ReportValidationError("report_not_object")
-    validate_report(payload)
+    validate_report(payload, fixture_texts=fixture_texts)
     return payload
 
 
 def write_summary(
     path: Path,
     *,
-    llm_calls: int,
-    embedding_calls: int,
+    settings: ProviderSettings,
+    metrics: CallMetrics,
     message_count: int,
+    http_shapes: tuple[HttpShape, ...],
     anchor: Path | None = None,
 ) -> None:
     divisor = max(message_count, 1)
+    usage_lines = _ingestion_usage_lines(metrics, divisor)
+    cost_line = _rough_cost_line(settings, metrics, message_count)
+    shape_lines = _http_shape_lines(http_shapes)
     write_private_text(
         path,
         "\n".join(
             (
                 "# EverOS POC Stage 1 Sanity",
                 "",
-                f"LLM calls per message: {llm_calls / divisor:.2f}",
-                f"Embedding calls per message: {embedding_calls / divisor:.2f}",
-                "Rough provider cost per message: unavailable without provider-authoritative pricing.",
+                "Ingestion means provider work attributed to add and explicit flush only; readiness and restart reads are excluded.",
+                f"LLM ingestion calls per message: {metrics.ingestion_llm_calls / divisor:.2f}",
+                f"Embedding ingestion calls per message: {metrics.ingestion_embedding_calls / divisor:.2f}",
+                f"Total sidecar LLM calls: {metrics.llm_calls}",
+                f"Total sidecar embedding calls: {metrics.embedding_calls}",
+                *usage_lines,
+                cost_line,
+                "",
+                "Observed public HTTP shapes (redacted keys only):",
+                *shape_lines,
                 "",
             )
         ),
         anchor=anchor,
+    )
+
+
+def _ingestion_usage_lines(metrics: CallMetrics, divisor: int) -> tuple[str, ...]:
+    lines: list[str] = []
+    if metrics.ingestion_llm_usage_records:
+        lines.append(
+            "LLM ingestion token usage: "
+            f"input={metrics.ingestion_llm_input_tokens}, output={metrics.ingestion_llm_output_tokens}, "
+            f"per_message_input={metrics.ingestion_llm_input_tokens / divisor:.2f}, "
+            f"per_message_output={metrics.ingestion_llm_output_tokens / divisor:.2f}."
+        )
+    else:
+        lines.append("LLM ingestion token usage: unavailable from provider responses.")
+    if metrics.ingestion_embedding_usage_records:
+        lines.append(
+            "Embedding ingestion token usage: "
+            f"input={metrics.ingestion_embedding_input_tokens}, "
+            f"per_message_input={metrics.ingestion_embedding_input_tokens / divisor:.2f}."
+        )
+    else:
+        lines.append("Embedding ingestion token usage: unavailable from provider responses.")
+    return tuple(lines)
+
+
+def _rough_cost_line(settings: ProviderSettings, metrics: CallMetrics, message_count: int) -> str:
+    estimate = estimate_ingestion_cost(settings, metrics, message_count=message_count)
+    if estimate is None:
+        return "Rough provider cost per message: unavailable; no matching versioned pricing assumption or token usage."
+    return (
+        f"Rough provider cost per message: CNY {estimate.per_message_cny:.8f} "
+        f"(estimate; total CNY {estimate.total_cny:.8f}; {estimate.assumption})."
+    )
+
+
+def _http_shape_lines(http_shapes: tuple[HttpShape, ...]) -> tuple[str, ...]:
+    unique = tuple(dict.fromkeys(http_shapes))
+    if not unique:
+        return ("- none recorded",)
+    return tuple(
+        "- "
+        f"phase={item.phase} method={item.method} route={item.route} status={item.status_code} "
+        f"closed_code={item.closed_code if item.closed_code is not None else 'absent'} "
+        f"request_keys={list(item.request_keys)} response_keys={list(item.response_keys)} "
+        f"data_keys={list(item.data_keys)} response_paths={list(item.response_schema_paths)}"
+        for item in unique
     )
 
 
@@ -214,8 +276,15 @@ def _safe_identifier(value: Any, *, allow_unknown: bool = False) -> bool:
     return bool(_SAFE_IDENTIFIER.fullmatch(value))
 
 
-def _numeric_or_none(value: Any) -> bool:
-    return value is None or (type(value) in {int, float} and value >= 0)
+def _numeric(value: Any) -> bool:
+    return type(value) in {int, float} and value >= 0
+
+
+def _assert_model_names_are_not_keys(settings: ProviderSettings) -> None:
+    model_names = (settings.llm_model, settings.embedding_model)
+    api_keys = (settings.llm_api_key, settings.embedding_api_key)
+    if any(model == api_key for model in model_names for api_key in api_keys):
+        raise ReportValidationError("report_model_matches_secret")
 
 
 def _validate_environment(value: Any) -> None:

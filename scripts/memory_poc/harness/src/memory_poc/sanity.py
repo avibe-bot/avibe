@@ -6,13 +6,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .environment import checked_workspace_root, discover_provider_settings, locked_environment_python, verify_locked_environment
+from .environment import (
+    assert_clean_harness_source,
+    checked_workspace_root,
+    discover_provider_settings,
+    locked_environment_python,
+    verify_locked_environment,
+)
 from .errors import HarnessError, LaunchError
 from .generated_config import write_generated_config
 from .identifiers import validate_run_id
 from .launcher import EverOSProcess
 from .metrics import read_call_metrics
-from .paths import ensure_owner_directory, runtime_root
+from .paths import ensure_owner_directory, runtime_root, write_private_text
 from .reports import build_report, set_criterion, write_report, write_summary
 from .reports import local_timezone_name
 
@@ -33,6 +39,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     root = checked_workspace_root(workspace)
     fixture = load_sanity_fixture()
     settings = discover_provider_settings(root)
+    assert_clean_harness_source(root)
     python = verify_locked_environment(locked_environment_python(root))
     state = ensure_owner_directory(runtime_root(root), anchor=root)
     run_dir = state / "runs" / run_id
@@ -45,7 +52,6 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     write_generated_config(everos_root=everos_root, timezone=local_timezone_name(), anchor=state)
     metrics_path = logs_dir / "request-counts.jsonl"
 
-    started = time.monotonic()
     first = EverOSProcess(
         python=python,
         everos_root=everos_root,
@@ -55,11 +61,15 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         metrics_path=metrics_path,
         owner_id=fixture.owner_id,
     )
+    first_shapes = ()
     try:
         client = first.start()
         add_ms = _elapsed_ms(lambda: client.add(session_id=fixture.session_id, messages=fixture.messages))
-        flush_ms = _elapsed_ms(lambda: client.flush(session_id=fixture.session_id))
-        first_reads = _read_required_memory(client, fixture)
+        flush_started = time.monotonic()
+        client.flush(session_id=fixture.session_id)
+        flush_ms = int((time.monotonic() - flush_started) * 1000)
+        first_searchable_ms = _read_required_memory(client, fixture, started_at=flush_started)
+        first_shapes = client.observed_http_shapes
     finally:
         first.stop()
 
@@ -72,9 +82,11 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         metrics_path=metrics_path,
         owner_id=fixture.owner_id,
     )
+    restarted_shapes = ()
     try:
         restarted_client = second.start()
-        restart_reads = _read_required_memory(restarted_client, fixture)
+        _read_required_memory(restarted_client, fixture)
+        restarted_shapes = restarted_client.observed_http_shapes
     finally:
         second.stop()
 
@@ -82,12 +94,12 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     metrics = read_call_metrics(metrics_path)
     report = build_report(run_id=run_id, settings=settings)
     set_criterion(report["criteria"], "launcher_uds_only", passed=True, value=1, threshold=1)
-    set_criterion(report["criteria"], "restart_preserves", passed=first_reads and restart_reads, value=1, threshold=1)
+    set_criterion(report["criteria"], "restart_preserves", passed=True, value=1, threshold=1)
     set_criterion(report["criteria"], "no_internals_needed", passed=True, value=1, threshold=1)
     report["latency"] = {
         "add_ms": {"sanity": add_ms},
         "flush_ms": {"sanity": flush_ms},
-        "searchable_ms": {"sanity": int((time.monotonic() - started) * 1000)},
+        "searchable_ms": {"sanity": first_searchable_ms},
         "query_ms": {},
     }
     report["resources"]["llm_calls"] = metrics.llm_calls
@@ -97,12 +109,18 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         raise HarnessError("sanity_storage_layout_missing")
     report_path = run_dir / "report.json"
     fixture_texts = tuple(message["content"] for message in fixture.messages)
+    write_private_text(
+        run_dir / "run.json",
+        json.dumps({"stage": "sanity", "fixture_set": "stage1-mini"}, ensure_ascii=True) + "\n",
+        anchor=state,
+    )
     write_report(report_path, report, anchor=state, fixture_texts=fixture_texts)
     write_summary(
         run_dir / "summary.md",
-        llm_calls=metrics.llm_calls,
-        embedding_calls=metrics.embedding_calls,
+        settings=settings,
+        metrics=metrics,
         message_count=len(fixture.messages),
+        http_shapes=first_shapes + restarted_shapes,
         anchor=state,
     )
     return report_path
@@ -141,7 +159,8 @@ def _elapsed_ms(callback: Any) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-def _read_required_memory(client: Any, fixture: SanityFixture) -> bool:
+def _read_required_memory(client: Any, fixture: SanityFixture, *, started_at: float | None = None) -> int:
+    measurement_start = time.monotonic() if started_at is None else started_at
     deadline = time.monotonic() + _READINESS_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         try:
@@ -156,7 +175,7 @@ def _read_required_memory(client: Any, fixture: SanityFixture) -> bool:
             and _contains_owned_items(episodes, key="episodes", owner_id=fixture.owner_id)
             and _contains_atomic_fact(facts, owner_id=fixture.owner_id, fact_hint=fixture.fact_hint)
         ):
-            return True
+            return int((time.monotonic() - measurement_start) * 1000)
         time.sleep(0.5)
     raise HarnessError("sanity_memory_not_ready")
 

@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import stat
 import subprocess
-import tomllib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .constants import EVEROS_VERSION, PROXY_AND_TLS_ENV_KEYS, REQUIRED_PROVIDER_ENV_KEYS
+from .constants import PROXY_AND_TLS_ENV_KEYS, REQUIRED_PROVIDER_ENV_KEYS
 from .errors import ConfigurationError, HarnessError
 from .paths import ensure_owner_directory, harness_root, runtime_root, workspace_root
 
 _DOTENV_ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _PLACEHOLDER = "REPLACE_ME"
+_FALLBACK_WORKTREE = Path("/Users/rk/work/chainbot/avibe-bot/avibe")
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ def dotenv_candidates(root: Path | None = None) -> tuple[Path, Path]:
     checkout = checked_workspace_root(root)
     return (
         checkout / ".runtime" / "memory-poc" / ".env.poc",
-        Path("/Users/rk/work/chainbot/avibe-bot/avibe/.runtime/memory-poc/.env.poc"),
+        _FALLBACK_WORKTREE / ".runtime" / "memory-poc" / ".env.poc",
     )
 
 
@@ -74,6 +74,8 @@ def discover_provider_settings(root: Path | None = None) -> ProviderSettings:
             continue
         if candidate == local_candidate:
             _assert_anchored_parent(candidate.parent, anchor=checkout)
+        else:
+            _assert_anchored_parent(candidate.parent, anchor=_FALLBACK_WORKTREE)
         _assert_dotenv_safe(candidate)
         values = parse_dotenv(candidate.read_text(encoding="utf-8"))
         return _settings_from_values(values, candidate)
@@ -91,6 +93,14 @@ def _assert_dotenv_safe(path: Path) -> None:
 
 
 def _assert_anchored_parent(path: Path, *, anchor: Path) -> None:
+    try:
+        anchor_info = anchor.lstat()
+    except FileNotFoundError as exc:
+        raise ConfigurationError("provider_configuration_path_unsafe") from exc
+    if stat.S_ISLNK(anchor_info.st_mode) or not stat.S_ISDIR(anchor_info.st_mode):
+        raise ConfigurationError("provider_configuration_path_unsafe")
+    if hasattr(os, "getuid") and anchor_info.st_uid != os.getuid():
+        raise ConfigurationError("provider_configuration_owner_invalid")
     try:
         components = path.relative_to(anchor).parts
     except ValueError as exc:
@@ -112,6 +122,7 @@ def _settings_from_values(values: dict[str, str], source: Path) -> ProviderSetti
     missing = [key for key in REQUIRED_PROVIDER_ENV_KEYS if values.get(key, "").strip() in {"", _PLACEHOLDER}]
     if missing:
         raise ConfigurationError("provider_configuration_incomplete:" + ",".join(missing))
+    _assert_model_names_are_not_keys(values)
     return ProviderSettings(
         llm_base_url=values["LLM_BASE_URL"],
         llm_model=values["LLM_MODEL"],
@@ -121,6 +132,13 @@ def _settings_from_values(values: dict[str, str], source: Path) -> ProviderSetti
         embedding_api_key=values["EMBEDDING_API_KEY"],
         source=source,
     )
+
+
+def _assert_model_names_are_not_keys(values: dict[str, str]) -> None:
+    model_values = (values["LLM_MODEL"], values["EMBEDDING_MODEL"])
+    key_values = (values["LLM_API_KEY"], values["EMBEDDING_API_KEY"])
+    if any(model == key for model in model_values for key in key_values):
+        raise ConfigurationError("provider_model_matches_secret")
 
 
 def locked_environment_python(root: Path | None = None) -> Path:
@@ -149,6 +167,8 @@ def sync_locked_environment(*, root: Path | None = None, uv_binary: str = "uv") 
             uv_binary,
             "sync",
             "--locked",
+            "--group",
+            "dev",
             "--project",
             str(harness_root()),
             "--python",
@@ -168,26 +188,9 @@ def verify_locked_environment(python: Path | None = None) -> Path:
     target = python or locked_environment_python()
     if not target.is_file() or not os.access(target, os.X_OK):
         raise HarnessError("locked_environment_missing")
-    code = (
-        "import importlib.metadata as metadata, json, re, site, sys; "
-        "from packaging.markers import default_environment; "
-        "from packaging.requirements import Requirement; "
-        "normalize=lambda value: re.sub(r'[-_.]+', '-', value).lower(); "
-        "expected=json.loads(sys.argv[1]); "
-        "assert sys.version_info[:2] == (3, 12); "
-        "assert site.ENABLE_USER_SITE is False; "
-        "installed={normalize(dist.metadata['Name']): dist for dist in metadata.distributions()}; "
-        "assert all(name in expected and expected[name] == dist.version for name, dist in installed.items()); "
-        "environment=default_environment(); "
-        "assert all("
-        "not requirement.marker or not requirement.marker.evaluate(environment) "
-        "or (normalize(requirement.name) in installed and installed[normalize(requirement.name)].version in requirement.specifier) "
-        "for dist in installed.values() for requirement in map(Requirement, dist.requires or [])); "
-        f"assert metadata.version('everos') == '{EVEROS_VERSION}'; "
-        "print(sys.prefix)"
-    )
+    lock_path = harness_root() / "uv.lock"
     result = subprocess.run(
-        [str(target), "-c", code, json.dumps(_locked_package_versions(), sort_keys=True)],
+        [str(target), "-m", "memory_poc.lock_check", str(lock_path)],
         check=False,
         capture_output=True,
         text=True,
@@ -202,9 +205,45 @@ def verify_locked_environment(python: Path | None = None) -> Path:
     return target
 
 
+def verify_harness_interpreter(root: Path | None = None) -> Path:
+    """Require the coordinator itself to use this run's locked interpreter."""
+    checkout = checked_workspace_root(root)
+    expected = locked_environment_python(checkout)
+    actual = Path(sys.executable)
+    expected_prefix = expected.parent.parent.resolve()
+    if Path(sys.prefix).resolve() != expected_prefix or actual.resolve() != expected.resolve():
+        raise HarnessError("harness_interpreter_not_locked")
+    return verify_locked_environment(expected)
+
+
+def assert_clean_harness_source(root: Path | None = None) -> None:
+    """A live report may identify only a committed harness revision."""
+    checkout = checked_workspace_root(root)
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            "scripts/memory_poc/harness",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise HarnessError("harness_source_identity_unavailable")
+    if result.stdout.strip():
+        raise HarnessError("harness_source_dirty")
+
+
 def child_environment(
     settings: ProviderSettings,
     *,
+    python: Path,
     everos_root: Path,
     child_home: Path,
     metrics_path: Path,
@@ -231,7 +270,7 @@ def child_environment(
         "HOME": str(child_home),
         "MEMORY_POC_OWNER_ID": owner_id,
         "MEMORY_POC_REQUEST_METRICS": str(metrics_path),
-        "PATH": f"{locked_environment_python().parent}:/usr/bin:/bin",
+        "PATH": f"{python.parent}:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
         "XDG_CACHE_HOME": str(xdg_cache),
@@ -252,21 +291,3 @@ def checked_workspace_root(root: Path | None = None) -> Path:
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise HarnessError("workspace_root_owner_mismatch")
     return checkout
-
-
-def _locked_package_versions() -> dict[str, str]:
-    lock_path = harness_root() / "uv.lock"
-    try:
-        payload = tomllib.loads(lock_path.read_text(encoding="utf-8"))
-        packages = payload["package"]
-    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
-        raise HarnessError("dependency_lock_invalid") from exc
-    result: dict[str, str] = {}
-    for package in packages:
-        if not isinstance(package, dict) or not isinstance(package.get("name"), str) or not isinstance(package.get("version"), str):
-            raise HarnessError("dependency_lock_invalid")
-        name = re.sub(r"[-_.]+", "-", package["name"]).lower()
-        if name in result:
-            raise HarnessError("dependency_lock_duplicate_package")
-        result[name] = package["version"]
-    return result

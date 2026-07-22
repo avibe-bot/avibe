@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+from contextvars import ContextVar
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from typing import Any
 from .constants import EVEROS_VERSION
 from .metrics import append_request_metric, classify_request_path
 from .request_guard import validate_request
+
+_REQUEST_PHASE: ContextVar[str] = ContextVar("memory_poc_request_phase", default="unattributed")
 
 
 def _install_request_counter(metrics_path: Path) -> None:
@@ -39,9 +42,14 @@ def _install_request_counter(metrics_path: Path) -> None:
         try:
             response = await original_async_send(self, request, *args, **kwargs)
         except Exception:  # noqa: BLE001
-            append_request_metric(metrics_path, kind=kind)
+            append_request_metric(metrics_path, kind=kind, phase=_REQUEST_PHASE.get())
             raise
-        append_request_metric(metrics_path, kind=kind, usage=usage_from_response(response))
+        append_request_metric(
+            metrics_path,
+            kind=kind,
+            usage=usage_from_response(response),
+            phase=_REQUEST_PHASE.get(),
+        )
         return response
 
     def tracked_sync_send(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
@@ -49,9 +57,14 @@ def _install_request_counter(metrics_path: Path) -> None:
         try:
             response = original_sync_send(self, request, *args, **kwargs)
         except Exception:  # noqa: BLE001
-            append_request_metric(metrics_path, kind=kind)
+            append_request_metric(metrics_path, kind=kind, phase=_REQUEST_PHASE.get())
             raise
-        append_request_metric(metrics_path, kind=kind, usage=usage_from_response(response))
+        append_request_metric(
+            metrics_path,
+            kind=kind,
+            usage=usage_from_response(response),
+            phase=_REQUEST_PHASE.get(),
+        )
         return response
 
     httpx.AsyncClient.send = tracked_async_send
@@ -85,7 +98,12 @@ def serve(uds: Path) -> None:
         rejection = validate_request(request.method, request.url.path, await request.body(), owner_id=owner_id)
         if rejection is not None:
             return JSONResponse({"detail": "memory_poc_request_rejected"}, status_code=403)
-        return await call_next(request)
+        phase = request.headers.get("x-memory-poc-phase", "unattributed")
+        token = _REQUEST_PHASE.set(phase if phase in {"ingestion", "read", "health"} else "unattributed")
+        try:
+            return await call_next(request)
+        finally:
+            _REQUEST_PHASE.reset(token)
 
     config = uvicorn.Config(app, uds=str(uds), access_log=False, log_level="warning", log_config=None)
     uvicorn.Server(config).run()

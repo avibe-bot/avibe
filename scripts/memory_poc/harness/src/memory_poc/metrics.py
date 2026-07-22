@@ -16,15 +16,30 @@ class CallMetrics:
     llm_input_tokens: int = 0
     llm_output_tokens: int = 0
     embedding_input_tokens: int = 0
+    llm_usage_records: int = 0
+    embedding_usage_records: int = 0
+    ingestion_llm_calls: int = 0
+    ingestion_embedding_calls: int = 0
+    ingestion_llm_input_tokens: int = 0
+    ingestion_llm_output_tokens: int = 0
+    ingestion_embedding_input_tokens: int = 0
+    ingestion_llm_usage_records: int = 0
+    ingestion_embedding_usage_records: int = 0
 
 
 def classify_request_path(path: str) -> str:
     return "embedding" if "embeddings" in path.lower() else "llm"
 
 
-def append_request_metric(path: Path, *, kind: str, usage: dict[str, Any] | None = None) -> None:
+def append_request_metric(
+    path: Path,
+    *,
+    kind: str,
+    usage: dict[str, Any] | None = None,
+    phase: str = "unattributed",
+) -> None:
     """Persist only request category and token counters, never URL/body/header data."""
-    record = {"kind": kind}
+    record = {"kind": kind, "phase": phase if phase in {"ingestion", "read", "health"} else "unattributed"}
     if isinstance(usage, dict):
         for source, target in (("prompt_tokens", "input_tokens"), ("input_tokens", "input_tokens"), ("completion_tokens", "output_tokens"), ("output_tokens", "output_tokens")):
             value = usage.get(source)
@@ -43,7 +58,22 @@ def append_request_metric(path: Path, *, kind: str, usage: dict[str, Any] | None
 def read_call_metrics(path: Path) -> CallMetrics:
     if not path.is_file():
         return CallMetrics()
-    llm_calls = embedding_calls = llm_input = llm_output = embedding_input = 0
+    counts = {
+        "llm_calls": 0,
+        "embedding_calls": 0,
+        "llm_input_tokens": 0,
+        "llm_output_tokens": 0,
+        "embedding_input_tokens": 0,
+        "llm_usage_records": 0,
+        "embedding_usage_records": 0,
+        "ingestion_llm_calls": 0,
+        "ingestion_embedding_calls": 0,
+        "ingestion_llm_input_tokens": 0,
+        "ingestion_llm_output_tokens": 0,
+        "ingestion_embedding_input_tokens": 0,
+        "ingestion_llm_usage_records": 0,
+        "ingestion_embedding_usage_records": 0,
+    }
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             item = json.loads(line)
@@ -52,22 +82,36 @@ def read_call_metrics(path: Path) -> CallMetrics:
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
+        ingestion = item.get("phase") == "ingestion"
         input_tokens = item.get("input_tokens", 0)
         output_tokens = item.get("output_tokens", 0)
+        usage_observed = "input_tokens" in item or "output_tokens" in item
         if kind == "embedding":
-            embedding_calls += 1
+            counts["embedding_calls"] += 1
+            if ingestion:
+                counts["ingestion_embedding_calls"] += 1
             if isinstance(input_tokens, int) and input_tokens >= 0:
-                embedding_input += input_tokens
+                counts["embedding_input_tokens"] += input_tokens
+                if ingestion:
+                    counts["ingestion_embedding_input_tokens"] += input_tokens
+            if usage_observed:
+                counts["embedding_usage_records"] += 1
+                if ingestion:
+                    counts["ingestion_embedding_usage_records"] += 1
         elif kind == "llm":
-            llm_calls += 1
+            counts["llm_calls"] += 1
+            if ingestion:
+                counts["ingestion_llm_calls"] += 1
             if isinstance(input_tokens, int) and input_tokens >= 0:
-                llm_input += input_tokens
+                counts["llm_input_tokens"] += input_tokens
+                if ingestion:
+                    counts["ingestion_llm_input_tokens"] += input_tokens
             if isinstance(output_tokens, int) and output_tokens >= 0:
-                llm_output += output_tokens
-    return CallMetrics(
-        llm_calls=llm_calls,
-        embedding_calls=embedding_calls,
-        llm_input_tokens=llm_input,
-        llm_output_tokens=llm_output,
-        embedding_input_tokens=embedding_input,
-    )
+                counts["llm_output_tokens"] += output_tokens
+                if ingestion:
+                    counts["ingestion_llm_output_tokens"] += output_tokens
+            if usage_observed:
+                counts["llm_usage_records"] += 1
+                if ingestion:
+                    counts["ingestion_llm_usage_records"] += 1
+    return CallMetrics(**counts)

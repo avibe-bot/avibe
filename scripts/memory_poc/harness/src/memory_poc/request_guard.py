@@ -61,7 +61,7 @@ def _validate_add(payload: dict[str, Any], owner_id: str) -> str | None:
             return "add_message_rejected"
         if not _keys_are(
             message,
-            {"sender_id", "sender_name", "role", "timestamp", "content"},
+            {"sender_id", "role", "timestamp", "content"},
             {"sender_id", "role", "timestamp", "content"},
         ):
             return "add_message_rejected"
@@ -99,6 +99,8 @@ def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
         return "search_owner_rejected"
     if payload.get("method") != "hybrid":
         return "search_method_rejected"
+    if type(payload.get("top_k")) is not int or payload["top_k"] != 8 or payload.get("include_profile") is not True:
+        return "search_options_rejected"
     if payload.get("enable_llm_rerank") is not False:
         return "search_rerank_rejected"
     return None
@@ -115,4 +117,13 @@ def _validate_get(payload: dict[str, Any], owner_id: str) -> str | None:
         return "get_owner_rejected"
     if payload.get("memory_type") not in {"profile", "episode"}:
         return "get_memory_type_rejected"
+    if (
+        type(payload.get("page")) is not int
+        or payload["page"] != 1
+        or type(payload.get("page_size")) is not int
+        or payload["page_size"] != 20
+        or payload.get("sort_by") != "timestamp"
+        or payload.get("sort_order") != "desc"
+    ):
+        return "get_options_rejected"
     return None

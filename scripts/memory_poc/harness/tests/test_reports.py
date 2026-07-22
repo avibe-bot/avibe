@@ -26,8 +26,8 @@ def test_report_has_frozen_schema_and_excludes_urls(tmp_path: Path, monkeypatch:
     report = build_report(run_id="r1", settings=_settings(tmp_path))
     report["environment"]["endpoint_locality"] = "remote"
 
-    validate_report(report)
-    write_report(tmp_path / "report.json", report)
+    validate_report(report, fixture_texts=())
+    write_report(tmp_path / "report.json", report, fixture_texts=())
 
     rendered = (tmp_path / "report.json").read_text(encoding="utf-8")
     assert "https://" not in rendered
@@ -40,7 +40,7 @@ def test_report_rejects_url_and_extra_top_level_field(tmp_path: Path, monkeypatc
     report["unexpected"] = "value"
 
     with pytest.raises(ReportValidationError, match="report_top_level_schema_invalid"):
-        validate_report(report)
+        validate_report(report, fixture_texts=())
 
 
 def test_report_rejects_nested_uris_and_fixture_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,7 +49,7 @@ def test_report_rejects_nested_uris_and_fixture_text(tmp_path: Path, monkeypatch
     report["environment"]["llm_model"] = "https://example.invalid"
 
     with pytest.raises(ReportValidationError, match="report_contains_uri"):
-        validate_report(report)
+        validate_report(report, fixture_texts=())
 
     report["environment"]["llm_model"] = "llm-model"
     report["duplicates"]["observed"] = "synthetic fixture body"
@@ -63,4 +63,39 @@ def test_report_rejects_unknown_nested_fields(tmp_path: Path, monkeypatch: pytes
     report["resources"]["secret"] = 1
 
     with pytest.raises(ReportValidationError, match="report_resources_schema_invalid"):
-        validate_report(report)
+        validate_report(report, fixture_texts=())
+
+
+def test_report_rejects_unmeasured_null_criteria(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["criteria"][0]["value"] = None
+
+    with pytest.raises(ReportValidationError, match="report_criteria_value_invalid"):
+        validate_report(report, fixture_texts=())
+
+
+def test_report_rejects_zero_based_quality_rank(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["quality"] = [{"query_id": "q1", "pass": False, "rank": 0, "latency_ms": 1}]
+
+    with pytest.raises(ReportValidationError, match="report_quality_rank_invalid"):
+        validate_report(report, fixture_texts=())
+
+
+def test_report_rejects_model_metadata_that_matches_an_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    settings = _settings(tmp_path)
+    settings = ProviderSettings(
+        llm_base_url=settings.llm_base_url,
+        llm_model=settings.embedding_api_key,
+        llm_api_key=settings.llm_api_key,
+        embedding_base_url=settings.embedding_base_url,
+        embedding_model=settings.embedding_model,
+        embedding_api_key=settings.embedding_api_key,
+        source=settings.source,
+    )
+
+    with pytest.raises(ReportValidationError, match="report_model_matches_secret"):
+        build_report(run_id="r1", settings=settings)

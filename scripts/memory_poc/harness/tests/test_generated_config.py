@@ -16,8 +16,9 @@ def test_generated_config_is_chat_only_and_has_no_endpoint_or_key(tmp_path: Path
 
     assert provider["memorize"]["mode"] == "chat"
     assert provider["memory"]["timezone"] == "Asia/Shanghai"
+    assert provider["rerank"] == {"model": "", "base_url": ""}
     assert ome["strategies"]["reflect_episodes"]["enabled"] is False
     assert ome["strategies"]["extract_foresight"]["enabled"] is False
-    assert "base_url" not in rendered
+    assert "https://" not in rendered
     assert "api_key" not in rendered
     assert stat.S_IMODE(generated.everos_toml.stat().st_mode) == 0o600

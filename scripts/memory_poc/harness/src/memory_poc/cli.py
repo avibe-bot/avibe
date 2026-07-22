@@ -3,14 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from .constants import STAGES
 from .errors import HarnessError, StageNotImplementedError
-from .environment import checked_workspace_root
+from .environment import checked_workspace_root, verify_harness_interpreter
+from .paths import ensure_owner_directory, read_private_text, runtime_root
 from .reports import load_report
-from .sanity import run_sanity
+from .sanity import load_sanity_fixture, run_sanity
 from .identifiers import validate_run_id
-from .paths import ensure_owner_directory, runtime_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,11 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        workspace = checked_workspace_root()
+        verify_harness_interpreter(workspace)
         if args.command == "run":
             return _run_stage(args.stage, args.run_id)
         if args.command == "report":
             run_id = validate_run_id(args.run_id)
-            workspace = checked_workspace_root()
             state = runtime_root(workspace)
             if not state.is_dir():
                 raise HarnessError("report_not_found")
@@ -43,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             ensure_owner_directory(runs, anchor=state)
             ensure_owner_directory(run_directory, anchor=state)
             path = run_directory / "report.json"
-            print(json.dumps(load_report(path), ensure_ascii=True, indent=2))
+            fixture_texts = _fixture_texts_for_report(run_directory)
+            print(json.dumps(load_report(path, fixture_texts=fixture_texts), ensure_ascii=True, indent=2))
             return 0
         raise HarnessError("unknown_command")
     except HarnessError as exc:
@@ -57,3 +60,14 @@ def _run_stage(stage: str, run_id: str) -> int:
     report_path = run_sanity(run_id=run_id)
     print(json.dumps({"run_id": run_id, "report": str(report_path)}, ensure_ascii=True))
     return 0
+
+
+def _fixture_texts_for_report(run_directory: Path) -> tuple[str, ...]:
+    """Select report redaction data from trusted, per-run metadata only."""
+    try:
+        metadata = json.loads(read_private_text(run_directory / "run.json"))
+    except (HarnessError, OSError, ValueError) as exc:
+        raise HarnessError("report_fixture_source_unknown") from exc
+    if metadata != {"stage": "sanity", "fixture_set": "stage1-mini"}:
+        raise HarnessError("report_fixture_source_unknown")
+    return tuple(message["content"] for message in load_sanity_fixture().messages)
