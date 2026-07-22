@@ -559,6 +559,23 @@ class MemoryStore:
             queue_plaintext_bytes=int(row["plaintext_bytes"] or 0),
         )
 
+    def has_provider_data_history(self) -> bool:
+        """Whether the active epoch contains any queued or terminal Memory history."""
+
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return False
+            row = conn.execute(
+                """
+                SELECT 1 FROM memory_capture_queue
+                WHERE epoch = ?
+                LIMIT 1
+                """,
+                (meta.epoch,),
+            ).fetchone()
+        return row is not None
+
     def get_queue_row(self, source_message_digest: str) -> QueueRow | None:
         """Return one queue row for worker and focused store tests."""
 

@@ -329,6 +329,90 @@ async def reconcile_agent_backends(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def reconcile_memory(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Ask the controller to apply persisted Memory settings in place."""
+
+    return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_status(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_profile(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/profile", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_search(
+    query: str,
+    limit: int,
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "POST",
+        "/internal/memory/search",
+        payload={"query": query, "limit": limit},
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_clear(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "POST",
+        "/internal/memory/clear",
+        payload={"confirm": True},
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def _memory_request(
+    method: str,
+    route: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float,
+) -> dict[str, Any]:
+    target = (socket_path or default_socket_path()).expanduser().resolve()
+    if not target.exists():
+        raise InternalServerUnavailable(f"dispatch socket missing at {target}")
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            response = await client.request(method, route, json=payload)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {"status": "failed", "error": "memory_provider_response_invalid"}
+    return {"status_code": response.status_code, "body": body}
+
+
 async def notify_vault_request_created(
     request_payload: dict[str, Any],
     *,

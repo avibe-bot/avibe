@@ -163,6 +163,70 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/dispatch", ("POST",)) in routes
     assert ("/internal/events", ("GET",)) in routes
     assert ("/internal/events", ("POST",)) in routes
+    assert ("/internal/reconcile-memory", ("POST",)) in routes
+    assert ("/internal/memory/status", ("GET",)) in routes
+    assert ("/internal/memory/profile", ("GET",)) in routes
+    assert ("/internal/memory/search", ("POST",)) in routes
+    assert ("/internal/memory/clear", ("POST",)) in routes
+
+
+def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
+    controller = _build_controller_double()
+    calls: list[tuple[str, object]] = []
+
+    class _Runtime:
+        async def status_payload(self):
+            calls.append(("status", None))
+            return {"state": "ready", "data_exists": True}
+
+        async def profile_payload(self):
+            calls.append(("profile", None))
+            return {"status": "ok", "items": []}
+
+        async def search_payload(self, query, limit):
+            calls.append(("search", (query, limit)))
+            return {"status": "ok", "items": []}
+
+        async def clear(self):
+            calls.append(("clear", None))
+            return {"status": "completed", "epoch": 2}
+
+    async def reconcile_memory(config):
+        calls.append(("reconcile", config))
+        return {"ok": True, "state": "ready"}
+
+    controller.memory_runtime = _Runtime()
+    controller.reconcile_memory = reconcile_memory
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured-memory"))
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (
+                await client.get("/internal/memory/status"),
+                await client.get("/internal/memory/profile"),
+                await client.post("/internal/memory/search", json={"query": "safe query", "limit": 3}),
+                await client.post("/internal/memory/clear", json={"confirm": True}),
+                await client.post("/internal/reconcile-memory"),
+                await client.post("/internal/memory/search", json=[]),
+            )
+
+    status, profile, search, clear, reconcile, invalid = asyncio.run(_go())
+
+    assert status.json() == {"state": "ready", "data_exists": True}
+    assert profile.json() == {"status": "ok", "items": []}
+    assert search.json() == {"status": "ok", "items": []}
+    assert clear.json() == {"status": "completed", "epoch": 2}
+    assert reconcile.json() == {"ok": True, "state": "ready"}
+    assert invalid.status_code == 400
+    assert calls == [
+        ("status", None),
+        ("profile", None),
+        ("search", ("safe query", 3)),
+        ("clear", None),
+        ("reconcile", "configured-memory"),
+    ]
 
 
 def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):

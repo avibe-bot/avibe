@@ -115,6 +115,17 @@ class MemoryModule:
             enabled=self._is_enabled,
         )
 
+    def _replace_provider(self, provider: MemoryProviderPort) -> None:
+        """Swap the private provider shared by direct reads and the worker.
+
+        ``MemoryRuntime`` holds the module lifecycle lock before invoking this,
+        so a sidecar credential/runtime replacement cannot split these two
+        consumers across provider instances.
+        """
+
+        self._provider = provider
+        self._worker._provider = provider
+
     async def capture(self, request: CaptureRequest) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
@@ -459,6 +470,41 @@ class MemoryModule:
         await asyncio.to_thread(self._verify_owned_provider_root, meta, require_empty=False)
         await self._run_owned_provider_cleanup()
         await asyncio.to_thread(self._recreate_owned_provider_root, meta)
+
+    def _ensure_owned_provider_root(self, meta: MemoryMeta) -> None:
+        """Create the first sentinel-owned root or verify an existing one.
+
+        Runtime wiring calls this private helper before starting EverOS. Keeping
+        it here means first enablement and Clear all use the same ownership
+        sentinel rules without widening the frozen MemoryModule interface.
+        """
+
+        _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
+        parent = self._provider_root.parent
+        try:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as error:
+            raise _ClearStepFailure("provider root parent cannot be created") from error
+        _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
+        parent_info = _lstat_or_clear_failure(parent, "provider root parent")
+        _require_owned_directory(parent_info, "provider root parent", private=True)
+        try:
+            root_info = self._provider_root.lstat()
+        except FileNotFoundError:
+            self._provider_root.mkdir(mode=0o700)
+            root_info = self._provider_root.lstat()
+        _require_owned_directory(root_info, "provider root", private=True)
+        sentinel = self._provider_root / ROOT_SENTINEL_FILENAME
+        if sentinel.exists() or sentinel.is_symlink():
+            self._verify_owned_provider_root(meta, require_empty=False)
+            return
+        try:
+            with os.scandir(self._provider_root) as entries:
+                if any(True for _entry in entries):
+                    raise _ClearStepFailure("provider root is not empty")
+        except OSError as error:
+            raise _ClearStepFailure("provider root cannot be read") from error
+        self._write_root_sentinel(meta)
 
     def _root_lifecycle_lock(self) -> asyncio.Lock:
         return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())

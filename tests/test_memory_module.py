@@ -981,9 +981,12 @@ async def test_health_recovery_clears_only_the_persisted_system_outage_error(tmp
     assert (await module.status()).state == "ready"
 
 
-def test_slice2_placeholder_modules_expose_no_public_runtime_types() -> None:
+def test_slice2_runtime_types_remain_internal_to_the_memory_package() -> None:
     import core.memory.artifact as artifact
     import core.memory.process as process
+    import core.memory as memory
 
-    assert not hasattr(artifact, "MemoryArtifactManager")
-    assert not hasattr(process, "EverOSProcess")
+    assert hasattr(artifact, "MemoryArtifactManager")
+    assert hasattr(process, "EverOSProcess")
+    assert "MemoryArtifactManager" not in memory.__all__
+    assert "EverOSProcess" not in memory.__all__

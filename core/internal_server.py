@@ -425,6 +425,80 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.exception("internal Agent backend reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    def _memory_runtime():
+        return getattr(controller, "memory_runtime", None)
+
+    @app.post("/internal/reconcile-memory")
+    async def _reconcile_memory() -> Any:
+        """Hot-apply persisted Memory configuration on the controller loop."""
+
+        try:
+            from config.v2_config import V2Config
+
+            config = await asyncio.to_thread(V2Config.load)
+            result = await controller.reconcile_memory(config.memory)
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.warning("internal memory reconcile failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
+
+    @app.get("/internal/memory/status")
+    async def _memory_status() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.status_payload()
+        except Exception:
+            logger.warning("internal memory status failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/profile")
+    async def _memory_profile() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        try:
+            return await runtime.profile_payload()
+        except Exception:
+            logger.warning("internal memory profile failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/search")
+    async def _memory_search(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"query", "limit"}
+            or not isinstance(payload.get("query"), str)
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        limit = payload.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.search_payload(payload["query"], limit)
+        except Exception:
+            logger.warning("internal memory search failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/clear")
+    async def _memory_clear(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.clear()
+        except Exception:
+            logger.warning("internal memory clear failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
     @app.get("/internal/events")
     async def _events() -> Any:
         """Long-lived SSE feed of Controller-side inbox events.

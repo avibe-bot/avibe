@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import threading
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import List, Literal, Optional, Union
+from urllib.parse import urlsplit, urlunsplit
 
 from config import paths
 from config.platform_registry import (
@@ -224,6 +226,151 @@ class AudioAsrConfig:
     max_file_bytes: Optional[int] = None
 
 
+_MEMORY_MAX_URL_BYTES = 2048
+_MEMORY_MAX_MODEL_BYTES = 512
+_MEMORY_MAX_API_KEY_BYTES = 16 * 1024
+
+
+@dataclass
+class MemoryEndpointConfig:
+    """One write-only processing endpoint used by the local memory sidecar."""
+
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = field(default=None, repr=False)
+
+    def validate(self, *, name: str) -> None:
+        self.base_url = _validate_memory_url(self.base_url, name=name)
+        self.model = _validate_memory_text(
+            self.model,
+            name=f"memory.processing.{name}.model",
+            maximum=_MEMORY_MAX_MODEL_BYTES,
+        )
+        self.api_key = _validate_memory_key(self.api_key, name=name)
+
+    def complete(self) -> bool:
+        return bool(self.base_url and self.model and self.api_key)
+
+
+@dataclass
+class MemoryProcessingConfig:
+    llm: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
+    embedding: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
+
+    def validate(self) -> None:
+        self.llm.validate(name="llm")
+        self.embedding.validate(name="embedding")
+
+
+@dataclass
+class MemoryConfig:
+    """Persisted local EverOS configuration; credentials are API-write-only."""
+
+    enabled: bool = False
+    processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("Config 'memory.enabled' must be a boolean")
+        self.processing.validate()
+        if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
+            raise ValueError("Both Memory processing endpoints must be complete before enabling Memory")
+
+
+def _validate_memory_url(value: object, *, name: str) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config 'memory.processing.{name}.base_url' must be a string")
+    candidate = value.strip()
+    if (
+        not candidate
+        or len(candidate.encode("utf-8")) > _MEMORY_MAX_URL_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+    ):
+        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError(f"Config 'memory.processing.{name}.base_url' requires HTTPS")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _validate_memory_text(value: object, *, name: str, maximum: int) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config '{name}' must be a string")
+    candidate = value.strip()
+    if (
+        not candidate
+        or len(candidate.encode("utf-8")) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+        or _looks_like_ui_mask(candidate)
+    ):
+        raise ValueError(f"Config '{name}' is invalid")
+    return candidate
+
+
+def _validate_memory_key(value: object, *, name: str) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config 'memory.processing.{name}.api_key' must be a string")
+    if (
+        len(value.encode("utf-8")) > _MEMORY_MAX_API_KEY_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or _looks_like_ui_mask(value)
+    ):
+        raise ValueError(f"Config 'memory.processing.{name}.api_key' is invalid")
+    return value
+
+
+def _looks_like_ui_mask(value: str) -> bool:
+    stripped = value.strip()
+    return bool(stripped) and all(character in {"*", "•", "x", "X"} for character in stripped)
+
+
+def memory_config_to_payload(memory: MemoryConfig, *, include_secrets: bool = False) -> dict:
+    """Project Memory config without ever returning a reusable API key."""
+
+    def endpoint_payload(endpoint: MemoryEndpointConfig) -> dict:
+        key = endpoint.api_key
+        return {
+            "base_url": endpoint.base_url,
+            "model": endpoint.model,
+            "api_key": key if include_secrets else None,
+            "has_api_key": bool(key),
+        }
+
+    return {
+        "enabled": memory.enabled,
+        "processing": {
+            "llm": endpoint_payload(memory.processing.llm),
+            "embedding": endpoint_payload(memory.processing.embedding),
+        },
+    }
+
+
 @dataclass
 class RuntimeConfig:
     default_cwd: str
@@ -417,6 +564,7 @@ class V2Config:
     slack: SlackConfig
     runtime: RuntimeConfig
     agents: AgentsConfig
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     platform: str = "slack"
     platforms: PlatformsConfig = field(default_factory=PlatformsConfig)
     discord: Optional[DiscordConfig] = None
@@ -568,6 +716,31 @@ class V2Config:
             avault=avault,
         )
 
+        memory_payload = payload.get("memory") or {}
+        if not isinstance(memory_payload, dict):
+            raise ValueError("Config 'memory' must be an object")
+        memory_processing_payload = memory_payload.get("processing") or {}
+        if not isinstance(memory_processing_payload, dict):
+            raise ValueError("Config 'memory.processing' must be an object")
+        memory_llm_payload = memory_processing_payload.get("llm") or {}
+        memory_embedding_payload = memory_processing_payload.get("embedding") or {}
+        if not isinstance(memory_llm_payload, dict):
+            raise ValueError("Config 'memory.processing.llm' must be an object")
+        if not isinstance(memory_embedding_payload, dict):
+            raise ValueError("Config 'memory.processing.embedding' must be an object")
+        memory = MemoryConfig(
+            enabled=memory_payload.get("enabled", False),
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig(
+                    **_filter_dataclass_fields(MemoryEndpointConfig, memory_llm_payload)
+                ),
+                embedding=MemoryEndpointConfig(
+                    **_filter_dataclass_fields(MemoryEndpointConfig, memory_embedding_payload)
+                ),
+            ),
+        )
+        memory.validate()
+
         ui_payload = payload.get("ui") or {}
         if not isinstance(ui_payload, dict):
             raise ValueError("Config 'ui' must be an object")
@@ -695,6 +868,7 @@ class V2Config:
             platform_configs={key: value for key, value in platform_configs.items() if value is not None},
             runtime=runtime,
             agents=agents,
+            memory=memory,
             gateway=gateway,
             ui=ui,
             remote_access=remote_access,
@@ -726,6 +900,7 @@ class V2Config:
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         self.platforms.validate()
+        self.memory.validate()
         self.platform = self.platforms.primary
         platform_payload = {}
         for descriptor in platform_descriptors():
@@ -756,6 +931,7 @@ class V2Config:
                 "codex": self.agents.codex.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
+            "memory": memory_config_to_payload(self.memory, include_secrets=True),
             "gateway": self.gateway.__dict__ if self.gateway else None,
             "ui": self.ui.__dict__,
             "remote_access": {

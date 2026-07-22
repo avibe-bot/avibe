@@ -827,10 +827,14 @@ def _validate_enabled_platform_runtime_credentials(
             raise ValueError(f"Config '{fields_text}' must be provided when {platform} is enabled")
 
 
-def save_config(payload: dict) -> V2Config:
+def save_config(payload: dict, *, allow_memory: bool = False) -> V2Config:
+    """Save general settings while preserving Memory's dedicated settings block."""
+
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
+    if not allow_memory:
+        payload = {key: value for key, value in payload.items() if key != "memory"}
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
@@ -889,6 +893,14 @@ def save_config(payload: dict) -> V2Config:
             pass
         _ensure_builtin_default_agents(config)
         return config
+
+
+def save_memory_config(memory_payload: dict) -> V2Config:
+    """Persist Memory settings only from the direct-loopback Memory route."""
+
+    if not isinstance(memory_payload, dict):
+        raise ValueError("Memory config payload must be an object")
+    return save_config({"memory": memory_payload}, allow_memory=True)
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
@@ -974,6 +986,7 @@ def _default_instance_name(config: V2Config, *, system_hostname: str) -> str:
 
 def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dict:
     from config.platform_registry import platform_descriptors
+    from config.v2_config import memory_config_to_payload
     from modules.agents.catalog import agent_backend_catalog_payload
 
     system_hostname = _system_hostname()
@@ -1015,6 +1028,7 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             # resets ``agents.avault.cli_path`` to the dataclass default.
             "avault": config.agents.avault.__dict__,
         },
+        "memory": memory_config_to_payload(config.memory, include_secrets=include_secrets),
         "gateway": _project_secret_fields(
             config.gateway.__dict__ if config.gateway else None,
             _GATEWAY_SECRET_FIELDS,
