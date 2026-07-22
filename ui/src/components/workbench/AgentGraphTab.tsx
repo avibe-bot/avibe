@@ -5,6 +5,8 @@ import { ChevronDown, Clock, FolderClosed, Loader2, RefreshCw, ServerCrash } fro
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
+import type { RunningAgent } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 import { SegmentedRadio } from '../ui/segmented';
@@ -17,6 +19,7 @@ import {
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
 import { AgentGraphDetail } from './AgentGraphDetail';
+import { AgentGraphOrphanStrip } from './AgentGraphOrphanStrip';
 
 // Degraded-mode refresh cadence while SSE is disconnected (mirrors the old
 // RunningAgentsTab). SSE covers lifecycle writes when connected.
@@ -43,10 +46,15 @@ function useIsDesktop(): boolean {
 export const AgentGraphTab: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
 
   const [graph, setGraph] = useState<GraphPayload | null>(null);
+  // Session-less orphan processes (contract A3) — surfaced in a strip above the
+  // graph, not as nodes. Sourced from the running-agents snapshot, so they are
+  // filter-independent like the badge.
+  const [orphans, setOrphans] = useState<RunningAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState(false);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
@@ -89,16 +97,23 @@ export const AgentGraphTab: React.FC = () => {
       const seq = ++seqRef.current;
       if (!background) setLoading(true);
       try {
-        const result = await api.getAgentsGraph({
-          window: windowSel,
-          project: projectSel,
-          includeEnded: mode === 'history',
-          includeBackground: showBackground,
-        });
+        // Orphans come from the (filter-independent) running-agents snapshot in
+        // parallel with the filtered graph; a running-agents failure must not
+        // fail the graph fetch.
+        const [result, running] = await Promise.all([
+          api.getAgentsGraph({
+            window: windowSel,
+            project: projectSel,
+            includeEnded: mode === 'history',
+            includeBackground: showBackground,
+          }),
+          api.getRunningAgents().catch(() => null),
+        ]);
         // Ignore a stale response: a slower earlier request must not clobber a
         // newer one issued after a filter change.
         if (!mountedRef.current || seq !== seqRef.current) return;
         setGraph(result);
+        setOrphans(running && running.ok ? running.agents.filter((a) => !a.session_id) : []);
         setErrored(false);
       } catch {
         if (mountedRef.current && seq === seqRef.current) setErrored(true);
@@ -107,6 +122,32 @@ export const AgentGraphTab: React.FC = () => {
       }
     },
     [api, windowSel, projectSel, mode, showBackground],
+  );
+
+  // Kill a session-less orphan process (A3): orphan teardown resolves by pid, so
+  // pass the snapshot row's identifiers straight through.
+  const killOrphan = useCallback(
+    async (orphan: RunningAgent) => {
+      try {
+        const result = await api.endRunningAgent({
+          backend: orphan.backend,
+          state: orphan.state,
+          session_id: orphan.session_id,
+          composite_key: orphan.composite_key,
+          base_session_id: orphan.base_session_id,
+          pid: orphan.pid,
+        });
+        if (result.ok) {
+          showToast(t('agents.running.endedToast'), 'success');
+          void fetchGraph(true);
+        } else {
+          showToast(t('agents.running.endFailedToast', { error: result.error || 'failed' }), 'error');
+        }
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [api, showToast, t, fetchGraph],
   );
 
   useEffect(() => {
@@ -273,6 +314,9 @@ export const AgentGraphTab: React.FC = () => {
           {t('agents.graph.unreachable')}
         </div>
       )}
+
+      {/* Orphan strip (A3) — session-less leaked processes, above the graph. */}
+      <AgentGraphOrphanStrip orphans={orphans} onKill={killOrphan} />
 
       {loading && !graph ? (
         <div className="flex items-center justify-center py-16">

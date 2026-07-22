@@ -1934,6 +1934,10 @@
       "empty": "No sessions in this view yet.",
       "error": "Couldn't load the run graph.",
       "unreachable": "Runtime unreachable — showing history only.",
+      "orphans": {
+        "title": "{{count}} orphan process(es)",
+        "description": "Leaked runtimes with no session — not shown as graph nodes. You can end them here."
+      },
       "filters": {
         "modeLabel": "Time range",
         "active": "Active",

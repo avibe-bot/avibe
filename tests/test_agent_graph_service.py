@@ -207,6 +207,7 @@ def seeded(isolated_state):
         _insert_session(conn, "ses_child_b", scope_id=PROJECT_SCOPE, backend="claude", title="Frontend lane")
         _insert_session(conn, "ses_standalone", scope_id=None, backend="codex", title="Standalone")
         _insert_session(conn, "ses_triggered", scope_id=PROJECT_SCOPE, backend="claude", title="Daily draft")
+        _insert_session(conn, "ses_queued", scope_id=PROJECT_SCOPE, backend="claude", title="Queued lane")
         _insert_session(conn, "ses_old", scope_id=PROJECT_SCOPE, backend="claude", title="Old",
                         created=NOW - timedelta(days=3), last_active=NOW - timedelta(days=3))
 
@@ -218,10 +219,15 @@ def seeded(isolated_state):
         _insert_run(conn, "run_a2", session_id="ses_child_a", source_kind="agent",
                     source_actor="ses_root", callback_session_id="ses_root",
                     callback_status="pending", created=NOW - timedelta(minutes=20))
-        # spawn ses_root → ses_child_b (1 run)
+        # spawn ses_root → ses_child_b (1 run); it also *routes* a callback to root
+        # but with NULL callback_status (sync-delegated) — A4 ⇒ no callback edge.
         _insert_run(conn, "run_b1", session_id="ses_child_b", source_kind="agent",
-                    source_actor="ses_root", status="succeeded", created=NOW - timedelta(minutes=30),
+                    source_actor="ses_root", status="succeeded", callback_session_id="ses_root",
+                    callback_status=None, created=NOW - timedelta(minutes=30),
                     completed=NOW - timedelta(minutes=18))
+        # queued (accepted-but-not-started) non-live run — A5 ⇒ shows in Active.
+        _insert_run(conn, "run_q1", session_id="ses_queued", status="queued",
+                    created=NOW - timedelta(minutes=5))
         # standalone root, its own failed run
         _insert_run(conn, "run_s1", session_id="ses_standalone", status="failed",
                     created=NOW - timedelta(minutes=50))
@@ -264,7 +270,9 @@ def test_history_payload_shape(seeded):
 
     nodes = _nodes_by_id(payload)
     # ses_old is outside the 24h window and not live → excluded.
-    assert set(nodes) == {"ses_root", "ses_child_a", "ses_child_b", "ses_standalone", "ses_triggered"}
+    assert set(nodes) == {
+        "ses_root", "ses_child_a", "ses_child_b", "ses_standalone", "ses_triggered", "ses_queued",
+    }
 
 
 def test_live_and_ended_status(seeded):
@@ -314,6 +322,13 @@ def test_callback_edge(seeded):
     assert cb["status"] == "pending"
 
 
+def test_a4_no_callback_edge_without_status(seeded):
+    # run_b1 routes a callback to ses_root but with NULL callback_status
+    # (sync-delegated); A4 ⇒ no edge emitted.
+    payload = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded)
+    assert _edge(payload, "callback", "ses_child_b", "ses_root") is None
+
+
 def test_trigger_edge_and_node(seeded):
     payload = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded)
     tr = _edge(payload, "trigger", "def:def_daily", "ses_triggered")
@@ -352,21 +367,25 @@ def test_counts(seeded):
     assert counts["live"] == 2
     assert counts["active"] == 1
     assert counts["idle"] == 1
-    assert counts["ended"] == 3
-    assert counts["total"] == 5
+    assert counts["queued"] == 1
+    assert counts["ended"] == 4
+    assert counts["total"] == 6
     # visibility column absent (pre-M1) ⇒ everything reads foreground
-    assert counts["foreground"] == 5
+    assert counts["foreground"] == 6
     assert counts["background"] == 0
 
 
 # ── filters ──────────────────────────────────────────────────────────────────
 
 
-def test_live_only_mode(seeded):
+def test_active_mode_keeps_live_and_queued(seeded):
+    # A5: Active view = non-terminal (live + queued). Live ses_root/ses_child_a
+    # AND the queued ses_queued stay; terminal non-live nodes drop.
     payload = agent_graph.build_graph(live_agents=LIVE, now=NOW, engine=seeded, include_ended=False)
     nodes = _nodes_by_id(payload)
-    assert set(nodes) == {"ses_root", "ses_child_a"}
-    # edges to dropped nodes are gone; the callback within the live pair stays
+    assert set(nodes) == {"ses_root", "ses_child_a", "ses_queued"}
+    assert nodes["ses_queued"]["status"] == "queued"
+    # edges to dropped (terminal) nodes are gone; the live-pair callback stays
     assert _edge(payload, "callback", "ses_child_a", "ses_root") is not None
     assert _edge(payload, "spawn", "ses_root", "ses_child_b") is None
     assert _edge(payload, "trigger", "def:def_daily", "ses_triggered") is None

@@ -229,7 +229,7 @@ def build_graph(
     engine = engine or create_sqlite_engine()
     try:
         with engine.connect() as conn:
-            candidate_ids = _resolve_candidates(conn, live_ids, cutoff_iso, include_ended)
+            candidate_ids = _resolve_candidates(conn, live_ids, cutoff_iso)
             if not candidate_ids:
                 return _empty_payload(now, window, live_unreachable)
 
@@ -277,17 +277,17 @@ def _empty_payload(now: datetime, window: str, live_unreachable: bool) -> dict[s
     }
 
 
-def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str, include_ended: bool) -> set[str]:
+def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
     """The set of session ids that become nodes.
 
-    Always the live sessions. In history mode, also every session with a run in
-    the window, plus the sessions those runs reference as caller
-    (``source_actor``) or callback target — so tree roots and report targets
-    render even when they have no in-window run of their own.
+    Always the live sessions, plus every session with a run in the window and
+    the sessions those runs reference as caller (``source_actor``) or callback
+    target — so tree roots, report targets, and (per contract A5) queued work
+    render. ``_filter_nodes`` then narrows to the active (non-terminal) or full
+    (history) view; this stays broad so a queued-but-not-live session is a
+    candidate the active filter can keep.
     """
     candidates: set[str] = set(live_ids)
-    if not include_ended:
-        return candidates
     stmt = select(
         agent_runs.c.session_id,
         agent_runs.c.source_kind,
@@ -389,13 +389,16 @@ def _build_edges(
                     agg["last_at"] = created
                     agg["last_run_id"] = run.get("id")
             # callback: this session → report target
-            if run.get("callback_session_id"):
+            # Contract A4: only emit a callback edge once a callback_status is
+            # recorded. A run that merely routes a callback (sync-delegated,
+            # null status — nothing will be delivered) produces no edge.
+            if run.get("callback_session_id") and run.get("callback_status"):
                 key = (session_id, run["callback_session_id"])
                 agg = callback.setdefault(key, {"status": None, "last_run_id": None, "last_at": None})
                 if agg["last_at"] is None or _newer(agg["last_at"], created):
                     agg["last_at"] = created
                     agg["last_run_id"] = run.get("callback_run_id") or run.get("id")
-                    agg["status"] = run.get("callback_status") or "pending"
+                    agg["status"] = run.get("callback_status")
             # trigger: definition → this session
             if run.get("run_type") in _TRIGGER_RUN_TYPES and run.get("definition_id"):
                 definition_id = run["definition_id"]
@@ -416,7 +419,7 @@ def _build_edges(
     for (src, dst), agg in callback.items():
         edges.append({
             "kind": "callback", "from": src, "to": dst,
-            "status": agg["status"] or "pending",
+            "status": agg["status"],
             "last_run_id": agg["last_run_id"], "last_at": _iso_z(agg["last_at"]),
         })
     for (definition_id, dst), agg in trigger.items():
@@ -518,7 +521,10 @@ def _filter_nodes(
 ) -> list[dict[str, Any]]:
     result = nodes
     if not include_ended:
-        result = [n for n in result if n["live"]]
+        # Active view (contract A5) = non-terminal work: live sessions plus
+        # queued (accepted-but-not-started) runs. Only terminal non-live nodes
+        # (succeeded/failed/canceled) are dropped.
+        result = [n for n in result if n["live"] or n["status"] == "queued"]
     if project and project != "all":
         if project == "standalone":
             result = [n for n in result if not n["scope_id"]]
