@@ -70,6 +70,32 @@ def test_search_uses_hybrid_to_receive_nested_atomic_facts(monkeypatch) -> None:
     ]
 
 
+def test_get_is_available_only_through_the_explicit_research_helper(monkeypatch) -> None:
+    headers: list[dict[str, str]] = []
+
+    class _GetResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, dict[str, list[object]]]:
+            return {"data": {"episodes": []}}
+
+    class _GetClient(_Client):
+        @staticmethod
+        def request(*_args: object, **kwargs: object) -> _GetResponse:
+            headers.append(kwargs["headers"])  # type: ignore[arg-type]
+            return _GetResponse()
+
+    monkeypatch.setattr("memory_poc.provider.httpx.HTTPTransport", lambda **_kwargs: object())
+    monkeypatch.setattr("memory_poc.provider.httpx.Client", _GetClient)
+
+    client = EverOSClient(Path("/tmp/everos.sock"))
+    client.research_diagnostic_get(owner_id="owner", memory_type="episode")
+
+    assert not hasattr(client, "get")
+    assert headers == [{"X-Memory-Poc-Phase": "research"}]
+
+
 def test_client_records_redacted_public_http_shapes(monkeypatch) -> None:
     headers: list[dict[str, str]] = []
 

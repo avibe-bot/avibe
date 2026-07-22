@@ -6,8 +6,8 @@ import sys
 from pathlib import Path
 
 from .constants import STAGES
-from .errors import HarnessError, StageNotImplementedError
-from .environment import checked_workspace_root, verify_harness_interpreter
+from .errors import ConfigurationError, HarnessError, StageNotImplementedError
+from .environment import checked_workspace_root, discover_provider_settings, verify_harness_interpreter
 from .paths import ensure_owner_directory, read_private_text, runtime_root
 from .reports import load_report
 from .sanity import load_sanity_fixture, run_sanity
@@ -46,7 +46,13 @@ def main(argv: list[str] | None = None) -> int:
             ensure_owner_directory(run_directory, anchor=state)
             path = run_directory / "report.json"
             fixture_texts = _fixture_texts_for_report(run_directory)
-            print(json.dumps(load_report(path, fixture_texts=fixture_texts), ensure_ascii=True, indent=2))
+            print(
+                json.dumps(
+                    load_report(path, fixture_texts=fixture_texts, secret_values=_report_secret_values(workspace)),
+                    ensure_ascii=True,
+                    indent=2,
+                )
+            )
             return 0
         raise HarnessError("unknown_command")
     except HarnessError as exc:
@@ -71,3 +77,14 @@ def _fixture_texts_for_report(run_directory: Path) -> tuple[str, ...]:
     if metadata != {"stage": "sanity", "fixture_set": "stage1-mini"}:
         raise HarnessError("report_fixture_source_unknown")
     return tuple(message["content"] for message in load_sanity_fixture().messages)
+
+
+def _report_secret_values(workspace: Path) -> tuple[str, ...]:
+    """Use live configuration for report redaction when it is safely available."""
+    try:
+        settings = discover_provider_settings(workspace)
+    except ConfigurationError as exc:
+        if str(exc).split(":", 1)[0] in {"provider_configuration_missing", "provider_configuration_incomplete"}:
+            return ()
+        raise
+    return (settings.llm_api_key, settings.embedding_api_key)

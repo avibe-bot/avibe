@@ -7,18 +7,29 @@ from typing import Any
 MAX_BODY_BYTES = 64 * 1024
 
 
-def validate_request(method: str, path: str, body: bytes, *, owner_id: str) -> str | None:
+def _is_strict_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_request(
+    method: str,
+    path: str,
+    body: bytes,
+    *,
+    owner_id: str,
+    phase: str = "unattributed",
+) -> str | None:
     """Return a closed, payload-free rejection reason for non-MVP requests."""
     if not isinstance(owner_id, str) or not owner_id:
         return "fixed_owner_missing"
     if method == "GET" and path == "/health":
         return None
-    if method != "POST" or path not in {
-        "/api/v1/memory/add",
-        "/api/v1/memory/flush",
-        "/api/v1/memory/search",
-        "/api/v1/memory/get",
-    }:
+    phase_routes = {
+        "ingestion": {"/api/v1/memory/add", "/api/v1/memory/flush"},
+        "read": {"/api/v1/memory/search"},
+        "research": {"/api/v1/memory/get"},
+    }
+    if method != "POST" or path not in phase_routes.get(phase, set()):
         return "route_not_allowed"
     if len(body) > MAX_BODY_BYTES:
         return "body_too_large"
@@ -99,7 +110,7 @@ def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
         return "search_owner_rejected"
     if payload.get("method") != "hybrid":
         return "search_method_rejected"
-    if type(payload.get("top_k")) is not int or payload["top_k"] != 8 or payload.get("include_profile") is not True:
+    if not _is_strict_int(payload.get("top_k")) or payload["top_k"] != 8 or payload.get("include_profile") is not True:
         return "search_options_rejected"
     if payload.get("enable_llm_rerank") is not False:
         return "search_rerank_rejected"
@@ -118,9 +129,9 @@ def _validate_get(payload: dict[str, Any], owner_id: str) -> str | None:
     if payload.get("memory_type") not in {"profile", "episode"}:
         return "get_memory_type_rejected"
     if (
-        type(payload.get("page")) is not int
+        not _is_strict_int(payload.get("page"))
         or payload["page"] != 1
-        or type(payload.get("page_size")) is not int
+        or not _is_strict_int(payload.get("page_size"))
         or payload["page_size"] != 20
         or payload.get("sort_by") != "timestamp"
         or payload.get("sort_order") != "desc"

@@ -122,7 +122,7 @@ def _settings_from_values(values: dict[str, str], source: Path) -> ProviderSetti
     missing = [key for key in REQUIRED_PROVIDER_ENV_KEYS if values.get(key, "").strip() in {"", _PLACEHOLDER}]
     if missing:
         raise ConfigurationError("provider_configuration_incomplete:" + ",".join(missing))
-    _assert_model_names_are_not_keys(values)
+    _assert_model_names_do_not_contain_keys(values)
     return ProviderSettings(
         llm_base_url=values["LLM_BASE_URL"],
         llm_model=values["LLM_MODEL"],
@@ -134,11 +134,11 @@ def _settings_from_values(values: dict[str, str], source: Path) -> ProviderSetti
     )
 
 
-def _assert_model_names_are_not_keys(values: dict[str, str]) -> None:
+def _assert_model_names_do_not_contain_keys(values: dict[str, str]) -> None:
     model_values = (values["LLM_MODEL"], values["EMBEDDING_MODEL"])
     key_values = (values["LLM_API_KEY"], values["EMBEDDING_API_KEY"])
-    if any(model == key for model in model_values for key in key_values):
-        raise ConfigurationError("provider_model_matches_secret")
+    if any(key and key in model for model in model_values for key in key_values):
+        raise ConfigurationError("provider_model_contains_secret")
 
 
 def locked_environment_python(root: Path | None = None) -> Path:

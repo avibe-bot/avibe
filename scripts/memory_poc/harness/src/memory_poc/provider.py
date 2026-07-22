@@ -70,7 +70,8 @@ class EverOSClient:
             phase="ingestion",
         )
 
-    def get(self, *, owner_id: str, memory_type: str) -> dict[str, Any]:
+    def research_diagnostic_get(self, *, owner_id: str, memory_type: str) -> dict[str, Any]:
+        """Use `/get` only for isolated research diagnostics, never MVP reads."""
         return self._request(
             "POST",
             "/api/v1/memory/get",
@@ -84,7 +85,7 @@ class EverOSClient:
                 "sort_by": "timestamp",
                 "sort_order": "desc",
             },
-            phase="read",
+            phase="research",
         )
 
     def search(self, *, owner_id: str, query: str) -> dict[str, Any]:
@@ -208,7 +209,7 @@ def _closed_code(value: Any) -> int | str | None:
         return None
     for key in ("code", "error_code"):
         candidate = value.get(key)
-        if type(candidate) is int and -999_999 <= candidate <= 999_999:
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and -999_999 <= candidate <= 999_999:
             return candidate
         if isinstance(candidate, str) and _safe_schema_key(candidate):
             return candidate

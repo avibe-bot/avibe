@@ -95,11 +95,11 @@ def serve(uds: Path) -> None:
 
     @app.middleware("http")
     async def guard(request: Any, call_next: Any) -> Any:
-        rejection = validate_request(request.method, request.url.path, await request.body(), owner_id=owner_id)
+        phase = request.headers.get("x-memory-poc-phase", "unattributed")
+        rejection = validate_request(request.method, request.url.path, await request.body(), owner_id=owner_id, phase=phase)
         if rejection is not None:
             return JSONResponse({"detail": "memory_poc_request_rejected"}, status_code=403)
-        phase = request.headers.get("x-memory-poc-phase", "unattributed")
-        token = _REQUEST_PHASE.set(phase if phase in {"ingestion", "read", "health"} else "unattributed")
+        token = _REQUEST_PHASE.set(phase if phase in {"ingestion", "read", "health", "research"} else "unattributed")
         try:
             return await call_next(request)
         finally:

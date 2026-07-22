@@ -10,6 +10,7 @@ from memory_poc.environment import ProviderSettings
 from memory_poc.errors import HarnessError
 from memory_poc.metrics import CallMetrics
 from memory_poc.readiness import SearchReadiness
+from memory_poc.research_inspection import ResearchInspection
 from memory_poc.sanity import (
     SanityFixture,
     _contains_atomic_fact,
@@ -206,11 +207,13 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
     class Process:
         def __init__(self, **_kwargs: object) -> None:
             self.client = Client()
+            self.uds_only_verified = False
 
         def start(self) -> Client:
             return self.client
 
         def stop(self) -> None:
+            self.uds_only_verified = True
             return None
 
     monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)
@@ -242,8 +245,8 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
     criteria = {item["id"]: item for item in report["criteria"]}
     assert criteria["launcher_uds_only"] == {
         "id": "launcher_uds_only",
-        "state": "pass",
-        "value": 1,
+        "state": "fail",
+        "value": 0,
         "threshold": 1,
     }
     assert criteria["restart_preserves"] == {
@@ -251,6 +254,12 @@ def test_sanity_failure_writes_redacted_partial_evidence(tmp_path: Path, monkeyp
         "state": "not_measured",
         "value": None,
         "threshold": None,
+    }
+    assert criteria["no_internals_needed"] == {
+        "id": "no_internals_needed",
+        "state": "fail",
+        "value": 0,
+        "threshold": 1,
     }
     assert report["resources"]["llm_calls"] == 2
     assert report["resources"]["embedding_calls"] == 3
@@ -292,11 +301,13 @@ def test_sanity_passes_core_retrieval_with_a_profile_warning(tmp_path: Path, mon
     class Process:
         def __init__(self, **_kwargs: object) -> None:
             self.client = Client()
+            self.uds_only_verified = False
 
         def start(self) -> Client:
             return self.client
 
         def stop(self) -> None:
+            self.uds_only_verified = True
             return None
 
     readiness = iter(
@@ -314,7 +325,11 @@ def test_sanity_passes_core_retrieval_with_a_profile_warning(tmp_path: Path, mon
     monkeypatch.setattr(sanity, "write_generated_config", lambda **_kwargs: None)
     monkeypatch.setattr(sanity, "EverOSProcess", Process)
     monkeypatch.setattr(sanity, "_read_required_memory", lambda *_args, **_kwargs: next(readiness))
-    monkeypatch.setattr(sanity, "_storage_exists", lambda _root: True)
+    monkeypatch.setattr(
+        sanity,
+        "inspect_isolated_root",
+        lambda _root: ResearchInspection(markdown_present=False, sqlite_present=False, outcome="not_observed"),
+    )
     monkeypatch.setattr(sanity, "read_call_metrics", lambda _path: CallMetrics(llm_calls=2, embedding_calls=3))
 
     report_path = sanity.run_sanity(run_id="r2", workspace=workspace)
@@ -330,7 +345,173 @@ def test_sanity_passes_core_retrieval_with_a_profile_warning(tmp_path: Path, mon
     }
     assert criteria["restart_preserves"]["state"] == "pass"
     assert criteria["no_internals_needed"]["state"] == "pass"
+    assert criteria["launcher_uds_only"]["state"] == "pass"
     assert "Run outcome: pass_with_profile_warning" in summary
     assert "profile content not retrievable via /search within the window; episode+fact retrieval succeeded; profile treated as known-absent" in summary
     assert "profile not published/readable via public search in 1.1.3 + llm-model; accepted as known behavior for MVP." in summary
+    assert "Research-only isolated-root retention inspection (not a delivery gate):" in summary
+    assert "Visible Markdown artifacts: not observed." in summary
+    assert "Private SQLite state: not observed." in summary
     assert "sanity_memory_not_ready" not in summary
+
+
+def test_sanity_marks_an_attempted_restart_read_failure_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settings = ProviderSettings(
+        llm_base_url="https://example.invalid/v1",
+        llm_model="llm-model",
+        llm_api_key="not-a-real-key",
+        embedding_base_url="https://example.invalid/v1",
+        embedding_model="embedding-model",
+        embedding_api_key="not-a-real-key",
+        source=tmp_path / ".env.poc",
+    )
+    fixture = SanityFixture(
+        session_id="stage1-session",
+        owner_id=OWNER_ID,
+        query="Which language does the synthetic owner use?",
+        fact_hint="Python",
+        messages=[{"content": "synthetic fixture body"}],
+    )
+
+    class Client:
+        observed_http_shapes: tuple[object, ...] = ()
+
+        def add(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+        def flush(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    class Process:
+        def __init__(self, **_kwargs: object) -> None:
+            self.client = Client()
+            self.uds_only_verified = False
+
+        def start(self) -> Client:
+            return self.client
+
+        def stop(self) -> None:
+            self.uds_only_verified = True
+
+    readiness = iter(
+        (
+            SearchReadiness(profile_ms=None, episode_ms=1, atomic_fact_ms=1, timeout_ms=600000),
+            SearchReadiness(profile_ms=None, episode_ms=None, atomic_fact_ms=None, timeout_ms=600000),
+        )
+    )
+    monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)
+    monkeypatch.setattr(sanity, "discover_provider_settings", lambda _workspace: settings)
+    monkeypatch.setattr(sanity, "assert_clean_harness_source", lambda _workspace: None)
+    monkeypatch.setattr(sanity, "locked_environment_python", lambda _workspace: tmp_path / "python")
+    monkeypatch.setattr(sanity, "verify_locked_environment", lambda python: python)
+    monkeypatch.setattr(sanity, "load_sanity_fixture", lambda: fixture)
+    monkeypatch.setattr(sanity, "write_generated_config", lambda **_kwargs: None)
+    monkeypatch.setattr(sanity, "EverOSProcess", Process)
+    monkeypatch.setattr(sanity, "_read_required_memory", lambda *_args, **_kwargs: next(readiness))
+    monkeypatch.setattr(
+        sanity,
+        "inspect_isolated_root",
+        lambda _root: ResearchInspection(markdown_present=True, sqlite_present=True, outcome="observed"),
+    )
+    monkeypatch.setattr(sanity, "read_call_metrics", lambda _path: CallMetrics())
+
+    with pytest.raises(HarnessError, match="sanity_memory_not_ready"):
+        sanity.run_sanity(run_id="r3", workspace=workspace)
+
+    report = json.loads((workspace / ".runtime" / "memory-poc" / "runs" / "r3" / "report.json").read_text(encoding="utf-8"))
+    criteria = {item["id"]: item for item in report["criteria"]}
+    assert criteria["launcher_uds_only"] == {"id": "launcher_uds_only", "state": "fail", "value": 0, "threshold": 1}
+    assert criteria["restart_preserves"] == {"id": "restart_preserves", "state": "fail", "value": 0, "threshold": 1}
+    assert criteria["no_internals_needed"] == {"id": "no_internals_needed", "state": "fail", "value": 0, "threshold": 1}
+
+
+def test_sanity_decides_the_uds_gate_after_teardown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settings = ProviderSettings(
+        llm_base_url="https://example.invalid/v1",
+        llm_model="llm-model",
+        llm_api_key="not-a-real-key",
+        embedding_base_url="https://example.invalid/v1",
+        embedding_model="embedding-model",
+        embedding_api_key="not-a-real-key",
+        source=tmp_path / ".env.poc",
+    )
+    fixture = SanityFixture(
+        session_id="stage1-session",
+        owner_id=OWNER_ID,
+        query="Which language does the synthetic owner use?",
+        fact_hint="Python",
+        messages=[{"content": "synthetic fixture body"}],
+    )
+
+    class Client:
+        observed_http_shapes: tuple[object, ...] = ()
+
+        def add(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+        def flush(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    class Process:
+        def __init__(self, **_kwargs: object) -> None:
+            self.client = Client()
+            self.uds_only_verified = False
+
+        def start(self) -> Client:
+            return self.client
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)
+    monkeypatch.setattr(sanity, "discover_provider_settings", lambda _workspace: settings)
+    monkeypatch.setattr(sanity, "assert_clean_harness_source", lambda _workspace: None)
+    monkeypatch.setattr(sanity, "locked_environment_python", lambda _workspace: tmp_path / "python")
+    monkeypatch.setattr(sanity, "verify_locked_environment", lambda python: python)
+    monkeypatch.setattr(sanity, "load_sanity_fixture", lambda: fixture)
+    monkeypatch.setattr(sanity, "write_generated_config", lambda **_kwargs: None)
+    monkeypatch.setattr(sanity, "EverOSProcess", Process)
+    monkeypatch.setattr(
+        sanity,
+        "_read_required_memory",
+        lambda *_args, **_kwargs: SearchReadiness(profile_ms=None, episode_ms=1, atomic_fact_ms=1, timeout_ms=600000),
+    )
+    monkeypatch.setattr(sanity, "read_call_metrics", lambda _path: CallMetrics())
+
+    with pytest.raises(HarnessError, match="sanity_tcp_listener_detected"):
+        sanity.run_sanity(run_id="r4", workspace=workspace)
+
+    report = json.loads((workspace / ".runtime" / "memory-poc" / "runs" / "r4" / "report.json").read_text(encoding="utf-8"))
+    criteria = {item["id"]: item for item in report["criteria"]}
+    assert criteria["launcher_uds_only"] == {"id": "launcher_uds_only", "state": "fail", "value": 0, "threshold": 1}
+
+
+def test_sanity_translates_an_atomic_run_directory_collision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settings = ProviderSettings(
+        llm_base_url="https://example.invalid/v1",
+        llm_model="llm-model",
+        llm_api_key="not-a-real-key",
+        embedding_base_url="https://example.invalid/v1",
+        embedding_model="embedding-model",
+        embedding_api_key="not-a-real-key",
+        source=tmp_path / ".env.poc",
+    )
+
+    def collision(*_args: object, **_kwargs: object) -> None:
+        raise HarnessError("runtime_directory_exists")
+
+    monkeypatch.setattr(sanity, "checked_workspace_root", lambda _workspace: workspace)
+    monkeypatch.setattr(sanity, "discover_provider_settings", lambda _workspace: settings)
+    monkeypatch.setattr(sanity, "assert_clean_harness_source", lambda _workspace: None)
+    monkeypatch.setattr(sanity, "locked_environment_python", lambda _workspace: tmp_path / "python")
+    monkeypatch.setattr(sanity, "verify_locked_environment", lambda python: python)
+    monkeypatch.setattr(sanity, "create_owner_directory", collision)
+
+    with pytest.raises(HarnessError, match="run_id_already_exists"):
+        sanity.run_sanity(run_id="r5", workspace=workspace)

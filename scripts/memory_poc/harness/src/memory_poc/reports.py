@@ -18,6 +18,7 @@ from .paths import read_private_text, workspace_root, write_private_text
 from .pricing import estimate_ingestion_cost
 from .provider import HttpShape
 from .readiness import SearchReadiness
+from .research_inspection import ResearchInspection
 
 _URI_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}:(?://)?", re.IGNORECASE)
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -58,6 +59,7 @@ _RESOURCE_KEYS = {
     "embedding_calls",
 }
 _DUPLICATE_KEYS = {"observed", "count"}
+_REDACTED_MODEL_NAME = "configured-model-redacted"
 
 
 def pending_criteria() -> list[dict[str, Any]]:
@@ -76,7 +78,7 @@ def set_criterion(criteria: list[dict[str, Any]], criterion_id: str, *, state: s
 
 
 def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
-    _assert_model_names_are_not_keys(settings)
+    secret_values = _configured_secret_values(settings)
     return {
         "run_id": run_id,
         "harness_commit": _git_commit(),
@@ -86,8 +88,8 @@ def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
             "machine_class": os.uname().machine,
             "python": platform.python_version(),
             "lock_id": lock_id(),
-            "llm_model": settings.llm_model,
-            "embedding_model": settings.embedding_model,
+            "llm_model": _redacted_model_name(settings.llm_model, secret_values=secret_values),
+            "embedding_model": _redacted_model_name(settings.embedding_model, secret_values=secret_values),
             "endpoint_locality": settings.endpoint_locality(),
             "timezone": local_timezone_name(),
         },
@@ -108,7 +110,12 @@ def build_report(*, run_id: str, settings: ProviderSettings) -> dict[str, Any]:
     }
 
 
-def validate_report(report: dict[str, Any], *, fixture_texts: tuple[str, ...]) -> None:
+def validate_report(
+    report: dict[str, Any],
+    *,
+    fixture_texts: tuple[str, ...],
+    secret_values: tuple[str, ...] = (),
+) -> None:
     if not isinstance(report, dict) or set(report) != _TOP_LEVEL_KEYS:
         raise ReportValidationError("report_top_level_schema_invalid")
     try:
@@ -146,6 +153,7 @@ def validate_report(report: dict[str, Any], *, fixture_texts: tuple[str, ...]) -
         raise ReportValidationError("report_recommendation_invalid")
 
     rendered = json.dumps(report, ensure_ascii=False, sort_keys=True)
+    _assert_secret_free(rendered, secret_values, code="report_contains_secret")
     if _URI_PATTERN.search(rendered):
         raise ReportValidationError("report_contains_uri")
     for fixture_text in fixture_texts:
@@ -160,19 +168,25 @@ def write_report(
     *,
     anchor: Path | None = None,
     fixture_texts: tuple[str, ...],
+    secret_values: tuple[str, ...],
 ) -> None:
-    validate_report(report, fixture_texts=fixture_texts)
+    validate_report(report, fixture_texts=fixture_texts, secret_values=secret_values)
     write_private_text(path, json.dumps(report, ensure_ascii=True, indent=2, sort_keys=False) + "\n", anchor=anchor)
 
 
-def load_report(path: Path, *, fixture_texts: tuple[str, ...]) -> dict[str, Any]:
+def load_report(
+    path: Path,
+    *,
+    fixture_texts: tuple[str, ...],
+    secret_values: tuple[str, ...] = (),
+) -> dict[str, Any]:
     try:
         payload = json.loads(read_private_text(path))
     except (HarnessError, OSError, ValueError) as exc:
         raise ReportValidationError("report_unreadable") from exc
     if not isinstance(payload, dict):
         raise ReportValidationError("report_not_object")
-    validate_report(payload, fixture_texts=fixture_texts)
+    validate_report(payload, fixture_texts=fixture_texts, secret_values=secret_values)
     return payload
 
 
@@ -185,6 +199,7 @@ def write_summary(
     http_shapes: tuple[HttpShape, ...],
     outcome: str = "completed",
     readiness: SearchReadiness | None = None,
+    research_inspection: ResearchInspection | None = None,
     anchor: Path | None = None,
 ) -> None:
     if not _SAFE_IDENTIFIER.fullmatch(outcome):
@@ -194,40 +209,45 @@ def write_summary(
     cost_line = _rough_cost_line(settings, metrics, message_count)
     shape_lines = _http_shape_lines(http_shapes)
     readiness_lines = _search_readiness_lines(readiness)
-    profile_lines = _profile_known_absent_lines(readiness, model_name=settings.llm_model)
-    write_private_text(
-        path,
-        "\n".join(
-            (
-                "# EverOS POC Stage 1 Sanity",
-                "",
-                f"Run outcome: {outcome}",
-                "Ingestion means provider work attributed to add and explicit flush only; readiness and restart reads are excluded.",
-                f"LLM ingestion calls per message: {metrics.ingestion_llm_calls / divisor:.2f}",
-                f"Embedding ingestion calls per message: {metrics.ingestion_embedding_calls / divisor:.2f}",
-                f"Total sidecar LLM calls: {metrics.llm_calls}",
-                f"Total sidecar embedding calls: {metrics.embedding_calls}",
-                *usage_lines,
-                cost_line,
-                "",
-                *readiness_lines,
-                *profile_lines,
-                "",
-                "Observed public HTTP shapes (redacted keys only):",
-                *shape_lines,
-                "",
-            )
-        ),
-        anchor=anchor,
+    secret_values = _configured_secret_values(settings)
+    profile_lines = _profile_known_absent_lines(
+        readiness,
+        model_name=settings.llm_model,
+        secret_values=secret_values,
     )
+    inspection_lines = _research_inspection_lines(research_inspection)
+    rendered = "\n".join(
+        (
+            "# EverOS POC Stage 1 Sanity",
+            "",
+            f"Run outcome: {outcome}",
+            "Ingestion means provider work attributed to add and explicit flush only; readiness and restart reads are excluded.",
+            f"LLM ingestion calls per message: {metrics.ingestion_llm_calls / divisor:.2f}",
+            f"Embedding ingestion calls per message: {metrics.ingestion_embedding_calls / divisor:.2f}",
+            f"Total sidecar LLM calls: {metrics.llm_calls}",
+            f"Total sidecar embedding calls: {metrics.embedding_calls}",
+            *usage_lines,
+            cost_line,
+            "",
+            *readiness_lines,
+            *profile_lines,
+            *inspection_lines,
+            "",
+            "Observed public HTTP shapes (redacted keys only):",
+            *shape_lines,
+            "",
+        )
+    )
+    _assert_secret_free(rendered, secret_values, code="summary_contains_secret")
+    write_private_text(path, rendered, anchor=anchor)
 
 
 def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...]:
     if readiness is None:
         return ()
-    if type(readiness.timeout_ms) is not int or readiness.timeout_ms <= 0:
+    if not _is_strict_int(readiness.timeout_ms) or readiness.timeout_ms <= 0:
         raise ReportValidationError("summary_readiness_timing_invalid")
-    if type(readiness.measurement_started) is not bool:
+    if not isinstance(readiness.measurement_started, bool):
         raise ReportValidationError("summary_readiness_timing_invalid")
     if not readiness.measurement_started:
         return (
@@ -251,7 +271,7 @@ def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...
                 f"- {label} via search: not observed within {readiness.timeout_ms} ms after flush completion."
             )
             continue
-        if type(observed_ms) is not int or observed_ms < 0 or observed_ms > readiness.timeout_ms:
+        if not _is_strict_int(observed_ms) or observed_ms < 0 or observed_ms > readiness.timeout_ms:
             raise ReportValidationError("summary_readiness_timing_invalid")
         observations.append(observed_ms)
         lines.append(f"- {label} via search: first observed {observed_ms} ms after flush completion.")
@@ -262,10 +282,15 @@ def _search_readiness_lines(readiness: SearchReadiness | None) -> tuple[str, ...
     return tuple(lines)
 
 
-def _profile_known_absent_lines(readiness: SearchReadiness | None, *, model_name: str) -> tuple[str, ...]:
+def _profile_known_absent_lines(
+    readiness: SearchReadiness | None,
+    *,
+    model_name: str,
+    secret_values: tuple[str, ...],
+) -> tuple[str, ...]:
     if readiness is None or not readiness.profile_known_absent:
         return ()
-    rendered_model_name = _summary_model_name(model_name)
+    rendered_model_name = _summary_model_name(model_name, secret_values=secret_values)
     return (
         "WARNING: profile content not retrievable via /search within the window; episode+fact retrieval succeeded; "
         "profile treated as known-absent.",
@@ -273,7 +298,7 @@ def _profile_known_absent_lines(readiness: SearchReadiness | None, *, model_name
     )
 
 
-def _summary_model_name(model_name: Any) -> str:
+def _summary_model_name(model_name: Any, *, secret_values: tuple[str, ...]) -> str:
     """Render provider model metadata without making model syntax a gate."""
     if (
         not isinstance(model_name, str)
@@ -281,9 +306,27 @@ def _summary_model_name(model_name: Any) -> str:
         or len(model_name) > 256
         or _URI_PATTERN.search(model_name)
         or any(unicodedata.category(character).startswith("C") for character in model_name)
+        or _contains_secret(model_name, secret_values)
     ):
-        return "configured model (redacted)"
+        return _REDACTED_MODEL_NAME
     return model_name
+
+
+def _research_inspection_lines(inspection: ResearchInspection | None) -> tuple[str, ...]:
+    if inspection is None:
+        return ()
+    return (
+        "Research-only isolated-root retention inspection (not a delivery gate):",
+        f"- Visible Markdown artifacts: {_inspection_presence(inspection.markdown_present)}.",
+        f"- Private SQLite state: {_inspection_presence(inspection.sqlite_present)}.",
+        f"- Inspection outcome: {inspection.outcome}.",
+    )
+
+
+def _inspection_presence(value: bool | None) -> str:
+    if value is None:
+        return "unavailable"
+    return "observed" if value else "not observed"
 
 
 def _ingestion_usage_lines(metrics: CallMetrics, divisor: int) -> tuple[str, ...]:
@@ -360,14 +403,28 @@ def _safe_identifier(value: Any, *, allow_unknown: bool = False) -> bool:
 
 
 def _numeric(value: Any) -> bool:
-    return type(value) in {int, float} and value >= 0
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
 
-def _assert_model_names_are_not_keys(settings: ProviderSettings) -> None:
-    model_names = (settings.llm_model, settings.embedding_model)
-    api_keys = (settings.llm_api_key, settings.embedding_api_key)
-    if any(model == api_key for model in model_names for api_key in api_keys):
-        raise ReportValidationError("report_model_matches_secret")
+def _is_strict_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _configured_secret_values(settings: ProviderSettings) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value for value in (settings.llm_api_key, settings.embedding_api_key) if value))
+
+
+def _redacted_model_name(model_name: str, *, secret_values: tuple[str, ...]) -> str:
+    return _REDACTED_MODEL_NAME if _contains_secret(model_name, secret_values) else model_name
+
+
+def _contains_secret(value: str, secret_values: tuple[str, ...]) -> bool:
+    return any(secret in value for secret in secret_values if secret)
+
+
+def _assert_secret_free(value: str, secret_values: tuple[str, ...], *, code: str) -> None:
+    if _contains_secret(value, secret_values):
+        raise ReportValidationError(code)
 
 
 def _validate_environment(value: Any) -> None:
@@ -385,11 +442,11 @@ def _validate_quality(value: Any) -> None:
     for item in value:
         if not isinstance(item, dict) or set(item) != _QUALITY_KEYS:
             raise ReportValidationError("report_quality_schema_invalid")
-        if not _safe_identifier(item.get("query_id")) or type(item.get("pass")) is not bool:
+        if not _safe_identifier(item.get("query_id")) or not isinstance(item.get("pass"), bool):
             raise ReportValidationError("report_quality_value_invalid")
-        if item.get("rank") is not None and (type(item["rank"]) is not int or item["rank"] < 1):
+        if item.get("rank") is not None and (not _is_strict_int(item["rank"]) or item["rank"] < 1):
             raise ReportValidationError("report_quality_rank_invalid")
-        if type(item.get("latency_ms")) is not int or item["latency_ms"] < 0:
+        if not _is_strict_int(item.get("latency_ms")) or item["latency_ms"] < 0:
             raise ReportValidationError("report_quality_latency_invalid")
 
 
@@ -400,14 +457,14 @@ def _validate_latency(value: Any) -> None:
         if not isinstance(measurements, dict):
             raise ReportValidationError("report_latency_schema_invalid")
         for label, milliseconds in measurements.items():
-            if not _safe_identifier(label) or type(milliseconds) is not int or milliseconds < 0:
+            if not _safe_identifier(label) or not _is_strict_int(milliseconds) or milliseconds < 0:
                 raise ReportValidationError("report_latency_value_invalid")
 
 
 def _validate_resources(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != _RESOURCE_KEYS:
         raise ReportValidationError("report_resources_schema_invalid")
-    if any(type(item) is not int or item < 0 for item in value.values()):
+    if any(not _is_strict_int(item) or item < 0 for item in value.values()):
         raise ReportValidationError("report_resources_value_invalid")
 
 
@@ -421,7 +478,7 @@ def _validate_duplicates(value: Any) -> None:
         raise ReportValidationError("report_duplicates_schema_invalid")
     if not isinstance(value.get("observed"), str) or not _SAFE_OUTCOME.fullmatch(value["observed"]):
         raise ReportValidationError("report_duplicates_outcome_invalid")
-    if type(value.get("count")) is not int or value["count"] < 0:
+    if not _is_strict_int(value.get("count")) or value["count"] < 0:
         raise ReportValidationError("report_duplicates_count_invalid")
 
 

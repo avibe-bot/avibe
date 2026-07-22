@@ -100,7 +100,7 @@ def test_discovery_rejects_a_symlinked_fallback_runtime_ancestor(tmp_path: Path,
         discover_provider_settings(tmp_path)
 
 
-def test_discovery_rejects_a_model_value_that_matches_any_api_key(tmp_path: Path) -> None:
+def test_discovery_rejects_a_model_value_that_contains_any_api_key(tmp_path: Path) -> None:
     local = tmp_path / ".runtime" / "memory-poc"
     local.mkdir(parents=True)
     dotenv = local / ".env.poc"
@@ -108,7 +108,7 @@ def test_discovery_rejects_a_model_value_that_matches_any_api_key(tmp_path: Path
         "\n".join(
             (
                 "LLM_BASE_URL=local",
-                "LLM_MODEL=embedding-secret",
+                "LLM_MODEL=alias-embedding-secret",
                 "LLM_API_KEY=llm-secret",
                 "EMBEDDING_BASE_URL=local",
                 "EMBEDDING_MODEL=embedding",
@@ -119,7 +119,7 @@ def test_discovery_rejects_a_model_value_that_matches_any_api_key(tmp_path: Path
     )
     dotenv.chmod(0o600)
 
-    with pytest.raises(ConfigurationError, match="provider_model_matches_secret"):
+    with pytest.raises(ConfigurationError, match="provider_model_contains_secret"):
         discover_provider_settings(tmp_path)
 
 

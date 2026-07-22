@@ -29,7 +29,12 @@ def test_report_has_frozen_schema_and_excludes_urls(tmp_path: Path, monkeypatch:
     report["environment"]["endpoint_locality"] = "remote"
 
     validate_report(report, fixture_texts=())
-    write_report(tmp_path / "report.json", report, fixture_texts=())
+    write_report(
+        tmp_path / "report.json",
+        report,
+        fixture_texts=(),
+        secret_values=("not-a-real-key",),
+    )
 
     rendered = (tmp_path / "report.json").read_text(encoding="utf-8")
     assert "https://" not in rendered
@@ -95,21 +100,48 @@ def test_report_rejects_zero_based_quality_rank(tmp_path: Path, monkeypatch: pyt
         validate_report(report, fixture_texts=())
 
 
-def test_report_rejects_model_metadata_that_matches_an_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_report_and_summary_redact_model_metadata_containing_an_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
     settings = _settings(tmp_path)
+    secret = "test-api-key"
     settings = ProviderSettings(
         llm_base_url=settings.llm_base_url,
-        llm_model=settings.embedding_api_key,
-        llm_api_key=settings.llm_api_key,
+        llm_model=f"alias-{secret}",
+        llm_api_key=secret,
         embedding_base_url=settings.embedding_base_url,
         embedding_model=settings.embedding_model,
         embedding_api_key=settings.embedding_api_key,
         source=settings.source,
     )
+    report = build_report(run_id="r1", settings=settings)
 
-    with pytest.raises(ReportValidationError, match="report_model_matches_secret"):
-        build_report(run_id="r1", settings=settings)
+    assert report["environment"]["llm_model"] == "configured-model-redacted"
+    write_report(
+        tmp_path / "report.json",
+        report,
+        fixture_texts=(),
+        secret_values=(settings.llm_api_key, settings.embedding_api_key),
+    )
+    write_summary(
+        tmp_path / "summary.md",
+        settings=settings,
+        metrics=CallMetrics(),
+        message_count=1,
+        http_shapes=(),
+        readiness=SearchReadiness(profile_ms=None, episode_ms=1, atomic_fact_ms=1, timeout_ms=600000),
+    )
+
+    report_text = (tmp_path / "report.json").read_text(encoding="utf-8")
+    summary_text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert secret not in report_text
+    assert secret not in summary_text
+    assert "configured-model-redacted" in summary_text
+
+    report["environment"]["llm_model"] = f"alias-{secret}"
+    with pytest.raises(ReportValidationError, match="report_contains_secret"):
+        validate_report(report, fixture_texts=(), secret_values=(secret, settings.embedding_api_key))
 
 
 def test_summary_records_a_safe_failure_outcome(tmp_path: Path) -> None:

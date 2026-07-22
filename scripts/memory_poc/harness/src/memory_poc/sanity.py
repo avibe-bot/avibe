@@ -18,8 +18,9 @@ from .generated_config import write_generated_config
 from .identifiers import validate_run_id
 from .launcher import EverOSProcess
 from .metrics import read_call_metrics
-from .paths import ensure_owner_directory, runtime_root, write_private_text
+from .paths import create_owner_directory, ensure_owner_directory, runtime_root, write_private_text
 from .readiness import SearchReadiness
+from .research_inspection import inspect_isolated_root
 from .reports import build_report, set_criterion, write_report, write_summary
 from .reports import local_timezone_name
 
@@ -45,10 +46,14 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     assert_clean_harness_source(root)
     python = verify_locked_environment(locked_environment_python(root))
     state = ensure_owner_directory(runtime_root(root), anchor=root)
-    run_dir = state / "runs" / run_id
-    if run_dir.exists():
-        raise HarnessError("run_id_already_exists")
-    ensure_owner_directory(run_dir, anchor=state)
+    runs_dir = ensure_owner_directory(state / "runs", anchor=state)
+    run_dir = runs_dir / run_id
+    try:
+        create_owner_directory(run_dir, anchor=state)
+    except HarnessError as exc:
+        if str(exc) == "runtime_directory_exists":
+            raise HarnessError("run_id_already_exists") from exc
+        raise
     logs_dir = ensure_owner_directory(run_dir / "logs", anchor=state)
     everos_root = ensure_owner_directory(run_dir / "everos-root", anchor=state)
     child_home = ensure_owner_directory(run_dir / "child-home", anchor=state)
@@ -72,8 +77,11 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     )
     first_shapes = ()
     restarted_shapes = ()
-    first_started = False
+    first_launch_attempted = False
+    first_uds_only_verified = False
+    restart_attempted = False
     restart_preserved = False
+    restart_uds_only_verified = False
     add_ms: int | None = None
     flush_ms: int | None = None
     first_searchable_ms: int | None = None
@@ -82,8 +90,8 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     try:
         client = None
         try:
+            first_launch_attempted = True
             client = first.start()
-            first_started = True
             add_ms = _elapsed_ms(lambda: client.add(session_id=fixture.session_id, messages=fixture.messages))
             flush_started = time.monotonic()
             client.flush(session_id=fixture.session_id)
@@ -98,7 +106,13 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         finally:
             if client is not None:
                 first_shapes = client.observed_http_shapes
-            first.stop()
+            try:
+                first.stop()
+            finally:
+                first_uds_only_verified = first.uds_only_verified
+
+        if not first_uds_only_verified:
+            raise HarnessError("sanity_tcp_listener_detected")
 
         second = EverOSProcess(
             python=python,
@@ -111,6 +125,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         )
         restarted_client = None
         try:
+            restart_attempted = True
             restarted_client = second.start()
             restart_readiness = _read_required_memory(restarted_client, fixture, wait_for_profile=False)
             if not restart_readiness.retrieval_complete:
@@ -119,20 +134,34 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         finally:
             if restarted_client is not None:
                 restarted_shapes = restarted_client.observed_http_shapes
-            second.stop()
+            try:
+                second.stop()
+            finally:
+                restart_uds_only_verified = second.uds_only_verified
 
-        if not _storage_exists(everos_root):
-            raise HarnessError("sanity_storage_layout_missing")
+        if not restart_uds_only_verified:
+            raise HarnessError("sanity_tcp_listener_detected")
     except HarnessError as exc:
         failure = exc
 
+    research_inspection = inspect_isolated_root(everos_root)
     metrics = read_call_metrics(metrics_path)
     report = build_report(run_id=run_id, settings=settings)
-    if first_started:
-        set_criterion(report["criteria"], "launcher_uds_only", state="pass", value=1, threshold=1)
-    if restart_preserved:
-        set_criterion(report["criteria"], "restart_preserves", state="pass", value=1, threshold=1)
-        set_criterion(report["criteria"], "no_internals_needed", state="pass", value=1, threshold=1)
+    if first_launch_attempted:
+        _set_boolean_criterion(
+            report,
+            "launcher_uds_only",
+            passed=(
+                failure is None
+                and first_uds_only_verified
+                and restart_attempted
+                and restart_uds_only_verified
+            ),
+        )
+    if restart_attempted:
+        _set_boolean_criterion(report, "restart_preserves", passed=failure is None and restart_preserved)
+    if first_launch_attempted:
+        _set_boolean_criterion(report, "no_internals_needed", passed=failure is None and restart_preserved)
     report["latency"] = {
         "add_ms": {"sanity": add_ms} if add_ms is not None else {},
         "flush_ms": {"sanity": flush_ms} if flush_ms is not None else {},
@@ -143,7 +172,13 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
     report["resources"]["embedding_calls"] = metrics.embedding_calls
     report["duplicates"] = {"observed": "not_run", "count": 0}
     report_path = run_dir / "report.json"
-    write_report(report_path, report, anchor=state, fixture_texts=fixture_texts)
+    write_report(
+        report_path,
+        report,
+        anchor=state,
+        fixture_texts=fixture_texts,
+        secret_values=(settings.llm_api_key, settings.embedding_api_key),
+    )
     write_summary(
         run_dir / "summary.md",
         settings=settings,
@@ -152,6 +187,7 @@ def run_sanity(*, run_id: str, workspace: Path | None = None) -> Path:
         http_shapes=first_shapes + restarted_shapes,
         outcome=_summary_outcome(failure, readiness),
         readiness=readiness,
+        research_inspection=research_inspection,
         anchor=state,
     )
     if failure is not None:
@@ -202,6 +238,16 @@ def _failure_outcome(error: HarnessError) -> str:
     ):
         return code
     return "harness_failure"
+
+
+def _set_boolean_criterion(report: dict[str, Any], criterion_id: str, *, passed: bool) -> None:
+    set_criterion(
+        report["criteria"],
+        criterion_id,
+        state="pass" if passed else "fail",
+        value=1 if passed else 0,
+        threshold=1,
+    )
 
 
 def _read_required_memory(
@@ -331,9 +377,3 @@ def _owned_episodes(value: Any, *, owner_id: str) -> tuple[dict[str, Any], ...]:
         for episode in episodes
         if isinstance(episode, dict) and episode.get("user_id") == owner_id
     )
-
-
-def _storage_exists(everos_root: Path) -> bool:
-    visible = any(everos_root.rglob("*.md"))
-    sqlite = any((everos_root / ".index" / "sqlite").glob("*.db"))
-    return visible and sqlite

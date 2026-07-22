@@ -4,6 +4,7 @@ import os
 import secrets
 import signal
 import stat
+import string
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ from .provider import EverOSClient
 _STARTUP_TIMEOUT_SECONDS = 30.0
 # EverOS 1.1.3 permits a single memorize call to hold its session lock for 360s.
 _REQUEST_TIMEOUT_SECONDS = 390.0
+_SOCKET_ALIAS_NAMES = string.ascii_lowercase + string.ascii_uppercase + string.digits
 
 
 def _socket_path_limit() -> int:
@@ -78,11 +80,49 @@ def assert_no_tcp_listener(
                 raise LaunchError("tcp_listener_detected")
 
 
-def new_socket_path(state_root: Path) -> Path:
-    socket_dir = ensure_owner_directory(state_root / "s", anchor=state_root)
-    path = socket_dir / f"{secrets.token_hex(8)}.sock"
-    validate_socket_path(path)
-    return path
+@dataclass(frozen=True)
+class SocketLocation:
+    """A short client path for a socket node physically owned by one run."""
+
+    connect_path: Path
+    actual_path: Path
+    alias_path: Path | None
+
+
+def new_socket_path(run_dir: Path, *, state_root: Path) -> SocketLocation:
+    """Allocate a UDS whose socket node is under the run, even on Darwin."""
+    socket_dir = ensure_owner_directory(run_dir / "socket", anchor=state_root)
+    actual_path = socket_dir / f"{secrets.token_hex(4)}.sock"
+    try:
+        validate_socket_path(actual_path)
+    except LaunchError:
+        return _short_socket_alias(actual_path, state_root=state_root)
+    return SocketLocation(connect_path=actual_path, actual_path=actual_path, alias_path=None)
+
+
+def _short_socket_alias(actual_path: Path, *, state_root: Path) -> SocketLocation:
+    """Use an owner-owned short symlink only for the UDS address length limit."""
+    alias_root = ensure_owner_directory(state_root / "s", anchor=state_root)
+    target = os.path.relpath(actual_path.parent, alias_root)
+    for name in _SOCKET_ALIAS_NAMES:
+        alias_path = alias_root / name
+        try:
+            os.symlink(target, alias_path, target_is_directory=True)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise LaunchError("uds_socket_alias_create_failed") from exc
+        connect_path = alias_path / actual_path.name
+        try:
+            validate_socket_path(connect_path)
+        except LaunchError:
+            try:
+                alias_path.unlink()
+            except OSError:
+                pass
+            raise
+        return SocketLocation(connect_path=connect_path, actual_path=actual_path, alias_path=alias_path)
+    raise LaunchError("uds_socket_alias_unavailable")
 
 
 def _signal_owned_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
@@ -327,7 +367,9 @@ class EverOSProcess:
     request_timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS
     process: subprocess.Popen[bytes] | None = field(default=None, init=False)
     socket_path: Path | None = field(default=None, init=False)
+    socket_location: SocketLocation | None = field(default=None, init=False)
     tcp_monitor: _TcpListenerMonitor | None = field(default=None, init=False)
+    uds_only_verified: bool = field(default=False, init=False)
 
     def start(self) -> EverOSClient:
         if os.name != "posix":
@@ -335,17 +377,19 @@ class EverOSProcess:
         verify_locked_environment(self.python)
         ensure_owner_directory(self.everos_root, anchor=self.state_root)
         ensure_owner_directory(self.child_home, anchor=self.state_root)
-        self.socket_path = new_socket_path(self.state_root)
-        child_env = child_environment(
-            self.settings,
-            python=self.python,
-            everos_root=self.everos_root,
-            child_home=self.child_home,
-            metrics_path=self.metrics_path,
-            owner_id=self.owner_id,
-            anchor=self.state_root,
-        )
+        self.uds_only_verified = False
         try:
+            self.socket_location = new_socket_path(self.everos_root.parent, state_root=self.state_root)
+            self.socket_path = self.socket_location.connect_path
+            child_env = child_environment(
+                self.settings,
+                python=self.python,
+                everos_root=self.everos_root,
+                child_home=self.child_home,
+                metrics_path=self.metrics_path,
+                owner_id=self.owner_id,
+                anchor=self.state_root,
+            )
             self.process = subprocess.Popen(
                 [str(self.python), "-m", "memory_poc.sidecar", "--uds", str(self.socket_path)],
                 cwd=self.everos_root.parent,
@@ -390,41 +434,41 @@ class EverOSProcess:
 
     def stop(self) -> None:
         process = self.process
-        self.process = None
         monitor = self.tcp_monitor
-        self.tcp_monitor = None
-        known_processes: dict[int, float] = {}
-        monitor_error: LaunchError | None = None
+        known_processes = monitor.known_processes() if monitor is not None else {}
+        if process is not None:
+            terminate_owned_process(
+                process,
+                known_processes=known_processes,
+                process_group=monitor.process_group if monitor is not None else None,
+            )
         if monitor is not None:
-            try:
-                known_processes = monitor.stop()
-            except LaunchError as exc:
-                monitor_error = exc
-                known_processes = monitor.known_processes()
-        termination_error: LaunchError | None = None
+            monitor.stop()
+        self._remove_owned_socket()
+        self.process = None
+        self.tcp_monitor = None
+        self.socket_location = None
+        self.uds_only_verified = True
+
+    def _remove_owned_socket(self) -> None:
+        socket_path = self.socket_path
         try:
-            if process is not None:
-                terminate_owned_process(
-                    process,
-                    known_processes=known_processes,
-                    process_group=monitor.process_group if monitor is not None else None,
-                )
-        except LaunchError as exc:
-            termination_error = exc
-        finally:
-            if self.socket_path is not None:
+            if socket_path is not None:
                 try:
-                    info = self.socket_path.lstat()
+                    info = socket_path.lstat()
                     if stat.S_ISSOCK(info.st_mode) and (not hasattr(os, "getuid") or info.st_uid == os.getuid()):
-                        self.socket_path.unlink()
+                        socket_path.unlink()
                 except FileNotFoundError:
                     pass
-                finally:
-                    self.socket_path = None
-        if termination_error is not None:
-            raise termination_error
-        if monitor_error is not None:
-            raise monitor_error
+            alias_path = self.socket_location.alias_path if self.socket_location is not None else None
+            if alias_path is not None:
+                try:
+                    alias_path.unlink()
+                except FileNotFoundError:
+                    pass
+        except OSError as exc:
+            raise LaunchError("sidecar_socket_cleanup_failed") from exc
+        self.socket_path = None
 
     def __enter__(self) -> EverOSClient:
         return self.start()

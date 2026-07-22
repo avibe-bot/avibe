@@ -14,7 +14,15 @@ import pytest
 
 from memory_poc.environment import ProviderSettings
 from memory_poc.errors import LaunchError
-from memory_poc.launcher import EverOSProcess, _TcpListenerMonitor, assert_no_tcp_listener, secure_socket, terminate_owned_process, validate_socket_path
+from memory_poc.launcher import (
+    EverOSProcess,
+    _TcpListenerMonitor,
+    assert_no_tcp_listener,
+    new_socket_path,
+    secure_socket,
+    terminate_owned_process,
+    validate_socket_path,
+)
 from memory_poc.provider import EverOSClient
 
 
@@ -39,6 +47,126 @@ def test_socket_path_overflow_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(LaunchError, match="uds_path_too_long"):
         validate_socket_path(path)
+
+
+def test_socket_location_resolves_inside_the_per_run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    run_dir = state / "runs" / "r1"
+    monkeypatch.setattr("memory_poc.launcher._socket_path_limit", lambda: 4096)
+
+    location = new_socket_path(run_dir, state_root=state)
+
+    assert location.actual_path.parent == run_dir / "socket"
+    assert location.connect_path.parent.resolve() == location.actual_path.parent
+    assert location.actual_path.name.endswith(".sock")
+
+
+def test_short_socket_alias_still_targets_the_per_run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    run_dir = state / "runs" / "r1"
+    alias_candidate = state / "s" / "a" / "00000000.sock"
+    monkeypatch.setattr("memory_poc.launcher._socket_path_limit", lambda: len(os.fsencode(alias_candidate)) + 1)
+
+    location = new_socket_path(run_dir, state_root=state)
+
+    assert location.alias_path is not None
+    assert location.actual_path.parent == run_dir / "socket"
+    assert location.connect_path.parent.resolve() == location.actual_path.parent
+
+
+def _process_for_stop(tmp_path: Path) -> EverOSProcess:
+    return EverOSProcess(
+        python=Path(sys.executable),
+        everos_root=tmp_path / "everos-root",
+        child_home=tmp_path / "child-home",
+        state_root=tmp_path,
+        settings=ProviderSettings(
+            llm_base_url="http://127.0.0.1",
+            llm_model="test-llm",
+            llm_api_key="test-key",
+            embedding_base_url="http://127.0.0.1",
+            embedding_model="test-embedding",
+            embedding_api_key="test-key",
+            source=tmp_path / ".env.poc",
+        ),
+        metrics_path=tmp_path / "request-counts.jsonl",
+        owner_id="00000000-0000-4000-8000-000000000001",
+    )
+
+
+def test_stop_keeps_owned_handles_when_monitor_cleanup_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    process = _process_for_stop(tmp_path)
+    child = SimpleNamespace()
+
+    class Monitor:
+        process_group = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def known_processes(self) -> dict[int, float]:
+            return {}
+
+        def stop(self) -> dict[int, float]:
+            self.calls += 1
+            if self.calls == 1:
+                raise LaunchError("tcp_listener_monitor_shutdown_timeout")
+            return {}
+
+    monitor = Monitor()
+    process.process = child  # type: ignore[assignment]
+    process.tcp_monitor = monitor  # type: ignore[assignment]
+    monkeypatch.setattr("memory_poc.launcher.terminate_owned_process", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(LaunchError, match="tcp_listener_monitor_shutdown_timeout"):
+        process.stop()
+
+    assert process.process is child
+    assert process.tcp_monitor is monitor
+
+    process.stop()
+
+    assert process.process is None
+    assert process.tcp_monitor is None
+
+
+def test_stop_keeps_owned_handles_when_termination_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    process = _process_for_stop(tmp_path)
+    child = SimpleNamespace()
+
+    class Monitor:
+        process_group = None
+
+        def known_processes(self) -> dict[int, float]:
+            return {}
+
+        def stop(self) -> dict[int, float]:
+            return {}
+
+    monitor = Monitor()
+    calls = [0]
+
+    def terminate(*_args: object, **_kwargs: object) -> None:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise LaunchError("sidecar_process_termination_failed")
+
+    process.process = child  # type: ignore[assignment]
+    process.tcp_monitor = monitor  # type: ignore[assignment]
+    monkeypatch.setattr("memory_poc.launcher.terminate_owned_process", terminate)
+
+    with pytest.raises(LaunchError, match="sidecar_process_termination_failed"):
+        process.stop()
+
+    assert process.process is child
+    assert process.tcp_monitor is monitor
+
+    process.stop()
+
+    assert process.process is None
+    assert process.tcp_monitor is None
 
 
 def test_sidecar_startup_and_request_timeouts_are_separate(tmp_path: Path) -> None:

@@ -111,6 +111,31 @@ def ensure_owner_directory(path: Path, *, anchor: Path | None = None) -> Path:
         os.close(descriptor)
 
 
+def create_owner_directory(path: Path, *, anchor: Path | None = None) -> Path:
+    """Atomically create one new owner-only directory without following links."""
+    parent = ensure_owner_directory(path.parent, anchor=anchor)
+    descriptor = _open_owner_directory(parent)
+    try:
+        try:
+            os.mkdir(path.name, mode=0o700, dir_fd=descriptor)
+        except FileExistsError as exc:
+            raise HarnessError("runtime_directory_exists") from exc
+        except OSError as exc:
+            raise HarnessError("runtime_directory_create_failed") from exc
+        try:
+            created_descriptor = os.open(path.name, _directory_flags(), dir_fd=descriptor)
+        except OSError as exc:
+            raise HarnessError("unsafe_runtime_directory") from exc
+        try:
+            _assert_owner(os.fstat(created_descriptor), directory=True)
+            os.fchmod(created_descriptor, 0o700)
+        finally:
+            os.close(created_descriptor)
+    finally:
+        os.close(descriptor)
+    return path
+
+
 def ensure_regular_file_mode(path: Path, mode: int = 0o600) -> None:
     info = path.lstat()
     _assert_owner(info, directory=False)
