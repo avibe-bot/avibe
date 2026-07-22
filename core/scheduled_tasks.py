@@ -276,7 +276,7 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
     anchor = str(row["session_anchor"] or "")
     thread_id = (
         None
-        if persisted_scope_id is None
+        if persisted_scope_id is None or anchor == raw
         else _thread_id_from_session_anchor(anchor, platform=platform, scope_id=native_scope_id)
     )
     session_metadata = _json_loads(row["session_metadata_json"], {})

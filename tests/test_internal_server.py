@@ -1755,6 +1755,62 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
     ]
 
 
+def test_flush_background_agent_run_preserves_primary_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.message_mirror import mirror_harness_inbound
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="placeholder",
+        message="background prompt",
+        agent_name="codex",
+    )
+    assert request_store.claim(request.id) is not None
+    request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+    session_id = _seed_avibe_session_with_queue(
+        [
+            (
+                "background prompt",
+                {
+                    "message_id": f"agent_run:{request.id}",
+                    "platform_specific": {
+                        "task_execution_id": request.id,
+                        "task_trigger_kind": "agent_run",
+                        "task_definition_id": None,
+                        "vibe_agent_name": "codex",
+                        "suppress_delivery": True,
+                    },
+                },
+            )
+        ]
+    )
+    mgr, runs = _manager_capturing_runs()
+
+    async def _mirror_run(sid, context, text, *, source=SOURCE_HUMAN):
+        mirror_harness_inbound(context, text)
+        runs.append((text, source, context))
+
+    mgr._run = _mirror_run
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    with create_sqlite_engine().connect() as conn:
+        rows = conn.execute(
+            select(messages).where(messages.c.session_id == session_id)
+        ).mappings().all()
+
+    harness_rows = [row for row in rows if row["type"] == "harness"]
+    assert [(row["native_message_id"], row["content_text"]) for row in harness_rows] == [
+        (f"agent_run:{request.id}", "background prompt")
+    ]
+    assert [row for row in rows if row["type"] == messages_service.HARNESS_DEDUPE_TYPE] == []
+
+
 def test_coalesced_agent_run_claim_is_atomic(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -2334,7 +2390,7 @@ def test_flush_resets_agent_run_claim_when_run_start_fails(tmp_path, monkeypatch
     assert all(row["metadata"].get("effective_run_id") is None for row in stored.values())
 
 
-def test_flush_marks_suppressed_first_native_id(tmp_path, monkeypatch):
+def test_flush_suppressed_segment_reserves_first_native_id_for_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def prov(execution_id: str) -> dict:
@@ -2365,6 +2421,7 @@ def test_flush_marks_suppressed_first_native_id(tmp_path, monkeypatch):
 
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     assert len(runs) == 1
+    assert runs[0][2].message_id == "watch:def-watch:run-1"
     with create_sqlite_engine().begin() as conn:
         dedupe_rows = conn.execute(select(messages)).mappings().all()
     dedupe_native_ids = {
@@ -2372,7 +2429,7 @@ def test_flush_marks_suppressed_first_native_id(tmp_path, monkeypatch):
         for row in dedupe_rows
         if row["type"] == messages_service.HARNESS_DEDUPE_TYPE
     }
-    assert dedupe_native_ids == {"watch:def-watch:run-1", "watch:def-watch:run-2"}
+    assert dedupe_native_ids == {"watch:def-watch:run-2"}
 
 
 def test_flush_does_not_coalesce_scheduled_callbacks_with_different_delivery(tmp_path, monkeypatch):

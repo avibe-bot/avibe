@@ -412,7 +412,6 @@ def persist_agent_message(
                 # hidden intermediate assistant stream.
                 if (
                     context.platform == "avibe"
-                    and scope_id is not None
                     and message_type in ("result", "notify", "error")
                     and row_session_id
                 ):

@@ -425,7 +425,7 @@ def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
         return
     first = segment[0]
     suppresses_delivery = _scheduled_segment_suppresses_delivery(segment)
-    marker_ids = native_ids if suppresses_delivery else native_ids[1:]
+    marker_ids = native_ids[1:]
     if not marker_ids:
         return
 

@@ -802,14 +802,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_background_im_session_suppresses_outward_delivery(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
-        controller.settings_manager.sessions.find_session_for_anchor = Mock(
-            return_value={
-                "id": "ses_background",
-                "agent_name": None,
-                "agent_backend": "codex",
-                "visibility": "background",
-            }
-        )
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -817,6 +809,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="m1",
             platform="slack",
+            platform_specific={
+                "agent_run_target": {
+                    "agent_session_id": "ses_background",
+                    "agent_backend": "codex",
+                    "visibility": "background",
+                }
+            },
         )
 
         await handler.handle_user_message(context, "continue")

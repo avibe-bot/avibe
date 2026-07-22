@@ -214,6 +214,15 @@ class MessageHandler(BaseHandler):
             )
             if not session_agent_backend and resolved_target.get("agent_backend"):
                 session_agent_backend = str(resolved_target["agent_backend"])
+            if resolved_target.get("agent_session_id"):
+                # The concrete persisted target owns outward delivery. Resolve
+                # this before the backend guard below: existing sessions already
+                # carry a backend, so the fallback anchor lookup is intentionally
+                # skipped for them.
+                platform_payload["suppress_delivery"] = (
+                    resolved_target.get("visibility") == "background"
+                )
+                context.platform_specific = platform_payload
             # Pin an EXISTING thread to its OWN backend. avibe carries the session
             # row in ``agent_session_target``; IM/CLI turns don't, so look up the
             # thread's (scope, anchor) row and adopt its agent/backend. A thread

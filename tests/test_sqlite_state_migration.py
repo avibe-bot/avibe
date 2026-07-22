@@ -260,6 +260,12 @@ def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp
     assert media_scope_not_null == 0
     assert existing_media == ("scope_real", "ses_caller")
 
+    from core.scheduled_tasks import resolve_session_id_target
+
+    promoted = resolve_session_id_target("ses_legacy_a", db_path=db_path)
+    assert promoted.scope_id == "scope_real"
+    assert promoted.session_key.thread_id is None
+
 
 def test_run_migrations_serializes_alembic_context(monkeypatch, tmp_path: Path) -> None:
     first_entered = threading.Event()
