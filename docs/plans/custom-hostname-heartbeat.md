@@ -33,7 +33,7 @@ originating hostname.
 
 ## Validation
 
-- Focused tests in `tests/test_remote_access_vibe_cloud.py` and
-  `tests/test_ui_remote_access_auth.py`.
-- Full runs of both affected test modules.
-- Ruff checks for changed Python files.
+- `tests/test_remote_access_vibe_cloud.py` and
+  `tests/test_ui_remote_access_auth.py`: 251 passed.
+- Adjacent mutation, Show Runtime, and terminal modules: 239 passed.
+- Ruff checks for all changed Python files: passed.
