@@ -506,7 +506,6 @@ def _run_quality(suite: Stage2Suite) -> Path:
                 report["latency"]["add_ms"][message_label] = add_ms
                 report["latency"]["flush_ms"][message_label] = flush_ms
                 if observed_searchable_ms is None:
-                    report["latency"]["searchable_ms"][message_label] = -1
                     evidence.append(
                         f"message {message_label} not searchable via hint within {_READINESS_TIMEOUT_SECONDS:.0f}s "
                         f"(distilled wording may not contain the hint substring; continuing)"

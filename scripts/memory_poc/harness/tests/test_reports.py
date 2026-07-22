@@ -100,6 +100,15 @@ def test_report_rejects_zero_based_quality_rank(tmp_path: Path, monkeypatch: pyt
         validate_report(report, fixture_texts=())
 
 
+def test_report_rejects_negative_latency_sentinels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memory_poc.reports.lock_id", lambda: "lock")
+    report = build_report(run_id="r1", settings=_settings(tmp_path))
+    report["latency"]["searchable_ms"]["q1-s1-1"] = -1
+
+    with pytest.raises(ReportValidationError, match="report_latency_value_invalid"):
+        validate_report(report, fixture_texts=())
+
+
 def test_report_and_summary_redact_model_metadata_containing_an_api_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
