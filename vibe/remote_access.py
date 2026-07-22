@@ -54,6 +54,8 @@ _STATUS_REPORT_LOCK = threading.Lock()
 _STATUS_REPORT_THREADS: set[threading.Thread] = set()
 _STATUS_REPORT_PENDING: tuple[V2Config | None, str, str | None] | None = None
 _STATUS_REPORT_ATEXIT_REGISTERED = False
+_ACTIVE_HOSTNAMES_LOCK = threading.Lock()
+_ACTIVE_HOSTNAMES_CACHE: tuple[Path, str, frozenset[str], float | None] | None = None
 STATUS_HEARTBEAT_SECONDS = 5 * 60
 RESOURCE_ACL_SYNC_INTERVAL_SECONDS = 30
 QUALITY_REPORT_SECONDS = 60
@@ -139,6 +141,10 @@ def _pid_path() -> Path:
 
 def _state_path() -> Path:
     return paths.get_runtime_dir() / "remote-access-cloudflared.json"
+
+
+def _active_hostnames_state_path() -> Path:
+    return paths.get_state_dir() / "remote-access-active-hostnames.json"
 
 
 def _quality_state_path() -> Path:
@@ -399,6 +405,80 @@ def _read_state() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _normalize_active_hostnames(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        hostname = item.strip().lower().rstrip(".")
+        if not hostname or "/" in hostname or ":" in hostname or hostname in seen:
+            continue
+        seen.add(hostname)
+        normalized.append(hostname)
+    return tuple(normalized)
+
+
+def _replace_active_hostnames(config: V2Config, value: Any) -> frozenset[str]:
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    hostnames = _normalize_active_hostnames(value)
+    source_updated_at = time.time()
+    state_path = _active_hostnames_state_path()
+    payload = {
+        "schema_version": 1,
+        "instance_id": instance_id,
+        "active_hostnames": list(hostnames),
+        "source_updated_at": source_updated_at,
+    }
+    with _ACTIVE_HOSTNAMES_LOCK:
+        _ACTIVE_HOSTNAMES_CACHE = (state_path, instance_id, frozenset(hostnames), source_updated_at)
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime.write_json(state_path, payload)
+        except OSError as exc:
+            logger.warning("failed to persist remote access hostname snapshot: %s", exc)
+    return frozenset(hostnames)
+
+
+def active_hostnames(config: V2Config) -> frozenset[str]:
+    """Return the latest control-plane hostname snapshot for this instance."""
+
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    if not instance_id:
+        return frozenset()
+    state_path = _active_hostnames_state_path()
+    with _ACTIVE_HOSTNAMES_LOCK:
+        cached = _ACTIVE_HOSTNAMES_CACHE
+        if cached is not None and cached[0] == state_path and cached[1] == instance_id:
+            return cached[2]
+
+        payload = runtime.read_json(state_path)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return frozenset()
+        if str(payload.get("instance_id") or "").strip() != instance_id:
+            return frozenset()
+        hostnames = frozenset(_normalize_active_hostnames(payload.get("active_hostnames")))
+        try:
+            source_updated_at = float(payload["source_updated_at"])
+        except (KeyError, TypeError, ValueError):
+            source_updated_at = None
+        _ACTIVE_HOSTNAMES_CACHE = (state_path, instance_id, hostnames, source_updated_at)
+        return hostnames
+
+
+def _clear_active_hostnames_cache() -> None:
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    with _ACTIVE_HOSTNAMES_LOCK:
+        _ACTIVE_HOSTNAMES_CACHE = None
+
+
 def _state_connector(name: str) -> dict[str, Any] | None:
     state = _read_state()
     if not state:
@@ -555,6 +635,8 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
         cloud = config.remote_access.vibe_cloud
         if not (cloud.instance_id and cloud.instance_secret and cloud.backend_url):
             return {"ok": False, "error": "remote_status_not_configured"}
+        if urllib.parse.urlsplit(cloud.backend_url).scheme.lower() != "https":
+            return {"ok": False, "error": "remote_status_backend_url_invalid"}
         payload = {
             "instance_secret": cloud.instance_secret,
             **runtime_status_payload(config, event=event, last_error=last_error),
@@ -564,6 +646,7 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
             payload,
             timeout=5.0,
         )
+        _replace_active_hostnames(config, result.get("active_hostnames"))
         return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "error": "remote_status_report_failed", "detail": str(exc)}
@@ -2566,11 +2649,17 @@ def session_needs_membership_refresh(payload: Mapping[str, Any], now: int | None
     return claims_issued_at <= 0 or current - claims_issued_at >= SESSION_ORGANIZATION_REFRESH_SECONDS
 
 
-def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: str) -> str:
+def authorization_url(
+    config: V2Config,
+    state: str,
+    nonce: str,
+    code_challenge: str,
+    redirect_uri: str | None = None,
+) -> str:
     cloud = config.remote_access.vibe_cloud
     params = {
         "client_id": cloud.client_id,
-        "redirect_uri": cloud.redirect_uri,
+        "redirect_uri": redirect_uri or cloud.redirect_uri,
         "response_type": "code",
         "scope": "openid email",
         "state": state,
@@ -2583,14 +2672,19 @@ def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: 
     return f"{cloud.authorization_endpoint}?{urllib.parse.urlencode(params)}"
 
 
-def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict[str, Any]:
+def exchange_oauth_code(
+    config: V2Config,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str | None = None,
+) -> dict[str, Any]:
     cloud = config.remote_access.vibe_cloud
     response = requests.post(
         cloud.token_endpoint,
         data={
             "grant_type": "authorization_code",
             "client_id": cloud.client_id,
-            "redirect_uri": cloud.redirect_uri,
+            "redirect_uri": redirect_uri or cloud.redirect_uri,
             "code": code,
             "code_verifier": code_verifier,
         },
@@ -2695,7 +2789,13 @@ def _warn_oauth_store_at_capacity() -> None:
 
 
 def store_oauth_handshake(
-    rid: str, *, nonce: str, code_verifier: str, next_target: str, device_hash: str | None = None
+    rid: str,
+    *,
+    nonce: str,
+    code_verifier: str,
+    next_target: str,
+    device_hash: str | None = None,
+    redirect_uri: str | None = None,
 ) -> None:
     """Persist a login handshake in memory, keyed by the signed state's random id.
 
@@ -2710,6 +2810,7 @@ def store_oauth_handshake(
         "code_verifier": code_verifier,
         "next": next_target,
         "device_hash": device_hash,
+        "redirect_uri": redirect_uri,
         "exp": now + OAUTH_HANDSHAKE_TTL_SECONDS,
     }
     with _OAUTH_STORE_LOCK:

@@ -320,9 +320,9 @@ def _current_origin() -> str:
         return trusted_forwarded_origin
 
     if config is not None and _is_remote_access_request(config):
-        public_origin = _remote_access_public_origin(config)
-        if public_origin:
-            return public_origin
+        remote_origin = _remote_access_request_origin(config)
+        if remote_origin:
+            return remote_origin
 
     if trusted_forwarded_origin is None:
         return f"{scheme}://{netloc}"
@@ -1283,10 +1283,21 @@ def _normalized_host(value: str | None) -> str:
 
 
 def _is_remote_access_request(config: V2Config) -> bool:
+    return _remote_access_host_allowed(config, _effective_normalized_host())
+
+
+def _remote_access_allowed_hosts(config: V2Config) -> frozenset[str]:
     public_host = _remote_access_public_host(config)
     if not public_host:
-        return False
-    return _normalized_host(_effective_request_host()) == public_host
+        return frozenset()
+    from vibe import remote_access
+
+    return frozenset({public_host, *remote_access.active_hostnames(config)})
+
+
+def _remote_access_host_allowed(config: V2Config, host: str | None) -> bool:
+    normalized = _normalized_host(host)
+    return bool(normalized and normalized in _remote_access_allowed_hosts(config))
 
 
 def _remote_access_public_host(config: V2Config) -> str | None:
@@ -1309,6 +1320,22 @@ def _remote_access_public_origin(config: V2Config) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc.lower().rstrip('.')}"
 
 
+def _remote_access_request_origin(config: V2Config) -> str | None:
+    host = _effective_normalized_host()
+    if not _remote_access_host_allowed(config, host):
+        return None
+    if host == _remote_access_public_host(config):
+        return _remote_access_public_origin(config)
+    return f"https://{host}"
+
+
+def _remote_access_oauth_redirect_uri(config: V2Config) -> str:
+    host = _effective_normalized_host()
+    if _remote_access_host_allowed(config, host):
+        return f"https://{host}/auth/callback"
+    return config.remote_access.vibe_cloud.redirect_uri
+
+
 def _origin_identity(value: str) -> tuple[str, str, int | None] | None:
     parsed = urlparse(value)
     if not parsed.scheme or not parsed.hostname or parsed.username or parsed.password:
@@ -1323,10 +1350,17 @@ def _same_origin(left: str, right: str) -> bool:
 
 
 def _remote_access_public_origin_matches(origin: str, config: V2Config) -> bool:
-    trusted_origin = _remote_access_public_origin(config)
-    if not trusted_origin:
+    identity = _origin_identity(origin)
+    if identity is None:
         return False
-    return _same_origin(origin, trusted_origin)
+    scheme, host, _ = identity
+    if scheme != "https" or not _remote_access_host_allowed(config, host):
+        return False
+    if host == _remote_access_public_host(config):
+        trusted_origin = _remote_access_public_origin(config)
+    else:
+        trusted_origin = f"https://{host}"
+    return bool(trusted_origin and _same_origin(origin, trusted_origin))
 
 
 def _remote_access_public_url_invalid(config: V2Config) -> bool:
@@ -1596,6 +1630,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
+    redirect_uri = _remote_access_oauth_redirect_uri(config)
     # Stable per-browser binding id: reuse the existing device cookie so it stays
     # consistent across the iOS authorize excursion (it is NOT regenerated per flow,
     # unlike the handshake state), generating one only on first use.
@@ -1611,6 +1646,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         code_verifier=code_verifier,
         next_target=next_target,
         device_hash=_oauth_device_hash(cloud.session_secret, device_id),
+        redirect_uri=redirect_uri,
     )
     oauth_cookie = _make_oauth_cookie(
         cloud.session_secret,
@@ -1619,11 +1655,18 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
             "nonce": nonce,
             "code_verifier": code_verifier,
             "next": next_target,
+            "redirect_uri": redirect_uri,
             "exp": int(datetime.now().timestamp()) + REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
         },
     )
     response = Response(status=302)
-    response.headers["Location"] = remote_access.authorization_url(config, state, nonce, code_challenge)
+    response.headers["Location"] = remote_access.authorization_url(
+        config,
+        state,
+        nonce,
+        code_challenge,
+        redirect_uri=redirect_uri,
+    )
     response.set_cookie(
         REMOTE_OAUTH_COOKIE_NAME,
         oauth_cookie,
@@ -2529,7 +2572,7 @@ def _show_runtime_websocket_authorized(websocket: Any) -> bool:
         return _websocket_is_local_request(websocket)
     if _websocket_is_local_request(websocket, config):
         return True
-    if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
+    if not _remote_access_host_allowed(config, _websocket_normalized_host(websocket)):
         return False
     return _remote_access_websocket_session_payload(websocket, config) is not None
 
@@ -2562,7 +2605,7 @@ def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
 def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | None) -> dict[str, Any] | None:
     if config is None or _websocket_is_local_request(websocket, config):
         return None
-    if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
+    if not _remote_access_host_allowed(config, _websocket_normalized_host(websocket)):
         return None
     from vibe import remote_access
 
@@ -4229,6 +4272,7 @@ def remote_access_auth_callback():
         code_verifier = cookie_state["code_verifier"]
         handshake_nonce = cookie_state.get("nonce")
         next_target = cookie_state.get("next")
+        redirect_uri = str(cookie_state.get("redirect_uri") or cloud.redirect_uri)
     elif store_record is not None and _oauth_store_record_device_bound(cloud.session_secret, store_record):
         # Store-fallback for the iOS standalone PWA case, where the handshake cookie's
         # state desyncs (authorize ran in a separate in-app-browser context). Gated on
@@ -4240,6 +4284,7 @@ def remote_access_auth_callback():
         code_verifier = store_record["code_verifier"]
         handshake_nonce = store_record.get("nonce")
         next_target = store_record.get("next")
+        redirect_uri = str(store_record.get("redirect_uri") or cloud.redirect_uri)
     else:
         # Neither the cookie nor the server-side store yielded the handshake.
         # Rate-limited: this branch is unauthenticated-reachable.
@@ -4259,7 +4304,12 @@ def remote_access_auth_callback():
         next_target = url_state.get("next") if url_state else "/"
         return _oauth_callback_error_response("invalid_oauth_state", next_target=next_target)
     try:
-        result = remote_access.exchange_oauth_code(config, _oauth_callback_arg("code") or "", code_verifier)
+        result = remote_access.exchange_oauth_code(
+            config,
+            _oauth_callback_arg("code") or "",
+            code_verifier,
+            redirect_uri=redirect_uri,
+        )
         claims = result["claims"]
         session_claims = result.get("session_claims")
         if not isinstance(session_claims, dict):
