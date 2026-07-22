@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Protocol, runtime_checkable
 
-from core.memory.types import MemoryErrorCode, MemoryItem
+from core.memory.types import MemoryErrorCode, MemoryItem, is_memory_error_code
 
 
 @dataclass(frozen=True)
@@ -25,10 +25,18 @@ class ProviderCapture:
 class MemoryProviderFailure(RuntimeError):
     """A redaction-safe failure already classified by the provider adapter."""
 
-    def __init__(self, error: MemoryErrorCode, *, retryable: bool = True) -> None:
-        super().__init__(error)
-        self.error = error
-        self.retryable = retryable
+    def __init__(
+        self,
+        error: MemoryErrorCode = "memory_processing_failed",
+        *,
+        retryable: bool = True,
+    ) -> None:
+        closed_error: MemoryErrorCode = (
+            error if is_memory_error_code(error) else "memory_processing_failed"
+        )
+        super().__init__(closed_error)
+        self.error = closed_error
+        self.retryable = bool(retryable)
 
 
 class MemoryProviderSystemFailure(MemoryProviderFailure):
@@ -38,7 +46,10 @@ class MemoryProviderSystemFailure(MemoryProviderFailure):
         self,
         error: MemoryErrorCode = "memory_sidecar_unavailable",
     ) -> None:
-        super().__init__(error, retryable=True)
+        closed_error: MemoryErrorCode = (
+            error if is_memory_error_code(error) else "memory_sidecar_unavailable"
+        )
+        super().__init__(closed_error, retryable=True)
 
 
 class MemoryProviderMessageFailure(MemoryProviderFailure):
@@ -50,7 +61,10 @@ class MemoryProviderMessageFailure(MemoryProviderFailure):
         *,
         retryable: bool = True,
     ) -> None:
-        super().__init__(error, retryable=retryable)
+        closed_error: MemoryErrorCode = (
+            error if is_memory_error_code(error) else "memory_processing_failed"
+        )
+        super().__init__(closed_error, retryable=retryable)
 
 
 @runtime_checkable

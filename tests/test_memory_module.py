@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sqlite3
 from collections import deque
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 
 from core.memory.everos import (
     FakeMemoryProvider,
+    MemoryProviderFailure,
     MemoryProviderMessageFailure,
     MemoryProviderSystemFailure,
 )
@@ -27,11 +29,12 @@ from core.memory.types import (
     CaptureDuplicate,
     CaptureSkipped,
     ClearCompleted,
+    CLOSED_MEMORY_ERROR_CODES,
     MemoryItem,
     MemoryItems,
     OperationFailed,
 )
-from core.memory.worker import MemoryWorker
+from core.memory.worker import MemoryWorker, SYSTEM_PAUSE_SECONDS
 
 
 def _request(
@@ -140,6 +143,7 @@ async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_
     assert oversized_id == CaptureSkipped(reason="memory_invalid_input")
     assert disk == CaptureSkipped(reason="memory_low_disk_space")
     assert store.ensure_meta().missed_count == 5
+    assert store.ensure_meta().last_error == "memory_low_disk_space"
     assert store.list_queue_rows() == ()
 
 
@@ -391,3 +395,264 @@ async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(
     rendered = f"{result!r}\n{caplog.text}"
     assert canary not in rendered
     assert "provider-error-body-canary" not in rendered
+
+
+async def test_provider_failures_are_closed_codes_and_never_persist_provider_text(tmp_path: Path) -> None:
+    canary = "https://provider.invalid/v1?api_key=memory-key-canary"
+    provider = FakeMemoryProvider(search_failure=MemoryProviderFailure(canary))  # type: ignore[arg-type]
+    module, store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.search("query")
+
+    assert isinstance(result, OperationFailed)
+    assert result.error in CLOSED_MEMORY_ERROR_CODES
+    assert canary not in repr(result)
+
+    provider.ingest_failures.append(MemoryProviderMessageFailure(canary))  # type: ignore[arg-type]
+    assert await module.capture(_request()) == CaptureAccepted()
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert row.last_error in CLOSED_MEMORY_ERROR_CODES
+    with sqlite3.connect(store.path) as conn:
+        serialized = "\n".join(
+            str(value)
+            for query in ("SELECT * FROM memory_meta", "SELECT * FROM memory_capture_queue")
+            for item in conn.execute(query)
+            for value in item
+        )
+    assert canary not in serialized
+
+
+async def test_malformed_unicode_returns_closed_capture_and_search_errors(tmp_path: Path) -> None:
+    module, _store, _provider = _module(tmp_path)
+
+    capture = await module.capture(_request(text="\ud800"))
+    search = await module.search("\ud800")
+
+    assert capture == CaptureSkipped(reason="memory_invalid_input")
+    assert search == OperationFailed(error="memory_invalid_input")
+
+
+async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Path) -> None:
+    class CountingStore(MemoryStore):
+        def __init__(self, path: Path) -> None:
+            self.transactions = 0
+            super().__init__(path)
+
+        @contextmanager
+        def _transaction(self):
+            self.transactions += 1
+            with super()._transaction() as conn:
+                yield conn
+
+    store = CountingStore(tmp_path / "memory.sqlite")
+    module = MemoryModule(
+        store,
+        FakeMemoryProvider(),
+        enabled=True,
+        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+    )
+    store.transactions = 0
+
+    assert await module.capture(_request()) == CaptureAccepted()
+    assert store.transactions == 1
+
+
+async def test_capture_does_not_wait_or_admit_during_an_active_clear(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def clear_provider_data() -> None:
+        entered.set()
+        await release.wait()
+
+    module, store, _provider = _module(tmp_path, clear_provider_data=clear_provider_data)
+    clear_task = asyncio.create_task(module.clear())
+    await entered.wait()
+
+    receipt = await asyncio.wait_for(module.capture(_request()), timeout=0.2)
+
+    assert receipt == CaptureSkipped(reason="memory_clear_failed")
+    assert store.list_queue_rows() == ()
+    release.set()
+    assert isinstance(await clear_task, ClearCompleted)
+
+
+async def test_system_failure_globally_pauses_claims_until_health_gate_recovers(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    provider.ingest_failures.append(MemoryProviderSystemFailure())
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+    )
+
+    assert await worker.drain_once() == 1
+    assert await worker.drain_once() == 0
+    paused = store.list_queue_rows()[0]
+    assert (paused.state, paused.attempts) == ("pending", 0)
+
+    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
+    assert await worker.drain_once() == 1
+    assert store.list_queue_rows()[0].state == "delivered"
+
+
+async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path) -> None:
+    cleanup_wait = asyncio.Event()
+
+    async def never_finish_cleanup() -> None:
+        await cleanup_wait.wait()
+
+    module, store, _provider = _module(
+        tmp_path / "cleanup-timeout",
+        clear_provider_data=never_finish_cleanup,
+        clear_cleanup_timeout_seconds=0.01,
+    )
+
+    assert await asyncio.wait_for(module.clear(), timeout=0.5) == OperationFailed(error="memory_clear_failed")
+    assert store.ensure_meta().clear_in_progress is True
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(FakeMemoryProvider):
+        async def ingest(self, capture):
+            del capture
+            entered.set()
+            await release.wait()
+
+    provider = BlockingProvider()
+    store = MemoryStore(tmp_path / "drain-timeout" / "memory.sqlite")
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        ingest_timeout_seconds=1.0,
+    )
+    module = MemoryModule(
+        store,
+        provider,
+        enabled=True,
+        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+        clear_provider_data=lambda: None,
+        clear_drain_timeout_seconds=0.01,
+        worker=worker,
+    )
+    assert await module.capture(_request()) == CaptureAccepted()
+    drain_task = asyncio.create_task(worker.drain_once())
+    await entered.wait()
+
+    assert await module.clear() == OperationFailed(error="memory_clear_failed")
+    assert store.ensure_meta().clear_in_progress is True
+    release.set()
+    assert await drain_task == 1
+
+
+async def test_interrupted_clear_rechecks_after_a_transient_store_read_failure(tmp_path: Path) -> None:
+    class FailingFirstReadStore(MemoryStore):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.fail_next_read = False
+
+        def get_meta(self):
+            if self.fail_next_read:
+                self.fail_next_read = False
+                raise sqlite3.OperationalError("transient store read failure")
+            return super().get_meta()
+
+    calls = 0
+
+    async def clear_provider_data() -> None:
+        nonlocal calls
+        calls += 1
+
+    store = FailingFirstReadStore(tmp_path / "memory.sqlite")
+    store.begin_clear()
+    store.fail_next_read = True
+    module = MemoryModule(
+        store,
+        FakeMemoryProvider(),
+        enabled=True,
+        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+        clear_provider_data=clear_provider_data,
+    )
+
+    first = await module.status()
+    second = await module.status()
+
+    assert first.state == "clearing"
+    assert second.state == "ready"
+    assert calls == 1
+    assert store.ensure_meta().clear_in_progress is False
+
+
+async def test_disabled_clear_resumes_worker_after_reenable(tmp_path: Path) -> None:
+    enabled = {"value": True}
+    module, store, _provider = _module(
+        tmp_path,
+        enabled=lambda: enabled["value"],
+        clear_provider_data=lambda: None,
+    )
+    assert await module.capture(_request(source="before-clear")) == CaptureAccepted()
+    enabled["value"] = False
+    assert isinstance(await module.clear(), ClearCompleted)
+
+    enabled["value"] = True
+    assert await module.capture(_request(source="after-clear")) == CaptureAccepted()
+    assert await module._worker.drain_once() == 1
+    assert store.list_queue_rows()[0].state == "delivered"
+
+
+async def test_clear_never_reports_completed_without_provider_cleanup(tmp_path: Path) -> None:
+    no_cleanup, no_cleanup_store, _provider = _module(tmp_path / "no-cleanup")
+    assert await no_cleanup.clear() == OperationFailed(error="memory_clear_failed")
+    assert no_cleanup_store.ensure_meta().clear_in_progress is True
+
+    provider_root = tmp_path / "provider-root"
+    provider_root.mkdir()
+    retained = provider_root / "retained-provider-data"
+    retained.write_text("provider state", encoding="utf-8")
+    module, store, _provider = _module(
+        tmp_path / "root-remains",
+        provider_root=provider_root,
+        clear_provider_data=lambda: None,
+    )
+
+    assert await module.clear() == OperationFailed(error="memory_clear_failed")
+    assert retained.exists()
+    assert store.ensure_meta().clear_in_progress is True
+
+
+async def test_capture_capacity_and_disk_pauses_are_visible_as_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    low_disk, _store, _provider = _module(tmp_path / "low-disk", disk_free_bytes=lambda: 0)
+    assert await low_disk.capture(_request()) == CaptureSkipped(reason="memory_low_disk_space")
+    assert (await low_disk.status()).state == "degraded"
+
+    monkeypatch.setattr("core.memory.module.MAX_NONTERMINAL_QUEUE_ROWS", 1)
+    full, _store, _provider = _module(tmp_path / "queue-full")
+    assert await full.capture(_request(source="one")) == CaptureAccepted()
+    assert await full.capture(_request(source="two")) == CaptureSkipped(reason="memory_queue_full")
+    assert (await full.status()).state == "degraded"
+
+
+async def test_whitespace_only_capture_identifiers_are_invalid(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    assert await module.capture(_request(source="   ")) == CaptureSkipped(reason="memory_invalid_input")
+    assert await module.capture(_request(session="\t\n")) == CaptureSkipped(reason="memory_invalid_input")
+    assert store.ensure_meta().missed_count == 2
+
+
+def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
+    import core.memory as memory
+
+    assert "MemoryProviderPort" not in memory.__all__
+    assert "ProviderCapture" not in memory.__all__

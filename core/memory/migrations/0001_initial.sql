@@ -53,5 +53,3 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
 
 CREATE INDEX IF NOT EXISTS ix_memory_capture_due
     ON memory_capture_queue (epoch, state, next_retry_at);
-
-PRAGMA user_version = 1;

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core.memory.everos import (
@@ -15,12 +15,14 @@ from core.memory.everos import (
     MemoryProviderSystemFailure,
     ProviderCapture,
 )
-from core.memory.store import MemoryStore
-from core.memory.types import MemoryErrorCode
+from core.memory.store import MemoryStore, QueueRow
+from core.memory.types import MemoryErrorCode, is_memory_error_code
 
 
 MAX_DRAIN_BATCH_SIZE = 32
 PROVIDER_HEALTH_TIMEOUT_SECONDS = 5.0
+PROVIDER_INGEST_TIMEOUT_SECONDS = 20.0
+SYSTEM_PAUSE_SECONDS = 5.0
 
 
 class MemoryWorker:
@@ -34,14 +36,22 @@ class MemoryWorker:
         enabled: Callable[[], bool],
         boot_id: str | None = None,
         now: Callable[[], datetime] | None = None,
+        ingest_timeout_seconds: float = PROVIDER_INGEST_TIMEOUT_SECONDS,
+        health_timeout_seconds: float = PROVIDER_HEALTH_TIMEOUT_SECONDS,
+        system_pause_seconds: float = SYSTEM_PAUSE_SECONDS,
     ) -> None:
         self._store = store
         self._provider = provider
         self._enabled = enabled
         self._boot_id = boot_id or uuid.uuid4().hex
         self._now = now or (lambda: datetime.now(UTC))
+        self._ingest_timeout_seconds = _positive_timeout(ingest_timeout_seconds)
+        self._health_timeout_seconds = _positive_timeout(health_timeout_seconds)
+        self._system_pause_seconds = max(float(system_pause_seconds), 0.0)
         self._drain_lock = asyncio.Lock()
         self._claims_paused = False
+        self._system_paused = False
+        self._system_pause_until: datetime | None = None
         self._recovered = False
 
     def pause_claims(self) -> None:
@@ -54,15 +64,26 @@ class MemoryWorker:
 
         self._claims_paused = False
 
-    async def pause_and_wait(self) -> None:
-        """Fence future claims and wait for the current bounded drain to become idle."""
+    async def pause_and_wait(
+        self,
+        *,
+        timeout_seconds: float = PROVIDER_INGEST_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Fence claims and wait only a bounded time for a current drain tick."""
 
         self.pause_claims()
-        async with self._drain_lock:
-            return
+        try:
+            await asyncio.wait_for(
+                self._drain_lock.acquire(),
+                timeout=_positive_timeout(timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            return False
+        self._drain_lock.release()
+        return True
 
     async def drain(self, *, max_rows: int = MAX_DRAIN_BATCH_SIZE) -> int:
-        """Drain at most ``max_rows`` due rows, stopping immediately on a system outage."""
+        """Drain a bounded batch, pausing new claims after infrastructure failures."""
 
         budget = min(max(int(max_rows), 0), MAX_DRAIN_BATCH_SIZE)
         if budget == 0:
@@ -74,8 +95,7 @@ class MemoryWorker:
                 self._recovered = True
             if self._claims_paused or not self._enabled():
                 return 0
-            if not await self._provider_healthy():
-                await self._store_call(self._store.set_last_error, "memory_sidecar_unavailable")
+            if not await self._health_gate_allows_claims():
                 return 0
 
             processed = 0
@@ -93,13 +113,7 @@ class MemoryWorker:
                 processed += 1
                 meta = await self._store_call(self._store.get_meta)
                 if meta is None or meta.epoch != row.epoch or row.payload_text is None:
-                    await self._store_call(
-                        self._store.return_system_failure,
-                        row,
-                        lease_owner=self._boot_id,
-                        error="memory_processing_failed",
-                        now=_iso_from_datetime(now),
-                    )
+                    await self._return_system_failure(row, "memory_processing_failed")
                     break
 
                 capture = ProviderCapture(
@@ -109,18 +123,35 @@ class MemoryWorker:
                     provider_timestamp_ms=row.provider_timestamp_ms,
                 )
                 try:
-                    await self._provider.ingest(capture)
+                    await asyncio.wait_for(
+                        self._provider.ingest(capture),
+                        timeout=self._ingest_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    await self._return_system_failure(row, "memory_provider_timeout")
+                    break
                 except MemoryProviderSystemFailure as failure:
-                    await self._return_system_failure(row, failure.error)
+                    await self._return_system_failure(
+                        row,
+                        _provider_error_code(failure, "memory_sidecar_unavailable"),
+                    )
                     break
                 except MemoryProviderMessageFailure as failure:
-                    await self._record_message_failure(row, failure.error, failure.retryable)
+                    await self._record_message_failure(
+                        row,
+                        _provider_error_code(failure, "memory_processing_failed"),
+                        failure.retryable,
+                    )
                     continue
                 except MemoryProviderFailure as failure:
                     if not await self._provider_healthy():
-                        await self._return_system_failure(row, failure.error)
+                        await self._return_system_failure(row, "memory_sidecar_unavailable")
                         break
-                    await self._record_message_failure(row, failure.error, failure.retryable)
+                    await self._record_message_failure(
+                        row,
+                        _provider_error_code(failure, "memory_processing_failed"),
+                        failure.retryable,
+                    )
                     continue
                 except Exception:
                     if not await self._provider_healthy():
@@ -142,7 +173,27 @@ class MemoryWorker:
 
         return await self.drain(max_rows=1)
 
-    async def _return_system_failure(self, row, error: MemoryErrorCode) -> None:
+    async def _health_gate_allows_claims(self) -> bool:
+        now = self._current_time()
+        if self._system_paused:
+            if self._system_pause_until is not None and now < self._system_pause_until:
+                return False
+            if not await self._provider_healthy():
+                self._pause_for_system_failure(now)
+                await self._store_call(self._store.set_last_error, "memory_sidecar_unavailable")
+                return False
+            self._system_paused = False
+            self._system_pause_until = None
+            return True
+
+        if not await self._provider_healthy():
+            self._pause_for_system_failure(now)
+            await self._store_call(self._store.set_last_error, "memory_sidecar_unavailable")
+            return False
+        return True
+
+    async def _return_system_failure(self, row: QueueRow, error: MemoryErrorCode) -> None:
+        self._pause_for_system_failure(self._current_time())
         await self._store_call(
             self._store.return_system_failure,
             row,
@@ -153,7 +204,7 @@ class MemoryWorker:
 
     async def _record_message_failure(
         self,
-        row,
+        row: QueueRow,
         error: MemoryErrorCode,
         retryable: bool,
     ) -> None:
@@ -171,7 +222,7 @@ class MemoryWorker:
             return bool(
                 await asyncio.wait_for(
                     self._provider.health(),
-                    timeout=PROVIDER_HEALTH_TIMEOUT_SECONDS,
+                    timeout=self._health_timeout_seconds,
                 )
             )
         except Exception:
@@ -180,8 +231,23 @@ class MemoryWorker:
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         return await asyncio.to_thread(method, *args, **kwargs)
 
+    def _pause_for_system_failure(self, now: datetime) -> None:
+        self._system_paused = True
+        self._system_pause_until = now + timedelta(seconds=self._system_pause_seconds)
+
     def _current_time(self) -> datetime:
         return self._now().astimezone(UTC)
+
+
+def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
+    return error.error if is_memory_error_code(error.error) else fallback
+
+
+def _positive_timeout(value: float) -> float:
+    try:
+        return max(float(value), 0.001)
+    except (TypeError, ValueError):
+        return 0.001
 
 
 def _iso_from_datetime(value: datetime) -> str:

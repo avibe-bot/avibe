@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -153,6 +155,29 @@ def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatc
 
     store = MemoryStore()
 
-    assert store.path == (effective_home / "state" / "memory.sqlite").resolve()
+    assert store.path == (effective_home / "state" / "memory" / "memory.sqlite").resolve()
     assert store.path.is_file()
     assert MAX_NONTERMINAL_QUEUE_ROWS == 500
+
+
+def test_store_enforces_owner_only_directory_and_database_modes_under_open_umask(tmp_path: Path) -> None:
+    database = tmp_path / "memory-private" / "memory.sqlite"
+    original_umask = os.umask(0o022)
+    try:
+        store = MemoryStore(database)
+    finally:
+        os.umask(original_umask)
+
+    assert stat.S_IMODE(store.path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+
+
+def test_opening_a_higher_version_database_never_downgrades_user_version(tmp_path: Path) -> None:
+    database = tmp_path / "future-version.sqlite"
+    with sqlite3.connect(database) as conn:
+        conn.execute("PRAGMA user_version = 2")
+
+    MemoryStore(database)
+
+    with sqlite3.connect(database) as conn:
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 import secrets
 import sqlite3
+import stat
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,10 +17,11 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
-from core.memory.types import MemoryErrorCode
+from core.memory.types import MemoryErrorCode, is_memory_error_code
 
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
+MEMORY_STORE_DIRNAME = "memory"
 MAX_NONTERMINAL_QUEUE_ROWS = 500
 MAX_MESSAGE_ATTEMPTS = 3
 TERMINAL_TOMBSTONE_LIMIT = 100_000
@@ -26,7 +31,7 @@ TERMINAL_TOMBSTONE_RETENTION = timedelta(days=90)
 def memory_store_path() -> Path:
     """Return the dedicated Memory database under the effective Avibe state root."""
 
-    return paths.get_state_dir() / MEMORY_STORE_FILENAME
+    return paths.get_state_dir() / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
 
 
 def utc_now_iso() -> str:
@@ -92,8 +97,9 @@ class MemoryStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self.path = (db_path or memory_store_path()).expanduser().resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._prepare_private_directory()
         self._initialize()
+        self._enforce_private_database_modes()
 
     def ensure_meta(self) -> MemoryMeta:
         """Create and return the singleton metadata row when Memory first opens."""
@@ -117,16 +123,117 @@ class MemoryStore:
     def increment_missed(self) -> None:
         """Record one validation or capacity rejection without retaining input."""
 
+        self.record_capture_skip(None)
+
+    def record_capture_skip(self, error: MemoryErrorCode | None) -> None:
+        """Record a closed admission skip without retaining rejected input."""
+
         now = utc_now_iso()
         with self._transaction() as conn:
             self._ensure_meta_in_connection(conn)
+            self._record_capture_skip_in_connection(conn, error, now)
+
+    def enqueue_request(
+        self,
+        *,
+        source_message_id: str,
+        session_id: str,
+        payload_text: str,
+        occurred_at_ms: int,
+        max_provider_timestamp_ms: int,
+        nonterminal_limit: int = MAX_NONTERMINAL_QUEUE_ROWS,
+    ) -> EnqueueResult:
+        """Admit one validated capture in a single local queue transaction.
+
+        Raw source identifiers are transformed only inside this transaction and
+        never written to SQLite.  This is the capture-path entry point; the
+        lower-level ``enqueue_capture`` remains for focused store maintenance
+        tests that already hold keyed identifiers.
+        """
+
+        now = utc_now_iso()
+        with self._transaction() as conn:
+            meta = self._ensure_meta_in_connection(conn)
+            if meta.clear_in_progress:
+                return EnqueueResult(outcome="clearing")
+
+            source_message_digest = _keyed_digest(meta.scope_key, source_message_id)
+            existing = conn.execute(
+                "SELECT * FROM memory_capture_queue WHERE source_message_digest = ?",
+                (source_message_digest,),
+            ).fetchone()
+            if existing is not None:
+                return EnqueueResult(outcome="duplicate", row=_queue_from_row(existing))
+
+            pending_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM memory_capture_queue
+                    WHERE epoch = ? AND state IN ('pending', 'processing')
+                    """,
+                    (meta.epoch,),
+                ).fetchone()[0]
+            )
+            if pending_count >= nonterminal_limit:
+                self._record_capture_skip_in_connection(conn, "memory_queue_full", now)
+                return EnqueueResult(outcome="queue_full")
+
+            provider_timestamp_ms = max(occurred_at_ms, meta.last_provider_timestamp_ms + 1)
+            if provider_timestamp_ms > max_provider_timestamp_ms:
+                self._record_capture_skip_in_connection(conn, None, now)
+                return EnqueueResult(outcome="timestamp_invalid")
+
+            session_ref = _provider_session_ref(meta.scope_key, session_id, meta.epoch)
             conn.execute(
                 """
                 UPDATE memory_meta
-                SET missed_count = missed_count + 1, updated_at = ?
+                SET last_provider_timestamp_ms = ?,
+                    last_error = CASE
+                        WHEN last_error IN ('memory_queue_full', 'memory_low_disk_space') THEN NULL
+                        ELSE last_error
+                    END,
+                    updated_at = ?
                 WHERE singleton = 1
                 """,
-                (now,),
+                (provider_timestamp_ms, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO memory_capture_queue (
+                    source_message_digest, epoch, session_id, payload_text,
+                    occurred_at_ms, provider_timestamp_ms, state, attempts,
+                    next_retry_at, lease_owner, lease_at, last_error,
+                    created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
+                """,
+                (
+                    source_message_digest,
+                    meta.epoch,
+                    session_ref,
+                    payload_text,
+                    occurred_at_ms,
+                    provider_timestamp_ms,
+                    now,
+                ),
+            )
+            return EnqueueResult(
+                outcome="accepted",
+                row=QueueRow(
+                    source_message_digest=source_message_digest,
+                    epoch=meta.epoch,
+                    session_id=session_ref,
+                    payload_text=payload_text,
+                    occurred_at_ms=occurred_at_ms,
+                    provider_timestamp_ms=provider_timestamp_ms,
+                    state="pending",
+                    attempts=0,
+                    next_retry_at=None,
+                    lease_owner=None,
+                    lease_at=None,
+                    last_error=None,
+                    created_at=now,
+                    completed_at=None,
+                ),
             )
 
     def enqueue_capture(
@@ -291,6 +398,7 @@ class MemoryStore:
     ) -> bool:
         """Release a claimed row after a global outage without consuming attempts."""
 
+        error = _closed_error_or(error, "memory_sidecar_unavailable")
         with self._transaction() as conn:
             result = conn.execute(
                 """
@@ -318,6 +426,7 @@ class MemoryStore:
     ) -> MessageFailureResult:
         """Spend one message failure attempt, retrying or terminally scrubbing it."""
 
+        error = _closed_error_or(error, "memory_processing_failed")
         now_iso = _iso_from_datetime(now)
         with self._transaction() as conn:
             current = conn.execute(
@@ -505,7 +614,11 @@ class MemoryStore:
         now = utc_now_iso()
         with self._transaction() as conn:
             self._ensure_meta_in_connection(conn)
-            self._set_last_error_in_connection(conn, error, now)
+            self._set_last_error_in_connection(
+                conn,
+                _closed_error_or(error, "memory_store_unavailable") if error is not None else None,
+                now,
+            )
 
     def compact_terminal_tombstones(self, *, now: datetime | None = None) -> int:
         """Bound terminal digest retention by age and count without exposing payloads."""
@@ -517,18 +630,23 @@ class MemoryStore:
     def _initialize(self) -> None:
         migration_path = Path(__file__).with_name("migrations") / "0001_initial.sql"
         with self._connection() as conn:
-            conn.executescript(migration_path.read_text(encoding="utf-8"))
+            user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if user_version == 0:
+                conn.executescript(migration_path.read_text(encoding="utf-8"))
+                conn.execute("PRAGMA user_version = 1")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
+            self._enforce_private_database_modes()
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 5000")
             yield conn
         finally:
+            self._enforce_private_database_modes()
             conn.close()
 
     @contextmanager
@@ -593,6 +711,57 @@ class MemoryStore:
             (error, now),
         )
 
+    def _record_capture_skip_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        error: MemoryErrorCode | None,
+        now: str,
+    ) -> None:
+        """Increment missed work and retain at most a validated closed category."""
+
+        safe_error = _closed_error_or(error, "memory_invalid_input") if error is not None else None
+        conn.execute(
+            """
+            UPDATE memory_meta
+            SET missed_count = missed_count + 1,
+                last_error = COALESCE(?, last_error),
+                updated_at = ?
+            WHERE singleton = 1
+            """,
+            (safe_error, now),
+        )
+
+    def _prepare_private_directory(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory_info = os.lstat(self.path.parent)
+        if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
+            raise OSError("Memory store directory must be an owned directory")
+        os.chmod(self.path.parent, 0o700)
+        if stat.S_IMODE(os.stat(self.path.parent).st_mode) != 0o700:
+            raise OSError("Memory store directory is not owner-only")
+        try:
+            database_info = os.lstat(self.path)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(database_info.st_mode) or not stat.S_ISREG(database_info.st_mode):
+            raise OSError("Memory database path must be a regular file")
+
+    def _enforce_private_database_modes(self) -> None:
+        for candidate in (
+            self.path,
+            self.path.with_name(f"{self.path.name}-wal"),
+            self.path.with_name(f"{self.path.name}-shm"),
+        ):
+            try:
+                info = os.lstat(candidate)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                raise OSError("Memory database path must be a regular file")
+            os.chmod(candidate, 0o600)
+            if stat.S_IMODE(os.stat(candidate).st_mode) != 0o600:
+                raise OSError("Memory database is not owner-only")
+
     def _compact_terminal_tombstones_in_connection(
         self,
         conn: sqlite3.Connection,
@@ -630,7 +799,7 @@ class MemoryStore:
 
 
 def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
-    error = row["last_error"]
+    error = _closed_error_or(row["last_error"], "memory_store_unavailable") if row["last_error"] is not None else None
     return MemoryMeta(
         epoch=int(row["epoch"]),
         clear_in_progress=bool(row["clear_in_progress"]),
@@ -640,12 +809,17 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
         last_provider_timestamp_ms=int(row["last_provider_timestamp_ms"]),
         missed_count=int(row["missed_count"]),
         last_success_at=str(row["last_success_at"]) if row["last_success_at"] is not None else None,
-        last_error=str(error) if error is not None else None,
+        last_error=error,
         updated_at=str(row["updated_at"]),
     )
 
 
 def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
+    last_error = (
+        _closed_error_or(row["last_error"], "memory_store_unavailable")
+        if row["last_error"] is not None
+        else None
+    )
     return QueueRow(
         source_message_digest=str(row["source_message_digest"]),
         epoch=int(row["epoch"]),
@@ -658,7 +832,7 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         next_retry_at=str(row["next_retry_at"]) if row["next_retry_at"] is not None else None,
         lease_owner=str(row["lease_owner"]) if row["lease_owner"] is not None else None,
         lease_at=str(row["lease_at"]) if row["lease_at"] is not None else None,
-        last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+        last_error=last_error,
         created_at=str(row["created_at"]),
         completed_at=str(row["completed_at"]) if row["completed_at"] is not None else None,
     )
@@ -670,3 +844,15 @@ def _iso_from_datetime(value: datetime) -> str:
 
 def _datetime_from_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _closed_error_or(value: object, fallback: MemoryErrorCode) -> MemoryErrorCode:
+    return value if is_memory_error_code(value) else fallback
+
+
+def _keyed_digest(scope_key: bytes, value: str) -> str:
+    return hmac.new(scope_key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _provider_session_ref(scope_key: bytes, session_id: str, epoch: int) -> str:
+    return f"src--{_keyed_digest(scope_key, session_id)}--e{epoch}"
