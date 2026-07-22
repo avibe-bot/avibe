@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.engine import Engine
 
 from storage.background import normalize_run_status
@@ -288,12 +288,21 @@ def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
     candidate the active filter can keep.
     """
     candidates: set[str] = set(live_ids)
+    # Window match = any recent activity, not just creation: a long run created
+    # before the cutoff but finished/failed/canceled inside the window must
+    # still surface (completed_at / updated_at bump on state changes).
     stmt = select(
         agent_runs.c.session_id,
         agent_runs.c.source_kind,
         agent_runs.c.source_actor,
         agent_runs.c.callback_session_id,
-    ).where(agent_runs.c.created_at >= cutoff_iso)
+    ).where(
+        or_(
+            agent_runs.c.created_at >= cutoff_iso,
+            agent_runs.c.completed_at >= cutoff_iso,
+            agent_runs.c.updated_at >= cutoff_iso,
+        )
+    )
     for row in conn.execute(stmt).mappings():
         if row["session_id"]:
             candidates.add(row["session_id"])
@@ -378,11 +387,26 @@ def _build_edges(
     def _newer(existing: Optional[str], candidate: Optional[str]) -> bool:
         return (existing or "") < (candidate or "")
 
+    # Callback target per run id — an explicit callback-delivery run
+    # (source_kind='agent', parent_run_id → the delegated run) reports INTO the
+    # delegated run's callback session. Such a report row must NOT be counted as
+    # a spawn (it would draw a misleading callee→caller edge and make the caller
+    # look "started by" the callee). Detect it: the run's session equals its
+    # parent run's callback target.
+    callback_target_by_run: dict[str, str] = {}
+    for runs in runs_by_session.values():
+        for run in runs:
+            if run.get("callback_session_id"):
+                callback_target_by_run[run["id"]] = run["callback_session_id"]
+
     for session_id, runs in runs_by_session.items():
         for run in runs:
             created = run.get("created_at")
-            # spawn: caller (source_actor) → this session
-            if run.get("source_kind") == "agent" and run.get("source_actor"):
+            parent = run.get("parent_run_id")
+            is_callback_delivery = bool(parent) and callback_target_by_run.get(parent) == session_id
+            # spawn: caller (source_actor) → this session (excluding callback-
+            # delivery reports, which run in the caller's session by design)
+            if run.get("source_kind") == "agent" and run.get("source_actor") and not is_callback_delivery:
                 key = (run["source_actor"], session_id)
                 agg = spawn.setdefault(key, {"run_count": 0, "last_run_id": None, "last_at": None})
                 agg["run_count"] += 1

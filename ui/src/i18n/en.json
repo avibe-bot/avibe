@@ -1936,8 +1936,8 @@
       "unreachable": "Runtime unreachable — showing history only.",
       "truncated": "Showing the most recent 300 sessions — narrow the filters to see the rest.",
       "orphans": {
-        "title": "{{count}} orphan process(es)",
-        "description": "Leaked runtimes with no session — not shown as graph nodes. You can end them here."
+        "title": "{{count}} unattributed process(es)",
+        "description": "Live runtimes with no session — not shown as graph nodes. End them here."
       },
       "filters": {
         "modeLabel": "Time range",

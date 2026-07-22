@@ -1936,8 +1936,8 @@
       "unreachable": "运行时不可达 — 仅显示历史。",
       "truncated": "仅显示最近 300 个会话 — 收窄筛选条件可查看其余。",
       "orphans": {
-        "title": "{{count}} 个孤儿进程",
-        "description": "无会话的泄漏运行时,不作为图节点显示,可在此结束。"
+        "title": "{{count}} 个会话外进程",
+        "description": "无法归属到会话的运行时,不作为图节点显示,可在此结束。"
       },
       "filters": {
         "modeLabel": "时间范围",

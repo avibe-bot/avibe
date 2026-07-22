@@ -113,14 +113,11 @@ export const AgentGraphTab: React.FC = () => {
         // newer one issued after a filter change.
         if (!mountedRef.current || seq !== seqRef.current) return;
         setGraph(result);
-        // Orphan strip = genuine leaked processes only (state 'orphan'). A
-        // session-less live row that is active/idle is an enrichment miss, not
-        // an orphan — don't mislabel it as a kill target.
-        setOrphans(
-          running && running.ok
-            ? running.agents.filter((a) => !a.session_id && a.state === 'orphan')
-            : [],
-        );
+        // Every session-less live row (any state) goes to the strip — the graph
+        // is session-centric so these have no node, and the old flat list let
+        // users end them. The strip labels each by its actual state and offers a
+        // state-appropriate action (Stop/Disconnect/Kill).
+        setOrphans(running && running.ok ? running.agents.filter((a) => !a.session_id) : []);
         setErrored(false);
       } catch {
         if (mountedRef.current && seq === seqRef.current) setErrored(true);
@@ -345,8 +342,8 @@ export const AgentGraphTab: React.FC = () => {
         </div>
       )}
 
-      {/* Orphan strip (A3) — session-less leaked processes, above the graph. */}
-      <AgentGraphOrphanStrip orphans={orphans} onKill={killOrphan} />
+      {/* Session-less live processes strip (A3 + r6) — above the graph. */}
+      <AgentGraphOrphanStrip rows={orphans} onEnd={killOrphan} />
 
       {loading && !graph ? (
         <div className="flex items-center justify-center py-16">

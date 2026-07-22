@@ -95,7 +95,8 @@ def _insert_session(conn, session_id, *, scope_id, backend="claude", title=None,
 
 def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent",
                 created=None, source_kind=None, source_actor=None, definition_id=None,
-                callback_session_id=None, callback_status=None, started=None, completed=None) -> None:
+                callback_session_id=None, callback_status=None, started=None, completed=None,
+                parent_run_id=None) -> None:
     created = created or (NOW - timedelta(hours=1))
     conn.execute(
         agent_runs.insert().values(
@@ -105,7 +106,7 @@ def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent
             status=status,
             source_kind=source_kind,
             source_actor=source_actor,
-            parent_run_id=None,
+            parent_run_id=parent_run_id,
             agent_name=None,
             agent_id=None,
             agent_backend=None,
@@ -330,6 +331,45 @@ def test_private_agent_run_scope_is_internal(isolated_state):
         assert node["scope_label"] is None
         assert node["project_id"] is None
         assert node["openable_in_chat"] is False
+    finally:
+        engine.dispose()
+
+
+def test_window_includes_recently_completed_run(isolated_state):
+    # A run created before the 24h cutoff but completed inside it must keep its
+    # session in the window (recent activity, not just creation time).
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "ses_lr", scope_id=None, backend="claude", title="Long run")
+            _insert_run(conn, "run_lr", session_id="ses_lr", status="succeeded",
+                        created=NOW - timedelta(days=3), completed=NOW - timedelta(minutes=10))
+        nodes = _nodes_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=engine, window="24h"))
+        assert "ses_lr" in nodes
+    finally:
+        engine.dispose()
+
+
+def test_callback_delivery_is_not_a_spawn(isolated_state):
+    # A delegated run spawns callee and routes a callback to caller; the callee's
+    # explicit callback-delivery run reports INTO the caller's session with
+    # parent_run_id = the delegated run. That report must NOT create a backwards
+    # spawn edge callee→caller (only the real spawn caller→callee + the callback).
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "ses_caller", scope_id=None, backend="claude", title="Caller")
+            _insert_session(conn, "ses_callee", scope_id=None, backend="codex", title="Callee")
+            _insert_run(conn, "run_deleg", session_id="ses_callee", source_kind="agent",
+                        source_actor="ses_caller", callback_session_id="ses_caller",
+                        callback_status="sent", created=NOW - timedelta(minutes=30))
+            _insert_run(conn, "run_report", session_id="ses_caller", source_kind="agent",
+                        source_actor="ses_callee", parent_run_id="run_deleg",
+                        created=NOW - timedelta(minutes=10))
+        payload = agent_graph.build_graph(live_agents=[], now=NOW, engine=engine)
+        assert _edge(payload, "spawn", "ses_caller", "ses_callee") is not None
+        assert _edge(payload, "spawn", "ses_callee", "ses_caller") is None
+        assert _edge(payload, "callback", "ses_callee", "ses_caller") is not None
     finally:
         engine.dispose()
 
