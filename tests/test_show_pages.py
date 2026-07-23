@@ -2172,7 +2172,7 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    assert payload["event"]["transcript_text"].startswith("[agent-mark:default:created] mark-default-summary")
+    assert payload["event"]["transcript_text"].startswith("[agent-mark] mark-default-summary")
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
@@ -2262,7 +2262,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
                         "scope": "default",
                         "anchor": {},
                         "payload": {},
-                        "transcript_text": "[agent-mark:default] mark-default-summary\n\nReview this summary.",
+                        "transcript_text": "[agent-mark] mark-default-summary\n\nReview this summary.",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",
@@ -2834,7 +2834,7 @@ def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tm
                         "scope": "default",
                         "anchor": {},
                         "payload": {"dispatch": True},
-                        "transcript_text": "[show-annotation:default:created] comment",
+                        "transcript_text": "[show-annotation] comment",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",

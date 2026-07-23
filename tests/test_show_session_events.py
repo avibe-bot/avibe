@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
+from core.show_session_events import ShowSessionEventError, ShowSessionEventStore, _format_transcript_text
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages, show_session_events
@@ -84,7 +84,7 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert event["scope"] == "default"
     assert event["message_id"]
     assert event["message"]["id"] == event["message_id"]
-    assert "[agent-mark:default:created] mark-default-summary" in event["transcript_text"]
+    assert "[agent-mark] mark-default-summary" in event["transcript_text"]
     assert "Anchor: [mark-default='summary']" in event["transcript_text"]
 
     with engine.connect() as conn:
@@ -133,7 +133,7 @@ def test_show_event_store_records_human_annotation_with_anchor_context(isolated_
     assert event["payload"]["status"] == "pending"
     assert event["payload"]["author"] == {"kind": "local"}
     assert event["message_id"]
-    assert "[show-annotation:default:created] question" in event["transcript_text"]
+    assert "[show-annotation] question" in event["transcript_text"]
     assert "Clarify this claim." in event["transcript_text"]
     assert "Quote: Quarterly summary" in event["transcript_text"]
 
@@ -580,7 +580,7 @@ def test_show_event_store_records_intent_dispatch_payload(isolated_state):
         store.close()
 
     assert event["payload"]["dispatch"] is True
-    assert "[show-intent:default] choose" in event["transcript_text"]
+    assert "[show-intent] choose" in event["transcript_text"]
     assert "Pick B." in event["transcript_text"]
 
 
@@ -604,6 +604,62 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
     assert event["actor"] == "assistant"
     assert event["message_id"]
     assert "[show-page-updated] Updated the Show Page" in event["transcript_text"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "expected_header"),
+    [
+        (
+            "assistant.mark.created",
+            {"scope": "default", "target": "summary", "body": "Created."},
+            "[agent-mark] summary",
+        ),
+        (
+            "assistant.mark.resolved",
+            {"scope": "default", "target": "summary", "body": "Resolved."},
+            "[agent-mark resolved] summary",
+        ),
+        (
+            "assistant.mark.updated",
+            {"scope": "review", "target": "summary", "body": "Updated."},
+            "[agent-mark updated scope=review] summary",
+        ),
+        (
+            "human.intent.submitted",
+            {"scope": "default", "intent": "question", "text": "Why?"},
+            "[show-intent] question",
+        ),
+        (
+            "human.intent.submitted",
+            {"scope": "review", "intent": "question", "text": "Why?"},
+            "[show-intent scope=review] question",
+        ),
+        (
+            "human.annotation.created",
+            {"scope": "default", "intent": "question", "comment": "Why?"},
+            "[show-annotation] question",
+        ),
+        (
+            "human.annotation.resolved",
+            {"scope": "default", "intent": "comment", "comment": "Done."},
+            "[show-annotation resolved] comment",
+        ),
+        (
+            "human.annotation.created",
+            {"scope": "review", "intent": "question", "comment": "Why?"},
+            "[show-annotation scope=review] question",
+        ),
+        (
+            "human.annotation.resolved",
+            {"scope": "review", "intent": "comment", "comment": "Done."},
+            "[show-annotation resolved scope=review] comment",
+        ),
+    ],
+)
+def test_show_event_transcript_headers_only_render_deviations(event_type, payload, expected_header):
+    transcript = _format_transcript_text(event_type, payload, {})
+
+    assert transcript.splitlines()[0] == expected_header
 
 
 def test_show_event_store_rejects_unknown_session(isolated_state):
@@ -738,13 +794,13 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monk
         "session_id": "ses_show",
         "scope_id": "scope1",
         "payload": {"intent": intent},
-        "transcript_text": f"[show-annotation:default:created] {intent}\n\nReview this.",
+        "transcript_text": f"[show-annotation] {intent}\n\nReview this.",
         "message_id": "m1",
     }
 
     asyncio.run(ui_server._run_show_event_dispatch(event))
 
-    assert event["transcript_text"] == f"[show-annotation:default:created] {intent}\n\nReview this."
+    assert event["transcript_text"] == f"[show-annotation] {intent}\n\nReview this."
     assert "Show event id: show_evt_1a2b3c4d" in captured[0]["text"]
     guidance = (
         "如需在页面上原位回应，可执行：\n"
