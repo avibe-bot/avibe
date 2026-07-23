@@ -215,12 +215,51 @@ def _codex_items(
 ) -> list[NativeMigrationItem]:
     _, auth_path = get_codex_config_paths(home)
     auth_data = _load_auth(auth_path)
+    if not isinstance(auth_data, dict):
+        return []
+    state = read_codex_auth_state(home)
+    items: list[NativeMigrationItem] = []
+
+    api_key = auth_data.get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        api_key = api_key.strip()
+        base_url = state.get("base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            base_url = None
+        item_id, source_id = _ids(
+            "codex",
+            "api_key",
+            "auth-json-api-key",
+            "import",
+            _stable_suffix(api_key, base_url or ""),
+        )
+        detail = mask_credential(api_key)
+        if base_url:
+            detail += " + base_url"
+        items.append(
+            NativeMigrationItem(
+                id=item_id,
+                source_id=source_id,
+                backend="codex",
+                kind="api_key",
+                masked_detail=detail,
+                proposed_action="import",
+                selected=True,
+                notes_key=None,
+                vendor="openai",
+                protocol="openai_responses",
+                display_name="OpenAI",
+                base_url=base_url,
+                secret=api_key,
+            )
+        )
+
     tokens = auth_data.get("tokens") if isinstance(auth_data, dict) else None
     if not isinstance(tokens, dict):
-        return []
+        return items
     access_token = tokens.get("access_token")
     if not isinstance(access_token, str) or not access_token.strip():
-        return []
+        return items
     access_token = access_token.strip()
 
     action: MigrationAction = (
@@ -235,7 +274,6 @@ def _codex_items(
         action,
         _stable_suffix(access_token),
     )
-    state = read_codex_auth_state(home)
     account = state.get("chatgpt_account")
     account_label = _safe_account_label(
         account.get("email") if isinstance(account, dict) else None
@@ -243,7 +281,7 @@ def _codex_items(
     detail = account_label or "Codex auth.json"
     if action == "controlled_import":
         detail = f"{detail} · {mask_credential(access_token)}"
-    return [
+    items.append(
         NativeMigrationItem(
             id=item_id,
             source_id=source_id,
@@ -263,7 +301,8 @@ def _codex_items(
             secret=access_token,
             account_label=account_label,
         )
-    ]
+    )
+    return items
 
 
 def _opencode_protocol(
@@ -325,6 +364,8 @@ def _opencode_items(
         secret = secret.strip()
         raw_base_url = options.get("baseURL")
         base_url = raw_base_url.strip() if isinstance(raw_base_url, str) and raw_base_url.strip() else None
+        if base_url is None and provider_id not in {"anthropic", "openai"}:
+            continue
         action: MigrationAction = "import"
         item_id, source_id = _ids(
             "opencode",

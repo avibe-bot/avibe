@@ -134,7 +134,16 @@ def _write_claude(home: Path, *, malformed: bool = False) -> None:
 def _write_codex(home: Path, *, malformed: bool = False) -> None:
     _write(
         home / ".codex" / "auth.json",
-        "{broken" if malformed else json.dumps({"tokens": {"access_token": "codex-access-123456"}}),
+        (
+            "{broken"
+            if malformed
+            else json.dumps(
+                {
+                    "OPENAI_API_KEY": "sk-openai-test-123456",
+                    "tokens": {"access_token": "codex-access-123456"},
+                }
+            )
+        ),
     )
 
 
@@ -152,6 +161,11 @@ def _write_opencode(home: Path, *, malformed: bool = False) -> None:
       "options": {
         "apiKey": "sk-openrouter-123456",
         "baseURL": "https://openrouter.example/v1",
+      },
+    },
+    "zhipuai": {
+      "options": {
+        "baseURL": "https://zhipu.example/v1",
       },
     },
   },
@@ -182,7 +196,7 @@ def _validate_scan(payload: dict) -> None:
 def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) -> None:
     cases = (
         ("claude", _write_claude, 2),
-        ("codex", _write_codex, 1),
+        ("codex", _write_codex, 2),
         ("opencode", _write_opencode, 2),
     )
     for backend, writer, expected in cases:
@@ -202,6 +216,7 @@ def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) 
             "sk-ant-test-123456789",
             "claude-oauth-token",
             "codex-access-123456",
+            "sk-openai-test-123456",
             "sk-openrouter-123456",
             "sk-zhipu-123456",
         ):
@@ -262,7 +277,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert scan_response.status_code == 200
     scan = scan_response.get_json()
     _validate_scan({"items": scan["items"]})
-    assert len(scan["items"]) == 5
+    assert len(scan["items"]) == 6
 
     apply_response = client.post(
         "/api/models/migration/apply",
@@ -272,10 +287,10 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     )
     assert apply_response.status_code == 200
     body = apply_response.get_json()
-    assert body["applied"] == 5
-    assert len(body["sources"]) == 5
-    assert len(store.config.sources) == 5
-    assert len(adapter.provisioned) == 3
+    assert body["applied"] == 6
+    assert len(body["sources"]) == 6
+    assert len(store.config.sources) == 6
+    assert len(adapter.provisioned) == 4
     assert adapter.revoked == []
     assert before == _tree_digest(native_home)
 
@@ -284,6 +299,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
         "sk-ant-test-123456789",
         "claude-oauth-token",
         "codex-access-123456",
+        "sk-openai-test-123456",
         "sk-openrouter-123456",
         "sk-zhipu-123456",
     ):
@@ -330,7 +346,11 @@ def test_mh_mig_003_controlled_import_is_flag_gated(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     store.config.subscription_hub_experimental = True
-    controlled = service.migration_scan()["items"][0]
+    controlled = next(
+        item
+        for item in service.migration_scan()["items"]
+        if item["proposed_action"] == "controlled_import"
+    )
     assert controlled["proposed_action"] == "controlled_import"
 
     store.config.subscription_hub_experimental = False
@@ -339,6 +359,22 @@ def test_mh_mig_003_controlled_import_is_flag_gated(
     assert error.value.code == "consent_required"
     assert adapter.provisioned == []
     assert store.config.sources == []
+
+
+def test_opencode_auth_only_custom_provider_without_base_url_is_not_importable(
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".local" / "share" / "opencode" / "auth.json",
+        json.dumps({"custom-provider": {"type": "api", "key": "sk-custom-123456"}}),
+    )
+
+    assert scan_native_configs(
+        ModelHubConfig(),
+        home=native_home,
+        mask_credential=_mask_credential,
+    ) == []
 
 
 def test_failed_batch_revokes_every_provisioned_credential(
