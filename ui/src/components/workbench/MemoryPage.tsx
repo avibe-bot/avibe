@@ -192,15 +192,20 @@ const EndpointFields: React.FC<{
           type="password"
           autoComplete="off"
           value={draft.apiKey}
-          disabled={disabled || draft.clearKey}
+          // Locked (embedding + data exists) disables the key field too: the whole embedding
+          // patch is discarded on save, so an editable key would falsely report a saved change.
+          disabled={fieldsDisabled || draft.clearKey}
           placeholder={t('memory.settings.apiKeyPlaceholder')}
           onChange={(e) => onChange({ ...draft, apiKey: e.target.value, clearKey: false })}
           className="text-[13px]"
         />
         <p className="text-[11px] text-muted">{t('memory.settings.apiKeyClearHint')}</p>
-        {canClearKey && original.has_api_key ? (
+        {canClearKey && original.has_api_key && !locked ? (
           <button
             type="button"
+            role="checkbox"
+            aria-checked={draft.clearKey}
+            aria-label={t('memory.settings.clearKeyLabel')}
             disabled={disabled}
             onClick={() => onChange({ ...draft, clearKey: !draft.clearKey, apiKey: '' })}
             className="mt-0.5 flex w-fit items-center gap-2 text-[11.5px] text-muted disabled:cursor-not-allowed disabled:opacity-50"
@@ -670,10 +675,6 @@ export const MemoryPage: React.FC = () => {
       } else if (isStatusSuccess(res)) {
         setStatus(res);
         setStatusError(null);
-        // A dependency-related error code alongside a valid status means the runtime itself is
-        // the blocker (missing/unsupported/broken) — surface the same install/repair hint the
-        // Enable toggle shows, rather than only a generic status error line.
-        setDependencyReady(!res.error || !res.error.startsWith('memory_runtime_'));
       } else {
         setStatusError(errorMessage(t, (res as { error?: string })?.error));
       }
@@ -684,10 +685,25 @@ export const MemoryPage: React.FC = () => {
     }
   }, [api, t]);
 
+  // Dependency readiness comes from the authoritative Dependencies source (plan §5), NOT the
+  // memory status: after a failed enable the backend rolls the setting back to disabled and a
+  // disabled status omits the runtime error, so status alone would falsely read "ready".
+  const loadDependency = useCallback(async () => {
+    try {
+      const res = await api.listDependencies();
+      const dep = res.deps?.find((d) => d.id === 'memory-runtime');
+      // Absent row (older backend) → don't block enablement; only a present, non-ready row does.
+      if (dep) setDependencyReady(dep.installed && dep.status === 'ready');
+    } catch {
+      // Best-effort: leave the prior readiness rather than falsely blocking the toggle.
+    }
+  }, [api]);
+
   useEffect(() => {
     void loadSettings();
     void loadStatus();
-  }, [loadSettings, loadStatus]);
+    void loadDependency();
+  }, [loadSettings, loadStatus, loadDependency]);
 
   // Poll status while the page is open so queue/state transitions (starting → ready, clearing →
   // enabled, etc.) show up without a manual refresh. Settings/profile/search stay explicit-refresh.
@@ -775,8 +791,12 @@ export const MemoryPage: React.FC = () => {
                 onSaved={(next) => {
                   setSettings(next);
                   void loadStatus();
+                  void loadDependency();
                 }}
-                onReloadStatus={() => void loadStatus()}
+                onReloadStatus={() => {
+                  void loadStatus();
+                  void loadDependency();
+                }}
                 onClearAll={() => setClearOpen(true)}
                 clearing={clearing}
               />
