@@ -44,7 +44,7 @@ priority, and a standalone managed-dependency manifest/status contract.
 | `resolution-event.schema.json` | L2 (adapter-owned), L4 UI, L1 adapter |
 | `oauth-flow.schema.json` | L2, L4 UI, L1 engine adapter |
 | `migration-scan.schema.json` | L6, L5 UI |
-| `runtime-dependency.schema.json` | L1, L2 status API, L7 guards |
+| `runtime-dependency.schema.json` | L1, L2 status API, L7 guards. **URL policy (orchestrator, 07-23 12:05):** the example URLs are placeholders; L1 ships with upstream release URLs + SHA256 integrity verification. Availability guard = L7/orchestrator deliverable BEFORE GA: mirror the pinned assets into Avibe-owned release storage (same manifest-verified backup/recovery pattern as Show Runtime, per repo release rules), then point the manifest at the mirror with upstream recorded as provenance. SHA256s never change (same bytes). L1 must NOT build the mirror or touch the Show Runtime guard. **Platform expansion (07-23 13:13):** linux-arm64 / darwin-x64 assets get pinned (+ schema platform-enum rev) together with the mirror work at L7; until then unsupported hosts fail closed, Direct = escape hatch (L1's `model_hub_engine_platform_unsupported` coverage is the intended behavior). |
 | `api.md` | all |
 | `opencode-overlay.md` | L3, L7 (identifier-stability tests) |
 | `adapter-interface.py` | L1 (implements), L2 (consumes; owns in-repo copy). Dual-copy rule: both lanes copy VERBATIM to `core/handlers/model_hub/adapter.py` in their branches — byte-identical, merge is a no-op. Added 07-23 10:55 after L1 raised the ordering race; **v1.1 07-23 11:05**: +OAuth surface with deterministic source binding (`start_oauth(source_id)` → success carries `credential_ref`), +`allowed_origins`/`invoke(origin)`/`OriginNotAllowedError` (both from L1 review findings). |
@@ -53,6 +53,11 @@ priority, and a standalone managed-dependency manifest/status contract.
 
 1. No credential material ever appears in any payload defined here —
    sources expose `credential_ref` only; events are adapter-redacted.
+   Clarified 07-23 12:10 (L4 finding): non-reversible display data IS
+   permitted — `account_label` (subscription identity from the sanctioned
+   auth surface) and `masked_credential` (≤7-char prefix + "…" + last 4,
+   computed once at provisioning, never re-derivable) exist precisely so
+   the UI never needs anything stronger.
 2. The engine's own usage feed stays disabled; events originate from our
    adapter (S1 gap ②).
 3. `allowed_origins`-style client binding is enforced in code: subscription

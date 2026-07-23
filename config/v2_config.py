@@ -5,6 +5,7 @@ import re
 import tempfile
 import threading
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional, Union
 
@@ -76,6 +77,20 @@ DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
+
+
+def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config '{field_path}' must be a date-time string or null")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Config '{field_path}' must be a valid date-time") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"Config '{field_path}' must include a timezone")
+    return value
 
 
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:
@@ -318,15 +333,22 @@ class ModelHubModelConfig:
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
         model_id = payload.get("id")
         provenance = payload.get("provenance")
+        display_name = payload.get("display_name")
+        discovered_at = payload.get("discovered_at")
         if not isinstance(model_id, str) or not model_id:
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
         if provenance not in {"discovered", "manual"}:
             raise ValueError("Config 'model_hub.sources.models.provenance' is invalid")
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("Config 'model_hub.sources.models.display_name' must be a string or null")
         return cls(
             id=model_id,
             provenance=provenance,
-            display_name=payload.get("display_name"),
-            discovered_at=payload.get("discovered_at"),
+            display_name=display_name,
+            discovered_at=_validate_optional_datetime(
+                discovered_at,
+                "model_hub.sources.models.discovered_at",
+            ),
         )
 
     def to_payload(self) -> dict:
@@ -349,9 +371,17 @@ class ModelHubSourceStateConfig:
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.state' must be an object")
         status = payload.get("status")
+        retry_at = payload.get("retry_at")
+        detail_key = payload.get("detail_key")
         if status not in {"active", "standby", "cooldown", "error"}:
             raise ValueError("Config 'model_hub.sources.state.status' is invalid")
-        return cls(status=status, retry_at=payload.get("retry_at"), detail_key=payload.get("detail_key"))
+        if detail_key is not None and not isinstance(detail_key, str):
+            raise ValueError("Config 'model_hub.sources.state.detail_key' must be a string or null")
+        return cls(
+            status=status,
+            retry_at=_validate_optional_datetime(retry_at, "model_hub.sources.state.retry_at"),
+            detail_key=detail_key,
+        )
 
     def to_payload(self) -> dict:
         return {"status": self.status, "retry_at": self.retry_at, "detail_key": self.detail_key}
@@ -375,14 +405,17 @@ class ModelHubSourceUsageConfig:
         ):
             raise ValueError("Config 'model_hub.sources.usage.cycle_used_pct' must be between 0 and 100")
         month_spend_cents = payload.get("month_spend_cents")
+        currency = payload.get("currency")
         if month_spend_cents is not None and (
             isinstance(month_spend_cents, bool) or not isinstance(month_spend_cents, int) or month_spend_cents < 0
         ):
             raise ValueError("Config 'model_hub.sources.usage.month_spend_cents' must be a non-negative integer")
+        if currency is not None and not isinstance(currency, str):
+            raise ValueError("Config 'model_hub.sources.usage.currency' must be a string or null")
         return cls(
             cycle_used_pct=cycle_used_pct,
             month_spend_cents=month_spend_cents,
-            currency=payload.get("currency"),
+            currency=currency,
         )
 
     def to_payload(self) -> dict:
@@ -408,6 +441,8 @@ class ModelHubSourceConfig:
     experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
     credential_ref: Optional[str] = None
+    account_label: Optional[str] = None
+    masked_credential: Optional[str] = None
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
@@ -441,12 +476,16 @@ class ModelHubSourceConfig:
         base_url = payload.get("base_url")
         consent_at = payload.get("experimental_consent_at")
         credential_ref = payload.get("credential_ref")
+        account_label = payload.get("account_label")
+        masked_credential = payload.get("masked_credential")
         if base_url is not None and not isinstance(base_url, str):
             raise ValueError("Config 'model_hub.sources.base_url' is invalid")
-        if consent_at is not None and not isinstance(consent_at, str):
-            raise ValueError("Config 'model_hub.sources.experimental_consent_at' is invalid")
         if credential_ref is not None and not isinstance(credential_ref, str):
             raise ValueError("Config 'model_hub.sources.credential_ref' is invalid")
+        if account_label is not None and not isinstance(account_label, str):
+            raise ValueError("Config 'model_hub.sources.account_label' is invalid")
+        if masked_credential is not None and not isinstance(masked_credential, str):
+            raise ValueError("Config 'model_hub.sources.masked_credential' is invalid")
         return cls(
             id=source_id,
             kind=kind,
@@ -458,9 +497,14 @@ class ModelHubSourceConfig:
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
             models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
             base_url=base_url,
-            experimental_consent_at=consent_at,
+            experimental_consent_at=_validate_optional_datetime(
+                consent_at,
+                "model_hub.sources.experimental_consent_at",
+            ),
             usage=ModelHubSourceUsageConfig.from_payload(usage_payload) if usage_payload is not None else None,
             credential_ref=credential_ref,
+            account_label=account_label,
+            masked_credential=masked_credential,
         )
 
     def to_payload(self) -> dict:
@@ -476,6 +520,8 @@ class ModelHubSourceConfig:
             "state": self.state.to_payload(),
             "models": [model.to_payload() for model in self.models],
             "credential_ref": self.credential_ref,
+            "account_label": self.account_label,
+            "masked_credential": self.masked_credential,
         }
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()

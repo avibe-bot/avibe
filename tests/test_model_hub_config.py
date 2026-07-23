@@ -145,3 +145,43 @@ def test_hub_subscription_requires_server_recorded_consent():
         assert "recorded experimental consent" in str(exc)
     else:
         raise AssertionError("hub-held subscription loaded without recorded consent")
+
+
+def test_source_optional_fields_reject_schema_invalid_values():
+    source = _schema("source.schema.json")["examples"][0]
+    invalid_sources = []
+
+    invalid = json.loads(json.dumps(source))
+    invalid["models"][0]["display_name"] = 1
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["models"][0]["discovered_at"] = "2026-07-23T03:00:00"
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["state"]["detail_key"] = 1
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["usage"]["currency"] = 1
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["experimental_consent_at"] = 1
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["account_label"] = 1
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["masked_credential"] = 1
+    invalid_sources.append(invalid)
+
+    for invalid in invalid_sources:
+        try:
+            ModelHubSourceConfig.from_payload(invalid)
+        except ValueError:
+            continue
+        raise AssertionError(f"schema-invalid optional field was accepted: {invalid}")

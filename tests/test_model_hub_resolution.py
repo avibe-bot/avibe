@@ -23,18 +23,21 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.events import BoundedEventLog, build_resolution_event
-from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
 from vibe.i18n import t as i18n_t
 
 
 class MemoryStore:
     def __init__(self, config: ModelHubConfig):
         self.config = config
+        self.fail_save = False
 
     def load(self) -> ModelHubConfig:
         return self.config
 
     def save(self, config: ModelHubConfig) -> None:
+        if self.fail_save:
+            raise OSError("save failed")
         self.config = config
 
 
@@ -44,6 +47,7 @@ class FakeAdapter:
         self.invocations = []
         self.synced = []
         self.revoked = []
+        self.provisioned = []
         self.fail_sync = False
         self.fail_revoke = False
 
@@ -63,6 +67,7 @@ class FakeAdapter:
         return "local-test-token"
 
     async def provision_credential(self, vendor, protocol, secret, base_url):
+        self.provisioned.append((vendor, protocol, base_url))
         return "cred_test"
 
     async def revoke_credential(self, credential_ref):
@@ -81,7 +86,8 @@ class FakeAdapter:
 
     async def invoke(self, source_id, model_id, request, stream, origin):
         self.invocations.append((source_id, model_id, origin))
-        return FakeInvokeHandle(self.outcomes.popleft())
+        result = self.outcomes.popleft()
+        return result if isinstance(result, FakeInvokeHandle) else FakeInvokeHandle(result)
 
     async def start_oauth(self, source_id, vendor):
         raise AssertionError
@@ -107,6 +113,19 @@ class FakeInvokeHandle:
 
     async def outcome(self):
         return self._outcome
+
+
+@pytest.mark.parametrize(
+    ("secret", "expected"),
+    [
+        ("sk-test-never-persist-this", "sk-test…this"),
+        ("abcde", "…bcde"),
+        ("abcd", "…••••"),
+    ],
+)
+def test_credential_display_mask_never_exposes_the_whole_secret(secret, expected):
+    assert _mask_credential(secret) == expected
+    assert secret != expected
 
 
 def _outcome(kind, *, status=None, code=None, message=None, stream_started=False):
@@ -239,6 +258,35 @@ def test_401_refreshes_exactly_once_before_returning(tmp_path):
     assert len(adapter.invocations) == 2
 
 
+def test_refreshed_fallback_stream_emits_switch_event(tmp_path):
+    async def stream_bytes():
+        yield b"ok"
+
+    adapter = FakeAdapter(
+        [
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=429),
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=401),
+            FakeInvokeHandle(
+                _outcome(RawOutcomeKind.SUCCESS, status=200, stream_started=True),
+                stream=stream_bytes(),
+            ),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+
+    result = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+            stream=True,
+        )
+    )
+
+    assert result.source_id == "src_backup001"
+    assert [event["kind"] for event in service.list_events(limit=10)] == ["switch", "cooldown"]
+
+
 def test_parameter_error_and_started_stream_never_fallback(tmp_path):
     for outcome in (
         _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"),
@@ -291,6 +339,44 @@ def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tm
     assert service.list_events(limit=10) == []
 
 
+def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].vendor = "relaycorp"
+    config.agents["opencode"].menu.checked = ["custom/claude-opus-4-6"]
+
+    menu = service.set_opencode_menu(config.agents["opencode"].menu.to_payload())
+    current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
+    resolved = asyncio.run(
+        service.resolve(
+            backend="opencode",
+            model_id="custom/claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert menu["menu"]["checked"] == ["custom/claude-opus-4-6"]
+    assert current["source_id"] == "src_primary01"
+    assert resolved.source_id == "src_primary01"
+
+
+def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    config.sources[0].state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2026-07-23T03:05:00+00:00",
+    )
+
+    claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
+    assert claude["current"]["source_id"] == "src_backup001"
+
+    config.sources[1].state = ModelHubSourceStateConfig(status="error")
+    claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
+    assert claude["current"] is None
+
+
 def test_direct_mode_never_enters_hub_resolution(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
@@ -326,6 +412,40 @@ def test_source_creation_is_not_persisted_when_engine_sync_fails(tmp_path):
     assert exc_info.value.code == "engine_down"
     assert [source.id for source in service.store.load().sources] == original_ids
     assert adapter.revoked == ["cred_test"]
+
+
+def test_subscription_source_rejects_api_key_credentials(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Invalid subscription",
+                    "key": "sk-test-must-not-be-provisioned",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert adapter.provisioned == []
+
+
+def test_source_delete_does_not_revoke_when_config_save_fails(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    service.store.load().sources[0].credential_ref = "cred_primary"
+    service.store.load().sources[1].credential_ref = "cred_backup"
+    service.store.fail_save = True
+
+    with pytest.raises(OSError, match="save failed"):
+        asyncio.run(service.delete_source("src_primary01", force=True))
+
+    assert adapter.revoked == []
+    assert [source.id for source in service.store.load().sources] == ["src_primary01", "src_backup001"]
 
 
 def test_source_reference_survives_failed_credential_revoke(tmp_path):

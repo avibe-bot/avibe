@@ -34,6 +34,7 @@ from .adapter import (
 )
 from .classification import ResolutionDecision, classify_outcome
 from .events import BoundedEventLog, EventAgent, EventReason, build_resolution_event
+from .identifiers import opencode_model_id, opencode_provider_id, parse_opencode_model_id
 from .oauth import (
     NativeOAuthUnavailableError,
     OAuthAdapter,
@@ -66,11 +67,12 @@ _RUNTIME_MANIFEST = {
 
 
 class ModelHubError(Exception):
-    def __init__(self, code: str, *, status: int = 400, detail: Optional[str] = None):
-        super().__init__(detail or code)
+    def __init__(self, code: str, *, status: int = 400):
+        detail_key = f"modelHub.errors.{code}"
+        super().__init__(detail_key)
         self.code = code
         self.status = status
-        self.detail = detail
+        self.detail = detail_key
 
 
 class EngineUnavailableError(RuntimeError):
@@ -176,6 +178,15 @@ def _source_id() -> str:
     return f"src_{uuid.uuid4().hex[:12]}"
 
 
+def _mask_credential(value: str) -> str:
+    """Create the one-way display mask frozen by the source contract."""
+    normalized = value.strip()
+    if len(normalized) <= 4:
+        return "…" + ("•" * len(normalized))
+    prefix_length = min(7, len(normalized) - 5)
+    return f"{normalized[:prefix_length]}…{normalized[-4:]}"
+
+
 def _default_protocol(vendor: str) -> str:
     if vendor == "anthropic":
         return "anthropic"
@@ -196,10 +207,10 @@ def _allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
 
 def _binding(source: ModelHubSourceConfig) -> SourceBinding:
     if not source.credential_ref:
-        raise ModelHubError("engine_down", status=503, detail="Hub source has no credential reference")
+        raise ModelHubError("engine_down", status=503)
     allowed_origins = _allowed_origins(source)
     if source.kind == "subscription" and not allowed_origins:
-        raise ModelHubError("mode_switch_blocked", status=409, detail="Subscription client binding is unavailable")
+        raise ModelHubError("mode_switch_blocked", status=409)
     return SourceBinding(
         source_id=source.id,
         vendor=source.vendor,
@@ -275,7 +286,7 @@ class ModelHubService:
     def _agent(config: ModelHubConfig, backend: str) -> ModelHubAgentSupplyConfig:
         agent = config.agents.get(backend)
         if agent is None:
-            raise ModelHubError("mode_switch_blocked", detail="Unsupported backend")
+            raise ModelHubError("mode_switch_blocked")
         return agent
 
     async def _engine_call(self, awaitable):
@@ -371,27 +382,35 @@ class ModelHubService:
 
     async def create_source(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
-            raise ModelHubError("discovery_failed", detail="Source payload must be an object")
-        forbidden = {"id", "credential_ref", "experimental_consent_at", "state", "usage"} & set(payload)
+            raise ModelHubError("discovery_failed")
+        forbidden = {
+            "id",
+            "credential_ref",
+            "account_label",
+            "masked_credential",
+            "experimental_consent_at",
+            "state",
+            "usage",
+        } & set(payload)
         if forbidden:
-            raise ModelHubError("discovery_failed", detail="Server-owned source fields are not accepted")
+            raise ModelHubError("discovery_failed")
         kind = payload.get("kind")
         vendor = payload.get("vendor")
         display_name = payload.get("display_name") or vendor
         if kind not in {"subscription", "api_key"} or not isinstance(vendor, str) or not vendor:
-            raise ModelHubError("discovery_failed", detail="Invalid source kind or vendor")
+            raise ModelHubError("discovery_failed")
         if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
-            raise ModelHubError("discovery_failed", detail="Invalid source display name")
+            raise ModelHubError("discovery_failed")
         channel = payload.get("supply_channel") or ("native_cli" if kind == "subscription" else "hub")
         if channel not in {"native_cli", "hub"} or (kind == "api_key" and channel != "hub"):
-            raise ModelHubError("discovery_failed", detail="Invalid source supply channel")
+            raise ModelHubError("discovery_failed")
         consented = payload.get("experimental_consent") is True
         if "experimental_consent" in payload and not isinstance(payload.get("experimental_consent"), bool):
             raise ModelHubError("consent_required")
         if kind == "subscription" and channel == "hub" and not consented:
             raise ModelHubError("consent_required", status=409)
         if consented and not (kind == "subscription" and channel == "hub"):
-            raise ModelHubError("consent_required", detail="Consent applies only to hub-held subscriptions")
+            raise ModelHubError("consent_required")
 
         protocol = payload.get("protocol") or _default_protocol(vendor)
         billing = payload.get("billing") or ("monthly" if kind == "subscription" else "metered")
@@ -416,16 +435,20 @@ class ModelHubService:
             )
             source = ModelHubSourceConfig.from_payload(source.to_payload())
         except (TypeError, ValueError) as exc:
-            raise ModelHubError("discovery_failed", detail=str(exc)) from exc
+            raise ModelHubError("discovery_failed") from exc
 
         credential_value = payload.get("key")
         oauth_ref = payload.get("oauth_flow_ref")
         if credential_value is not None and not isinstance(credential_value, str):
-            raise ModelHubError("discovery_failed", detail="Source key must be a string")
+            raise ModelHubError("discovery_failed")
         if oauth_ref is not None and not isinstance(oauth_ref, str):
             raise ModelHubError("flow_not_found", status=404)
+        if kind == "subscription" and credential_value is not None:
+            raise ModelHubError("discovery_failed")
+        if kind == "api_key" and oauth_ref is not None:
+            raise ModelHubError("discovery_failed")
         if kind == "api_key" and not credential_value:
-            raise ModelHubError("discovery_failed", detail="API key is required")
+            raise ModelHubError("discovery_failed")
 
         provisioned_ref: Optional[str] = None
         persisted = False
@@ -435,6 +458,7 @@ class ModelHubService:
                     self.adapter.provision_credential(vendor, protocol, credential_value, source.base_url)
                 )
                 source.credential_ref = provisioned_ref
+                source.masked_credential = _mask_credential(credential_value)
             elif oauth_ref:
                 flow_channel = self._oauth_channel(oauth_ref)
                 if flow_channel != channel:
@@ -480,19 +504,19 @@ class ModelHubService:
 
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         if not isinstance(payload, dict) or set(payload) - {"display_name", "base_url"}:
-            raise ModelHubError("discovery_failed", detail="Only display_name and base_url may be changed")
+            raise ModelHubError("discovery_failed")
         previous = self.store.load()
         config = self._clone_config(previous)
         source = self._source(config, source_id)
         if "display_name" in payload:
             display_name = payload["display_name"]
             if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
-                raise ModelHubError("discovery_failed", detail="Invalid source display name")
+                raise ModelHubError("discovery_failed")
             source.display_name = display_name
         if "base_url" in payload:
             base_url = payload["base_url"]
             if base_url is not None and not isinstance(base_url, str):
-                raise ModelHubError("discovery_failed", detail="Invalid base URL")
+                raise ModelHubError("discovery_failed")
             source.base_url = base_url
             discovered = await self._discover(source)
             manual = [model for model in source.models if model.provenance == "manual"]
@@ -508,8 +532,11 @@ class ModelHubService:
         if agent.backend == "opencode" and agent.menu:
             targets = []
             for identifier in agent.menu.checked:
-                provider, separator, model_id = identifier.partition("/")
-                if separator and provider and model_id:
+                try:
+                    provider, model_id = parse_opencode_model_id(identifier)
+                except ValueError:
+                    continue
+                else:
                     targets.append((provider, model_id))
             return targets
         return [(None, mapping.target_model_id) for mapping in agent.mappings if mapping.enabled]
@@ -522,13 +549,15 @@ class ModelHubService:
     ) -> bool:
         for agent in config.agents.values():
             for provider, target_model_id in self._selected_targets(agent):
-                if target_model_id != model_id or (provider is not None and provider != source.vendor):
+                if target_model_id != model_id or (
+                    provider is not None and provider != opencode_provider_id(source.vendor)
+                ):
                     continue
                 suppliers = [
                     candidate
                     for candidate in config.sources
                     if self._eligible_for_agent(candidate, agent.backend)
-                    and (provider is None or candidate.vendor == provider)
+                    and (provider is None or opencode_provider_id(candidate.vendor) == provider)
                     and any(item.id == model_id for item in candidate.models)
                 ]
                 if len(suppliers) == 1 and suppliers[0].id == source.id:
@@ -543,20 +572,20 @@ class ModelHubService:
         config = self._clone_config(previous)
         source = self._source(config, source_id)
         if not force and self._only_selected_supplier(config, source):
-            raise ModelHubError("mode_switch_blocked", status=409, detail="Source is the only selected model supplier")
+            raise ModelHubError("mode_switch_blocked", status=409)
         config.sources = [item for item in config.sources if item.id != source_id]
         config.priority_order = [item for item in config.priority_order if item != source_id]
-        await self._sync_sources(config)
+        await self._commit_synced(previous, config)
         try:
             if source.credential_ref:
                 await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
         except ModelHubError:
+            self.store.save(previous)
             try:
                 await self._sync_sources(previous)
             except ModelHubError:
                 pass
             raise
-        self.store.save(config)
 
     async def test_source(self, source_id: str) -> tuple[dict, int]:
         previous = self.store.load()
@@ -595,21 +624,34 @@ class ModelHubService:
             return source.supply_channel == "hub"
         return backend in _allowed_origins(source)
 
+    def _source_available(self, source: ModelHubSourceConfig) -> bool:
+        if source.state.status == "error":
+            return False
+        if source.state.status != "cooldown":
+            return True
+        try:
+            return datetime.fromisoformat(source.state.retry_at or "") <= self.now()
+        except ValueError:
+            return False
+
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         current = None
         if agent.mode == "hub":
             provider = None
             target = next((mapping.target_model_id for mapping in agent.mappings if mapping.enabled), None)
             if target is None and agent.menu and agent.menu.checked:
-                provider, separator, target = agent.menu.checked[0].partition("/")
-                if not separator:
+                try:
+                    provider, target = parse_opencode_model_id(agent.menu.checked[0])
+                except ValueError:
                     provider = None
             by_id = {source.id: source for source in config.sources}
             for source_id in config.priority_order:
                 source = by_id[source_id]
                 if not self._eligible_for_agent(source, agent.backend):
                     continue
-                if provider is not None and source.vendor != provider:
+                if not self._source_available(source):
+                    continue
+                if provider is not None and opencode_provider_id(source.vendor) != provider:
                     continue
                 model = next((model for model in source.models if target is None or model.id == target), None)
                 if model is not None:
@@ -638,7 +680,7 @@ class ModelHubService:
         try:
             parsed = [ModelHubMappingConfig.from_payload(mapping) for mapping in mappings]
         except ValueError as exc:
-            raise ModelHubError("mapping_target_unavailable", detail=str(exc)) from exc
+            raise ModelHubError("mapping_target_unavailable") from exc
         available = {
             model.id
             for source in config.sources
@@ -657,9 +699,9 @@ class ModelHubService:
         try:
             parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
         except (TypeError, ValueError) as exc:
-            raise ModelHubError("mapping_target_unavailable", detail=str(exc)) from exc
+            raise ModelHubError("mapping_target_unavailable") from exc
         available = {
-            f"{source.vendor}/{model.id}"
+            opencode_model_id(source.vendor, model.id)
             for source in config.sources
             if self._eligible_for_agent(source, "opencode")
             for model in source.models
@@ -679,9 +721,9 @@ class ModelHubService:
         model_id = payload.get("model_id")
         display_name = payload.get("display_name")
         if not isinstance(model_id, str) or not model_id or "/" in model_id:
-            raise ModelHubError("mapping_target_unavailable", detail="Invalid model id")
+            raise ModelHubError("mapping_target_unavailable")
         if display_name is not None and not isinstance(display_name, str):
-            raise ModelHubError("mapping_target_unavailable", detail="Invalid display name")
+            raise ModelHubError("mapping_target_unavailable")
         existing = next((model for model in source.models if model.id == model_id), None)
         if existing is None:
             source.models.append(
@@ -703,7 +745,7 @@ class ModelHubService:
             None,
         )
         if manual is not None and self._only_selected_model_supplier(config, source, model_id):
-            raise ModelHubError("mode_switch_blocked", status=409, detail="Model is the only selected supplier")
+            raise ModelHubError("mode_switch_blocked", status=409)
         source.models = [
             model for model in source.models if not (model.id == model_id and model.provenance == "manual")
         ]
@@ -820,7 +862,7 @@ class ModelHubService:
             if (
                 source.supply_channel == "hub"
                 and self._eligible_for_agent(source, backend)
-                and (provider is None or source.vendor == provider)
+                and (provider is None or opencode_provider_id(source.vendor) == provider)
                 and any(model.id == model_id for model in source.models)
                 and source.state.status != "error"
             ):
@@ -914,7 +956,7 @@ class ModelHubService:
         config = self.store.load()
         agent = self._agent(config, backend)
         if agent.mode != "hub":
-            raise ModelHubError("mode_switch_blocked", status=409, detail="Backend is in Direct mode")
+            raise ModelHubError("mode_switch_blocked", status=409)
         target_model = next(
             (
                 mapping.target_model_id
@@ -926,8 +968,9 @@ class ModelHubService:
         mapping_applied = target_model != model_id
         provider = None
         if backend == "opencode":
-            provider, separator, target_model = target_model.partition("/")
-            if not separator or not provider or not target_model:
+            try:
+                provider, target_model = parse_opencode_model_id(target_model)
+            except ValueError:
                 raise ModelHubError("mapping_target_unavailable", status=409)
         event_agent = cast(EventAgent, backend)
         if mapping_applied:
@@ -976,6 +1019,13 @@ class ModelHubService:
                     backend=backend,
                 )
                 if outcome is None:
+                    self._emit_switch(
+                        agent=event_agent,
+                        model_id=target_model,
+                        failed_source=failed_source,
+                        failed_reason=failed_reason,
+                        source=source,
+                    )
                     return ResolvedInvocation(source.id, target_model, handle, None)
                 decision = classify_outcome(outcome, refresh_attempted=True)
             if decision.action == "return":

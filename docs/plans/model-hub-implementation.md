@@ -90,7 +90,7 @@ no-touch zones.
 | L4 UI: Models page + sources + OAuth connect | claude | `ui/src/components/settings/models/**` (new dir), add-source menu/dialogs, OAuth dialog reusing `BackendOAuthPanel` shell | contracts |
 | L5 UI: menus + mapping + backend card + migration dialog | claude | `ui/src/components/settings/models/menus/**`, backend page 供给方式 card, migration dialog | contracts; L4 shared primitives |
 | L6 migration backend | codex | scan/import of native configs (Claude settings.json, Codex auth.json controlled import, opencode providers), re-auth orchestration, non-destructive tests | L2 |
-| L7 scenario tests + regression + docs | either (split) | `tests/scenarios/model_hub/**` catalog + harness, Incus verification script hooks, `avibe-docs` user docs EN/ZH | all |
+| L7 scenario tests + regression + docs + availability guard | either (split) | `tests/scenarios/model_hub/**` catalog + harness, Incus verification script hooks, `avibe-docs` user docs EN/ZH; **engine-asset availability guard** (decided 07-23: mirror pinned CPA assets into Avibe-owned release storage pre-GA, manifest → mirror URLs, upstream as provenance; same manifest-verified backup/recovery pattern as Show Runtime) + **platform-set expansion** (07-23 13:13, from L1 review: add linux-arm64 / darwin-x64 assets — pin + SHA256 + schema platform-enum rev — together with the mirror work; until then unsupported hosts fail closed with Direct as escape hatch, scenario `model_hub_engine_platform_unsupported`) | all |
 
 No-touch zones: only L2 edits `config/v2_config.py`; only L3 edits
 `modules/agents/**`; L4/L5 split `ui/src/components/settings/**` by

@@ -475,6 +475,23 @@
     "routingCanceled": "Routing update canceled."
   },
   "modelHub": {
+    "errors": {
+      "source_not_found": "Model source not found.",
+      "flow_not_found": "Authorization flow not found.",
+      "flow_expired": "Authorization flow expired.",
+      "discovery_failed": "Could not validate or discover this source.",
+      "invalid_priority_order": "Priority must include every source exactly once.",
+      "mapping_target_unavailable": "The selected model is unavailable for this backend.",
+      "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
+      "engine_down": "The local Model Hub runtime is unavailable.",
+      "consent_required": "Explicit consent is required for experimental subscription routing.",
+      "migration_item_conflict": "This migration item conflicts with current Model Hub state.",
+      "stream_interrupted": "The upstream stream was interrupted.",
+      "upstream_protocol_error": "The upstream response did not match the expected protocol.",
+      "upstream_request_invalid": "The upstream service rejected the request.",
+      "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
+      "upstream_error": "The upstream service returned an error."
+    },
     "events": {
       "sourceFallback": "source",
       "switch": "{from_source}: {reason} -> switched to {to_source}",

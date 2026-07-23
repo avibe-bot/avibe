@@ -201,6 +201,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert response.status_code == 409
     _assert_envelope(error, ok=False)
     assert error["error"] == "consent_required"
+    assert error["detail"] == "modelHub.errors.consent_required"
 
     fake_key = "sk-test-never-persist-this"
     response = client.post(
@@ -221,6 +222,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     source = body["source"]
     _assert_valid("source.schema.json", source)
     source_id = source["id"]
+    assert source["masked_credential"] == "sk-test…this"
     assert fake_key not in json.dumps(store.config.to_payload())
     assert adapter.secret_lengths[0] == len(fake_key)
 
