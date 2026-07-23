@@ -618,6 +618,48 @@ def test_cap_applies_project_filter_before_capping(isolated_state):
     assert [n["session_id"] for n in payload["nodes"]] == ["ses_proj"]
 
 
+def test_active_view_keeps_queued_past_recency_cap(isolated_state):
+    # A queued session with old last_active must still appear in the active view
+    # even when newer *ended* sessions would fill a small cap — the active view
+    # loads live/queued candidates directly, not a recency slice of raw sessions.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_q", scope_id=None, title="Queued",
+                        last_active=NOW - timedelta(hours=5))
+        _insert_run(conn, "run_q", session_id="ses_q", status="queued",
+                    created=NOW - timedelta(hours=5))
+        for idx in range(2):
+            sid = f"ses_done{idx}"
+            _insert_session(conn, sid, scope_id=None, title=f"Done{idx}",
+                            last_active=NOW - timedelta(minutes=idx + 1))
+            _insert_run(conn, f"run_done{idx}", session_id=sid, status="succeeded",
+                        created=NOW - timedelta(minutes=idx + 1))
+
+    payload = agent_graph.build_graph(
+        live_agents=[], now=NOW, engine=engine, node_cap=1, include_ended=False
+    )
+    assert [n["session_id"] for n in payload["nodes"]] == ["ses_q"]
+
+
+def test_missing_lineage_reference_terminates(isolated_state):
+    # A retained run pointing at a session id with no agent_sessions row (a stale
+    # source_actor/callback from imported or repaired state) must not spin the
+    # lineage fixed-point loop forever: it terminates and returns a graph without
+    # a node for the missing session.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_live", scope_id=None, title="Live")
+        _insert_run(conn, "run_live", session_id="ses_live", source_kind="agent",
+                    source_actor="ses_ghost")
+
+    payload = agent_graph.build_graph(
+        live_agents=[{"session_id": "ses_live", "state": "active"}], now=NOW, engine=engine
+    )
+    ids = {n["session_id"] for n in payload["nodes"]}
+    assert "ses_live" in ids
+    assert "ses_ghost" not in ids
+
+
 def test_visibility_emitted_and_filtered(isolated_state):
     # M1's ``agent_sessions.visibility`` is now a hard column: every node
     # carries it (legacy rows backfill to foreground), a background session is

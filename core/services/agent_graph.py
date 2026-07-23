@@ -228,38 +228,53 @@ def build_graph(
             if not candidate_ids:
                 return _empty_payload(now, window, live_unreachable)
 
-            # Bound the expensive run-history load: rank the candidate SESSIONS
-            # (cheap — no runs) the same way the node cap ranks nodes, after the
-            # session-level project/background filters, and keep only the top
-            # ``node_cap`` before loading runs. A busy install can have many more
-            # candidates than the cap; loading every run for all of them on each
-            # SSE/poll refresh is wasted work since the response is truncated
-            # anyway. ``include_ended`` is intentionally NOT pre-applied here
-            # (``queued`` is a run-derived status), so a recent queued session
-            # that survives the cap still reaches the active view.
+            # Bound the expensive run-history load by choosing which candidate
+            # SESSIONS to load runs for (cheap — no runs) before ``_load_runs``. A
+            # busy install can have far more candidates than survive the response,
+            # and the graph refetches on SSE/poll, so loading every run for every
+            # candidate is wasted work.
             candidate_rows = _load_sessions(conn, candidate_ids)
             eligible = _prefilter_candidate_rows(
                 candidate_rows, project=project, include_background=include_background,
             )
-            eligible.sort(key=lambda r: _session_sort_key(r, live_ids))
-            candidate_truncated = len(eligible) > node_cap
-            session_by_id = {r["id"]: r for r in eligible[:node_cap]}
+            eligible_ids = {r["id"] for r in eligible}
+            if include_ended:
+                # History view: no run-derived filter applies, so a session-level
+                # recency rank is exact. Keep the most-recent ``node_cap``.
+                ranked = sorted(eligible, key=lambda r: _session_sort_key(r, live_ids))
+            else:
+                # Active view keeps only live/queued nodes, so load runs for
+                # exactly those candidates (naturally bounded by in-flight work)
+                # rather than a recency slice — otherwise a queued session whose
+                # last activity sorts past the cap would be dropped before
+                # ``_filter_nodes`` ever classifies it.
+                active_ids = (live_ids | _queued_candidate_ids(conn, eligible_ids)) & eligible_ids
+                by_id = {r["id"]: r for r in eligible}
+                ranked = sorted((by_id[i] for i in active_ids),
+                                key=lambda r: _session_sort_key(r, live_ids))
+            candidate_truncated = len(ranked) > node_cap
+            session_by_id = {r["id"]: r for r in ranked[:node_cap]}
+            loaded_ids = set(session_by_id)
 
-            runs_by_session = _load_runs(conn, set(session_by_id))
-            # Pull in lineage sessions referenced by ANY run of a retained
-            # candidate — even a spawn/callback run older than the window (e.g. a
-            # long-lived live session's original delegation) — so the edge and its
-            # "who started it / reports to" endpoints survive. Fixed point: a
-            # lineage session's own runs can reference further ancestors/targets.
+            runs_by_session = _load_runs(conn, loaded_ids)
+            # Pull in lineage sessions referenced by a retained run — even a
+            # spawn/callback older than the window (e.g. a long-lived live
+            # session's original delegation) — so the edge and its "who started
+            # it / reports to" endpoints survive. Fixed point, but track attempted
+            # ids in ``loaded_ids`` (monotonic): a run can point at a session id
+            # with no ``agent_sessions`` row (stale source_actor/callback from
+            # imported or repaired state) which never lands in ``session_by_id``,
+            # so keying the loop off that alone would spin forever.
             while True:
-                extra = _lineage_refs(runs_by_session) - set(session_by_id)
+                extra = _lineage_refs(runs_by_session) - loaded_ids
                 if not extra:
                     break
+                loaded_ids |= extra
                 runs_by_session.update(_load_runs(conn, extra))
                 for row in _load_sessions(conn, extra):
                     session_by_id.setdefault(row["id"], row)
             session_rows = list(session_by_id.values())
-            edges, trigger_ids = _build_edges(runs_by_session, set(session_by_id))
+            edges, trigger_ids = _build_edges(runs_by_session, loaded_ids)
             trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
     finally:
         if owned_engine:
@@ -300,6 +315,18 @@ def _empty_payload(now: datetime, window: str, live_unreachable: bool) -> dict[s
         "edges": [],
         "truncated": False,
     }
+
+
+def _queued_candidate_ids(conn, candidate_ids: set[str]) -> set[str]:
+    """Candidate sessions that have a queued run — the non-live half of the
+    active view. Queued runs are few (upcoming work drains quickly), so this is a
+    cheap status lookup intersected in Python; it lets the active view load runs
+    for only the sessions that can survive its filter, without a recency pre-cap
+    dropping a queued session whose own last activity is old."""
+    if not candidate_ids:
+        return set()
+    stmt = select(agent_runs.c.session_id).where(agent_runs.c.status == "queued").distinct()
+    return {row[0] for row in conn.execute(stmt) if row[0] in candidate_ids}
 
 
 def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
