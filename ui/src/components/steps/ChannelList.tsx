@@ -708,8 +708,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     const neededClaudeCwds = new Set<string>();
     const neededCodexCwds = new Set<string>();
 
-    channels.forEach((channel) => {
-      const raw = configs[channel.id];
+    const collectBackendCwd = (raw: ChannelConfig | undefined) => {
       if (!raw || raw.enabled === false) return;
       const effectiveCwd = (raw.custom_cwd ?? '') || defaultCwd;
       const routing = raw.routing || {};
@@ -725,6 +724,13 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       if (backend === 'codex' && config.agents?.codex?.enabled) {
         neededCodexCwds.add(effectiveCwd);
       }
+    };
+
+    channels.forEach((channel) => {
+      collectBackendCwd(configs[channel.id]);
+    });
+    Object.values(threadConfigs).forEach((topics) => {
+      Object.values(topics).forEach(collectBackendCwd);
     });
 
     neededOpenCodeCwds.forEach((cwd) => {
@@ -744,7 +750,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         void loadCodexAgents(cwd);
       }
     });
-  }, [channels, configs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
+  }, [channels, configs, threadConfigs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
 
   const isChannelEnabled = (channelId: string) => {
     const channel = configs[channelId];

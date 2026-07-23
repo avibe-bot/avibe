@@ -754,7 +754,7 @@ class TelegramBot(BaseIMClient):
             if topic_id is not None and is_forum:
                 created = (message or {}).get("forum_topic_created") or {}
                 edited = (message or {}).get("forum_topic_edited") or {}
-                topic_name = created.get("name") or edited.get("name") or ("General" if str(topic_id) == "1" else "")
+                topic_name = created.get("name") or edited.get("name") or ""
                 chat_discovery.remember_thread(
                     "telegram",
                     str(chat.get("id")),

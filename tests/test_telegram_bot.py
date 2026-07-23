@@ -52,6 +52,32 @@ def test_strip_leading_bot_mention_returns_empty_for_mention_only() -> None:
     assert bot._strip_leading_bot_mention(message, "@vibe_remote_bot") == ""
 
 
+def test_discovered_general_topic_leaves_name_for_ui_localization() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    chat = {
+        "id": -100123,
+        "type": "supergroup",
+        "title": "Forum",
+        "is_forum": True,
+    }
+    message = {"is_topic_message": True}
+
+    with (
+        patch.object(chat_discovery, "remember_chat"),
+        patch.object(chat_discovery, "remember_thread") as remember_thread,
+    ):
+        bot._remember_discovered_chat(chat, message)
+
+    remember_thread.assert_called_once_with(
+        "telegram",
+        "-100123",
+        "1",
+        name="",
+        native_type="forum_topic",
+        metadata={"is_general": True},
+    )
+
+
 def test_strip_leading_bot_mention_keeps_message_body() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     bot._bot_user = {"id": 1, "username": "vibe_remote_bot"}
