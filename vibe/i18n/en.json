@@ -443,6 +443,25 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
+  "memory": {
+    "command": {
+      "unavailable": "Memory is unavailable in this conversation.",
+      "usage": "Memory commands: /memory status, /memory profile, /memory search <query>",
+      "status": "Memory status: {state}",
+      "counts": "Pending: {pending}; processing: {processing}; missed: {missed}",
+      "profileWarning": "Profile warning: {warning}",
+      "profile": "Memory profile:",
+      "search": "Memory search:",
+      "empty": "No memory items found."
+    },
+    "cli": {
+      "error": "Memory {operation} failed: {code}",
+      "status": "Memory status: {state}",
+      "counts": "Pending: {pending}; processing: {processing}; missed: {missed}",
+      "profileWarning": "Profile warning: {warning}",
+      "empty": "No memory items found."
+    }
+  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",

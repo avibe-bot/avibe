@@ -106,6 +106,23 @@ def test_check_authorization_uses_text_when_action_missing():
     assert result.allowed is True
 
 
+def test_memory_auth_denial_reaches_the_shared_generic_handler():
+    im = _IM(_Cfg())
+    im.on_command_callbacks = {"memory": lambda *_args: None}
+    manager = _SettingsManager(bound=False)
+
+    result = im.check_authorization(
+        user_id="U1",
+        channel_id="D1",
+        is_dm=True,
+        text="/memory profile",
+        settings_manager=manager,
+    )
+
+    assert result.allowed is True
+    assert result.is_dm is True
+
+
 def test_dispatch_text_command_executes_handler():
     im = _IM(_Cfg())
     received = {}

@@ -49,6 +49,7 @@ Avibe 当前有两套命令面：
 | `/stop` | 中断当前后端执行 |
 | `/bind <绑定码>` | 在 DM 里绑定当前用户 |
 | `bind <绑定码>` | 仅限未绑定 DM 用户的纯文本别名 |
+| `/memory [help\|status\|profile\|search <查询>]` | 在符合条件的管理员 DM 中读取本地记忆 |
 
 ### 2.2 权限模型
 
@@ -80,11 +81,16 @@ Avibe 当前有两套命令面：
 - `/bind <绑定码>` 允许未绑定的 DM 用户执行。
 - `bind <绑定码>` 也允许未绑定的 DM 用户执行，用来兼容某些平台对 `/` 开头消息的不便场景。
 
+#### 私信记忆读取
+
+- `/memory` 只允许已绑定、已启用的管理员在私信中使用。
+- 只支持 `help`、`status`、`profile` 和 `search <查询>`；不能清空、配置、捕获、导出或删除记忆数据。
+
 ### 2.3 平台差异
 
 #### Slack
 
-- 目前原生 Slack slash command 只公开了 `/start` 和 `/stop`。
+- 在 Slack App 中声明后，原生 Slack slash command 会公开 `/start`、`/stop` 和 `/memory`。
 - 其它命令通常以“普通消息 + bot 定向”的方式触发，例如：
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -501,6 +507,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
+| `vibe memory ...` | 通过运行中的控制器读取本地记忆状态、档案或搜索结果 |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |

@@ -399,6 +399,31 @@ async def memory_search(
     )
 
 
+async def memory_capture(
+    source_message_id: str,
+    session_id: str,
+    text: str,
+    occurred_at_ms: int,
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Durably enqueue one Workbench capture before ordinary dispatch starts."""
+
+    return await _memory_request(
+        "POST",
+        "/internal/memory/capture",
+        payload={
+            "source_message_id": source_message_id,
+            "session_id": session_id,
+            "text": text,
+            "occurred_at_ms": occurred_at_ms,
+        },
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_clear(
     *,
     socket_path: Optional[Path] = None,
@@ -408,6 +433,38 @@ async def memory_clear(
         "POST",
         "/internal/memory/clear",
         payload={"confirm": True},
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_status_sync(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return _memory_request_sync("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
+
+
+def memory_profile_sync(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    return _memory_request_sync("GET", "/internal/memory/profile", socket_path=socket_path, timeout=timeout)
+
+
+def memory_search_sync(
+    query: str,
+    limit: int,
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/search",
+        payload={"query": query, "limit": limit},
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -427,7 +484,7 @@ async def _memory_request(
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://localhost",
-            timeout=httpx.Timeout(timeout, connect=5.0),
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
         ) as client:
             response = await client.request(method, route, json=payload)
     except _SOCKET_ERRORS as exc:

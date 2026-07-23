@@ -277,7 +277,7 @@ class BaseIMClient(ABC):
         settings_manager: Any = None,
     ):
         """Run centralized auth with shared action extraction logic."""
-        from core.auth import check_auth
+        from core.auth import AuthResult, check_auth
 
         allow_plain_bind = self.should_allow_plain_bind(
             user_id=user_id,
@@ -285,7 +285,7 @@ class BaseIMClient(ABC):
             settings_manager=settings_manager,
         )
         resolved_action = action or self.extract_command_action(text, allow_plain_bind=allow_plain_bind)
-        return check_auth(
+        result = check_auth(
             user_id=user_id,
             channel_id=channel_id,
             is_dm=is_dm,
@@ -293,6 +293,15 @@ class BaseIMClient(ABC):
             action=resolved_action,
             settings_manager=settings_manager,
         )
+        # Memory deliberately hides whether eligibility failed because the user is
+        # unbound, disabled, in the wrong channel, or not an administrator. The
+        # shared controller handler repeats its own fail-closed admission check and
+        # sends the one generic inert response. Keep this bypass conditional on a
+        # registered handler so a partially initialized adapter cannot fall through
+        # to an ordinary agent turn.
+        if resolved_action == "memory" and not result.allowed and "memory" in self.on_command_callbacks:
+            return AuthResult(allowed=True, is_dm=result.is_dm)
+        return result
 
     def build_auth_denial_text(self, denial: str, channel_id: Optional[str] = None) -> Optional[str]:
         """Build a localized denial message from centralized auth result.
@@ -347,6 +356,15 @@ class BaseIMClient(ABC):
             Message ID of sent message, or None when not delivered
         """
         pass
+
+    async def send_inert_message(self, context: MessageContext, text: str) -> Optional[str]:
+        """Send a bounded plain command result without rich transport affordances.
+
+        Adapters with richer defaults override this with their native plain-text
+        primitive. The fallback keeps the contract usable for simple transports.
+        """
+
+        return await self.send_message(context, text, parse_mode=None)
 
     @abstractmethod
     async def send_message_with_buttons(

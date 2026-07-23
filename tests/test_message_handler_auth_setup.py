@@ -63,6 +63,7 @@ MessageHandler = _load_message_handler_class()
 class _StubSessions:
     def __init__(self):
         self.recorded = []
+        self._claimed = set()
 
     def is_message_already_processed(self, channel_id, thread_ts, message_ts):
         return False
@@ -70,6 +71,14 @@ class _StubSessions:
     def record_processed_message(self, channel_id, thread_ts, message_ts):
         self.recorded.append((channel_id, thread_ts, message_ts))
         return None
+
+    def try_record_processed_message(self, channel_id, thread_ts, message_ts):
+        key = (channel_id, thread_ts, message_ts)
+        if key in self._claimed:
+            return False
+        self._claimed.add(key)
+        self.recorded.append(key)
+        return True
 
 
 class _StubSettingsManager:
@@ -158,7 +167,29 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
             context,
             "auth-code#oauth-state",
         )
-        self.assertEqual(controller.settings_manager.sessions.recorded, [("C1", "m1", "m1")])
+        self.assertEqual(controller.settings_manager.sessions.recorded, [("im:slack:C1", "im:slack:m1", "im:slack:m1")])
+
+    async def test_platform_qualified_dedup_keeps_colliding_native_ids_distinct(self):
+        controller = _StubController()
+        controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(return_value=True)
+        handler = MessageHandler(controller)
+
+        slack = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m1")
+        duplicate_slack = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m1")
+        discord = MessageContext(user_id="U1", channel_id="C1", platform="discord", message_id="m1")
+
+        await handler.handle_user_message(slack, "first")
+        await handler.handle_user_message(duplicate_slack, "duplicate")
+        await handler.handle_user_message(discord, "second platform")
+
+        self.assertEqual(
+            controller.settings_manager.sessions.recorded,
+            [
+                ("im:slack:C1", "im:slack:m1", "im:slack:m1"),
+                ("im:discord:C1", "im:discord:m1", "im:discord:m1"),
+            ],
+        )
+        self.assertEqual(controller.agent_auth_service.maybe_consume_setup_reply.await_count, 2)
 
 
 if __name__ == "__main__":

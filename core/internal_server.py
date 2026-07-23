@@ -501,6 +501,44 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
+    @app.post("/internal/memory/capture")
+    async def _memory_capture(request: Request) -> Any:
+        runtime = _memory_runtime()
+        module = getattr(runtime, "module", None) if runtime is not None else None
+        if module is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"source_message_id", "session_id", "text", "occurred_at_ms"}
+            or not isinstance(payload.get("source_message_id"), str)
+            or not isinstance(payload.get("session_id"), str)
+            or not isinstance(payload.get("text"), str)
+            or not isinstance(payload.get("occurred_at_ms"), int)
+            or isinstance(payload.get("occurred_at_ms"), bool)
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+
+        from core.memory import CaptureRequest
+
+        try:
+            # ``capture`` performs just the local idempotent queue insert; it
+            # never waits for EverOS or a model endpoint. Returning only after
+            # it finishes gives the UI a durable capture-before-dispatch
+            # handoff while its outcome remains non-critical to agent dispatch.
+            receipt = await module.capture(CaptureRequest(**payload))
+        except Exception:
+            logger.warning("internal memory capture failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        response: dict[str, Any] = {"status": receipt.status}
+        reason = getattr(receipt, "reason", None)
+        error = getattr(receipt, "error", None)
+        if reason is not None:
+            response["reason"] = reason
+        if error is not None:
+            response["error"] = error
+        return response
+
     @app.post("/internal/memory/clear")
     async def _memory_clear(request: Request) -> Any:
         runtime = _memory_runtime()

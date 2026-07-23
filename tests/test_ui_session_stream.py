@@ -14,7 +14,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -133,6 +133,131 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     sent = dispatch_mock.await_args.args[0]
     assert sent["session_id"] == session_id
     assert sent["text"] == "no stream"
+
+
+def test_workbench_memory_intercepts_before_persist_or_dispatch(isolated_state, tmp_path):
+    """A local text-only /memory read must not enter chat history or an agent."""
+
+    from storage import messages_service
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    status_mock = AsyncMock(return_value={"status_code": 200, "body": {"state": "ready", "pending": 0}})
+    dispatch_mock = AsyncMock()
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    with (
+        patch("vibe.internal_client.memory_status", status_mock),
+        patch("vibe.internal_client.dispatch_async", dispatch_mock),
+        patch.object(messages_service, "append", wraps=messages_service.append) as append_mock,
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "/memory status"},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.get_json() == {
+        "memory_command_result": {
+            "schema_version": 1,
+            "type": "memory_command_result",
+            "command": "status",
+            "result": {"state": "ready", "pending": 0},
+        }
+    }
+    append_mock.assert_not_called()
+    dispatch_mock.assert_not_awaited()
+    status_mock.assert_awaited_once()
+
+
+def test_workbench_memory_intercept_returns_only_closed_errors(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    async def profile():
+        return {"status_code": 503, "body": {"detail": "provider diagnostics must not escape"}}
+
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    with patch("vibe.internal_client.memory_profile", profile):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "/memory profile"},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.get_json()["memory_command_result"]["result"] == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
+    }
+
+
+def test_workbench_capture_handoff_is_accepted_after_commit_before_dispatch(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    events: list[str] = []
+
+    async def handoff_capture(row, observed_session_id):
+        assert row["id"]
+        assert row["text"] == "capture this"
+        assert observed_session_id == session_id
+        events.append("handoff")
+
+    async def dispatch(payload):
+        assert payload["text"] == "capture this"
+        events.append("dispatch")
+        return {"status_code": 202, "body": {"ok": True, "session_id": session_id}}
+
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    with (
+        patch("vibe.ui_server._handoff_workbench_memory_capture", handoff_capture),
+        patch("vibe.internal_client.dispatch_async", dispatch),
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "capture this"},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 201
+    assert events == ["handoff", "dispatch"]
+
+
+def test_workbench_memory_capture_skips_forwarded_metadata(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    handoff_capture = Mock()
+    dispatch = AsyncMock(return_value={"status_code": 202, "body": {"ok": True}})
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+
+    with (
+        patch("vibe.ui_server._handoff_workbench_memory_capture", handoff_capture),
+        patch("vibe.internal_client.dispatch_async", dispatch),
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "forwarded text", "metadata": {"forwarded": True}},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 201
+    handoff_capture.assert_not_called()
+    dispatch.assert_awaited_once()
 
 
 def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):

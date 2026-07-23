@@ -564,6 +564,25 @@ class WeChatBot(BaseIMClient):
             message_id = f"wc-{uuid.uuid4().hex[:12]}"
         return message_id
 
+    async def send_inert_message(self, context: MessageContext, text: str) -> str:
+        """Send a raw text item without formatter output or interaction hints."""
+
+        if not text:
+            raise ValueError("WeChat send_inert_message requires non-empty text")
+        response = await wechat_api.send_message(
+            self.config.base_url,
+            self.config.bot_token,
+            context.user_id,
+            self._get_context_token(context),
+            [{"type": 1, "text_item": {"text": text}}],
+            proxy=self._proxy_url,
+        )
+        if _is_session_expired_code(_get_wechat_error_code(response)):
+            self._mark_session_expired(_get_wechat_error_code(response))
+        _raise_if_wechat_api_error(response, "send_inert_message")
+        message_id = response.get("message_id", "") if response else ""
+        return message_id or f"wc-{uuid.uuid4().hex[:12]}"
+
     async def send_message_with_buttons(
         self,
         context: MessageContext,

@@ -6,6 +6,7 @@
 vibe              # Alias for vibe start
 vibe start        # Start Avibe if needed (opens web UI)
 vibe status       # Check service status
+vibe memory status # Read local Memory status from the running controller
 vibe restart      # Restart all services (use --delay-seconds when agent-triggered)
 vibe remote       # Guided Avibe Cloud remote-access setup
 vibe screenshot   # Capture a local desktop screenshot
@@ -95,6 +96,16 @@ vibe status
   "running": true,
   "pid": 12345
 }
+```
+
+### `vibe memory`
+
+Read local Memory through the existing mode-0600 controller socket. This command does not start a service and has no write, clear, configuration, capture, or export subcommands.
+
+```bash
+vibe memory status [--json]
+vibe memory profile [--json]
+vibe memory search <query> [--limit 1..20] [--json]
 ```
 
 ### `vibe doctor`

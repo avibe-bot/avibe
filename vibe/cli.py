@@ -51,6 +51,7 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
+from vibe.i18n import normalize_language, t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -205,6 +206,133 @@ def _cli_payload(kind: str, **fields) -> dict:
 
 def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
+
+
+def _memory_cli_language() -> str:
+    """Read an optional configured language without creating or migrating state."""
+
+    try:
+        config_path = paths.get_config_path()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        language = payload.get("language") if isinstance(payload, dict) else None
+        return normalize_language(language if isinstance(language, str) else None)
+    except Exception:
+        return "en"
+
+
+def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
+    payload = {
+        "schema_version": 1,
+        "ok": False,
+        "kind": f"memory_{operation}",
+        "code": code,
+        "error": code,
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(i18n_t("memory.cli.error", language, operation=operation, code=code), file=sys.stderr)
+    return 1
+
+
+def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
+    """Validate the closed controller response shape used by ``vibe memory``."""
+
+    from core.memory.types import is_memory_error_code
+
+    if not isinstance(response, dict):
+        return None, "memory_provider_response_invalid"
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return None, "memory_provider_response_invalid"
+    error = body.get("error")
+    if response.get("status_code") != 200 or body.get("status") == "failed":
+        return None, error if is_memory_error_code(error) else fallback
+    return body, None
+
+
+def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> None:
+    if operation == "status":
+        print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
+        print(
+            i18n_t(
+                "memory.cli.counts",
+                language,
+                pending=result.get("pending", 0),
+                processing=result.get("processing", 0),
+                missed=result.get("missed", 0),
+            )
+        )
+        warning = result.get("profile_warning")
+        if isinstance(warning, str) and warning:
+            print(i18n_t("memory.cli.profileWarning", language, warning=warning))
+        return
+
+    items = result.get("items")
+    if not isinstance(items, list) or not items:
+        print(i18n_t("memory.cli.empty", language))
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        date = item.get("date")
+        prefix = f"{date} " if isinstance(date, str) and date else ""
+        print(f"{prefix}{text}")
+
+
+def cmd_memory(args) -> int:
+    """Present direct Memory reads from the controller's verified UDS only."""
+
+    from vibe import internal_client
+
+    operation = args.memory_command
+    as_json = bool(getattr(args, "json", False))
+    language = _memory_cli_language()
+    query = ""
+    if operation not in {"status", "profile", "search"}:
+        return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
+    if operation == "search":
+        query = args.query.strip() if isinstance(args.query, str) else ""
+        if (
+            not query
+            or len(query.encode("utf-8")) > 8 * 1024
+            or not isinstance(args.limit, int)
+            or isinstance(args.limit, bool)
+            or not 1 <= args.limit <= 20
+        ):
+            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
+    try:
+        if operation == "status":
+            response = internal_client.memory_status_sync()
+        elif operation == "profile":
+            response = internal_client.memory_profile_sync()
+        else:
+            response = internal_client.memory_search_sync(query, args.limit)
+    except internal_client.InternalServerUnavailable:
+        return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
+
+    result, error = _memory_cli_body(response, fallback="memory_sidecar_unavailable")
+    if error is not None:
+        return _print_memory_cli_error(operation, error, as_json=as_json, language=language)
+    assert result is not None
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": True,
+                    "kind": f"memory_{operation}",
+                    "result": result,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _print_memory_cli_human(operation, result, language=language)
+    return 0
 
 
 def _add_pagination_args(parser, *, help_command: str) -> None:
@@ -11178,6 +11306,17 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
+    memory_parser = subparsers.add_parser("memory", help="Read local Memory state through the running controller")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", metavar="{status,profile,search}")
+    memory_subparsers.required = True
+    memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
+    memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_profile_parser = memory_subparsers.add_parser("profile", help="Show the Memory profile")
+    memory_profile_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_search_parser = memory_subparsers.add_parser("search", help="Search local Memory")
+    memory_search_parser.add_argument("query", help="Search query")
+    memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
+    memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -12500,6 +12639,8 @@ def main():
         )
     if args.command == "status":
         sys.exit(cmd_status())
+    if args.command == "memory":
+        sys.exit(cmd_memory(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":

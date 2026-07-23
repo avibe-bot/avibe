@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import logging
 import threading
+import time
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -39,6 +40,8 @@ from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
+from core.memory import CaptureRequest
+from core.memory.commands import bounded_inert_text, is_memory_command_candidate, parse_memory_command
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -309,8 +312,8 @@ class Controller:
         self.native_session_service = None
         self.processing_indicator = ProcessingIndicatorService(self)
         self.audio_asr_service = AudioAsrService(self.config)
-        # Memory owns no IM capture in this slice. It is initialized here solely
-        # so the controller UDS can serve settings/status/read/clear requests.
+        # The runtime serves controller UDS reads/capture and the shared
+        # private-IM Memory admission path.
         from core.memory.runtime import MemoryRuntime
 
         self.memory_runtime = MemoryRuntime(getattr(self.config, "memory", None) or MemoryConfig())
@@ -722,6 +725,7 @@ class Controller:
             "settings": self._dispatch_to_controller_loop(self.settings_handler.handle_settings),
             "stop": self._dispatch_to_controller_loop(self.command_handler.handle_stop),
             "bind": self._dispatch_to_controller_loop(self.command_handler.handle_bind),
+            "memory": self._dispatch_to_controller_loop(self.handle_memory_command),
         }
 
         # IM inbound messages funnel through ``core.services.dispatch``
@@ -1183,6 +1187,297 @@ class Controller:
             return self.platform_settings_managers[self.primary_platform]
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
         return self.platform_settings_managers.get(platform, self.platform_settings_managers[self.primary_platform])
+
+    # ----- Direct Memory entry admission ---------------------------------
+
+    _MEMORY_IM_PLATFORMS = frozenset({"slack", "discord", "telegram", "lark", "feishu", "wechat"})
+
+    @classmethod
+    def _memory_context_platform(cls, context: MessageContext) -> Optional[str]:
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        platform = context.platform or payload.get("platform")
+        if not isinstance(platform, str) or platform not in cls._MEMORY_IM_PLATFORMS:
+            return None
+        return platform
+
+    def memory_im_admitted(self, context: MessageContext) -> bool:
+        """Fail closed unless this is a bound, enabled administrator DM."""
+
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        if payload.get("is_dm") is not True:
+            return False
+        platform = self._memory_context_platform(context)
+        user_id = getattr(context, "user_id", None)
+        if platform is None or not isinstance(user_id, str) or not user_id:
+            return False
+
+        try:
+            managers = getattr(self, "platform_settings_managers", {})
+            manager = managers.get(platform) if isinstance(managers, dict) else None
+            if manager is None:
+                return False
+            store = manager.get_store()
+            store.maybe_reload()
+            user = store.get_user(user_id, platform=platform)
+            return bool(user is not None and user.enabled and user.is_admin)
+        except Exception:
+            # Direct Memory reads and capture must never turn a settings read
+            # failure into an implicit authorization grant.
+            return False
+
+    def _memory_feature_enabled(self) -> bool:
+        memory_config = getattr(getattr(self, "config", None), "memory", None)
+        return bool(getattr(memory_config, "enabled", False))
+
+    @staticmethod
+    def _memory_inbound_is_ordinary_text(
+        context: MessageContext,
+        text: object,
+        *,
+        allow_memory_command: bool = False,
+    ) -> bool:
+        """Reject non-human, rich, mutated, or attachment-bearing input facts."""
+
+        if not isinstance(text, str) or not text.strip():
+            return False
+        if not allow_memory_command and is_memory_command_candidate(text):
+            return False
+        if getattr(context, "files", None):
+            return False
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        if any(
+            payload.get(key) is True
+            for key in (
+                "scheduled",
+                "is_scheduled",
+                "is_bot",
+                "is_self",
+                "is_system",
+                "system",
+                "is_forwarded",
+                "forwarded",
+                "is_edited",
+                "edited",
+                "is_rich",
+                "rich_text",
+                "has_attachments",
+            )
+        ):
+            return False
+        if payload.get("turn_source") == "scheduled":
+            return False
+
+        raw_message = payload.get("event") or payload.get("message") or payload.get("raw_message")
+        if isinstance(raw_message, dict):
+            if raw_message.get("is_system") or raw_message.get("system"):
+                return False
+            if any(
+                raw_message.get(key)
+                for key in (
+                    "files",
+                    "attachments",
+                    "edited",
+                    "edit_date",
+                    "is_bot",
+                    "bot_id",
+                    "forward_origin",
+                    "forward_from",
+                    "forwarded",
+                )
+            ):
+                return False
+            if raw_message.get("type") in {"system", "system_message"}:
+                return False
+            subtype = raw_message.get("subtype")
+            if subtype in {
+                "bot_message",
+                "file_share",
+                "message_changed",
+                "message_deleted",
+                "message_replied",
+                "channel_join",
+                "channel_leave",
+            }:
+                return False
+            if raw_message.get("blocks") or raw_message.get("rich_text") or raw_message.get("forwarded"):
+                return False
+            sender = raw_message.get("from")
+            if isinstance(sender, dict) and sender.get("is_bot") is True:
+                return False
+            event_sender = raw_message.get("sender")
+            if isinstance(event_sender, dict) and event_sender.get("sender_type") == "app":
+                return False
+            nested_message = raw_message.get("message")
+            if isinstance(nested_message, dict):
+                message_type = nested_message.get("message_type")
+                if message_type not in {None, "text"}:
+                    return False
+                if any(nested_message.get(key) for key in ("file", "image", "media", "edited", "forwarded")):
+                    return False
+        elif raw_message is not None:
+            author = getattr(raw_message, "author", None)
+            if bool(getattr(author, "bot", False)):
+                return False
+            if getattr(raw_message, "edited_at", None) is not None:
+                return False
+            if getattr(raw_message, "attachments", None) or getattr(raw_message, "embeds", None):
+                return False
+            flags = getattr(raw_message, "flags", None)
+            if bool(getattr(flags, "forwarded", False)) or getattr(raw_message, "message_snapshots", None):
+                return False
+            is_system = getattr(raw_message, "is_system", False)
+            if callable(is_system):
+                try:
+                    is_system = is_system()
+                except Exception:
+                    return False
+            if bool(is_system):
+                return False
+        return True
+
+    async def capture_memory_from_im(self, context: MessageContext, text: str, session_id: str) -> None:
+        """Submit eligible private-IM text after native dedup/session resolution.
+
+        This is deliberately best effort. It is scheduled by ``MessageHandler``
+        and never participates in an agent turn's completion path.
+        """
+
+        platform = self._memory_context_platform(context)
+        native_message_id = getattr(context, "message_id", None)
+        if (
+            platform is None
+            or not isinstance(native_message_id, str)
+            or not native_message_id
+            or not isinstance(session_id, str)
+            or not session_id
+            or not self._memory_feature_enabled()
+            or not self.memory_im_admitted(context)
+            or not self._memory_inbound_is_ordinary_text(context, text)
+        ):
+            return
+
+        started_at = time.monotonic()
+        try:
+            await self.memory_module.capture(
+                CaptureRequest(
+                    source_message_id=f"im:{platform}:{native_message_id}",
+                    session_id=session_id,
+                    text=text,
+                    occurred_at_ms=int(time.time() * 1000),
+                )
+            )
+            logger.info(
+                "Memory IM capture platform=%s latency_ms=%d",
+                platform,
+                int((time.monotonic() - started_at) * 1000),
+            )
+        except Exception:
+            logger.warning(
+                "Memory IM capture failed platform=%s latency_ms=%d",
+                platform,
+                int((time.monotonic() - started_at) * 1000),
+            )
+
+    async def _send_memory_inert_reply(self, context: MessageContext, text: str) -> None:
+        client = self.get_im_client_for_context(context)
+        sender = getattr(client, "send_inert_message", None)
+        if not callable(sender):
+            return
+        await sender(context, bounded_inert_text(text))
+
+    def _claim_memory_command(self, context: MessageContext) -> bool:
+        """Claim a stable private command event before a direct Memory read."""
+
+        platform = self._memory_context_platform(context)
+        native_message_id = getattr(context, "message_id", None)
+        if platform is None or not isinstance(native_message_id, str) or not native_message_id:
+            # Some native slash command transports do not expose an event id.
+            # Those reads are non-mutating and may be repeated by a retry.
+            return True
+        sessions = getattr(self, "sessions", None)
+        recorder = getattr(sessions, "try_record_processed_message", None)
+        if not callable(recorder):
+            return True
+        try:
+            return bool(
+                recorder(
+                    f"memory-command:{platform}:{context.channel_id}",
+                    context.thread_id or native_message_id,
+                    native_message_id,
+                )
+            )
+        except Exception:
+            return False
+
+    def _memory_command_text(self, action: str, payload: dict[str, Any]) -> str:
+        if action == "status":
+            state = payload.get("state") if isinstance(payload.get("state"), str) else "error"
+            lines = [
+                self._t("memory.command.status", state=state),
+                self._t(
+                    "memory.command.counts",
+                    pending=int(payload.get("pending") or 0),
+                    processing=int(payload.get("processing") or 0),
+                    missed=int(payload.get("missed") or 0),
+                ),
+            ]
+            warning = payload.get("profile_warning")
+            if isinstance(warning, str) and warning:
+                lines.append(self._t("memory.command.profileWarning", warning=warning))
+            return "\n".join(lines)
+
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            return self._t("memory.command.empty")
+        heading = self._t("memory.command.profile") if action == "profile" else self._t("memory.command.search")
+        rendered_items: list[str] = []
+        for item in items[:8]:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            rendered_items.append(f"- {item['text']}")
+        return "\n".join([heading, *rendered_items]) if rendered_items else self._t("memory.command.empty")
+
+    async def handle_memory_command(self, context: MessageContext, args: str = "") -> None:
+        """Serve the closed read-only private-IM ``/memory`` command surface."""
+
+        command_text = f"/memory {args}".rstrip()
+        if (
+            not self._memory_feature_enabled()
+            or not self.memory_im_admitted(context)
+            or not self._memory_inbound_is_ordinary_text(
+                context,
+                command_text,
+                allow_memory_command=True,
+            )
+        ):
+            await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
+            return
+        if not self._claim_memory_command(context):
+            return
+
+        command = parse_memory_command(command_text)
+        if command is None or command.action == "invalid":
+            await self._send_memory_inert_reply(context, self._t("memory.command.usage"))
+            return
+        if command.action == "help":
+            await self._send_memory_inert_reply(context, self._t("memory.command.usage"))
+            return
+
+        try:
+            if command.action == "status":
+                payload = await self.memory_runtime.status_payload()
+            elif command.action == "profile":
+                payload = await self.memory_runtime.profile_payload()
+            else:
+                payload = await self.memory_runtime.search_payload(command.query or "", limit=8)
+        except Exception:
+            await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
+            return
+
+        if payload.get("status") == "failed":
+            await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
+            return
+        await self._send_memory_inert_reply(context, self._memory_command_text(command.action, payload))
 
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""
