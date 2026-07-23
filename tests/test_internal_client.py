@@ -211,6 +211,64 @@ def test_memory_runtime_install_sync_round_trip(socket_path):
     }
 
 
+def test_memory_capture_round_trip(socket_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/memory/capture")
+    async def _capture(payload: dict):
+        captured["payload"] = payload
+        return {"status": "accepted"}
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.memory_capture(
+                "workbench:message-1",
+                "session-1",
+                "ordinary text",
+                123,
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+
+    assert captured["payload"] == {
+        "source_message_id": "workbench:message-1",
+        "session_id": "session-1",
+        "text": "ordinary text",
+        "occurred_at_ms": 123,
+    }
+    assert result == {"status_code": 200, "body": {"status": "accepted"}}
+
+
+def test_memory_sync_read_helpers_use_verified_uds(socket_path):
+    captured: list[tuple[str, dict | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8")) if request.content else None
+        captured.append((request.url.path, payload))
+        if request.url.path == "/internal/memory/status":
+            return httpx.Response(200, json={"state": "ready"})
+        if request.url.path == "/internal/memory/profile":
+            return httpx.Response(200, json={"status": "ok", "items": []})
+        return httpx.Response(200, json={"status": "ok", "items": []})
+
+    with patch("vibe.internal_client.httpx.HTTPTransport", return_value=httpx.MockTransport(handler)):
+        assert internal_client.memory_status_sync(socket_path=socket_path)["body"] == {"state": "ready"}
+        assert internal_client.memory_profile_sync(socket_path=socket_path)["body"] == {"status": "ok", "items": []}
+        assert internal_client.memory_search_sync("find this", 4, socket_path=socket_path)["body"] == {
+            "status": "ok",
+            "items": [],
+        }
+
+    assert captured == [
+        ("/internal/memory/status", None),
+        ("/internal/memory/profile", None),
+        ("/internal/memory/search", {"query": "find this", "limit": 4}),
+    ]
+
+
 def test_notify_vault_request_created_round_trip(tmp_path, socket_path):
     app = FastAPI()
     captured: dict = {}

@@ -207,6 +207,118 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
+def _print_memory_cli_error(operation: str, code: str, *, as_json: bool) -> int:
+    payload = {
+        "schema_version": 1,
+        "ok": False,
+        "kind": f"memory_{operation}",
+        "code": code,
+        "error": code,
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Memory {operation} failed: {code}", file=sys.stderr)
+    return 1
+
+
+def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
+    """Validate the closed controller response shape used by ``vibe memory``."""
+
+    from core.memory.types import is_memory_error_code
+
+    if not isinstance(response, dict):
+        return None, "memory_provider_response_invalid"
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return None, "memory_provider_response_invalid"
+    error = body.get("error")
+    if response.get("status_code") != 200 or body.get("status") == "failed":
+        return None, error if is_memory_error_code(error) else fallback
+    return body, None
+
+
+def _print_memory_cli_human(operation: str, result: dict) -> None:
+    if operation == "status":
+        print(f"Memory status: {result.get('state', 'error')}")
+        print(
+            "Pending: {pending}; processing: {processing}; missed: {missed}".format(
+                pending=result.get("pending", 0),
+                processing=result.get("processing", 0),
+                missed=result.get("missed", 0),
+            )
+        )
+        warning = result.get("profile_warning")
+        if isinstance(warning, str) and warning:
+            print(f"Profile warning: {warning}")
+        return
+
+    items = result.get("items")
+    if not isinstance(items, list) or not items:
+        print("No memory items found.")
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        date = item.get("date")
+        prefix = f"{date} " if isinstance(date, str) and date else ""
+        print(f"{prefix}{text}")
+
+
+def cmd_memory(args) -> int:
+    """Present direct Memory reads from the controller's verified UDS only."""
+
+    from vibe import internal_client
+
+    operation = args.memory_command
+    as_json = bool(getattr(args, "json", False))
+    query = ""
+    if operation not in {"status", "profile", "search"}:
+        return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json)
+    if operation == "search":
+        query = args.query.strip() if isinstance(args.query, str) else ""
+        if (
+            not query
+            or len(query.encode("utf-8")) > 8 * 1024
+            or not isinstance(args.limit, int)
+            or isinstance(args.limit, bool)
+            or not 1 <= args.limit <= 20
+        ):
+            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json)
+    try:
+        if operation == "status":
+            response = internal_client.memory_status_sync()
+        elif operation == "profile":
+            response = internal_client.memory_profile_sync()
+        else:
+            response = internal_client.memory_search_sync(query, args.limit)
+    except internal_client.InternalServerUnavailable:
+        return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json)
+
+    result, error = _memory_cli_body(response, fallback="memory_sidecar_unavailable")
+    if error is not None:
+        return _print_memory_cli_error(operation, error, as_json=as_json)
+    assert result is not None
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": True,
+                    "kind": f"memory_{operation}",
+                    "result": result,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _print_memory_cli_human(operation, result)
+    return 0
+
+
 def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument("--page", type=int, help="Page number to return. Defaults to 1.")
     parser.add_argument("--limit", type=int, help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}.")
@@ -11178,6 +11290,17 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
+    memory_parser = subparsers.add_parser("memory", help="Read local Memory state through the running controller")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", metavar="{status,profile,search}")
+    memory_subparsers.required = True
+    memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
+    memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_profile_parser = memory_subparsers.add_parser("profile", help="Show the Memory profile")
+    memory_profile_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_search_parser = memory_subparsers.add_parser("search", help="Search local Memory")
+    memory_search_parser.add_argument("query", help="Search query")
+    memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
+    memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -12500,6 +12623,8 @@ def main():
         )
     if args.command == "status":
         sys.exit(cmd_status())
+    if args.command == "memory":
+        sys.exit(cmd_memory(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":

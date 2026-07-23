@@ -321,6 +321,9 @@ class MultiIMClient(BaseIMClient):
             kwargs["subtext"] = subtext
         return await self.get_client_for_context(context).send_message(context, text, **kwargs)
 
+    async def send_inert_message(self, context: MessageContext, text: str) -> Optional[str]:
+        return await self.get_client_for_context(context).send_inert_message(context, text)
+
     async def send_message_with_buttons(
         self,
         context: MessageContext,

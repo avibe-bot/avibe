@@ -348,6 +348,15 @@ class BaseIMClient(ABC):
         """
         pass
 
+    async def send_inert_message(self, context: MessageContext, text: str) -> Optional[str]:
+        """Send a bounded plain command result without rich transport affordances.
+
+        Adapters with richer defaults override this with their native plain-text
+        primitive. The fallback keeps the contract usable for simple transports.
+        """
+
+        return await self.send_message(context, text, parse_mode=None)
+
     @abstractmethod
     async def send_message_with_buttons(
         self,

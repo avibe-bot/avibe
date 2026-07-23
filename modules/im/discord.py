@@ -157,13 +157,14 @@ class DiscordBot(BaseIMClient):
         if guild_id and not self._is_allowed_guild(guild_id):
             return None
 
-        is_dm = interaction.guild is None or isinstance(interaction.channel, discord.DMChannel)
+        is_dm = isinstance(interaction.channel, discord.DMChannel)
         return MessageContext(
             user_id=str(interaction.user.id),
             channel_id=channel_id,
+            platform="discord",
             thread_id=thread_id,
             message_id=str(interaction.message.id) if interaction.message else None,
-            platform_specific={"interaction": interaction, "is_dm": is_dm},
+            platform_specific={"platform": "discord", "interaction": interaction, "is_dm": is_dm},
         )
 
     async def _dispatch_callback_query(self, context: MessageContext, data: str) -> None:
@@ -573,6 +574,24 @@ class DiscordBot(BaseIMClient):
                         self.sessions.mark_thread_active(context.user_id, context.channel_id, context.thread_id)
                 except Exception:
                     pass
+            return str(message.id)
+
+        return await self._run_on_client_loop(_impl())
+
+    async def send_inert_message(self, context: MessageContext, text: str) -> str:
+        """Send a non-mentioning, embed-suppressed command response."""
+
+        async def _impl() -> str:
+            if not text:
+                raise ValueError("Discord send_inert_message requires non-empty text")
+            target = await self._resolve_target(context)
+            if target is None:
+                raise RuntimeError("Discord channel not found")
+            message = await target.send(
+                content=text,
+                suppress_embeds=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return str(message.id)
 
         return await self._run_on_client_loop(_impl())
@@ -1021,7 +1040,7 @@ class DiscordBot(BaseIMClient):
             return
 
         # Determine if this is a DM
-        is_dm = isinstance(channel, discord.DMChannel) or message.guild is None
+        is_dm = isinstance(channel, discord.DMChannel)
         referenced_anchor_base = None if is_dm else self._get_reply_anchor_base(channel_id, self._get_reference_message_id(message))
 
         auth_result = self.check_authorization(
@@ -1070,9 +1089,10 @@ class DiscordBot(BaseIMClient):
             command_context = MessageContext(
                 user_id=str(message.author.id),
                 channel_id=channel_id,
+                platform="discord",
                 thread_id=thread_id,
                 message_id=str(message.id),
-                platform_specific={"message": message, "is_dm": is_dm},
+                platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                 files=files,
             )
             if await self.dispatch_text_command(command_context, content, allow_plain_bind=allow_plain_bind):
@@ -1083,9 +1103,10 @@ class DiscordBot(BaseIMClient):
                 context = MessageContext(
                     user_id=str(message.author.id),
                     channel_id=channel_id,
+                    platform="discord",
                     thread_id=thread_id,
                     message_id=str(message.id),
-                    platform_specific={"message": message, "is_dm": is_dm},
+                    platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                     files=files,
                 )
                 await self.on_message_callback(context, "")
@@ -1094,9 +1115,10 @@ class DiscordBot(BaseIMClient):
         context = MessageContext(
             user_id=str(message.author.id),
             channel_id=channel_id,
+            platform="discord",
             thread_id=thread_id,
             message_id=str(message.id),
-            platform_specific={"message": message, "is_dm": is_dm},
+            platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
             files=files,
         )
 

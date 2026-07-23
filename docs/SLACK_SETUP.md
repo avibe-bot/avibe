@@ -56,7 +56,15 @@ Go to [api.slack.com/apps](https://api.slack.com/apps) and create app with this 
       "home_tab_enabled": true,
       "messages_tab_enabled": true,
       "messages_tab_read_only_enabled": false
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/memory",
+        "description": "Read local Memory in an eligible administrator DM",
+        "usage_hint": "status | profile | search <query>",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "scopes": {

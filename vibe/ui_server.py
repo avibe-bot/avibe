@@ -6454,6 +6454,129 @@ async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     return _memory_response(body, status_code=result.get("status_code", 503))
 
 
+def _workbench_memory_command_is_text_only(
+    payload: object,
+    text: object,
+    content: object,
+    quick_reply_for: object,
+) -> bool:
+    """Keep command interception separate from rich Workbench turn payloads."""
+
+    if not isinstance(payload, dict) or quick_reply_for:
+        return False
+    if payload.get("attachments") or payload.get("files"):
+        return False
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return False
+    if content is None:
+        return isinstance(text, str)
+    if not isinstance(content, dict) or set(content) - {"text"}:
+        return False
+    return isinstance(content.get("text"), str) and (text is None or isinstance(text, str))
+
+
+def _memory_command_result(command: str, result: dict[str, Any]) -> Response:
+    return _memory_response(
+        {
+            "memory_command_result": {
+                "schema_version": 1,
+                "type": "memory_command_result",
+                "command": command,
+                "result": result,
+            }
+        }
+    )
+
+
+async def _workbench_memory_command_response(command_text: str) -> Response:
+    """Resolve one already-authorized Workbench Memory read through the UDS."""
+
+    from core.memory.commands import parse_memory_command
+    from core.memory.types import is_memory_error_code
+    from vibe import internal_client
+
+    command = parse_memory_command(command_text)
+    if command is None:
+        return _memory_command_result("invalid", {"status": "failed", "error": "memory_invalid_input"})
+    if command.action == "invalid":
+        return _memory_command_result(command.action, {"status": "failed", "error": "memory_invalid_input"})
+    if command.action == "help":
+        return _memory_command_result(
+            command.action,
+            {"status": "ok", "commands": ["status", "profile", "search"]},
+        )
+    try:
+        if command.action == "status":
+            response = await internal_client.memory_status()
+        elif command.action == "profile":
+            response = await internal_client.memory_profile()
+        else:
+            response = await internal_client.memory_search(command.query or "", 8)
+    except internal_client.InternalServerUnavailable:
+        return _memory_command_result(
+            command.action,
+            {"status": "failed", "error": "memory_sidecar_unavailable"},
+        )
+    body = response.get("body") if isinstance(response, dict) else None
+    if not isinstance(body, dict):
+        return _memory_command_result(
+            command.action,
+            {"status": "failed", "error": "memory_provider_response_invalid"},
+        )
+    status_code = response.get("status_code")
+    if status_code != 200 or body.get("status") == "failed":
+        error = body.get("error")
+        fallback = "memory_provider_response_invalid" if status_code == 200 else "memory_sidecar_unavailable"
+        return _memory_command_result(
+            command.action,
+            {"status": "failed", "error": error if is_memory_error_code(error) else fallback},
+        )
+    return _memory_command_result(command.action, body)
+
+
+def _workbench_message_occurred_at_ms(message: dict[str, Any]) -> int:
+    value = message.get("created_at")
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            pass
+    return int(time.time() * 1000)
+
+
+def _schedule_workbench_memory_capture(message: dict[str, Any], session_id: str) -> None:
+    """Best-effort post-commit capture; dispatch must never wait for it."""
+
+    from vibe import internal_client
+
+    message_id = message.get("id")
+    text = message.get("text")
+    if not isinstance(message_id, str) or not message_id or not isinstance(text, str) or not text.strip():
+        return
+
+    task = asyncio.create_task(
+        internal_client.memory_capture(
+            message_id,
+            session_id,
+            text,
+            _workbench_message_occurred_at_ms(message),
+        ),
+        name="memory-workbench-capture",
+    )
+
+    def _log_capture_result(done_task: asyncio.Task) -> None:
+        try:
+            done_task.result()
+        except Exception:
+            logger.warning("Memory Workbench capture task failed")
+
+    task.add_done_callback(_log_capture_result)
+
+
 def _memory_settings_payload() -> dict:
     from config.v2_config import memory_config_to_payload
 
@@ -7392,6 +7515,18 @@ async def sessions_messages_create(session_id: str):
         or ""
     )
 
+    # A local Workbench /memory command is a direct UI read, never a chat row
+    # or agent turn. The global CSRF gate has already run; this additional
+    # predicate keeps the direct-read authority loopback-only.
+    from core.memory.commands import is_memory_command_candidate
+
+    if (
+        is_memory_command_candidate(dispatch_text)
+        and is_direct_loopback_memory_request()
+        and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
+    ):
+        return await _workbench_memory_command_response(dispatch_text)
+
     # Resolve uploaded-attachment refs (media tokens the browser holds) to local
     # file specs the agent turn can read. Done here (not in the browser) so a
     # filesystem path never leaves the server.
@@ -7479,6 +7614,12 @@ async def sessions_messages_create(session_id: str):
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
         return jsonify({"error": "session is archived", "code": "session_archived"}), 409
+    if (
+        is_direct_loopback_memory_request()
+        and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
+        and not is_memory_command_candidate(dispatch_text)
+    ):
+        _schedule_workbench_memory_capture(message, session_id)
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.

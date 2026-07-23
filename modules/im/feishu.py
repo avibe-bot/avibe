@@ -431,6 +431,52 @@ class FeishuBot(BaseIMClient):
                 self.sessions.mark_thread_active(context.user_id, context.channel_id, thread)
         return message_id
 
+    async def send_inert_message(self, context: MessageContext, text: str) -> str:
+        """Send a Feishu text message, never an interactive card."""
+
+        self._ensure_client()
+        if not text:
+            raise ValueError("Feishu send_inert_message requires non-empty text")
+        from lark_oapi.api.im.v1 import (
+            CreateMessageRequest,
+            CreateMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        content = json.dumps({"text": text}, ensure_ascii=False)
+        if context.thread_id:
+            request = (
+                ReplyMessageRequest.builder()
+                .message_id(context.thread_id)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .msg_type("text")
+                    .content(content)
+                    .reply_in_thread(True)
+                    .build()
+                )
+                .build()
+            )
+            response = await self._lark_client.im.v1.message.areply(request)
+        else:
+            request = (
+                CreateMessageRequest.builder()
+                .receive_id_type("chat_id")
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(context.channel_id)
+                    .msg_type("text")
+                    .content(content)
+                    .build()
+                )
+                .build()
+            )
+            response = await self._lark_client.im.v1.message.acreate(request)
+        if not response.success():
+            raise RuntimeError("Feishu inert message failed")
+        return response.data.message_id
+
     async def _reply_message(self, parent_id: str, text: str, subtext: Optional[str] = None) -> str:
         """Reply to an existing message as a topic (reply_in_thread).
 

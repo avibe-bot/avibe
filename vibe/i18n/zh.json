@@ -443,6 +443,18 @@
   "permission": {
     "adminOnly": "🔒 仅管理员可以修改 Bot 设置。如需权限请联系管理员。"
   },
+  "memory": {
+    "command": {
+      "unavailable": "此对话中无法使用记忆功能。",
+      "usage": "记忆命令：/memory status、/memory profile、/memory search <查询>",
+      "status": "记忆状态：{state}",
+      "counts": "待处理：{pending}；处理中：{processing}；遗漏：{missed}",
+      "profileWarning": "档案警告：{warning}",
+      "profile": "记忆档案：",
+      "search": "记忆搜索：",
+      "empty": "未找到记忆条目。"
+    }
+  },
   "language": {
     "systemDefault": "(系统默认)",
     "en": "English",

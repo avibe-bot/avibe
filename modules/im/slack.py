@@ -792,6 +792,23 @@ class SlackBot(BaseIMClient):
             logger.error(f"Error sending Slack message: {e}")
             raise
 
+    async def send_inert_message(self, context: MessageContext, text: str) -> Optional[str]:
+        """Send a plain Memory command response with no blocks or unfurls."""
+
+        self._ensure_clients()
+        if not text:
+            raise ValueError("Slack send_inert_message requires non-empty text")
+        kwargs: Dict[str, Any] = {
+            "channel": context.channel_id,
+            "text": text,
+            "mrkdwn": False,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        if context.thread_id:
+            kwargs["thread_ts"] = context.thread_id
+        return await self._post_message_with_dm_recovery(context, kwargs, log_label="inert message send")
+
     async def _send_status_message(
         self,
         context: MessageContext,
@@ -1740,11 +1757,12 @@ class SlackBot(BaseIMClient):
                 await client.send_socket_mode_response(response)
                 self._create_event_task(req.payload)
             elif req.type == "slash_commands":
-                # Handle slash commands
-                await self._handle_slash_command(req.payload)
-                # Acknowledge after handling slash commands
+                # Acknowledge before a direct Memory read can await a bounded
+                # provider operation. Slack requires the Socket Mode ack within
+                # three seconds; the handler replies independently afterward.
                 response = SocketModeResponse(envelope_id=req.envelope_id)
                 await client.send_socket_mode_response(response)
+                self._create_slash_command_task(req.payload)
             elif req.type == "interactive":
                 # For interactive components, acknowledge FIRST to avoid Slack timeout
                 # This is important for long-running operations like updates
@@ -1771,6 +1789,11 @@ class SlackBot(BaseIMClient):
         self._event_tasks.add(task)
         task.add_done_callback(self._handle_event_task_done)
 
+    def _create_slash_command_task(self, payload: Dict[str, Any]) -> None:
+        task = asyncio.create_task(self._handle_slash_command(payload))
+        self._event_tasks.add(task)
+        task.add_done_callback(self._handle_event_task_done)
+
     def _handle_event_task_done(self, task: asyncio.Task) -> None:
         self._event_tasks.discard(task)
         try:
@@ -1778,7 +1801,7 @@ class SlackBot(BaseIMClient):
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.error("Error handling Slack event asynchronously", exc_info=True)
+            logger.error("Error handling Slack background task asynchronously", exc_info=True)
 
     async def _drain_event_tasks(self) -> None:
         if not self._event_tasks:
@@ -1964,9 +1987,11 @@ class SlackBot(BaseIMClient):
             context = MessageContext(
                 user_id=user_id,
                 channel_id=channel_id,
+                platform="slack",
                 thread_id=thread_id,  # Always have a thread_id
                 message_id=event.get("ts"),
                 platform_specific={
+                    "platform": "slack",
                     "team_id": payload.get("team_id"),
                     "event": event,
                     "is_dm": is_dm,
@@ -2055,9 +2080,11 @@ class SlackBot(BaseIMClient):
             context = MessageContext(
                 user_id=event.get("user"),
                 channel_id=channel_id,
+                platform="slack",
                 thread_id=thread_id,  # Always have a thread_id
                 message_id=event.get("ts"),
                 platform_specific={
+                    "platform": "slack",
                     "team_id": payload.get("team_id"),
                     "event": event,
                     "is_dm": channel_id.startswith("D"),
@@ -2121,9 +2148,8 @@ class SlackBot(BaseIMClient):
             await self._send_auth_denial(channel_id, user_id, auth, response_url=response_url)
             return
 
-        # Map Slack slash commands to internal commands
-        # Only /start and /stop commands are exposed to users
-        command_mapping = {"start": "start", "stop": "stop"}
+        # Map native Slack slash commands to the shared command handlers.
+        command_mapping = {"start": "start", "stop": "stop", "memory": "memory"}
 
         # Get the actual command name
         actual_command = command_mapping.get(command, command)
@@ -2132,7 +2158,10 @@ class SlackBot(BaseIMClient):
         context = MessageContext(
             user_id=payload.get("user_id"),
             channel_id=payload.get("channel_id"),
+            platform="slack",
+            message_id=payload.get("trigger_id"),
             platform_specific={
+                "platform": "slack",
                 "trigger_id": payload.get("trigger_id"),
                 "response_url": payload.get("response_url"),
                 "command": command,
@@ -2155,6 +2184,7 @@ class SlackBot(BaseIMClient):
                 "clear",
                 "cwd",
                 "queue",
+                "memory",
             ]:
                 await self.send_slash_response(
                     response_url, f"⏳ {self._t('common.processing', channel_id, command=command)}"

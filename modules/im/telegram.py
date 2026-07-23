@@ -857,6 +857,7 @@ class TelegramBot(BaseIMClient):
             "set_cwd",
             "bind",
             "stop",
+            "memory",
         }
         parsed_command = self.parse_text_command(stripped, allow_plain_bind=True)
         if parsed_command and parsed_command[0] in known_commands:
@@ -1205,6 +1206,21 @@ class TelegramBot(BaseIMClient):
             reply_to=reply_to,
             parse_mode=parse_mode,
         )
+        result = await telegram_api.call_api(self.config.bot_token, "sendMessage", payload, proxy_url=self._proxy_url)
+        return str(result["result"]["message_id"])
+
+    async def send_inert_message(self, context: MessageContext, text: str) -> str:
+        """Send a plain Memory command response without markup or previews."""
+
+        if not text:
+            raise ValueError("Telegram send_inert_message requires non-empty text")
+        payload: dict[str, Any] = {
+            "chat_id": context.channel_id,
+            "text": text,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if context.thread_id:
+            payload["message_thread_id"] = int(context.thread_id)
         result = await telegram_api.call_api(self.config.bot_token, "sendMessage", payload, proxy_url=self._proxy_url)
         return str(result["result"]["message_id"])
 

@@ -192,6 +192,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/memory/status", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
+    assert ("/internal/memory/capture", ("POST",)) in routes
     assert ("/internal/memory/clear", ("POST",)) in routes
 
 
@@ -199,7 +200,15 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     controller = _build_controller_double()
     calls: list[tuple[str, object]] = []
 
+    class _Module:
+        async def capture(self, request):
+            calls.append(("capture", request))
+            return types.SimpleNamespace(status="accepted")
+
     class _Runtime:
+        def __init__(self):
+            self.module = _Module()
+
         async def status_payload(self):
             calls.append(("status", None))
             return {"state": "ready", "data_exists": True}
@@ -236,29 +245,45 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.get("/internal/memory/status"),
                 await client.get("/internal/memory/profile"),
                 await client.post("/internal/memory/search", json={"query": "safe query", "limit": 3}),
+                await client.post(
+                    "/internal/memory/capture",
+                    json={
+                        "source_message_id": "workbench:message-1",
+                        "session_id": "session-1",
+                        "text": "ordinary text",
+                        "occurred_at_ms": 123,
+                    },
+                ),
                 await client.post("/internal/memory/clear", json={"confirm": True}),
                 await client.post("/internal/memory/install-runtime"),
                 await client.post("/internal/reconcile-memory"),
                 await client.post("/internal/memory/search", json=[]),
+                await client.post("/internal/memory/capture", json={"text": "missing fields"}),
             )
 
-    status, profile, search, clear, install, reconcile, invalid = asyncio.run(_go())
+    status, profile, search, capture, clear, install, reconcile, invalid, invalid_capture = asyncio.run(_go())
 
     assert status.json() == {"state": "ready", "data_exists": True}
     assert profile.json() == {"status": "ok", "items": []}
     assert search.json() == {"status": "ok", "items": []}
+    assert capture.json() == {"status": "accepted"}
     assert clear.json() == {"status": "completed", "epoch": 2}
     assert install.json() == {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
     assert reconcile.json() == {"ok": True, "state": "ready"}
     assert invalid.status_code == 400
-    assert calls == [
-        ("status", None),
-        ("profile", None),
-        ("search", ("safe query", 3)),
-        ("clear", None),
-        ("install", None),
-        ("reconcile", "configured-memory"),
+    assert invalid_capture.status_code == 400
+    assert [name for name, _value in calls] == [
+        "status",
+        "profile",
+        "search",
+        "capture",
+        "clear",
+        "install",
+        "reconcile",
     ]
+    captured_request = calls[3][1]
+    assert captured_request.source_message_id == "workbench:message-1"
+    assert captured_request.session_id == "session-1"
 
 
 def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):

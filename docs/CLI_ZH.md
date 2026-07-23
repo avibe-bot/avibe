@@ -6,6 +6,7 @@
 vibe              # vibe start 的别名
 vibe start        # 按需启动 Avibe（打开 Web UI）
 vibe status       # 查看服务状态
+vibe memory status # 通过运行中的控制器查看本地记忆状态
 vibe remote       # 引导式配置 Avibe Cloud 远程访问
 vibe screenshot   # 截取本机桌面截图
 vibe stop         # 停止所有服务
@@ -80,6 +81,16 @@ vibe status
   "running": true,
   "pid": 12345
 }
+```
+
+### `vibe memory`
+
+通过现有 mode-0600 控制器 socket 读取本地记忆。该命令不会启动服务，也没有写入、清空、配置、捕获或导出子命令。
+
+```bash
+vibe memory status [--json]
+vibe memory profile [--json]
+vibe memory search <查询> [--limit 1..20] [--json]
 ```
 
 ### `vibe doctor`

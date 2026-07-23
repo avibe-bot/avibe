@@ -56,7 +56,15 @@ vibe
       "home_tab_enabled": true,
       "messages_tab_enabled": true,
       "messages_tab_read_only_enabled": false
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/memory",
+        "description": "在符合条件的管理员私信中读取本地记忆",
+        "usage_hint": "status | profile | search <查询>",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "scopes": {

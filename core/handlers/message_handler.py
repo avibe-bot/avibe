@@ -1,5 +1,6 @@
 """Message routing and Agent communication handlers"""
 
+import asyncio
 import logging
 import inspect
 from datetime import datetime
@@ -174,6 +175,26 @@ class MessageHandler(BaseHandler):
                 context, source=source
             )
             context.platform_specific = payload
+
+            # Memory capture is deliberately outside the agent turn. Native IM
+            # dedup has already claimed this message and the stable base session
+            # is now known, so the controller can make one best-effort capture
+            # decision without delaying dispatch.
+            if is_human:
+                capture_memory = getattr(self.controller, "capture_memory_from_im", None)
+                if callable(capture_memory):
+                    capture_task = asyncio.create_task(
+                        capture_memory(context, control_message, base_session_id),
+                        name="memory-im-capture",
+                    )
+
+                    def _log_memory_capture_result(done_task: asyncio.Task) -> None:
+                        try:
+                            done_task.result()
+                        except Exception:
+                            logger.warning("Memory IM capture task failed")
+
+                    capture_task.add_done_callback(_log_memory_capture_result)
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
