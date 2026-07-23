@@ -852,7 +852,7 @@
         "notes": {
           "customBaseUrl": "Includes a custom Base URL",
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
-          "codexControlled": "Format confirmed · controlled import",
+          "keepNativeReauthHint": "Kept native; re-authorize inside the hub to make it hub-held (experimental)",
           "fromOpencode": "From the opencode config"
         }
       },

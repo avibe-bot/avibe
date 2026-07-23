@@ -243,12 +243,17 @@ export function buildMockRuntime(): RuntimeDependency {
 }
 
 // Migration scan fixture (frame 03). Mirrors the frozen migration-scan schema
-// example, adapted to the mock backends. Per spec v1.1 (Option 1): API keys /
-// base URLs → import; Claude account OAuth → keep_native (sanctioned as-is);
-// Codex auth.json → controlled_import behind the experimental flag, else
-// keep_native. Selections default to the items that actually move into the hub.
+// example, adapted to the mock backends. Per spec v1.1 + the 2026-07-23 L6
+// finding: API keys / base URLs → import; subscription OAuth (Claude account +
+// Codex auth.json) → keep_native ALWAYS (controlled_import is deferred — adapter
+// v1.2 forbids OAuth material in provision_credential). When the experimental
+// flag is on, those rows only add a "re-authorize inside the hub" hint; they
+// never become an import. So this fixture emits only import / keep_native.
 export function buildMockMigration(): MigrationScan {
-  const codexAction = SUBSCRIPTION_HUB_EXPERIMENTAL ? 'controlled_import' : 'keep_native';
+  // Subscription-OAuth rows stay native; the flag only swaps their hint line.
+  const oauthNote = SUBSCRIPTION_HUB_EXPERIMENTAL
+    ? 'settings.models.migration.notes.keepNativeReauthHint'
+    : 'settings.models.migration.notes.keepNativeSanctioned';
   return {
     items: [
       {
@@ -267,18 +272,16 @@ export function buildMockMigration(): MigrationScan {
         masked_detail: 'Claude 账号登录（OAuth）',
         proposed_action: 'keep_native',
         selected: false,
-        notes_key: 'settings.models.migration.notes.keepNativeSanctioned',
+        notes_key: oauthNote,
       },
       {
         id: 'mig_codex_auth',
         backend: 'codex',
         kind: 'oauth_native',
         masked_detail: 'ChatGPT 登录 · auth.json',
-        proposed_action: codexAction,
-        selected: SUBSCRIPTION_HUB_EXPERIMENTAL,
-        notes_key: SUBSCRIPTION_HUB_EXPERIMENTAL
-          ? 'settings.models.migration.notes.codexControlled'
-          : 'settings.models.migration.notes.keepNativeSanctioned',
+        proposed_action: 'keep_native',
+        selected: false,
+        notes_key: oauthNote,
       },
       {
         id: 'mig_opencode_zhipu',

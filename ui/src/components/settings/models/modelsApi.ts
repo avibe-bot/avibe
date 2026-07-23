@@ -251,8 +251,9 @@ class MockStore {
     // reauth needs the interactive OAuth flow, so it is never bulk-applied here.
     const chosen = scan.items.filter((i) => itemIds.includes(i.id) && i.proposed_action !== 'reauth');
     // Copy-only: each selected native config materializes a new source; the
-    // (simulated) originals are never touched. import/controlled_import land on
-    // the hub channel; keep_native registers a sanctioned native_cli source.
+    // (simulated) originals are never touched. import lands on the hub channel;
+    // keep_native registers a sanctioned native_cli source. (controlled_import
+    // is deferred per the 2026-07-23 L6 finding, so it's never emitted here.)
     for (const item of chosen) {
       const isKey = item.kind === 'api_key' || item.kind === 'opencode_provider';
       const channel: SupplyChannel = item.proposed_action === 'keep_native' ? 'native_cli' : 'hub';
@@ -264,7 +265,8 @@ class MockStore {
         protocol: item.backend === 'codex' ? 'openai_responses' : 'anthropic',
         base_url: null,
         supply_channel: channel,
-        experimental_consent_at: item.proposed_action === 'controlled_import' ? new Date().toISOString() : null,
+        // No hub-held subscription is created by migration, so never consented.
+        experimental_consent_at: null,
         billing: isKey ? 'metered' : 'monthly',
         state: { status: 'standby', retry_at: null, detail_key: null },
         usage: isKey ? { cycle_used_pct: null, month_spend_cents: 0, currency: 'CNY' } : { cycle_used_pct: 0, month_spend_cents: null, currency: null },

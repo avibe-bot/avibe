@@ -852,7 +852,7 @@
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
           "keepNativeSanctioned": "保留在 CLI 自己的凭据库（受官方认可）",
-          "codexControlled": "格式已确认，可受控导入",
+          "keepNativeReauthHint": "保持原生；可在中枢内重新授权以托管（实验）",
           "fromOpencode": "来自 opencode 配置"
         }
       },
