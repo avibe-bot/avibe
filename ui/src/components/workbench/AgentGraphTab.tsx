@@ -92,9 +92,21 @@ export const AgentGraphTab: React.FC = () => {
   }, [api]);
 
   const seqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const pendingBgRef = useRef(false);
   const fetchGraph = useCallback(
     async (background = false) => {
+      // Coalesce background refreshes: the poll and the SSE bus (which can burst
+      // many run/turn events) both call this. While a fetch is in flight, record
+      // that another was requested and run exactly one trailing refresh when it
+      // settles — `seqRef` only discards stale *results*, it doesn't stop
+      // concurrent scans from piling up on a slow/backgrounded tab.
+      if (background && inFlightRef.current) {
+        pendingBgRef.current = true;
+        return;
+      }
       const seq = ++seqRef.current;
+      inFlightRef.current = true;
       if (!background) setLoading(true);
       try {
         // Orphans come from the (filter-independent) running-agents snapshot in
@@ -122,10 +134,17 @@ export const AgentGraphTab: React.FC = () => {
       } catch {
         if (mountedRef.current && seq === seqRef.current) setErrored(true);
       } finally {
+        inFlightRef.current = false;
         // Always clear the spinner a foreground fetch raised — even if a newer
         // fetch superseded its result — or a superseded foreground load leaves
         // loading stuck true forever.
         if (mountedRef.current && !background) setLoading(false);
+        // Run the single coalesced refresh requested while this one was in
+        // flight, so bursts collapse to one trailing fetch.
+        if (mountedRef.current && pendingBgRef.current) {
+          pendingBgRef.current = false;
+          void fetchGraph(true);
+        }
       }
     },
     [api, windowSel, projectSel, mode, showBackground],
@@ -180,6 +199,10 @@ export const AgentGraphTab: React.FC = () => {
       onTurnStart: () => void fetchGraph(true),
       onTurnEnd: () => void fetchGraph(true),
       onSessionStatus: () => void fetchGraph(true),
+      // Visibility/scope/project moves arrive as session.activity — refetch so a
+      // session leaves/enters its bucket immediately instead of waiting for the
+      // 30s liveness poll.
+      onSessionActivity: () => void fetchGraph(true),
     });
   }, [api, fetchGraph]);
 
@@ -338,7 +361,7 @@ export const AgentGraphTab: React.FC = () => {
           <Loader2 className="size-5 animate-spin text-muted" />
         </div>
       ) : errored && !graph ? (
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-amber/40 bg-amber/[0.04] px-6 py-12 text-center">
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-amber-500/40 bg-amber-500/[0.04] px-6 py-12 text-center">
           <ServerCrash className="size-8 text-amber-500" />
           <div className="text-[13px] text-muted">{t('agents.graph.error')}</div>
           <Button type="button" variant="outline" size="xs" onClick={() => fetchGraph(false)}>

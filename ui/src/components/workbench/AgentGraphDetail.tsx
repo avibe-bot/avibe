@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import {
@@ -58,10 +58,34 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
   const { showToast } = useToast();
   const [busy, setBusy] = useState(false);
   const [armEnd, setArmEnd] = useState(false);
+  const disarmRef = useRef<number | null>(null);
+  const disarm = () => {
+    if (disarmRef.current != null) window.clearTimeout(disarmRef.current);
+    disarmRef.current = null;
+    setArmEnd(false);
+  };
+  const arm = () => {
+    if (disarmRef.current != null) window.clearTimeout(disarmRef.current);
+    setArmEnd(true);
+    // Auto-disarm after a few seconds: the Stop/Kill button can keep focus, so
+    // blur alone would leave a destructive action armed indefinitely and a later
+    // stray click could terminate an active/orphan run.
+    disarmRef.current = window.setTimeout(() => {
+      disarmRef.current = null;
+      setArmEnd(false);
+    }, 3000);
+  };
   // The panel stays mounted across node switches (only the prop changes), so
   // clear a pending destructive-confirm when the selected session changes — a
-  // click on the new node must not skip its first confirmation.
-  useEffect(() => setArmEnd(false), [node.session_id]);
+  // click on the new node must not skip its first confirmation — and never let
+  // the disarm timer outlive the panel.
+  useEffect(() => {
+    setArmEnd(false);
+    return () => {
+      if (disarmRef.current != null) window.clearTimeout(disarmRef.current);
+      disarmRef.current = null;
+    };
+  }, [node.session_id]);
 
   const lineage = deriveLineage(node.session_id, edges, triggersById);
   const meta = statusMeta(node.status);
@@ -99,7 +123,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
   };
 
   const endRun = async () => {
-    setArmEnd(false);
+    disarm();
     setBusy(true);
     try {
       // Ending a live runtime needs the backend-specific identifiers the
@@ -301,8 +325,8 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
                 type="button"
                 variant={armEnd ? 'destructive' : 'destructive-soft'}
                 size="xs"
-                onClick={() => (meta.needsConfirm && !armEnd ? setArmEnd(true) : endRun())}
-                onBlur={() => setArmEnd(false)}
+                onClick={() => (meta.needsConfirm && !armEnd ? arm() : endRun())}
+                onBlur={() => disarm()}
                 disabled={busy}
                 className="flex-1"
               >

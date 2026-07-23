@@ -619,6 +619,7 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_session_created on agent_runs (session_id, created_at)')
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
+    conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
 
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:

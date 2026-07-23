@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260723_0032"
+HEAD_REVISION = "20260723_0033"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:

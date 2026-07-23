@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from storage.background import normalize_run_status
@@ -298,19 +298,19 @@ def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
     candidates: set[str] = set(live_ids)
     # Window match = any recent activity, not just creation: a long run created
     # before the cutoff but finished/failed/canceled inside the window must
-    # still surface (completed_at / updated_at bump on state changes).
+    # still surface. ``updated_at`` alone captures all of these — it is set to
+    # ``created_at`` on insert and bumped to the transition time (equal to
+    # ``completed_at`` on terminal states) on every status change, so it is a
+    # superset of the created/completed timestamps. Using the single column lets
+    # this frequently-polled scan ride the ``ix_agent_runs_updated`` index
+    # instead of a full table scan (the other agent_runs indexes all lead with a
+    # non-timestamp column and cannot serve a bare range predicate).
     stmt = select(
         agent_runs.c.session_id,
         agent_runs.c.source_kind,
         agent_runs.c.source_actor,
         agent_runs.c.callback_session_id,
-    ).where(
-        or_(
-            agent_runs.c.created_at >= cutoff_iso,
-            agent_runs.c.completed_at >= cutoff_iso,
-            agent_runs.c.updated_at >= cutoff_iso,
-        )
-    )
+    ).where(agent_runs.c.updated_at >= cutoff_iso)
     for row in conn.execute(stmt).mappings():
         if row["session_id"]:
             candidates.add(row["session_id"])

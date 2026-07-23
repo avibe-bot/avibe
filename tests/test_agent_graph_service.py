@@ -140,7 +140,9 @@ def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent
             created_at=_run_iso(created),
             started_at=_run_iso(started or created),
             completed_at=_run_iso(completed) if completed else None,
-            updated_at=_run_iso(created),
+            # Mirror production: updated_at is bumped to the latest transition
+            # time (start, then completion), never left at creation time.
+            updated_at=_run_iso(completed or started or created),
             metadata_json="{}",
         )
     )

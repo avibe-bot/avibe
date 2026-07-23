@@ -39,7 +39,7 @@ export const AgentGraphOrphanStrip: React.FC<AgentGraphOrphanStripProps> = ({ ro
   const { t } = useTranslation();
   if (rows.length === 0) return null;
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-amber/40 bg-amber/[0.05] px-4 py-3">
+    <div className="flex flex-col gap-2 rounded-xl border border-amber-500/40 bg-amber-500/[0.05] px-4 py-3">
       <div className="flex items-center gap-2">
         <AlertTriangle className="size-3.5 shrink-0 text-amber-500" />
         <span className="text-[12px] font-semibold text-foreground">
