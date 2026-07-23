@@ -495,6 +495,26 @@ def test_native_source_is_dispatched_before_hub_and_cooldown_falls_through(tmp_p
     assert adapter.invocations == [("src_backup001", "claude-opus-4-6", "claude")]
 
 
+def test_native_dispatch_attempts_pending_credential_revoke(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    native = service.store.load().sources[0]
+    native.kind = "subscription"
+    native.supply_channel = "native_cli"
+    native.credential_ref = None
+    service.revocations.add("src_deleted", "cred_deleted")
+
+    resolved = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert resolved.supply_channel == "native_cli"
+    assert adapter.revoked == ["cred_deleted"]
+    assert service.revocations.list() == []
+    assert adapter.invocations == []
+
+
 def test_direct_mode_never_enters_hub_resolution(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
@@ -600,6 +620,20 @@ def test_source_delete_does_not_revoke_when_config_save_fails(tmp_path):
 
     assert adapter.revoked == []
     assert [source.id for source in service.store.load().sources] == ["src_primary01", "src_backup001"]
+
+
+def test_deleting_last_hub_source_syncs_empty_binding_set(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources = [config.sources[0]]
+    config.priority_order = [config.sources[0].id]
+
+    asyncio.run(service.delete_source("src_primary01", force=True))
+
+    assert adapter.synced == [()]
+    assert adapter.revoked == ["cred_src_primary01"]
+    assert service.store.load().sources == []
 
 
 def test_source_reference_survives_failed_credential_revoke(tmp_path):

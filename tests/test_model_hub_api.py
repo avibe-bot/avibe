@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
 
-from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
+from config.v2_config import (
+    ModelHubAgentSupplyConfig,
+    ModelHubConfig,
+    ModelHubSourceStateConfig,
+)
 from core.handlers.model_hub.adapter import (
     EngineHealth,
     EngineStatus,
@@ -19,7 +23,7 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService, UnavailableEngineAdapter
+from core.handlers.model_hub.service import ModelHubError, ModelHubService
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
 from vibe.ui_server import app
@@ -678,9 +682,10 @@ def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tm
 def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
     store = MemoryStore()
     native = FakeAdapter()
+    native.fail_sync = True
     service = ModelHubService(
         store=store,
-        adapter=UnavailableEngineAdapter(),
+        adapter=native,
         events=BoundedEventLog(tmp_path / "events.json"),
         native_oauth_adapter=native,
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
@@ -714,6 +719,19 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
     )
     assert resolved.source_id == source["id"]
     assert resolved.supply_channel == "native_cli"
+    assert native.synced == []
+
+    store.config.sources[0].state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2026-07-23T03:05:00Z",
+    )
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.test_source(source["id"]))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources[0].state.status == "cooldown"
+    assert store.config.sources[0].state.retry_at == "2026-07-23T03:05:00Z"
+    assert native.synced == []
 
 
 def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
@@ -777,6 +795,9 @@ def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
     [
         "https://user:password@relay.example/v1",
         "https://relay.example/v1?api_key=sk-test-never-persist-this",
+        "https://relay.example/v1?X-Amz-Signature=abcdef123456",
+        "https://relay.example/v1?oauth_signature=abcdef123456",
+        "https://relay.example/v1?x-authorization=opaque-value",
         "https://relay.example/v1?target=sk-test-never-persist-this",
     ],
 )

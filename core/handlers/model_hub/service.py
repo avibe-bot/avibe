@@ -245,7 +245,17 @@ def _validated_base_url(value: object) -> Optional[str]:
         normalized = key.strip().lower().replace("-", "_").replace(".", "_")
         if normalized in _CREDENTIAL_QUERY_KEYS or any(
             marker in normalized
-            for marker in ("api_key", "access_token", "auth_token", "client_secret")
+            for marker in (
+                "api_key",
+                "access_token",
+                "auth_token",
+                "token",
+                "authorization",
+                "signature",
+                "secret",
+                "password",
+                "credential",
+            )
         ):
             raise ModelHubError("discovery_failed")
     return value
@@ -403,9 +413,9 @@ class ModelHubService:
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
         return ModelHubConfig.from_payload(config.to_payload())
 
-    async def _sync_sources(self, config: ModelHubConfig) -> None:
+    async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
-        if not bindings and isinstance(self.adapter, UnavailableEngineAdapter):
+        if not bindings and not force_empty:
             return
         await self._engine_call(self.adapter.sync_sources(bindings))
 
@@ -413,12 +423,14 @@ class ModelHubService:
         """Register the new projection before making it authoritative on disk."""
 
         self._engine_synced = False
-        await self._sync_sources(updated)
+        previous_bindings = self._bindings(previous)
+        updated_bindings = self._bindings(updated)
+        await self._sync_sources(updated, force_empty=bool(previous_bindings))
         try:
             self.store.save(updated)
         except Exception:
             try:
-                await self._sync_sources(previous)
+                await self._sync_sources(previous, force_empty=bool(updated_bindings))
             except ModelHubError:
                 self._engine_synced = False
             else:
@@ -847,6 +859,8 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
+            if source.supply_channel == "native_cli":
+                raise ModelHubError("discovery_failed")
             model_ids = await self._discover(source)
             manual = [model for model in source.models if model.provenance == "manual"]
             self._apply_discovered_models(source, manual, model_ids)
@@ -1266,6 +1280,12 @@ class ModelHubService:
         failed_reason: Optional[EventReason] = None
         for source in candidates:
             if source.supply_channel == "native_cli":
+                if self.revocations.list():
+                    try:
+                        await self._ensure_engine_synced()
+                    except ModelHubError:
+                        # Credential cleanup remains durable; native routing is independent.
+                        pass
                 self._emit_switch(
                     agent=event_agent,
                     model_id=target_model,
