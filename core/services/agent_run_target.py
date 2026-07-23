@@ -151,14 +151,19 @@ def resolve_agent_run_target(
         scope_row = _scope_for_context(conn, context, platform, settings_key)
         scope_id = scope_row.get("scope_id") if scope_row else None
 
-        if scope_id:
+        existing = None
+        for candidate_scope_id in _session_scope_ids_for_context(
+            context,
+            platform=platform,
+            preferred_scope_id=_optional_str(scope_id),
+        ):
             existing = conn.execute(
                 select(
                     agent_sessions,
                     scopes.c.scope_type.label("_scope_type"),
                 )
                 .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
-                .where(agent_sessions.c.scope_id == scope_id)
+                .where(agent_sessions.c.scope_id == candidate_scope_id)
                 .where(agent_sessions.c.session_anchor == anchor)
                 # Never resolve a turn onto an archived row. The archived row's
                 # anchor is vacated on archive (so it won't match a live thread
@@ -168,24 +173,26 @@ def resolve_agent_run_target(
                 .limit(1)
             ).mappings().first()
             if existing is not None:
-                return _cache_target(
-                    context,
-                    _target_from_session_row(
+                break
+        if existing is not None:
+            return _cache_target(
+                context,
+                _target_from_session_row(
+                    existing,
+                    platform=platform,
+                    settings_key=settings_key,
+                    session_key=session_key,
+                    fallback_anchor=anchor,
+                    workdir=_authoritative_session_workdir(
                         existing,
                         platform=platform,
                         settings_key=settings_key,
                         session_key=session_key,
-                        fallback_anchor=anchor,
-                        workdir=_authoritative_session_workdir(
-                            existing,
-                            platform=platform,
-                            settings_key=settings_key,
-                            session_key=session_key,
-                            source="existing_session",
-                        ),
-                        source=source,
+                        source="existing_session",
                     ),
-                )
+                    source=source,
+                ),
+            )
 
         if not scope_id:
             agent_target = _resolve_agent_target(
@@ -530,6 +537,34 @@ def _scope_for_context(conn, context: MessageContext, platform: str, settings_ke
         if row is not None:
             return row
     return None
+
+
+def _session_scope_ids_for_context(
+    context: MessageContext,
+    *,
+    platform: str,
+    preferred_scope_id: Optional[str],
+) -> list[str]:
+    """Return stable session lookup scopes for a context.
+
+    Telegram topic settings can be added or removed independently of the
+    topic's conversation. Search both the currently preferred settings scope
+    and its parent/child counterpart so that changing the override does not
+    fork the existing Agent Session.
+    """
+
+    scope_ids = [preferred_scope_id] if preferred_scope_id else []
+    thread_id = resolve_context_thread_id(context)
+    if not thread_id:
+        return scope_ids
+
+    for scope_id in (
+        f"{platform}::thread::{make_thread_native_id(str(context.channel_id), thread_id)}",
+        f"{platform}::channel::{context.channel_id}",
+    ):
+        if scope_id not in scope_ids:
+            scope_ids.append(scope_id)
+    return scope_ids
 
 
 def _scope_row(conn, scope_id: str) -> Optional[dict[str, Any]]:

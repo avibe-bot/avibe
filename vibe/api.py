@@ -4186,7 +4186,8 @@ def save_thread_settings(payload: dict) -> dict:
     if not channel_id or not thread_id or not isinstance(settings_payload, dict):
         return {"ok": False, "error": "channel_id, thread_id, and settings are required"}
 
-    base = store.find_thread(channel_id, thread_id, platform=platform)
+    existing = store.find_thread(channel_id, thread_id, platform=platform)
+    base = existing
     if base is None:
         base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
     routing_payload = settings_payload.get("routing")
@@ -4195,6 +4196,10 @@ def save_thread_settings(payload: dict) -> dict:
         if isinstance(routing_payload, dict)
         else base.routing
     )
+    require_mention = settings_payload.get("require_mention", base.require_mention)
+    if existing is None and require_mention is None:
+        platform_config = _stored_platform_config(platform)
+        require_mention = bool(getattr(platform_config, "require_mention", True))
     settings = ChannelSettings(
         enabled=bool(settings_payload.get("enabled", base.enabled)),
         show_message_types=_normalize_show_message_types_for_platform(
@@ -4203,7 +4208,7 @@ def save_thread_settings(payload: dict) -> dict:
         ),
         custom_cwd=settings_payload.get("custom_cwd", base.custom_cwd),
         routing=routing,
-        require_mention=settings_payload.get("require_mention", base.require_mention),
+        require_mention=require_mention,
         require_bind=settings_payload.get("require_bind", base.require_bind),
     )
     store.update_thread(channel_id, thread_id, settings, platform=platform)

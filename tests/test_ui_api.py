@@ -2742,6 +2742,34 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
         SettingsStore.reset_instance()
 
 
+def test_telegram_topic_settings_materialize_inherited_mention_default(tmp_path, monkeypatch):
+    # Scenario: TELEGRAM-TOPIC-001
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+    monkeypatch.setattr(api, "_stored_platform_config", lambda _platform: SimpleNamespace(require_mention=False))
+    SettingsStore.reset_instance()
+    try:
+        store = SettingsStore.get_instance()
+        store.update_channel("-1001", ChannelSettings(enabled=True, require_mention=None), platform="telegram")
+
+        saved = api.save_thread_settings(
+            {
+                "platform": "telegram",
+                "channel_id": "-1001",
+                "thread_id": "42",
+                "settings": {
+                    "enabled": True,
+                    "require_mention": None,
+                },
+            }
+        )
+
+        assert saved["ok"] is True
+        assert saved["settings"]["require_mention"] is False
+        assert store.find_thread("-1001", "42", platform="telegram").require_mention is False
+    finally:
+        SettingsStore.reset_instance()
+
+
 def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
