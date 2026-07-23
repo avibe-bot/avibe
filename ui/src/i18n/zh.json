@@ -2568,7 +2568,8 @@
       "scheduled": "定时任务",
       "watch": "Watch 监听",
       "webhook": "Webhook",
-      "harness": "自动触发",
+      "harness": "来自 Agent",
+      "from": "来自",
       "agentFallback": "智能体"
     },
     "picker": {

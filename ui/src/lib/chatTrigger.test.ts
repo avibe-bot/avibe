@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { chatTriggerLink, isUnresolvedAgentCallback } from './chatTrigger';
+import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from './chatTrigger';
 
 type Msg = Parameters<typeof chatTriggerLink>[0];
 const msg = (over: Partial<Msg>): Msg => ({
@@ -90,5 +90,29 @@ describe('isUnresolvedAgentCallback', () => {
     expect(m({ native_message_id: 'scheduled:def:exec' })).toBe(false);
     expect(m({ native_message_id: null })).toBe(false);
     expect(m({ source: 'agent' })).toBe(false);
+  });
+});
+
+describe('harnessChipLabelKey (leading-label key by source presence)', () => {
+  const key = (over: Partial<Msg>) => harnessChipLabelKey(msg(over));
+
+  it('a resolved agent-callback uses the "From" PREFIX key (precedes the source title)', () => {
+    expect(key({ author_name: 'agent_run', source_session_id: 'ses_src_1234' })).toBe('chat.source.from');
+    // The prefix wins even for a watch-authored row that carries a source.
+    expect(key({ author_name: 'watch', source_session_id: 'ses_src' })).toBe('chat.source.from');
+  });
+
+  it('an unresolved agent-callback falls back to the self-contained "From agent" key', () => {
+    // Source deleted / not yet enriched → no dangling bare "From".
+    expect(key({ author_name: 'agent_run', source_session_id: null })).toBe('chat.source.harness');
+    expect(key({ author_name: null, source_session_id: null })).toBe('chat.source.harness');
+  });
+
+  it('task / watch / webhook keep their own self-contained labels (unchanged)', () => {
+    expect(key({ author_name: 'watch' })).toBe('chat.source.watch');
+    expect(key({ author_name: 'webhook' })).toBe('chat.source.webhook');
+    for (const author_name of ['scheduled', 'task_run', 'task']) {
+      expect(key({ author_name })).toBe('chat.source.scheduled');
+    }
   });
 });
