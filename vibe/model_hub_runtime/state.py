@@ -166,15 +166,24 @@ class EngineStateStore:
                     raise EngineStateError("unsupported source protocol")
                 vendor = str(binding.vendor).strip().lower()
                 base_url = _validated_base_url(binding.base_url)
-                if credential["kind"] == "api_key" and (
-                    credential.get("vendor") != vendor
-                    or credential.get("protocol") != protocol
-                    or credential.get("base_url") != base_url
+                if credential["kind"] == "api_key":
+                    if (
+                        credential.get("vendor") != vendor
+                        or credential.get("protocol") != protocol
+                        or credential.get("base_url") != base_url
+                    ):
+                        raise EngineStateError("credential does not match source binding")
+                elif (
+                    credential.get("source_id") != source_id
+                    or credential.get("vendor") != vendor
+                    or base_url is not None
                 ):
-                    raise EngineStateError("credential does not match source binding")
+                    raise EngineStateError("OAuth credential does not match source binding")
                 allowed_origins = tuple(dict.fromkeys(str(origin).strip() for origin in binding.allowed_origins))
                 if any(not origin for origin in allowed_origins):
                     raise EngineStateError("allowed origin cannot be empty")
+                if credential["kind"] == "oauth" and not allowed_origins:
+                    raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
                 model_ids = tuple(dict.fromkeys(str(model).strip() for model in binding.model_ids))
                 if any(not model for model in model_ids):
@@ -189,9 +198,11 @@ class EngineStateStore:
                         allowed_origins=allowed_origins,
                         model_ids=model_ids,
                         prefix=(
-                            previous.prefix
+                            str(credential["prefix"])
+                            if credential.get("prefix")
+                            else previous.prefix
                             if previous
-                            else str(credential.get("prefix") or f"avibe-{secrets.token_hex(12)}")
+                            else f"avibe-{secrets.token_hex(12)}"
                         ),
                     )
                 )

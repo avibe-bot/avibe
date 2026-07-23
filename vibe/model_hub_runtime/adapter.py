@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
@@ -65,6 +65,7 @@ class _OAuthFlow:
     state: str = "awaiting_action"
     error_key: str | None = None
     credential_ref: str | None = None
+    operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def snapshot(self) -> OAuthFlowState:
         return OAuthFlowState(
@@ -219,6 +220,7 @@ class CLIProxyEngineAdapter:
             raise EngineStateError("unsupported OAuth vendor")
         engine_endpoint, callback_provider, auth_provider = endpoint
         with self._oauth_lock:
+            self._expire_oauth_flows_locked()
             if auth_provider in self._active_oauth_providers:
                 raise EngineStateError("an OAuth flow for this provider is already active")
             self._active_oauth_providers.add(auth_provider)
@@ -260,75 +262,80 @@ class CLIProxyEngineAdapter:
 
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
-        if flow.state in {"success", "failed", "cancelled"}:
+        async with flow.operation_lock:
+            self._expire_oauth_flows()
+            if flow.state in {"success", "failed", "cancelled"}:
+                return flow.snapshot()
+            try:
+                client = await asyncio.to_thread(self.supervisor.client)
+                payload = await asyncio.to_thread(
+                    client.management_request,
+                    "GET",
+                    "/get-auth-status",
+                    query={"state": flow.engine_state},
+                )
+                status = str(payload.get("status") or "").strip().lower()
+                if status == "ok":
+                    await self._complete_oauth(flow, client)
+                elif status == "error":
+                    self._fail_flow(flow, "models.oauth.upstream_failed")
+                elif flow.state != "verifying":
+                    flow.state = "awaiting_action"
+            except (EngineClientError, EngineUnavailableError):
+                self._fail_flow(flow, "models.oauth.engine_unavailable")
             return flow.snapshot()
-        client = await asyncio.to_thread(self.supervisor.client)
-        try:
-            payload = await asyncio.to_thread(
-                client.management_request,
-                "GET",
-                "/get-auth-status",
-                query={"state": flow.engine_state},
-            )
-        except (EngineClientError, EngineUnavailableError):
-            self._fail_flow(flow, "models.oauth.engine_unavailable")
-            return flow.snapshot()
-        status = str(payload.get("status") or "").strip().lower()
-        if status == "ok":
-            await self._complete_oauth(flow, client)
-        elif status == "error":
-            self._fail_flow(flow, "models.oauth.upstream_failed")
-        elif flow.state != "verifying":
-            flow.state = "awaiting_action"
-        return flow.snapshot()
 
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
-        if flow.state in {"success", "failed", "cancelled"}:
-            raise EngineStateError("OAuth flow is no longer active")
-        if flow.expects == "none":
-            raise EngineStateError("this OAuth flow does not accept a submission")
-        submitted = value.strip()
-        if not submitted:
-            raise EngineStateError("OAuth submission is empty")
-        payload: dict[str, str] = {
-            "provider": flow.callback_provider,
-            "state": flow.engine_state,
-        }
-        if submitted.startswith(("http://", "https://")):
-            payload["redirect_url"] = submitted
-        else:
-            payload["code"] = submitted
-        try:
-            client = await asyncio.to_thread(self.supervisor.client)
-            await asyncio.to_thread(
-                client.management_request,
-                "POST",
-                "/oauth-callback",
-                payload=payload,
-            )
-        except (EngineClientError, EngineUnavailableError):
-            self._fail_flow(flow, "models.oauth.submission_failed")
+        async with flow.operation_lock:
+            self._expire_oauth_flows()
+            if flow.state in {"success", "failed", "cancelled"}:
+                raise EngineStateError("OAuth flow is no longer active")
+            if flow.expects == "none":
+                raise EngineStateError("this OAuth flow does not accept a submission")
+            submitted = value.strip()
+            if not submitted:
+                raise EngineStateError("OAuth submission is empty")
+            payload: dict[str, str] = {
+                "provider": flow.callback_provider,
+                "state": flow.engine_state,
+            }
+            if submitted.startswith(("http://", "https://")):
+                payload["redirect_url"] = submitted
+            else:
+                payload["code"] = submitted
+            try:
+                client = await asyncio.to_thread(self.supervisor.client)
+                await asyncio.to_thread(
+                    client.management_request,
+                    "POST",
+                    "/oauth-callback",
+                    payload=payload,
+                )
+            except (EngineClientError, EngineUnavailableError):
+                self._fail_flow(flow, "models.oauth.submission_failed")
+                return flow.snapshot()
+            flow.state = "verifying"
             return flow.snapshot()
-        flow.state = "verifying"
-        return flow.snapshot()
 
     async def cancel_oauth(self, flow_id: str) -> None:
         flow = self._get_flow(flow_id)
-        if flow.state in {"success", "failed", "cancelled"}:
-            return
-        try:
-            client = await asyncio.to_thread(self.supervisor.client)
-            await asyncio.to_thread(
-                client.management_request,
-                "DELETE",
-                "/oauth-session",
-                query={"state": flow.engine_state},
-            )
-        except (EngineClientError, EngineUnavailableError):
-            pass
-        flow.state = "cancelled"
-        self._release_provider(flow)
+        async with flow.operation_lock:
+            self._expire_oauth_flows()
+            if flow.state in {"success", "failed", "cancelled"}:
+                return
+            try:
+                client = await asyncio.to_thread(self.supervisor.client)
+                await asyncio.to_thread(
+                    client.management_request,
+                    "DELETE",
+                    "/oauth-session",
+                    query={"state": flow.engine_state},
+                )
+            except (EngineClientError, EngineUnavailableError):
+                pass
+            flow.state = "cancelled"
+            self._release_provider(flow)
 
     async def invoke(
         self,
@@ -413,6 +420,7 @@ class CLIProxyEngineAdapter:
 
     def _get_flow(self, flow_id: str) -> _OAuthFlow:
         with self._oauth_lock:
+            self._expire_oauth_flows_locked()
             flow = self._oauth_flows.get(flow_id)
         if flow is None:
             raise EngineStateError("OAuth flow is unknown")
@@ -426,6 +434,26 @@ class CLIProxyEngineAdapter:
     def _release_provider(self, flow: _OAuthFlow) -> None:
         with self._oauth_lock:
             self._active_oauth_providers.discard(flow.auth_provider)
+
+    def _expire_oauth_flows(self) -> None:
+        with self._oauth_lock:
+            self._expire_oauth_flows_locked()
+
+    def _expire_oauth_flows_locked(self) -> None:
+        now = datetime.now(timezone.utc)
+        for flow in self._oauth_flows.values():
+            if flow.state in {"success", "failed", "cancelled"}:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(flow.expires_at_iso)
+            except ValueError:
+                expires_at = now
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= now:
+                flow.state = "failed"
+                flow.error_key = "models.oauth.expired"
+                self._active_oauth_providers.discard(flow.auth_provider)
 
 
 def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:

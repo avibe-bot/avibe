@@ -217,6 +217,41 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+def test_oauth_source_bindings_are_scoped_and_follow_reauthentication(tmp_path: Path) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    first_ref = store.bind_oauth_credential(
+        "src_fixture123",
+        "anthropic",
+        "claude-first.json",
+    )
+    binding = _binding(
+        first_ref,
+        vendor="anthropic",
+        protocol="anthropic",
+        base_url=None,
+        allowed_origins=("claude",),
+    )
+
+    with pytest.raises(EngineStateError, match="requires at least one allowed origin"):
+        store.sync_sources([SourceBinding(**{**binding.__dict__, "allowed_origins": ()})])
+    with pytest.raises(EngineStateError, match="does not match"):
+        store.sync_sources([SourceBinding(**{**binding.__dict__, "source_id": "src_other1234"})])
+    with pytest.raises(EngineStateError, match="does not match"):
+        store.sync_sources([SourceBinding(**{**binding.__dict__, "vendor": "openai"})])
+
+    first = store.sync_sources([binding])[0]
+    assert first.prefix == store.credential_metadata(first_ref)["prefix"]
+
+    replacement_ref = store.bind_oauth_credential(
+        "src_fixture123",
+        "anthropic",
+        "claude-replacement.json",
+    )
+    replacement = store.sync_sources([SourceBinding(**{**binding.__dict__, "credential_ref": replacement_ref})])[0]
+    assert replacement.prefix == store.credential_metadata(replacement_ref)["prefix"]
+    assert replacement.prefix != first.prefix
+
+
 @contextmanager
 def _models_endpoint():
     class Handler(BaseHTTPRequestHandler):
@@ -538,11 +573,15 @@ def test_oauth_flow_binds_exactly_one_new_auth_record(tmp_path: Path) -> None:
         flow = await adapter.start_oauth("src_fixture123", "anthropic")
         with pytest.raises(EngineStateError, match="already active"):
             await adapter.start_oauth("src_other1234", "anthropic")
-        completed = await adapter.oauth_status(flow.flow_id)
+        completed, concurrent = await asyncio.gather(
+            adapter.oauth_status(flow.flow_id),
+            adapter.oauth_status(flow.flow_id),
+        )
 
         assert completed.state == "success"
         assert completed.source_id == "src_fixture123"
         assert completed.credential_ref and completed.credential_ref.startswith("cred_")
+        assert concurrent.credential_ref == completed.credential_ref
         assert client.patches[0]["name"] == "claude-account.json"
         assert str(client.patches[0]["prefix"]).startswith("avibe-")
         repeated = await adapter.oauth_status(flow.flow_id)
@@ -550,6 +589,60 @@ def test_oauth_flow_binds_exactly_one_new_auth_record(tmp_path: Path) -> None:
         assert len(client.patches) == 1
         await adapter.cancel_oauth(flow.flow_id)
         assert (await adapter.oauth_status(flow.flow_id)).state == "success"
+
+    asyncio.run(run())
+
+
+def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: Path) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.starts = 0
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                return {"files": []}
+            if path == "/anthropic-auth-url":
+                self.starts += 1
+                return {
+                    "state": f"engine-state-{self.starts}",
+                    "url": "https://example.test/oauth",
+                }
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+            self.unavailable = False
+
+        def client(self):
+            if self.unavailable:
+                raise EngineUnavailableError("engine unavailable")
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        client = Client()
+        supervisor = Supervisor(store, client)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=supervisor,  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        failed_flow = await adapter.start_oauth("src_fixture123", "anthropic")
+        supervisor.unavailable = True
+        failed = await adapter.oauth_status(failed_flow.flow_id)
+        assert failed.state == "failed"
+        assert failed.error_key == "models.oauth.engine_unavailable"
+
+        supervisor.unavailable = False
+        expiring_flow = await adapter.start_oauth("src_other1234", "anthropic")
+        adapter._oauth_flows[expiring_flow.flow_id].expires_at_iso = "2000-01-01T00:00:00+00:00"
+        replacement = await adapter.start_oauth("src_third1234", "anthropic")
+        assert replacement.state == "awaiting_action"
+        expired = await adapter.oauth_status(expiring_flow.flow_id)
+        assert expired.state == "failed"
+        assert expired.error_key == "models.oauth.expired"
 
     asyncio.run(run())
 
