@@ -61,6 +61,42 @@ def test_channel_require_bind_persists(tmp_path: Path) -> None:
         reloaded.close()
 
 
+def test_telegram_thread_settings_round_trip_and_parent_fallback(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    parent = ChannelSettings(enabled=True, require_mention=True, require_bind=False)
+    topic = ChannelSettings(
+        enabled=True,
+        show_message_types=["assistant", "toolcall"],
+        custom_cwd="/topics/release",
+        routing=RoutingSettings(agent_name="reviewer", model="gpt-5.4"),
+        require_mention=False,
+        require_bind=True,
+    )
+    store.update_channel("-1001", parent, platform="telegram")
+    store.update_thread("-1001", "42", topic, platform="telegram")
+    store.close()
+
+    reloaded = SettingsStore(settings_path)
+    try:
+        effective = reloaded.find_effective_channel("-1001", thread_id="42", platform="telegram")
+        inherited = reloaded.find_effective_channel("-1001", thread_id="99", platform="telegram")
+        assert effective is not None
+        assert effective.require_mention is False
+        assert effective.require_bind is True
+        assert effective.show_message_types == ["assistant", "toolcall"]
+        assert effective.routing.agent_name == "reviewer"
+        assert effective.custom_cwd == "/topics/release"
+        assert inherited is not None
+        assert inherited.require_mention is True
+        assert reloaded.get_threads_for_platform("telegram")["-1001"]["42"] == effective
+
+        assert reloaded.delete_thread("-1001", "42", platform="telegram") is True
+        assert reloaded.find_effective_channel("-1001", thread_id="42", platform="telegram").require_mention is True
+    finally:
+        reloaded.close()
+
+
 def test_bound_and_enabled_user_checks_are_separate(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     store = SettingsStore(settings_path)

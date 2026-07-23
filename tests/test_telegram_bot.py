@@ -83,6 +83,35 @@ def test_group_message_uses_channel_require_mention_override() -> None:
     assert bot.on_message_callback.await_args.args[1] == "hello team"
 
 
+def test_forum_message_uses_topic_require_mention_override() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token", require_mention=True))
+    bot._bot_user = {"id": 1, "username": "vibe_remote_bot"}
+    settings_keys: list[str] = []
+
+    def get_require_mention(settings_key, global_default=False):
+        settings_keys.append(settings_key)
+        return False
+
+    bot.settings_manager = SimpleNamespace(get_require_mention=get_require_mention)
+    bot.on_message_callback = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 78,
+                "message_thread_id": 42,
+                "is_topic_message": True,
+                "chat": {"id": -100123, "type": "supergroup", "title": "Core Forum", "is_forum": True},
+                "from": {"id": 42},
+                "text": "hello topic",
+            }
+        )
+    )
+
+    assert settings_keys == ["thread::-100123::42"]
+    bot.on_message_callback.assert_awaited_once()
+
+
 def test_inbound_message_refreshes_config_before_reading_options() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token", require_mention=True))
     bot._bot_user = {"id": 1, "username": "vibe_remote_bot"}

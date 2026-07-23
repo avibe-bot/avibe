@@ -941,13 +941,16 @@ class Controller:
         """Get settings key based on context.
 
         For DM contexts, returns user_id so per-user settings apply.
-        For channel contexts, returns channel_id for per-channel settings.
+        For channel contexts, returns channel_id for per-channel settings. A
+        Telegram forum topic returns a runtime thread key so its explicit
+        override can win before the parent channel fallback.
 
         Relies on the ``is_dm`` flag set by the IM layer in
         ``context.platform_specific`` (see Phase 2 of the refactoring).
         """
-        is_dm = (context.platform_specific or {}).get("is_dm", False)
-        return context.user_id if is_dm else context.channel_id
+        from core.message_context import resolve_context_scope_settings_key
+
+        return resolve_context_scope_settings_key(context)
 
     def _get_session_key(self, context: MessageContext) -> str:
         """Get a globally unique session-scope key.
@@ -958,7 +961,9 @@ class Controller:
         tracking never collide.
         """
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
-        settings_key = self._get_settings_key(context)
+        from core.message_context import resolve_context_settings_key
+
+        settings_key = resolve_context_settings_key(context)
         return build_context_session_key(context, platform=platform, settings_key=settings_key)
 
     def backend_alive(self, context: MessageContext) -> Optional[bool]:

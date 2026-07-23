@@ -4174,6 +4174,61 @@ def save_settings(payload: dict) -> dict:
     return _settings_to_payload(store, platform=platform)
 
 
+def save_thread_settings(payload: dict) -> dict:
+    """Create or replace one child-thread settings override."""
+    store = SettingsStore.get_instance()
+    platform = str(payload.get("platform") or _current_platform())
+    channel_id = str(payload.get("channel_id") or "").strip()
+    thread_id = str(payload.get("thread_id") or "").strip()
+    settings_payload = payload.get("settings")
+    if platform != "telegram":
+        return {"ok": False, "error": "thread settings currently support Telegram only"}
+    if not channel_id or not thread_id or not isinstance(settings_payload, dict):
+        return {"ok": False, "error": "channel_id, thread_id, and settings are required"}
+
+    base = store.find_thread(channel_id, thread_id, platform=platform)
+    if base is None:
+        base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
+    routing_payload = settings_payload.get("routing")
+    routing = (
+        _parse_routing(_normalize_backend_routing_payload(routing_payload))
+        if isinstance(routing_payload, dict)
+        else base.routing
+    )
+    settings = ChannelSettings(
+        enabled=bool(settings_payload.get("enabled", base.enabled)),
+        show_message_types=_normalize_show_message_types_for_platform(
+            settings_payload.get("show_message_types", base.show_message_types),
+            platform,
+        ),
+        custom_cwd=settings_payload.get("custom_cwd", base.custom_cwd),
+        routing=routing,
+        require_mention=settings_payload.get("require_mention", base.require_mention),
+        require_bind=settings_payload.get("require_bind", base.require_bind),
+    )
+    store.update_thread(channel_id, thread_id, settings, platform=platform)
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "settings": _scope_settings_payload(settings, platform),
+    }
+
+
+def delete_thread_settings(platform: str, channel_id: str, thread_id: str) -> dict:
+    """Remove one child-thread override so it inherits its parent channel again."""
+    platform = str(platform or "").strip()
+    channel_id = str(channel_id or "").strip()
+    thread_id = str(thread_id or "").strip()
+    if platform != "telegram":
+        return {"ok": False, "error": "thread settings currently support Telegram only"}
+    if not channel_id or not thread_id:
+        return {"ok": False, "error": "channel_id and thread_id are required"}
+    store = SettingsStore.get_instance()
+    removed = store.delete_thread(channel_id, thread_id, platform=platform)
+    return {"ok": True, "removed": removed, "channel_id": channel_id, "thread_id": thread_id}
+
+
 def _guild_scope_update_from_settings_payload(
     store: SettingsStore,
     platform: str,
@@ -4499,11 +4554,18 @@ def delete_channel_scope(platform: str, native_id: str, scope_type: str = "chann
 def telegram_list_chats(include_private: bool = False, include_not_returned: bool = False) -> dict:
     from core import chat_discovery
 
-    return chat_discovery.channels_response(
+    result = chat_discovery.channels_response(
         "telegram",
         include_private=include_private,
         include_not_returned=include_not_returned,
     )
+    for channel in result.get("channels") or []:
+        supports_topics = bool(channel.get("supports_topics") or channel.get("supports_threads"))
+        channel["supports_topics"] = supports_topics
+        if supports_topics:
+            channel["topics"] = chat_discovery.list_thread_payloads("telegram", str(channel.get("id") or ""))
+    result["chats"] = result.get("channels") or []
+    return result
 
 
 def discord_list_guilds(bot_token: str) -> dict:
@@ -4886,9 +4948,21 @@ def _current_platform() -> str:
     return load_config().platform
 
 
+def _scope_settings_payload(settings: ChannelSettings, platform: str) -> dict:
+    return {
+        "enabled": settings.enabled,
+        "show_message_types": _normalize_show_message_types_for_platform(settings.show_message_types, platform),
+        "custom_cwd": settings.custom_cwd,
+        "require_mention": settings.require_mention,
+        "require_bind": settings.require_bind,
+        "routing": routing_to_compat_dict(settings.routing),
+    }
+
+
 def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
     payload: dict = {
         "channels": {},
+        "threads": {},
         "guilds": {},
         "guild_allowlist": [],
         "guild_scope_configured": False,
@@ -4897,13 +4971,11 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
         "bind_codes": [],
     }
     for channel_id, settings in store.get_channels_for_platform(platform).items():
-        payload["channels"][channel_id] = {
-            "enabled": settings.enabled,
-            "show_message_types": _normalize_show_message_types_for_platform(settings.show_message_types, platform),
-            "custom_cwd": settings.custom_cwd,
-            "require_mention": settings.require_mention,
-            "require_bind": settings.require_bind,
-            "routing": routing_to_compat_dict(settings.routing),
+        payload["channels"][channel_id] = _scope_settings_payload(settings, platform)
+    for channel_id, threads in store.get_threads_for_platform(platform).items():
+        payload["threads"][channel_id] = {
+            thread_id: _scope_settings_payload(settings, platform)
+            for thread_id, settings in threads.items()
         }
     payload["guild_scope_configured"] = store.has_guild_scope_for_platform(platform)
     payload["guild_default_enabled"] = store.get_guild_default_enabled_for_platform(platform)

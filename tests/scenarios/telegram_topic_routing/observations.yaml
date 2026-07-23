@@ -1,0 +1,22 @@
+version: 1
+capability: telegram_topic_routing
+observations:
+  - id: OBS-TELEGRAM-TOPIC-001
+    source: telegram_bot_api_contract
+    related_scenarios:
+      - TELEGRAM-TOPIC-001
+      - TELEGRAM-TOPIC-004
+    summary: Telegram does not expose a complete list of forum topics to bots.
+    required_updates:
+      - discover topics passively from inbound messages
+      - keep undiscovered topics on the parent group fallback
+      - represent General as topic ID 1 when Telegram omits message_thread_id
+  - id: OBS-TELEGRAM-TOPIC-002
+    source: architecture_review
+    related_scenarios:
+      - TELEGRAM-TOPIC-002
+      - TELEGRAM-TOPIC-003
+    summary: Topic settings and conversation identity are separate concerns.
+    required_updates:
+      - resolve settings from thread then channel
+      - preserve the existing group session key and Telegram reply anchor

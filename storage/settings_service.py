@@ -18,8 +18,10 @@ from config.v2_settings import (
     UserSettings,
     _make_scoped_key,
     _split_scoped_key,
+    make_thread_native_id,
     normalize_routing_settings,
     normalize_show_message_types,
+    split_thread_native_id,
 )
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.models import auth_codes, scope_settings, scopes
@@ -29,7 +31,7 @@ GUILD_POLICY_KIND = "guild_policy"
 # Scope types whose settings this store owns. avibe project scopes
 # (storage.projects_service) share the scope_settings table but are NOT managed
 # here, so save_state must never delete or overwrite their rows.
-_MANAGED_SCOPE_TYPES = ("channel", "platform", "guild", "user")
+_MANAGED_SCOPE_TYPES = ("channel", "thread", "platform", "guild", "user")
 
 
 class SQLiteSettingsService:
@@ -49,6 +51,7 @@ class SQLiteSettingsService:
         with self.engine.connect() as conn:
             return SettingsState(
                 channels=self._load_channels(conn),
+                threads=self._load_threads(conn),
                 guilds=self._load_guilds(conn),
                 guild_scope_platforms=self._load_guild_scope_platforms(conn),
                 guild_default_enabled=self._load_guild_policies(conn),
@@ -69,6 +72,48 @@ class SQLiteSettingsService:
             for scoped_key, item in state.channels.items():
                 platform, channel_id = _split_scoped_key(scoped_key)
                 scope_id = upsert_scope(conn, platform or "unknown", "channel", channel_id, now=now)
+                routing = asdict(item.routing)
+                self._upsert_scope_settings(
+                    conn,
+                    scope_id=scope_id,
+                    enabled=_bool_int(item.enabled),
+                    role=None,
+                    workdir=item.custom_cwd,
+                    require_mention=_nullable_bool_int(item.require_mention),
+                    settings_json=_json_dumps(
+                        {
+                            "show_message_types": normalize_show_message_types(item.show_message_types),
+                            "routing": routing,
+                            "require_bind": item.require_bind,
+                        }
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                    settings_version=SETTINGS_VERSION,
+                    **_routing_columns(item.routing),
+                )
+                kept.add(scope_id)
+
+            for scoped_key, item in state.threads.items():
+                platform, native_id = _split_scoped_key(scoped_key)
+                channel_id, thread_id = split_thread_native_id(native_id)
+                resolved_platform = platform or "unknown"
+                parent_scope_id = upsert_scope(
+                    conn,
+                    resolved_platform,
+                    "channel",
+                    channel_id,
+                    now=now,
+                )
+                scope_id = upsert_scope(
+                    conn,
+                    resolved_platform,
+                    "thread",
+                    make_thread_native_id(channel_id, thread_id),
+                    parent_scope_id=parent_scope_id,
+                    native_type="forum_topic" if resolved_platform == "telegram" else "thread",
+                    now=now,
+                )
                 routing = asdict(item.routing)
                 self._upsert_scope_settings(
                     conn,
@@ -232,6 +277,27 @@ class SQLiteSettingsService:
         for row in rows:
             payload = _json_loads(row["settings_json"], {})
             key = _make_scoped_key(str(row["platform"]), str(row["native_id"]))
+            result[key] = ChannelSettings(
+                enabled=bool(row["enabled"]),
+                show_message_types=normalize_show_message_types(_json_list(payload.get("show_message_types"))),
+                custom_cwd=row["workdir"],
+                routing=_routing_from_row(row, payload),
+                require_mention=_nullable_bool(row["require_mention"]),
+                require_bind=payload.get("require_bind"),
+            )
+        return result
+
+    def _load_threads(self, conn: Connection) -> dict[str, ChannelSettings]:
+        rows = _settings_rows(conn, "thread")
+        result: dict[str, ChannelSettings] = {}
+        for row in rows:
+            payload = _json_loads(row["settings_json"], {})
+            native_id = str(row["native_id"])
+            try:
+                split_thread_native_id(native_id)
+            except ValueError:
+                continue
+            key = _make_scoped_key(str(row["platform"]), native_id)
             result[key] = ChannelSettings(
                 enabled=bool(row["enabled"]),
                 show_message_types=normalize_show_message_types(_json_list(payload.get("show_message_types"))),

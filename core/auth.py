@@ -77,6 +77,7 @@ def check_auth(
     *,
     user_id: str,
     channel_id: str,
+    thread_id: str | None = None,
     is_dm: bool,
     platform: str | None = None,
     action: str = "",
@@ -122,7 +123,16 @@ def check_auth(
         # DM users skip channel authorization
     else:
         # 2. Channel authorization
-        if hasattr(store, "find_channel"):
+        if thread_id and hasattr(store, "find_effective_channel"):
+            try:
+                ch = store.find_effective_channel(
+                    channel_id,
+                    thread_id=thread_id,
+                    platform=platform,
+                )
+            except TypeError:
+                ch = store.find_channel(channel_id, platform=platform)
+        elif hasattr(store, "find_channel"):
             try:
                 ch = store.find_channel(channel_id, platform=platform)
             except TypeError:

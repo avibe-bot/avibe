@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from modules.im import MessageContext
+from config.v2_settings import make_thread_settings_key
 
 
 def resolve_context_platform(
@@ -25,6 +26,28 @@ def resolve_context_settings_key(context: MessageContext) -> str:
     payload = context.platform_specific or {}
     value = context.user_id if payload.get("is_dm", False) else context.channel_id
     return str(value or "")
+
+
+def resolve_context_thread_id(context: MessageContext) -> Optional[str]:
+    """Return the canonical configurable thread ID for a message context."""
+    platform = resolve_context_platform(context)
+    payload = context.platform_specific or {}
+    if platform != "telegram" or payload.get("is_dm", False):
+        return None
+    if context.thread_id:
+        return str(context.thread_id)
+    if payload.get("is_forum") or payload.get("is_topic_message"):
+        return "1"
+    return None
+
+
+def resolve_context_scope_settings_key(context: MessageContext) -> str:
+    """Resolve the context-aware settings key without changing session identity."""
+    base = resolve_context_settings_key(context)
+    thread_id = resolve_context_thread_id(context)
+    if thread_id and not (context.platform_specific or {}).get("is_dm", False):
+        return make_thread_settings_key(base, thread_id)
+    return base
 
 
 def requires_typed_user_session_key(context: MessageContext) -> bool:

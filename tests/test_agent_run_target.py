@@ -15,6 +15,7 @@ from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
+from config.v2_settings import make_thread_native_id
 
 
 def _controller(tmp_path):
@@ -142,6 +143,50 @@ def test_im_channel_scope_workdir_creates_session_snapshot(tmp_path):
     with controller.sqlite_engine.connect() as conn:
         session = sessions_service.get_session(conn, target.agent_session_id)
     assert session["workdir"] == str(workdir)
+    assert session["agent_id"] == "agent-codex-default"
+    assert session["agent_name"] == "codex"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "codex"
+
+
+def test_telegram_topic_scope_workdir_wins_over_group(tmp_path):
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    topic_workdir = tmp_path / "topic"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+        topic_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="thread",
+            native_id=make_thread_native_id("-1001", "42"),
+            parent_scope_id=group_scope_id,
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, topic_scope_id, workdir=str(topic_workdir))
+
+    ctx = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_forum": True, "is_topic_message": True},
+    )
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="telegram_topic_42")
+
+    assert target.scope_id == "telegram::thread::-1001/42"
+    assert target.workdir == str(topic_workdir)
+    assert target.agent_session_id
+    with controller.sqlite_engine.connect() as conn:
+        session = sessions_service.get_session(conn, target.agent_session_id)
+    assert session["workdir"] == str(topic_workdir)
     assert session["agent_id"] == "agent-codex-default"
     assert session["agent_name"] == "codex"
     assert session["agent_backend"] == "codex"

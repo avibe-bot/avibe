@@ -17,7 +17,12 @@ from typing import Any, Optional
 
 from sqlalchemy import Engine, select
 
-from core.message_context import build_context_session_key, resolve_context_settings_key
+from core.message_context import (
+    build_context_session_key,
+    resolve_context_settings_key,
+    resolve_context_thread_id,
+)
+from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.models import agent_sessions, scope_settings, scopes
@@ -507,6 +512,11 @@ def _scope_for_context(conn, context: MessageContext, platform: str, settings_ke
     if (payload.get("is_dm", False)):
         candidates.append((platform, "user", str(context.user_id)))
     else:
+        thread_id = resolve_context_thread_id(context)
+        if thread_id:
+            candidates.append(
+                (platform, "thread", make_thread_native_id(str(context.channel_id), thread_id))
+            )
         candidates.append((platform, "channel", str(settings_key)))
         candidates.append((platform, "user", str(settings_key)))
     if platform == "avibe":
@@ -515,6 +525,8 @@ def _scope_for_context(conn, context: MessageContext, platform: str, settings_ke
     for candidate_platform, scope_type, native_id in candidates:
         scope_id = f"{candidate_platform}::{scope_type}::{native_id}"
         row = _scope_row(conn, scope_id)
+        if row is not None and scope_type == "thread" and not row.get("settings_scope_id"):
+            continue
         if row is not None:
             return row
     return None
@@ -533,6 +545,7 @@ def _scope_row(conn, scope_id: str) -> Optional[dict[str, Any]]:
             scope_settings.c.model,
             scope_settings.c.reasoning_effort,
             scope_settings.c.settings_json,
+            scope_settings.c.scope_id.label("settings_scope_id"),
         )
         .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
         .where(scopes.c.id == scope_id)

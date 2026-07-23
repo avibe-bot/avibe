@@ -4519,6 +4519,26 @@ def settings_post():
     return jsonify(api.save_settings(payload))
 
 
+@app.route("/api/settings/thread", methods=["POST"])
+def thread_settings_post():
+    from vibe import api
+
+    return jsonify(api.save_thread_settings(request.json or {}))
+
+
+@app.route("/api/settings/thread", methods=["DELETE"])
+def thread_settings_delete():
+    from vibe import api
+
+    return jsonify(
+        api.delete_thread_settings(
+            request.args.get("platform", ""),
+            request.args.get("channel_id", ""),
+            request.args.get("thread_id", ""),
+        )
+    )
+
+
 @app.route("/api/slack/auth_test", methods=["POST"])
 def slack_auth_test():
     from vibe import api

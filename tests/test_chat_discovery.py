@@ -69,6 +69,48 @@ def test_remember_chat_lists_inventory_with_configured_state(tmp_path: Path) -> 
     assert chats[0].visibility_status == chat_discovery.VISIBILITY_VISIBLE
 
 
+def test_remember_thread_lists_discovered_and_configured_topics(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat(
+        "telegram",
+        "-1001",
+        name="Engineering",
+        native_type="supergroup",
+        supports_threads=True,
+        db_path=db_path,
+    )
+    chat_discovery.remember_thread(
+        "telegram",
+        "-1001",
+        "42",
+        name="Releases",
+        native_type="forum_topic",
+        db_path=db_path,
+    )
+
+    topics = chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path)
+    assert [(topic["id"], topic["name"], topic["configured"]) for topic in topics] == [
+        ("42", "Releases", False)
+    ]
+
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                threads={
+                    "telegram::-1001/42": ChannelSettings(enabled=True, require_mention=False),
+                }
+            )
+        )
+    finally:
+        service.close()
+
+    topics = chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path)
+    assert topics[0]["configured"] is True
+    assert topics[0]["name"] == "Releases"
+
+
 def test_remember_chat_debounce_does_not_suppress_retry_after_persist_failure(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
