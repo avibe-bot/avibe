@@ -40,6 +40,7 @@ _OAUTH_ENDPOINTS = {
     "kimi": ("/kimi-auth-url", "kimi", "kimi"),
     "xai": ("/xai-auth-url", "xai", "xai"),
 }
+_WEBUI_OAUTH_VENDORS = frozenset({"anthropic", "openai", "codex", "antigravity"})
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,7 @@ class CLIProxyEngineAdapter:
                 client.management_request,
                 "GET",
                 engine_endpoint,
+                query={"is_webui": "true"} if normalized_vendor in _WEBUI_OAUTH_VENDORS else None,
             )
             engine_state = str(payload.get("state") or "").strip()
             if not engine_state:
@@ -384,7 +386,7 @@ class CLIProxyEngineAdapter:
                     RawCallOutcome(
                         kind=RawOutcomeKind.NETWORK_ERROR,
                         http_status=None,
-                        error_code="engine_unavailable",
+                        error_code=None,
                         redacted_message=None,
                         stream_started=False,
                         model_id=model_id,

@@ -158,6 +158,8 @@ class EngineClient:
             sock_read=None,
         )
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
+        response: aiohttp.ClientResponse | None = None
+        first_received = False
         try:
             response = await asyncio.wait_for(
                 session.post(
@@ -174,7 +176,7 @@ class EngineClient:
                         _read_limited(response.content, _MAX_RESPONSE_BYTES),
                         timeout=self.timeout,
                     )
-                except _ResponseTooLargeError:
+                except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                 outcome = _outcome(
                     kind=RawOutcomeKind.HTTP_ERROR,
@@ -204,6 +206,7 @@ class EngineClient:
                         message="upstream response ended before the first byte",
                     )
                 )
+            first_received = True
             if not stream:
                 try:
                     first = await asyncio.wait_for(
@@ -224,6 +227,7 @@ class EngineClient:
                             model_id=model_id,
                             http_status=response.status,
                             message="upstream response exceeded the local limit",
+                            stream_started=True,
                         )
                     )
                 if not _is_json(first):
@@ -236,26 +240,35 @@ class EngineClient:
                             model_id=model_id,
                             http_status=response.status,
                             message="upstream returned an invalid JSON response",
+                            stream_started=True,
                         )
                     )
         except asyncio.TimeoutError:
+            if response is not None:
+                response.close()
             await session.close()
             return completed_handle(
                 _outcome(
                     kind=RawOutcomeKind.TIMEOUT,
                     source=source,
                     model_id=model_id,
+                    http_status=response.status if response is not None and first_received else None,
                     message="upstream request timed out",
+                    stream_started=first_received,
                 )
             )
         except aiohttp.ClientError:
+            if response is not None:
+                response.close()
             await session.close()
             return completed_handle(
                 _outcome(
                     kind=RawOutcomeKind.NETWORK_ERROR,
                     source=source,
                     model_id=model_id,
+                    http_status=response.status if response is not None and first_received else None,
                     message="upstream request failed",
+                    stream_started=first_received,
                 )
             )
 

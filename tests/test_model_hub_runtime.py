@@ -25,6 +25,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceBinding,
 )
+from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError
 from vibe.model_hub_runtime.config import write_engine_config
@@ -569,6 +570,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(1)
             return
+        if payload['model'].endswith('/invalid-json'):
+            body = b'not-json'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if payload['model'].endswith('/oversized-non-stream'):
+            body = b'{{"payload":"too-large"}}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if payload['model'].endswith('/slow-stream'):
             first = b'data: {{"type":"content_block_delta"}}\\n\\n'
             second = b'data: {{"type":"message_stop"}}\\n\\n'
@@ -848,7 +865,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
     asyncio.run(run())
 
 
-def test_adapter_engine_unavailable_outcome_contains_only_a_stable_code(tmp_path: Path) -> None:
+def test_adapter_engine_unavailable_does_not_forge_an_upstream_error_code(tmp_path: Path) -> None:
     class Supervisor:
         def client(self):
             raise EngineUnavailableError("models.engine.health_failed")
@@ -869,7 +886,7 @@ def test_adapter_engine_unavailable_outcome_contains_only_a_stable_code(tmp_path
         outcome = await handle.outcome()
 
         assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
-        assert outcome.error_code == "engine_unavailable"
+        assert outcome.error_code is None
         assert outcome.redacted_message is None
 
     asyncio.run(run())
@@ -974,17 +991,20 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("model_id", "stream"),
+    ("model_id", "stream", "expected_kind", "expected_status", "stream_started"),
     [
-        ("stalled-first-byte", True),
-        ("stalled-error-body", True),
-        ("stalled-non-stream", False),
+        ("stalled-first-byte", True, RawOutcomeKind.TIMEOUT, None, False),
+        ("stalled-error-body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
+        ("stalled-non-stream", False, RawOutcomeKind.TIMEOUT, 200, True),
     ],
 )
 def test_engine_client_times_out_before_completion(
     tmp_path: Path,
     model_id: str,
     stream: bool,
+    expected_kind: RawOutcomeKind,
+    expected_status: int | None,
+    stream_started: bool,
 ) -> None:
     async def run() -> None:
         supervisor, store = _fixture_supervisor(tmp_path / model_id)
@@ -1005,8 +1025,107 @@ def test_engine_client_times_out_before_completion(
         )
 
         assert handle.stream is None
-        assert (await handle.outcome()).kind is RawOutcomeKind.TIMEOUT
+        outcome = await handle.outcome()
+        assert outcome.kind is expected_kind
+        assert outcome.http_status == expected_status
+        assert outcome.stream_started is stream_started
         supervisor.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("model_id", "response_limit"),
+    [("invalid-json", 1024), ("oversized-non-stream", 8)],
+)
+def test_engine_client_non_stream_failures_after_first_byte_block_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_id: str,
+    response_limit: int,
+) -> None:
+    async def run() -> None:
+        supervisor, store = _fixture_supervisor(tmp_path / model_id)
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources([_binding(credential_ref, model_ids=(model_id,))])
+        source = store.get_source("src_fixture123")
+        assert source is not None
+        connection = supervisor.ensure_running()
+        monkeypatch.setattr(client_module, "_MAX_RESPONSE_BYTES", response_limit)
+
+        handle = await EngineClient(connection).invoke(
+            source,
+            model_id,
+            {},
+            stream=False,
+        )
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.http_status == 200
+        assert outcome.stream_started is True
+        supervisor.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("vendor", "endpoint", "expected_query", "device_flow"),
+    [
+        ("anthropic", "/anthropic-auth-url", {"is_webui": "true"}, False),
+        ("openai", "/codex-auth-url", {"is_webui": "true"}, False),
+        ("codex", "/codex-auth-url", {"is_webui": "true"}, False),
+        ("antigravity", "/antigravity-auth-url", {"is_webui": "true"}, False),
+        ("kimi", "/kimi-auth-url", None, True),
+        ("xai", "/xai-auth-url", None, True),
+    ],
+)
+def test_oauth_start_uses_webui_callback_only_for_browser_flows(
+    tmp_path: Path,
+    vendor: str,
+    endpoint: str,
+    expected_query: dict[str, str] | None,
+    device_flow: bool,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.start_query = None
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                return {"files": []}
+            if path == endpoint:
+                self.start_query = query
+                response = {"state": "engine-state", "url": "https://example.test/oauth"}
+                if device_flow:
+                    response.update({"flow": "device", "user_code": "ABCD-EFGH"})
+                return response
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        flow = await adapter.start_oauth("src_fixture123", vendor)
+
+        assert client.start_query == expected_query
+        assert flow.expects == ("none" if device_flow else "paste_callback_url")
 
     asyncio.run(run())
 
