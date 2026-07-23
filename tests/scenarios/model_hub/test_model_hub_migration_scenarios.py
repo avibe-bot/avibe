@@ -160,7 +160,8 @@ def _write_codex(home: Path, *, malformed: bool = False) -> None:
     if not malformed:
         _write(
             home / ".codex" / "config.toml",
-            """model_provider = "Relay"
+            """cli_auth_credentials_store = "file"
+model_provider = "Relay"
 
 [model_providers.Relay]
 base_url = "https://codex-relay.example/v1"
@@ -178,6 +179,10 @@ def _write_codex_oauth(home: Path) -> None:
                 "tokens": {"access_token": "codex-access-123456"},
             }
         ),
+    )
+    _write(
+        home / ".codex" / "config.toml",
+        'cli_auth_credentials_store = "file"\n',
     )
 
 
@@ -375,6 +380,35 @@ def test_codex_scan_treats_tokens_as_stale_when_key_has_no_auth_mode(
     )
 
     assert [item.kind for item in items] == ["api_key"]
+
+
+@pytest.mark.parametrize("credential_store", (None, "keyring"))
+def test_codex_scan_skips_auth_json_outside_file_store(
+    tmp_path: Path,
+    credential_store: str | None,
+) -> None:
+    native_home = tmp_path / (credential_store or "auto")
+    _write_codex(native_home)
+    config_path = native_home / ".codex" / "config.toml"
+    config = config_path.read_text(encoding="utf-8")
+    replacement = (
+        ""
+        if credential_store is None
+        else f'cli_auth_credentials_store = "{credential_store}"\n'
+    )
+    config_path.write_text(
+        config.replace('cli_auth_credentials_store = "file"\n', replacement),
+        encoding="utf-8",
+    )
+
+    assert (
+        scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
 
 
 def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
@@ -575,6 +609,10 @@ def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
 def test_codex_empty_token_bag_does_not_create_native_subscription(tmp_path: Path) -> None:
     native_home = tmp_path / "native-home"
     _write(native_home / ".codex" / "auth.json", json.dumps({"tokens": {}}))
+    _write(
+        native_home / ".codex" / "config.toml",
+        'cli_auth_credentials_store = "file"\n',
+    )
 
     assert (
         scan_native_configs(

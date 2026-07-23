@@ -260,6 +260,11 @@ def _codex_items(
     if not isinstance(auth_data, dict):
         return []
     state = read_codex_auth_state(home)
+    # auth.json is authoritative only when Codex is explicitly using its
+    # file credential store. In auto/keyring mode it may contain stale values
+    # while the live credential remains inaccessible in the OS keyring.
+    if state.get("file_store_active") is not True:
+        return []
     items: list[NativeMigrationItem] = []
     raw_auth_mode = auth_data.get("auth_mode")
     auth_mode = raw_auth_mode.strip().lower() if isinstance(raw_auth_mode, str) else None
