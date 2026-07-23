@@ -767,6 +767,95 @@
         "connectFailed": "Couldn't connect, please retry",
         "refreshFailed": "Couldn't refresh, please retry"
       },
+      "menus": {
+        "done": "Done",
+        "resetAll": "Reset all to default",
+        "saveFailed": "Couldn't save your changes, please retry",
+        "mapping": {
+          "title": "{{backend}} · Model menu",
+          "subtitle": "Fixed menu: {{backend}} only recognizes these built-in model IDs. Each ID can be redirected to another model — this affects {{backend}} only.",
+          "builtinCol": "Built-in model ID",
+          "supplyCol": "Actual supply",
+          "followNative": "Follow native · supply by priority",
+          "candidates": "By priority · {{sources}}",
+          "candidatesUnavailable": "No source can supply this model yet",
+          "warning": "Reasoning, cache and tool semantics aren't fully equivalent after remapping",
+          "resetRow": "Reset to default",
+          "footnote": "Remapping affects only this ID in {{backend}}; the Hub converts protocols automatically."
+        },
+        "opencode": {
+          "title": "OpenCode · Model menu",
+          "subtitle": "Open menu: grouped by provider prefix. Prefix + model ID = the full identifier, identical to native OpenCode. Checked = shown in the model picker.",
+          "viewLabel": "Menu scope",
+          "featured": "Featured · {{count}}",
+          "full": "All · {{count}}",
+          "addCustom": "Custom model",
+          "empty": "No models here yet.",
+          "footnote": "Prefix = the standard vendor ID (identical to native OpenCode; unrecognized vendors fall under custom/). Switching Hub/Direct never changes the identifier; dots = supplying sources.",
+          "customBadge": "Custom",
+          "provider": {
+            "anthropic": "Anthropic protocol · Claude family",
+            "openai": "OpenAI protocol · GPT family",
+            "zhipuai": "OpenAI-compatible · GLM family",
+            "custom": "Custom endpoints"
+          }
+        },
+        "custom": {
+          "title": "Add a custom model",
+          "subtitle": "Register a model that discovery missed and add it to the OpenCode menu.",
+          "sourceLabel": "Source (able to supply this model)",
+          "modelIdLabel": "Model ID",
+          "displayNameLabel": "Display name (optional)",
+          "previewLabel": "OpenCode identifier · generated",
+          "previewEmpty": "Enter a model ID to preview",
+          "previewHint": "The provider segment is chosen automatically: a recognized vendor uses its standard ID (identical to native OpenCode), otherwise it falls under custom/. Adding or removing sources and switching modes never change the identifier.",
+          "add": "Add to menu",
+          "failed": "Couldn't add the model, please retry"
+        }
+      },
+      "supplyMode": {
+        "title": "Supply mode",
+        "currentHub": "Current: Hub",
+        "currentDirect": "Current: Direct",
+        "switchedHub": "Switched to Hub",
+        "switchedDirect": "Switched to Direct",
+        "switchFailed": "Couldn't switch mode, please retry",
+        "hub": {
+          "title": "Hub mode",
+          "recommended": "Recommended · default",
+          "openModels": "Open Models page",
+          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, priority and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
+        },
+        "direct": {
+          "title": "Direct mode",
+          "description": "{{backend}} uses its own native config (settings.json / CLI sign-in); Avibe only launches the process and doesn't manage models. Good for troubleshooting or fully self-managed setups.",
+          "detected": "Existing direct config detected: {{detail}} — import it into the Hub in one click",
+          "import": "Import to Hub…"
+        }
+      },
+      "migration": {
+        "title": "Connect to the Model Hub",
+        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — all three Agents share one set of sources and priority.",
+        "empty": "No native configuration detected to migrate.",
+        "scanFailed": "Couldn't scan native configs, please retry",
+        "applyFailed": "Import failed, please retry",
+        "applied": "Imported {{count}} item(s)",
+        "later": "Maybe later",
+        "apply": "Import {{count}} & enable Hub",
+        "nonDestructive": "Non-destructive: native configs are never changed or deleted — importing only copies them; you can switch back to Direct on the Backends page anytime.",
+        "action": {
+          "import": "Import as source",
+          "controlledImport": "Controlled import · experimental",
+          "keepNative": "Keep native",
+          "reauth": "Re-authorize · one-click in browser"
+        },
+        "notes": {
+          "customBaseUrl": "Includes a custom Base URL",
+          "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
+          "codexControlled": "Format confirmed · controlled import",
+          "fromOpencode": "From the opencode config"
+        }
+      },
       "backends": {
         "claude": "Claude Code",
         "codex": "Codex",

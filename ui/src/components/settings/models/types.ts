@@ -109,6 +109,27 @@ export type AgentSupply = {
   menu?: AgentMenu | null;
 };
 
+// ── migration-scan.schema.json ──────────────────────────────────────────
+export type MigrationKind = 'api_key' | 'oauth_native' | 'opencode_provider';
+/** Option 1 (spec v1.1): Claude oauth_native → keep_native (sanctioned as-is);
+ *  Codex auth.json → controlled_import behind the consent-gated flag, else
+ *  keep_native; keys / base URLs → import. */
+export type MigrationAction = 'import' | 'controlled_import' | 'keep_native' | 'reauth';
+
+export type MigrationItem = {
+  id: string;
+  backend: AgentBackend;
+  kind: MigrationKind;
+  /** e.g. "sk-…dd3c + 自定义 Base URL"; never full secrets. */
+  masked_detail: string;
+  proposed_action: MigrationAction;
+  selected: boolean;
+  /** i18n key for the row's secondary line. */
+  notes_key?: string | null;
+};
+
+export type MigrationScan = { items: MigrationItem[] };
+
 // ── resolution-event.schema.json ────────────────────────────────────────
 export type ResolutionEventKind =
   | 'switch'
@@ -211,4 +232,18 @@ export type ApiKeySourceCreate = {
   vendor: string;
   base_url?: string | null;
   key: string;
+};
+
+/** POST /api/models/custom-models — appends a manual-provenance model entry to
+ *  a source's supply list (frame 08). */
+export type CustomModelCreate = {
+  source_id: string;
+  model_id: string;
+  display_name?: string | null;
+};
+
+/** POST /api/models/migration/apply response. */
+export type MigrationApplyResult = {
+  applied: number;
+  sources: Source[];
 };
