@@ -420,15 +420,16 @@ class ModelHubService:
         await self._engine_call(self.adapter.sync_sources(bindings))
 
     async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
-        """Register the new projection before making it authoritative on disk."""
+        """Persist the authoritative config before updating its engine projection."""
 
         self._engine_synced = False
         previous_bindings = self._bindings(previous)
         updated_bindings = self._bindings(updated)
-        await self._sync_sources(updated, force_empty=bool(previous_bindings))
+        self.store.save(updated)
         try:
-            self.store.save(updated)
+            await self._sync_sources(updated, force_empty=bool(previous_bindings))
         except Exception:
+            self.store.save(previous)
             try:
                 await self._sync_sources(previous, force_empty=bool(updated_bindings))
             except ModelHubError:

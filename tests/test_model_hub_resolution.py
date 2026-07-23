@@ -527,6 +527,63 @@ def test_direct_mode_never_enters_hub_resolution(tmp_path):
     assert adapter.invocations == []
 
 
+def test_source_creation_persists_before_engine_sync(tmp_path):
+    order = []
+
+    class OrderingAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            order.append("sync")
+            assert len(service.store.load().sources) == 3
+            await super().sync_sources(bindings)
+
+    adapter = OrderingAdapter([])
+    service = _service(tmp_path, adapter)
+    save = service.store.save
+
+    def record_save(config):
+        save(config)
+        order.append("persist")
+
+    service.store.save = record_save
+    created = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Ordered source",
+                "key": "sk-test-transient-only",
+            }
+        )
+    )
+
+    assert order == ["persist", "sync"]
+    assert service.store.load().sources[-1].id == created["id"]
+
+
+def test_source_creation_revokes_credential_when_persist_fails(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    original_ids = [source.id for source in service.store.load().sources]
+    service.store.fail_save = True
+
+    with pytest.raises(OSError, match="save failed"):
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Unpersisted source",
+                    "key": "sk-test-transient-only",
+                }
+            )
+        )
+
+    assert [source.id for source in service.store.load().sources] == original_ids
+    assert adapter.synced == []
+    assert adapter.revoked == ["cred_test"]
+    assert service.revocations.list() == []
+
+
 def test_source_creation_is_not_persisted_when_engine_sync_fails(tmp_path):
     adapter = FakeAdapter([])
     adapter.fail_sync = True
