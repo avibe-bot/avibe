@@ -82,6 +82,15 @@ class SessionHandler(BaseHandler):
         controller.claude_system_prompts = self.claude_system_prompts
         controller.claude_session_creates = self.claude_session_creates
 
+    @staticmethod
+    def _cached_claude_subagent_model(
+        explicit_model: Optional[str],
+        model_hub_launch: "ModelHubLaunch",
+    ) -> Optional[str]:
+        if model_hub_launch.channel in {"native_cli", "hub"}:
+            return model_hub_launch.runtime_model
+        return explicit_model
+
     def touch_session_activity(self, composite_key: str) -> None:
         if composite_key:
             self.session_last_activity[composite_key] = time.monotonic()
@@ -724,7 +733,7 @@ class SessionHandler(BaseHandler):
         )
         bind_launch(context, model_hub_launch)
         runtime_model = model_hub_launch.runtime_model or launch_model
-        cached_subagent_model = runtime_model if model_hub_launch.channel == "hub" else explicit_model
+        cached_subagent_model = self._cached_claude_subagent_model(explicit_model, model_hub_launch)
 
         if not effective_agent:
             # Claude SDK model changes are control requests; only send one when

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+import hashlib
 import json
 import logging
 import os
@@ -102,6 +103,7 @@ class OpenCodeServerManager:
         self._last_prompt_started_at: dict[str, float] = {}
         self._model_hub_overlay_path: Optional[str] = None
         self._model_hub_overlay_hash: Optional[str] = None
+        self._model_hub_overlay_content: Optional[str] = None
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
 
     def _caller_context_path(self) -> str:
@@ -378,6 +380,13 @@ class OpenCodeServerManager:
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
+        desired_content = None
+        if overlay is not None:
+            content = getattr(overlay, "content", None)
+            if isinstance(content, bytes):
+                desired_content = content.decode("utf-8")
+            elif isinstance(content, str):
+                desired_content = content
         drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
         while True:
             should_wait = False
@@ -407,6 +416,7 @@ class OpenCodeServerManager:
                         # same OPENCODE_CONFIG without relying on the old pid file.
                         self._model_hub_overlay_path = desired_path
                         self._model_hub_overlay_hash = desired_hash
+                        self._model_hub_overlay_content = desired_content
                         if (effective_path, effective_hash) == (desired_path, desired_hash):
                             return
                         if await self._is_healthy():
@@ -1249,6 +1259,19 @@ class OpenCodeServerManager:
         env.update(server_environment())
         if self._model_hub_overlay_path:
             env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
+            content = self._model_hub_overlay_content
+            if content is None:
+                try:
+                    raw_content = Path(self._model_hub_overlay_path).read_bytes()
+                except OSError as exc:
+                    raise RuntimeError("Model Hub OpenCode overlay is unavailable") from exc
+                if hashlib.sha256(raw_content).hexdigest() != self._model_hub_overlay_hash:
+                    raise RuntimeError("Model Hub OpenCode overlay content hash changed")
+                content = raw_content.decode("utf-8")
+            # Inline config is OpenCode's runtime-override tier, loaded after
+            # project config. Reasserting the exact overlay here prevents a
+            # checked-in opencode.json from replacing Hub provider transport.
+            env["OPENCODE_CONFIG_CONTENT"] = content
 
         try:
             self._process = await asyncio.create_subprocess_exec(

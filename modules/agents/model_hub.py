@@ -113,14 +113,11 @@ def build_claude_hub_env(
 
     if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
         return dict(base_env)
-    result = dict(base_env)
-    for key in (
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-    ):
-        result.pop(key, None)
+    result = {
+        key: value
+        for key, value in base_env.items()
+        if not key.startswith("ANTHROPIC_") and key != "CLAUDE_CODE_OAUTH_TOKEN"
+    }
     result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
     result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
     return result
@@ -152,6 +149,8 @@ def build_codex_hub_launch(
         f'model_providers.{provider}.env_key="AVIBE_MODEL_HUB_TOKEN"',
         "-c",
         f'model_providers.{provider}.wire_api="responses"',
+        "-c",
+        f"model_providers.{provider}.supports_websockets=false",
         "-c",
         f"model_providers.{provider}.requires_openai_auth=false",
     ]
@@ -198,9 +197,32 @@ class ModelHubRuntimeRouter:
             service = create_default_service(adapter=get_model_hub_engine_adapter())
         self.service = service
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
-        self._last_launch: dict[BackendName, ModelHubLaunch] = {}
-        self._pending_switch_reason: dict[BackendName, EventReason] = {}
-        self._pending_source_failure: dict[BackendName, tuple[str, EventReason]] = {}
+        self._last_launch: dict[tuple[BackendName, str], ModelHubLaunch] = {}
+        self._pending_switch_reason: dict[tuple[BackendName, str], EventReason] = {}
+        self._pending_source_failure: dict[tuple[BackendName, str], tuple[str, EventReason]] = {}
+
+    @staticmethod
+    def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
+        return launch.backend, launch.target_model
+
+    @staticmethod
+    def _is_bootstrap_unconfigured(config: ModelHubConfig, backend: BackendName) -> bool:
+        if not config.sources:
+            return True
+        if backend != "opencode":
+            return False
+        menu = config.agents[backend].menu
+        return menu is None or not menu.checked
+
+    @staticmethod
+    def _direct_launch(backend: BackendName, requested_model: str) -> ModelHubLaunch:
+        return ModelHubLaunch(
+            backend=backend,
+            channel="direct",
+            requested_model=requested_model,
+            target_model=requested_model,
+            runtime_model=requested_model,
+        )
 
     @staticmethod
     def _target_model(config: ModelHubConfig, backend: BackendName, requested_model: str) -> str:
@@ -241,13 +263,14 @@ class ModelHubRuntimeRouter:
         return f"http://{status.listen_host}:{status.listen_port}", token
 
     def _emit_channel_switch(self, current: ModelHubLaunch) -> None:
-        previous = self._last_launch.get(current.backend)
-        self._last_launch[current.backend] = current
+        route_key = self._route_key(current)
+        previous = self._last_launch.get(route_key)
+        self._last_launch[route_key] = current
         if previous is None or previous.channel == current.channel:
             return
         if {previous.channel, current.channel} != {"native_cli", "hub"}:
             return
-        reason = self._pending_switch_reason.pop(current.backend, None)
+        reason = self._pending_switch_reason.pop(route_key, None)
         if reason is None:
             reason = "recovery" if current.channel == "native_cli" else "manual"
         self.service._record_event(
@@ -261,17 +284,18 @@ class ModelHubRuntimeRouter:
         )
 
     def _emit_source_switch(self, current: ModelHubLaunch, config: ModelHubConfig) -> None:
-        pending = self._pending_source_failure.get(current.backend)
+        route_key = self._route_key(current)
+        pending = self._pending_source_failure.get(route_key)
         if pending is None or not current.source_id:
             return
         failed_source_id, reason = pending
         if failed_source_id == current.source_id:
-            self._pending_source_failure.pop(current.backend, None)
+            self._pending_source_failure.pop(route_key, None)
             return
         failed_source = next((source for source in config.sources if source.id == failed_source_id), None)
         current_source = next((source for source in config.sources if source.id == current.source_id), None)
         if failed_source is None or current_source is None:
-            self._pending_source_failure.pop(current.backend, None)
+            self._pending_source_failure.pop(route_key, None)
             return
         self.service._emit_switch(
             agent=cast(EventAgent, current.backend),
@@ -280,22 +304,21 @@ class ModelHubRuntimeRouter:
             failed_reason=reason,
             source=current_source,
         )
-        self._pending_source_failure.pop(current.backend, None)
+        self._pending_source_failure.pop(route_key, None)
 
     async def resolve(self, backend: BackendName, requested_model: str) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = self.service.store.load()
         agent = config.agents[backend]
         if agent.mode == "direct":
-            launch = ModelHubLaunch(
-                backend=backend,
-                channel="direct",
-                requested_model=requested_model,
-                target_model=requested_model,
-                runtime_model=requested_model,
-            )
+            launch = self._direct_launch(backend, requested_model)
             self._emit_channel_switch(launch)
             return launch
+        # Fresh installs seed Hub mode before setup/migration has supplied any
+        # usable source or OpenCode menu. Until that bootstrap state is complete,
+        # preserve the native launch path; once configured, Hub remains fail-closed.
+        if self._is_bootstrap_unconfigured(config, backend):
+            return self._direct_launch(backend, requested_model)
         if not requested_model:
             raise ModelHubError("mapping_target_unavailable", status=409)
 
@@ -387,15 +410,18 @@ class ModelHubRuntimeRouter:
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
         reason = cast(EventReason, decision.reason)
-        self._pending_source_failure[launch.backend] = (launch.source_id, reason)
+        route_key = self._route_key(launch)
+        self._pending_source_failure[route_key] = (launch.source_id, reason)
         if launch.channel == "native_cli":
-            self._pending_switch_reason[launch.backend] = reason
+            self._pending_switch_reason[route_key] = reason
         return True
 
     async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:
         config = self.service.store.load()
         agent = config.agents["opencode"]
         if agent.mode == "direct":
+            return None
+        if self._is_bootstrap_unconfigured(config, "opencode"):
             return None
         checked = tuple(agent.menu.checked if agent.menu else ())
         if not checked:

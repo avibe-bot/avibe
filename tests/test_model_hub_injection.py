@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import stat
 from contextlib import suppress
@@ -291,7 +292,7 @@ def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path:
     assert (launch.channel, launch.source_id) == ("hub", hub_openai.id)
 
 
-def test_mh_chan_001_hub_mode_without_sources_fails_closed(tmp_path: Path) -> None:
+def test_mh_chan_001_unconfigured_fresh_hub_preserves_native_launch(tmp_path: Path) -> None:
     service = _service(
         tmp_path,
         ModelHubConfig(sources=[], priority_order=[], agents=_agents()),
@@ -299,8 +300,30 @@ def test_mh_chan_001_hub_mode_without_sources_fails_closed(tmp_path: Path) -> No
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
 
+    launch = asyncio.run(ModelHubRuntimeRouter(service=service).resolve("codex", "gpt-5"))
+
+    assert launch.channel == "direct"
+    assert service.events.list(limit=10) == []
+
+
+def test_mh_chan_001_configured_hub_stays_fail_closed_for_unavailable_model(tmp_path: Path) -> None:
+    hub = _source(
+        "src_hub0099",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=_agents()),
+        LaunchAdapter({hub.id: "route-hub"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(ModelHubRuntimeRouter(service=service).resolve("codex", "gpt-5"))
+        asyncio.run(ModelHubRuntimeRouter(service=service).resolve("codex", "unavailable-model"))
 
     assert exc_info.value.code == "mapping_target_unavailable"
 
@@ -336,6 +359,8 @@ def test_mh_inj_runtime_injection_never_writes_native_configs(tmp_path: Path, mo
             "ANTHROPIC_API_KEY": "upstream-key",
             "ANTHROPIC_AUTH_TOKEN": "upstream-token",
             "ANTHROPIC_BASE_URL": "https://upstream.invalid",
+            "ANTHROPIC_CUSTOM_HEADERS": "x-upstream-auth: stale",
+            "ANTHROPIC_MODEL": "stale-model",
         },
         hub_launch,
     )
@@ -352,6 +377,7 @@ def test_mh_inj_runtime_injection_never_writes_native_configs(tmp_path: Path, mo
         codex_launch,
     )
     assert codex_args[:2] == ["-c", 'model_provider="avibe_model_hub"']
+    assert "model_providers.avibe_model_hub.supports_websockets=false" in codex_args
     assert codex_env == {"PATH": "/bin", "AVIBE_MODEL_HUB_TOKEN": "gateway-only-token"}
 
     direct = ModelHubLaunch("claude", "direct", "model", "model", "model")
@@ -459,6 +485,59 @@ def test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations(tmp_path: P
     assert stat.S_IMODE(router.overlay_path.stat().st_mode) == 0o600
 
 
+def test_mh_chan_001_switch_telemetry_is_isolated_per_model_route(tmp_path: Path) -> None:
+    native_a = _source(
+        "src_native_a",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("model-a",),
+    )
+    hub_a = _source(
+        "src_hub_a",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("model-a",),
+    )
+    hub_b = _source(
+        "src_hub_b",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("model-b",),
+    )
+    config = ModelHubConfig(
+        sources=[native_a, hub_a, hub_b],
+        priority_order=[native_a.id, hub_a.id, hub_b.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter({hub_a.id: "route-a", hub_b.id: "route-b"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = ModelHubRuntimeRouter(service=service)
+
+    native_launch = asyncio.run(router.resolve("codex", "model-a"))
+    assert asyncio.run(router.resolve("codex", "model-b")).channel == "hub"
+    assert not [event for event in service.events.list(limit=20) if event["kind"] == "channel_switch"]
+
+    context = SimpleNamespace()
+    bind_launch(context, native_launch)
+    assert asyncio.run(router.record_native_failure(context, "usage quota exceeded")) is True
+    asyncio.run(router.resolve("codex", "model-b"))
+    assert not [event for event in service.events.list(limit=20) if event["kind"] == "switch"]
+
+    assert asyncio.run(router.resolve("codex", "model-a")).source_id == hub_a.id
+    switch_events = [event for event in service.events.list(limit=20) if event["kind"] in {"switch", "channel_switch"}]
+    assert {event["model_id"] for event in switch_events} == {"model-a"}
+
+
 def test_mh_inj_opencode_overlay_change_drains_then_restarts_and_records_hash(tmp_path: Path) -> None:
     """MH-INJ-OPENCODE-001: active work drains before overlay restart."""
 
@@ -547,11 +626,16 @@ def test_mh_inj_opencode_config_env_is_hub_only(tmp_path: Path, monkeypatch) -> 
     """MH-INJ-DIRECT-001: direct serve launch has no OPENCODE_CONFIG injection."""
 
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
 
-    async def capture(overlay_path: str | None) -> dict:
+    async def capture(overlay_content: bytes | None) -> dict:
         manager = OpenCodeServerManager()
-        manager._pid_file = tmp_path / f"pid-{bool(overlay_path)}.json"
-        manager._model_hub_overlay_path = overlay_path
+        manager._pid_file = tmp_path / f"pid-{bool(overlay_content)}.json"
+        if overlay_content is not None:
+            overlay_path = tmp_path / "overlay.json"
+            overlay_path.write_bytes(overlay_content)
+            manager._model_hub_overlay_path = str(overlay_path)
+            manager._model_hub_overlay_hash = hashlib.sha256(overlay_content).hexdigest()
         manager._clear_pid_file = Mock()
         manager._write_pid_file = Mock()
         manager._apply_resource_governance = Mock()
@@ -564,10 +648,12 @@ def test_mh_inj_opencode_config_env_is_hub_only(tmp_path: Path, monkeypatch) -> 
             await manager._start_server()
         return spawn.await_args.kwargs["env"]
 
+    overlay_content = b'{"provider":{"openai":{}}}\n'
     direct_env = asyncio.run(capture(None))
-    hub_env = asyncio.run(capture(str(tmp_path / "overlay.json")))
+    hub_env = asyncio.run(capture(overlay_content))
     assert "OPENCODE_CONFIG" not in direct_env
     assert hub_env["OPENCODE_CONFIG"] == str(tmp_path / "overlay.json")
+    assert hub_env["OPENCODE_CONFIG_CONTENT"] == overlay_content.decode()
 
 
 def test_mh_chan_001_codex_resolves_only_after_session_queue_lock() -> None:
@@ -692,3 +778,18 @@ def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
         handler.cleanup_session.assert_awaited_once_with(key)
 
     asyncio.run(exercise())
+
+
+def test_mh_inj_cached_claude_subagent_uses_resolved_native_model() -> None:
+    native = ModelHubLaunch(
+        "claude",
+        "native_cli",
+        "builtin-opus",
+        "claude-opus-4-6",
+        "claude-opus-4-6",
+        "src_native",
+    )
+    direct = ModelHubLaunch("claude", "direct", "builtin-opus", "builtin-opus", "builtin-opus")
+
+    assert SessionHandler._cached_claude_subagent_model("builtin-opus", native) == "claude-opus-4-6"
+    assert SessionHandler._cached_claude_subagent_model(None, direct) is None
