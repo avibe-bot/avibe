@@ -574,18 +574,29 @@ def _path_is_service_entry(path: Path, current_main: Path | None) -> bool:
     return False
 
 
+def _systemd_scope_target_argv(args: list[str]) -> list[str] | None:
+    if not args:
+        return None
+    executable_name = Path(args[0].strip("\"'")).name.lower()
+    if executable_name != "systemd-run":
+        return None
+    try:
+        separator = args.index("--")
+    except ValueError:
+        return None
+    if "--scope" not in args[1:separator]:
+        return None
+    target = args[separator + 1 :]
+    return target or None
+
+
 def _service_entry_arg_from_argv(args: list[str]) -> str | None:
     if not args:
         return None
     executable_name = Path(args[0].strip("\"'")).name.lower()
-    if executable_name == "systemd-run":
-        if "--scope" not in args:
-            return None
-        try:
-            separator = args.index("--")
-        except ValueError:
-            return None
-        return _service_entry_arg_from_argv(args[separator + 1 :])
+    scope_target = _systemd_scope_target_argv(args)
+    if scope_target is not None:
+        return _service_entry_arg_from_argv(scope_target)
     if executable_name.startswith("python"):
         for arg in args[1:]:
             cleaned_arg = arg.strip("\"'")
@@ -600,12 +611,19 @@ def _service_entry_arg_from_argv(args: list[str]) -> str | None:
     return None
 
 
-def _command_looks_like_service_entry(command: str | None, *, cwd: str | None = None) -> bool:
+def _command_looks_like_service_entry(
+    command: str | None,
+    *,
+    cwd: str | None = None,
+    include_scope_wrapper: bool = True,
+) -> bool:
     if not command:
         return False
     try:
         args = shlex.split(command, posix=(os.name != "nt"))
     except ValueError:
+        return False
+    if not include_scope_wrapper and _systemd_scope_target_argv(args) is not None:
         return False
     current_main = _safe_resolve_path(get_service_main_path())
     cwd_path = _safe_resolve_path(cwd) if cwd else None
@@ -704,7 +722,11 @@ def service_processes(*, include_unverified: bool = False) -> list[dict]:
             continue
         session_leader = _process_is_service_session_leader(pid)
         command = _process_command_from_info(proc)
-        if not _command_looks_like_service_entry(command, cwd=_process_cwd(proc)):
+        if not _command_looks_like_service_entry(
+            command,
+            cwd=_process_cwd(proc),
+            include_scope_wrapper=False,
+        ):
             continue
         lock_owner = service_lock_held_by(pid)
         home_match = _process_home_matches_current(proc)

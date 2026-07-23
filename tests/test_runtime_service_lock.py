@@ -372,6 +372,40 @@ class RuntimeServiceLockTests(unittest.TestCase):
             self.assertTrue(processes[0]["home_match"])
             self.assertFalse(processes[0]["lock_owner"])
 
+    def test_service_processes_ignores_systemd_scope_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            command = [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "-q",
+                "-p",
+                "Delegate=yes",
+                "--",
+                sys.executable,
+                str(runtime.get_service_main_path()),
+            ]
+
+            class FakeProcess:
+                info = {"pid": 33333, "cmdline": command}
+
+                def cwd(self):
+                    return str(runtime.get_working_dir())
+
+                def environ(self):
+                    return {
+                        "AVIBE_HOME": str(home),
+                        "VIBE_REQUIRE_SHUTDOWN_INTENT": "1",
+                    }
+
+            with patch("vibe.runtime.paths.get_vibe_remote_dir", return_value=home):
+                with patch("vibe.runtime.psutil.process_iter", return_value=[FakeProcess()]):
+                    with patch("vibe.runtime.pid_alive", return_value=True):
+                        with patch("vibe.runtime.service_lock_held_by", return_value=False):
+                            self.assertEqual(runtime.service_processes(), [])
+
     def test_service_processes_ignores_same_user_service_main_without_avibe_marker(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
