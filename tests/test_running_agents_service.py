@@ -393,28 +393,25 @@ def test_orphan_dedup_by_pid_when_live_client_lacks_native(monkeypatch):
     assert {o["pid"] for o in orphans} == {999}
 
 
-def test_private_agent_run_not_labeled_slack():
-    # ``reserve_private_agent_session`` stores private agent runs with a
-    # placeholder ``platform="slack"`` but ``native_type="private_agent_run"``.
-    # Such a row must NOT be shown as a Slack session.
+def test_standalone_background_session_is_openable():
     row = running_agents._make_row(backend="codex", state="idle", base_session_id="b1")
     meta = {
         "id": "ses0000priv",
-        "scope_id": "slack::channel::private-agent-run-abc123",
-        "scope_platform": "slack",
-        "scope_scope_type": "channel",
-        "scope_display_name": "Private Agent Run",
-        "scope_native_type": "private_agent_run",
+        "scope_id": None,
+        "scope_platform": None,
+        "scope_scope_type": None,
+        "scope_display_name": None,
+        "visibility": "background",
         "title": "[Current Task] review",
         "agent_name": "codex",
         "workdir": None,
     }
     running_agents._apply_session_meta(row, meta)
 
-    assert row["platform"] is None  # not "slack"
-    assert row["trigger_source"] == "agent"
-    assert row["openable_in_chat"] is False
-    assert row["scope_display_name"] == "Private Agent Run"
+    assert row["platform"] is None
+    assert row["visibility"] == "background"
+    assert row["openable_in_chat"] is True
+    assert row["scope_display_name"] is None
 
 
 def test_real_slack_session_labeled_and_openable():

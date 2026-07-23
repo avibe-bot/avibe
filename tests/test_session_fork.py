@@ -780,8 +780,8 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
     assert row["session_anchor"].startswith("slack_C999:fork_")
     assert metadata["fork_target_scope_id"] == target_scope_id
     assert metadata["legacy_scope_key"] == target_scope_id
-    assert "private_agent_run" not in metadata
-    assert "no_delivery" not in metadata
+    assert metadata["private_agent_run"] is True
+    assert metadata["no_delivery"] is True
     assert rows[0]["session_anchor"] != rows[1]["session_anchor"]
 
     resolved = resolve_session_id_target(first_result.session_id, db_path=db_path)
@@ -1408,3 +1408,35 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
         "native_turn_started": True,
         "opencode_fork_message_id": "oc-msg-2",
     }
+
+
+def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: Path) -> None:
+    """A codex/opencode source whose latest turn completed SILENTLY (the invisible
+    ``silent`` marker follows its input + activity) is TERMINAL — the fork must not
+    trim/roll back the completed turn as if it were still running."""
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)  # agent_backend='codex'
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).mappings().one()["scope_id"]
+            messages_service.append(
+                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
+                author="user", message_type="user", text="do the thing",
+            )
+            messages_service.append(
+                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
+                author="agent", message_type="assistant", text="working",
+            )
+            messages_service.append(
+                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
+                author="agent", message_type=messages_service.SILENT_TYPE, text="",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    # A terminal exists after the input anchor → not a running turn → no trim.
+    assert result.fork.trim_latest_running_turn is False

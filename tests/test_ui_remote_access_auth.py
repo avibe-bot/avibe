@@ -49,7 +49,11 @@ def _mock_tailscale_whois(
     *,
     addresses: list[str] | None = None,
     allowed_ips: list[str] | None = None,
+    payload_key: str = "Node",
 ) -> None:
+    """Stub ``_tailscale_whois`` with the modern ``Node`` payload shape by
+    default (host-CIDR address strings, as emitted by current ``tailscale
+    whois --json``); pass ``payload_key="Machine"`` for the legacy shape."""
     peer_address = ipaddress.ip_address(peer)
     prefix = peer_address.max_prefixlen
     monkeypatch.setattr(ui_server, "_TAILSCALE_PEER_CACHE", {})
@@ -57,8 +61,8 @@ def _mock_tailscale_whois(
         ui_server,
         "_tailscale_whois",
         lambda address: {
-            "Machine": {
-                "Addresses": addresses or [str(peer_address)],
+            payload_key: {
+                "Addresses": addresses or [f"{peer_address}/{prefix}"],
                 "AllowedIPs": allowed_ips or [f"{peer_address}/{prefix}"],
             }
         }
@@ -2703,6 +2707,65 @@ def test_setup_host_wildcard_rejects_tailscale_subnet_router_peer(monkeypatch, t
 
     assert response.status_code == 503
     assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_trusted_tailscale_peer_accepts_modern_node_whois_payload(monkeypatch):
+    """Current ``tailscale whois --json`` nests the peer under ``Node`` with
+    host-CIDR address strings; the top-level ``Machine`` object is gone."""
+    peer = ipaddress.ip_address("100.97.103.5")
+    monkeypatch.setattr(ui_server, "_TAILSCALE_PEER_CACHE", {})
+    monkeypatch.setattr(
+        ui_server,
+        "_tailscale_whois",
+        lambda address: {
+            "Node": {
+                "Name": "iphone.example.ts.net.",
+                "Machine": "mkey:0123456789abcdef",
+                "Addresses": ["100.97.103.5/32", "fd7a:115c:a1e0::5/128"],
+                "AllowedIPs": ["100.97.103.5/32", "fd7a:115c:a1e0::5/128"],
+            },
+            "UserProfile": {"LoginName": "user@example.com"},
+            "CapMap": {},
+        },
+    )
+
+    assert ui_server._is_trusted_tailscale_peer(peer) is True
+
+
+def test_trusted_tailscale_peer_accepts_legacy_machine_whois_payload(monkeypatch):
+    peer = ipaddress.ip_address("100.97.103.5")
+    _mock_tailscale_whois(
+        monkeypatch,
+        "100.97.103.5",
+        addresses=["100.97.103.5"],
+        payload_key="Machine",
+    )
+
+    assert ui_server._is_trusted_tailscale_peer(peer) is True
+
+
+def test_trusted_tailscale_peer_rejects_node_payload_with_subnet_route(monkeypatch):
+    peer = ipaddress.ip_address("100.97.103.5")
+    _mock_tailscale_whois(
+        monkeypatch,
+        "100.97.103.5",
+        allowed_ips=["100.97.103.5/32", "192.168.50.0/24"],
+    )
+
+    assert ui_server._is_trusted_tailscale_peer(peer) is False
+
+
+def test_trusted_tailscale_peer_ignores_non_host_address_entries(monkeypatch):
+    """Address entries that are not host CIDRs must not satisfy the peer
+    match, so a payload claiming a whole range cannot vouch for the peer."""
+    peer = ipaddress.ip_address("100.97.103.5")
+    _mock_tailscale_whois(
+        monkeypatch,
+        "100.97.103.5",
+        addresses=["100.97.103.0/24"],
+    )
+
+    assert ui_server._is_trusted_tailscale_peer(peer) is False
 
 
 def test_setup_host_wildcard_does_not_trust_unconfigured_tailscale_host(monkeypatch, tmp_path):

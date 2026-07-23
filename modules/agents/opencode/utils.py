@@ -122,6 +122,26 @@ def resolve_opencode_model_id(
     return model_id
 
 
+def resolve_opencode_configured_default_model(
+    default_model: str | None,
+    *,
+    default_provider: str | None,
+    provider_id: str | None,
+) -> str | None:
+    """Return the configured agent model when it belongs to ``provider_id``."""
+
+    model = (default_model or "").strip()
+    provider = (provider_id or "").strip()
+    configured_provider = (default_provider or "").strip()
+    if not model or not provider:
+        return None
+
+    model_provider, model_id = _parse_model_key(model)
+    if model_provider:
+        return model_id if model_provider == provider and model_id else None
+    return model if configured_provider == provider else None
+
+
 def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
     if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
         return False

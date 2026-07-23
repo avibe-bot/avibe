@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260716_0030"
+HEAD_REVISION = "20260723_0033"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -121,9 +121,13 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         media_columns = {
             row[1] for row in conn.execute("pragma table_info(media_objects)")
         }
+        media_scope_not_null = {
+            row[1]: row[3] for row in conn.execute("pragma table_info(media_objects)")
+        }["scope_id"]
         assert "mtime_ns" in media_columns  # 20260603_0014: dedup fingerprint
         assert "width_px" in media_columns  # 20260604_0015: zero-shift image box
         assert "height_px" in media_columns
+        assert media_scope_not_null == 0  # standalone sessions can own uploads
         background_columns = {
             row[1]
             for row in conn.execute(
@@ -133,6 +137,134 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260721_0031")
+    now = "2026-07-23T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        for scope_id, native_type in (
+            ("scope_real", None),
+            ("scope_private_a", "private_agent_run"),
+            ("scope_private_b", "private_agent_run"),
+            ("scope_private_c", "private_agent_run"),
+        ):
+            conn.execute(
+                """
+                insert into scopes (
+                    id, platform, scope_type, native_id, native_type, is_private,
+                    supports_threads, metadata_json, first_seen_at, last_seen_at, updated_at
+                ) values (?, 'avibe', 'project', ?, ?, 0, 0, '{}', ?, ?, ?)
+                """,
+                (scope_id, scope_id, native_type, now, now, now),
+            )
+
+        def insert_session(session_id: str, scope_id: str, anchor: str, workdir: str) -> None:
+            conn.execute(
+                """
+                insert into agent_sessions (
+                    id, scope_id, agent_backend, agent_variant, session_anchor,
+                    workdir, native_session_id, status, agent_status, metadata_json,
+                    created_at, updated_at, last_active_at
+                ) values (?, ?, 'codex', 'codex', ?, ?, '', 'active', 'idle', '{}', ?, ?, ?)
+                """,
+                (session_id, scope_id, anchor, workdir, now, now, now),
+            )
+
+        insert_session("ses_caller", "scope_real", "caller", "/caller")
+        insert_session("ses_source", "scope_real", "source", "/source")
+        insert_session("ses_legacy_a", "scope_private_a", "same-anchor", "/legacy-a")
+        insert_session("ses_legacy_b", "scope_private_b", "same-anchor", "/legacy-b")
+        insert_session("ses_legacy_c", "scope_private_c", "unresolved", "/legacy-c")
+
+        conn.execute(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, kind, source, local_path, created_at
+            ) values (
+                'media_existing', 'scope_real', 'ses_caller', 'file',
+                'user_upload', '/tmp/existing.txt', ?
+            )
+            """,
+            (now,),
+        )
+
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, source_actor, session_id,
+                cancel_requested, created_at, updated_at, metadata_json
+            ) values (
+                'run_source_actor', 'agent_run', 'succeeded', 'agent', 'ses_caller',
+                'ses_legacy_a', 0, ?, ?, '{}'
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, source_actor, session_id,
+                cancel_requested, created_at, updated_at, metadata_json
+            ) values (
+                'run_metadata', 'agent_run', 'succeeded', 'agent', 'agent:worker',
+                'ses_legacy_b', 0, ?, ?, ?
+            )
+            """,
+            (now, now, json.dumps({"caller_context": {"session_id": "ses_source"}})),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            select id, scope_id, session_anchor, visibility, workdir
+            from agent_sessions where id like 'ses_legacy_%' order by id
+            """
+        ).fetchall()
+        pseudo_scope_count = conn.execute(
+            "select count(*) from scopes where native_type = 'private_agent_run'"
+        ).fetchone()[0]
+        unique_index = conn.execute(
+            "select [unique] from pragma_index_list('agent_sessions') where name = 'uq_agent_sessions_scope_anchor'"
+        ).fetchone()
+        media_scope_not_null = {
+            row[1]: row[3] for row in conn.execute("pragma table_info(media_objects)")
+        }["scope_id"]
+        existing_media = conn.execute(
+            "select scope_id, session_id from media_objects where token = 'media_existing'"
+        ).fetchone()
+        conn.execute(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, kind, source, local_path, created_at
+            ) values (
+                'media_standalone', null, 'ses_legacy_c', 'file',
+                'user_upload', '/tmp/standalone.txt', ?
+            )
+            """,
+            (now,),
+        )
+
+    assert rows == [
+        ("ses_legacy_a", "scope_real", "ses_legacy_a", "background", "/legacy-a"),
+        ("ses_legacy_b", "scope_real", "ses_legacy_b", "background", "/legacy-b"),
+        ("ses_legacy_c", None, "ses_legacy_c", "background", "/legacy-c"),
+    ]
+    assert pseudo_scope_count == 3
+    assert unique_index == (1,)
+    assert media_scope_not_null == 0
+    assert existing_media == ("scope_real", "ses_caller")
+
+    from core.scheduled_tasks import resolve_session_id_target
+
+    promoted = resolve_session_id_target("ses_legacy_a", db_path=db_path)
+    assert promoted.scope_id == "scope_real"
+    assert promoted.session_key.thread_id is None
 
 
 def test_run_migrations_serializes_alembic_context(monkeypatch, tmp_path: Path) -> None:

@@ -1,0 +1,20 @@
+version: 1
+capability: model_hub
+observations:
+  - id: MH-OBS-001
+    source: engine-survey-s1
+    summary: Engine fallback is broader than the signed taxonomy, so the adapter owns the per-source candidate loop.
+    affects:
+      - MH-RES-001
+  - id: MH-OBS-002
+    source: engine-survey-s1
+    summary: Engine usage events contain inbound credential material and remain disabled; Model Hub emits its own redacted events.
+    affects:
+      - MH-RES-001
+  - id: MH-OBS-003
+    source: engine-survey-s1
+    summary: OAuth presentation is runtime-declared rather than inferred from a vendor table.
+    affects:
+      - MH-OAUTH-A-001
+      - MH-OAUTH-B-001
+      - MH-OAUTH-C-001

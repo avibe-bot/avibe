@@ -1,3 +1,5 @@
+import { deferRemoteAuthRedirect } from './remoteAuth';
+
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -96,6 +98,11 @@ async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void
   if ((payload as { error?: string } | null)?.error !== 'remote_access_login_required') {
     return;
   }
+  // A cross-origin OAuth redirect from an iOS Home-Screen app opens in a
+  // separate browser sheet. Never raise that sheet automatically: hand control
+  // back to AuthGuard so the PWA can ask for an explicit sign-in action.
+  if (deferRemoteAuthRedirect()) return;
+
   redirectingForRemoteAuth = true;
   // Full-page navigation to the current path: enforce_remote_access_cookie
   // redirects an unauthenticated browser request to the Avibe Cloud login

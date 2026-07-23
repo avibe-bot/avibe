@@ -17,12 +17,18 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
-from storage.agent_session_rows import create_agent_session_row
+from config import paths
+from storage.agent_session_rows import (
+    SESSION_VISIBILITIES,
+    create_agent_session_row,
+    new_session_id,
+)
 from storage.db import escape_sql_like
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
@@ -78,6 +84,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "model": row.get("model"),
         "reasoning_effort": row.get("reasoning_effort"),
         "status": row.get("status"),
+        "visibility": row.get("visibility") or "foreground",
         # Live agent-runtime status (idle/running/failed), separate from the
         # lifecycle ``status``. Older rows predating the column read as ``idle``.
         "agent_status": row.get("agent_status") or "idle",
@@ -125,7 +132,7 @@ def list_sessions(
     case-insensitive title LIKE match (LIKE metacharacters escaped).
     """
 
-    query = select(agent_sessions)
+    query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
     if scope_id is not None:
         query = query.where(agent_sessions.c.scope_id == scope_id)
     if status is not None and status != "all":
@@ -214,9 +221,18 @@ def list_sessions_page(
     without a second COUNT query.
     """
     request = PageRequest(page=max(int(page), 1), limit=max(int(limit), 1))
-    query = select(agent_sessions).where(agent_sessions.c.status == "active")
+    query = select(agent_sessions).where(
+        agent_sessions.c.status == "active",
+        agent_sessions.c.visibility == "foreground",
+    )
     if platform:
-        query = query.where(agent_sessions.c.scope_id.like(f"{platform}::%"))
+        platform_filter = agent_sessions.c.scope_id.like(f"{platform}::%")
+        if platform == "avibe":
+            # Standalone sessions are Web/Workbench sessions without project
+            # placement. Keep them visible through the agent-facing avibe type
+            # filter even though their payload correctly has no platform.
+            platform_filter = or_(agent_sessions.c.scope_id.is_(None), platform_filter)
+        query = query.where(platform_filter)
     query = (
         query.order_by(
             agent_sessions.c.last_active_at.desc(),
@@ -234,7 +250,7 @@ def list_sessions_page(
 def create_session(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: Optional[str],
     agent_backend: str,
     agent_name: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -242,36 +258,40 @@ def create_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     title: Optional[str] = None,
+    visibility: str = "foreground",
     metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Create a workbench session inside the given project scope.
+    """Create a session in a Scope or as a standalone session.
 
     Pulls ``workdir`` from ``scope_settings`` so Agent runs already know
     where to cd. ``native_session_id`` stays empty — Claude / OpenCode /
     Codex fill it on their first turn.
     """
 
-    scope_row = conn.execute(
-        select(
-            scopes.c.id,
-            scope_settings.c.workdir,
-            scope_settings.c.enabled,
-            scope_settings.c.agent_name,
-            agents.c.backend.label("agent_backend"),
-            scope_settings.c.agent_variant,
-            scope_settings.c.model,
-            scope_settings.c.reasoning_effort,
-        )
-        .select_from(
-            scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
-            .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
-        )
-        .where(scopes.c.id == scope_id)
-    ).mappings().first()
-    if scope_row is None:
-        raise LookupError(f"Scope not found: {scope_id}")
-    if scope_row.get("enabled") == 0:
-        raise PermissionError(f"Scope is archived: {scope_id}")
+    scope_row: dict[str, Any] = {}
+    if scope_id is not None:
+        found = conn.execute(
+            select(
+                scopes.c.id,
+                scope_settings.c.workdir,
+                scope_settings.c.enabled,
+                scope_settings.c.agent_name,
+                agents.c.backend.label("agent_backend"),
+                scope_settings.c.agent_variant,
+                scope_settings.c.model,
+                scope_settings.c.reasoning_effort,
+            )
+            .select_from(
+                scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
+                .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+            )
+            .where(scopes.c.id == scope_id)
+        ).mappings().first()
+        if found is None:
+            raise LookupError(f"Scope not found: {scope_id}")
+        scope_row = dict(found)
+        if scope_row.get("enabled") == 0:
+            raise PermissionError(f"Scope is archived: {scope_id}")
     if agent_name and not agent_backend:
         agent_backend = _backend_for_agent_name(conn, str(agent_name))
     # Inherit the project's default Agent when the caller didn't pin a backend.
@@ -299,8 +319,14 @@ def create_session(
     if metadata:
         metadata_payload.update(metadata)
 
-    session_id = create_agent_session_row(
+    session_id = new_session_id(conn)
+    workdir = scope_row.get("workdir") or os.getcwd()
+    if scope_id is None:
+        workdir = str(paths.get_show_page_dir(session_id))
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+    create_agent_session_row(
         conn,
+        session_id=session_id,
         scope_id=scope_id,
         agent_id=agent_id,
         agent_name=agent_name,
@@ -310,8 +336,9 @@ def create_session(
         reasoning_effort=reasoning_effort,
         # Workbench sessions self-anchor; IM platforms use the parent message ts.
         session_anchor=None,
-        workdir=scope_row.get("workdir") or os.getcwd(),
+        workdir=workdir,
         title=title,
+        visibility=visibility,
         metadata=metadata_payload,
         now=now,
     )
@@ -348,10 +375,13 @@ def update_session(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    visibility: Any = _UNSET,
+    scope_id: Any = _UNSET,
 ) -> dict[str, Any]:
     existing = conn.execute(
         select(
             agent_sessions.c.id,
+            agent_sessions.c.scope_id,
             agent_sessions.c.agent_backend,
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
@@ -430,6 +460,47 @@ def update_session(
         values["model"] = model or None
     if reasoning_effort is not _UNSET:
         values["reasoning_effort"] = reasoning_effort or None
+    if visibility is not _UNSET:
+        visibility_value = str(visibility or "").strip()
+        if visibility_value not in SESSION_VISIBILITIES:
+            raise ValueError(f"invalid session visibility: {visibility!r}")
+        values["visibility"] = visibility_value
+    if scope_id is not _UNSET:
+        target_scope_id = str(scope_id) if scope_id is not None else None
+        target_scope = None
+        if scope_id is not None:
+            scope = conn.execute(
+                select(
+                    scopes.c.id,
+                    scopes.c.platform,
+                    scopes.c.native_id,
+                    scope_settings.c.enabled,
+                )
+                .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(scopes.c.id == target_scope_id)
+            ).first()
+            if scope is None:
+                raise ValueError(f"Scope not found: {scope_id}")
+            if scope.enabled == 0:
+                raise PermissionError(f"Scope is archived: {scope_id}")
+            target_scope = scope
+        values["scope_id"] = target_scope_id
+        if target_scope_id != existing.scope_id:
+            # Legacy IM caches still consult this metadata key first. A scope
+            # move must stop pinning the session to the old channel; removing
+            # the override lets the loader derive the key from the new scope.
+            existing_metadata.pop("legacy_scope_key", None)
+            values["metadata_json"] = _dumps_metadata(existing_metadata)
+            # A session anchor encodes its delivery thread relative to its
+            # scope. Carrying the old anchor across a move can reinterpret the
+            # old channel id as a thread under the new scope. Standalone rows
+            # self-anchor; scoped rows use a unique suffix whose base resolves
+            # to the destination scope (and therefore no thread).
+            values["session_anchor"] = (
+                session_id
+                if target_scope is None
+                else f"{target_scope.platform}_{target_scope.native_id}:session_{session_id}"
+            )
 
     stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
     if backend_changes:
@@ -630,15 +701,17 @@ def _harness_banner_item(
     since: str,
     updated_at: str,
     backend: str = "",
+    schedule_type: str | None = None,
 ) -> dict[str, Any]:
     """Shape one harness row like a serialized background activity.
 
     The banner unions these with process-local backend activities
     (``core/session_activities.SessionActivity.to_dict``), so a harness item
     carries every key an existing ``background_activities`` consumer already
-    reads, plus the unified ``item_kind`` / ``label`` / ``since`` fields the
-    banner uses to render and route each row. Nothing here is written back into
-    the registry — the row is derived fresh on every runtime-state build.
+    reads, plus the unified ``item_kind`` / ``label`` / ``since`` /
+    ``schedule_type`` fields the banner uses to render and route each row.
+    Nothing here is written back into the registry — the row is derived fresh
+    on every runtime-state build.
     """
     return {
         "id": item_id,
@@ -657,10 +730,11 @@ def _harness_banner_item(
         "started_at": since,
         "updated_at": updated_at or since,
         "completed_at": None,
-        # Unified background-work banner fields (spec: kind / label / since).
+        # Unified background-work banner fields.
         "item_kind": item_kind,
         "label": label,
         "since": since,
+        "schedule_type": schedule_type,
     }
 
 
@@ -678,7 +752,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
       session dispatched and is waiting on).
 
     Each row is shaped like a serialized background activity plus the unified
-    ``item_kind`` / ``label`` / ``since`` fields (see ``_harness_banner_item``).
+    banner fields (see ``_harness_banner_item``).
     """
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -696,6 +770,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 run_definitions.c.name,
                 run_definitions.c.prompt,
                 run_definitions.c.message,
+                run_definitions.c.schedule_type,
                 run_definitions.c.created_at,
                 run_definitions.c.updated_at,
             )
@@ -720,6 +795,11 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
         else:
             continue
         since = str(row["created_at"] or "")
+        schedule_type = (
+            str(row["schedule_type"] or "").strip() or None
+            if item_kind == "task"
+            else None
+        )
         items.append(
             _harness_banner_item(
                 item_id=f"{item_kind}:{row['id']}",
@@ -729,6 +809,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 label=label,
                 since=since,
                 updated_at=str(row["updated_at"] or since),
+                schedule_type=schedule_type,
             )
         )
 

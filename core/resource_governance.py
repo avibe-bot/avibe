@@ -283,6 +283,11 @@ def _is_under_runtime_dir(cmdline: str) -> bool:
     return False
 
 
+def _is_package_service_main(cmdline: str) -> bool:
+    service_main = Path(__file__).resolve().parents[1] / "vibe" / "service_main.py"
+    return any(path in cmdline for path in _path_variants(service_main))
+
+
 def _is_managed_cloudflared(pid: int, cmdline: str) -> bool:
     if not _is_cloudflared_cmd(cmdline):
         return False
@@ -307,6 +312,8 @@ def _is_known_avibe_runtime_member(pid: int, *, uid: int | None = None) -> bool:
     if _is_under_runtime_dir(cmdline):
         return True
     if _is_managed_cloudflared(pid, cmdline):
+        return True
+    if _is_package_service_main(cmdline):
         return True
 
     runtime_cwd = _current_runtime_cwd()

@@ -1,0 +1,256 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/source.schema.json",
+  "title": "Source",
+  "description": "A supply source. Two kinds only (spec §3). 'Relay stations' are api_key sources with a custom base_url, never a third kind.",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "vendor",
+    "display_name",
+    "protocol",
+    "supply_channel",
+    "billing",
+    "state",
+    "models"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^src_[a-z0-9]{8,}$"
+    },
+    "kind": {
+      "enum": [
+        "subscription",
+        "api_key"
+      ]
+    },
+    "vendor": {
+      "type": "string",
+      "description": "Standard vendor id (anthropic|openai|zhipuai|kimi|xai|...) or 'custom'. Also the OpenCode provider prefix (see opencode-overlay.md)."
+    },
+    "display_name": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "protocol": {
+      "enum": [
+        "anthropic",
+        "openai_responses",
+        "openai_chat",
+        "openai_compatible"
+      ]
+    },
+    "base_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "api_key kind only. null = vendor official default. Custom value covers relays/self-hosted gateways."
+    },
+    "supply_channel": {
+      "enum": [
+        "native_cli",
+        "hub"
+      ],
+      "description": "Resolved 2026-07-23 (README): subscription→native_cli by default (sanctioned CLI-held OAuth, per-turn dispatch), api_key→hub. Any hub-held subscription (Claude AND ChatGPT) requires the subscription_hub_experimental flag + recorded per-source consent; UI marks such sources 实验."
+    },
+    "experimental_consent_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "Set iff this is a hub-held subscription the user explicitly consented to (subscription_hub_experimental). null otherwise."
+    },
+    "billing": {
+      "enum": [
+        "monthly",
+        "metered"
+      ]
+    },
+    "state": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "active",
+            "standby",
+            "cooldown",
+            "error"
+          ]
+        },
+        "retry_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "detail_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "i18n key, never raw upstream error text"
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cycle_used_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "month_spend_cents": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "currency": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "ISO 4217, e.g. CNY/USD"
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "provenance"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Bare model id (no provider prefix)"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provenance": {
+            "enum": [
+              "discovered",
+              "manual"
+            ],
+            "description": "manual = custom model entry (spec §5 frame 08)"
+          },
+          "discovered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "credential_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Opaque handle. Secret material NEVER appears in any payload (README invariant 1). null for native_cli sources (credential lives in the CLI's own store)."
+    },
+    "account_label": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "v1.1 (07-23 12:10, L4 finding): human display identity for subscription sources (e.g. 'me@gmail.com'), for the row's mono sub-line (frame 01r). Populated from the sanctioned CLI auth surface for native_cli sources; MAY stay null for hub-held experimental sources until a later adapter rev. Never secret material."
+    },
+    "masked_credential": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "v1.1 (07-23 12:10, L4 finding): non-reversible display mask for api_key sources, computed by L2 ONCE at provisioning from the transient secret (rule: ≤7-char prefix + '…' + last 4, e.g. 'sk-ant-…8f2A') and persisted as display data only. Never re-derivable, never secret material."
+    }
+  },
+  "examples": [
+    {
+      "id": "src_claudepro1",
+      "kind": "subscription",
+      "vendor": "anthropic",
+      "display_name": "Claude Pro 订阅",
+      "protocol": "anthropic",
+      "base_url": null,
+      "supply_channel": "native_cli",
+      "billing": "monthly",
+      "state": {
+        "status": "active",
+        "retry_at": null,
+        "detail_key": null
+      },
+      "usage": {
+        "cycle_used_pct": 62,
+        "month_spend_cents": null,
+        "currency": null
+      },
+      "models": [
+        {
+          "id": "claude-opus-4-6",
+          "display_name": "Opus 4.6",
+          "provenance": "discovered",
+          "discovered_at": "2026-07-23T03:00:00Z"
+        }
+      ],
+      "credential_ref": null,
+      "account_label": "me@gmail.com",
+      "masked_credential": null
+    },
+    {
+      "id": "src_relay9c1x",
+      "kind": "api_key",
+      "vendor": "custom",
+      "display_name": "relay.example",
+      "protocol": "openai_compatible",
+      "base_url": "https://relay.example/v1",
+      "supply_channel": "hub",
+      "billing": "metered",
+      "state": {
+        "status": "cooldown",
+        "retry_at": "2026-07-23T04:00:00Z",
+        "detail_key": "models.source.cooldown.timeout"
+      },
+      "usage": {
+        "cycle_used_pct": null,
+        "month_spend_cents": 320,
+        "currency": "CNY"
+      },
+      "models": [
+        {
+          "id": "glm-5.2-air",
+          "display_name": "GLM 5.2 Air",
+          "provenance": "manual",
+          "discovered_at": null
+        }
+      ],
+      "credential_ref": "cred_a1b2c3",
+      "account_label": null,
+      "masked_credential": "key …9c1"
+    }
+  ]
+}

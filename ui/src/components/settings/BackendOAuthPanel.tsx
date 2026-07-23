@@ -1,11 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, CheckCircle2, Copy, ExternalLink, LogIn, Trash2, X } from 'lucide-react';
-import clsx from 'clsx';
+import { AlertTriangle, CheckCircle2, LogIn, Trash2, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
-import { Input } from '../ui/input';
 import { Label } from '../ui/label';
+import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from './oauth/OAuthFlowParts';
 import { useApi } from '@/context/ApiContext';
 import type { OAuthWebState } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
@@ -424,25 +423,11 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <Label className="text-[11px] font-medium uppercase tracking-wide text-muted">
             {t('settings.backends.oauthAuthUrlLabel')}
           </Label>
-          <div className="flex flex-wrap items-center gap-2">
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={clsx(
-                'inline-flex max-w-full items-center gap-1.5 break-all rounded-md',
-                'bg-cyan-soft/40 px-2 py-1 font-mono text-[12px] text-cyan',
-                'transition-colors hover:bg-cyan-soft hover:text-cyan',
-              )}
-            >
-              <ExternalLink className="size-3 shrink-0" />
-              <span className="break-all">{url}</span>
-            </a>
-            <Button type="button" variant="secondary" size="xs" onClick={(e) => void copyUrl(e)}>
-              <Copy className="size-3" />
-              {t('common.copy')}
-            </Button>
-          </div>
+          <OAuthLinkRow
+            url={url}
+            onCopy={(e) => void copyUrl(e)}
+            copyLabel={t('common.copy') as string}
+          />
         </div>
       )}
 
@@ -451,15 +436,11 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <Label className="text-[11px] font-medium uppercase tracking-wide text-muted">
             {t('settings.backends.codexDeviceCodeLabel')}
           </Label>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="rounded-md bg-cyan-soft/40 px-2.5 py-1 font-mono text-[14px] font-semibold tracking-[0.18em] text-cyan">
-              {deviceCode}
-            </code>
-            <Button type="button" variant="secondary" size="xs" onClick={(e) => void copyDeviceCode(e)}>
-              <Copy className="size-3" />
-              {t('common.copy')}
-            </Button>
-          </div>
+          <OAuthDeviceCodeRow
+            code={deviceCode ?? ''}
+            onCopy={(e) => void copyDeviceCode(e)}
+            copyLabel={t('common.copy') as string}
+          />
           <p className="text-[12px] leading-relaxed text-muted">
             {t('settings.backends.codexDeviceInstructions')}
           </p>
@@ -471,28 +452,16 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <Label htmlFor={`oauth-code-${backend}`} className="text-xs font-medium uppercase text-muted">
             {t('settings.backends.claudeCallbackCodeLabel')}
           </Label>
-          <div className="flex gap-2">
-            <Input
-              id={`oauth-code-${backend}`}
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={t('settings.backends.claudeCallbackCodePlaceholder') as string}
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              className="font-mono"
-              disabled={submitting}
-            />
-            <Button
-              type="button"
-              variant="brand"
-              size="sm"
-              onClick={() => void submitCallback()}
-              disabled={submitting || !code.trim()}
-            >
-              {submitting ? t('common.submitting') : t('common.submit')}
-            </Button>
-          </div>
+          <OAuthSubmitRow
+            id={`oauth-code-${backend}`}
+            value={code}
+            onChange={setCode}
+            onSubmit={() => void submitCallback()}
+            submitting={submitting}
+            placeholder={t('settings.backends.claudeCallbackCodePlaceholder') as string}
+            submitLabel={t('common.submit') as string}
+            submittingLabel={t('common.submitting') as string}
+          />
           <p className="text-[12px] leading-relaxed text-muted">
             {t('settings.backends.claudeCallbackCodeHint')}
           </p>
@@ -504,28 +473,16 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <Label htmlFor={`oauth-code-${backend}`} className="text-xs font-medium uppercase text-muted">
             {t('settings.backends.opencodeCallbackUrlLabel')}
           </Label>
-          <div className="flex gap-2">
-            <Input
-              id={`oauth-code-${backend}`}
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="http://127.0.0.1:..../callback?code=..."
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              className="font-mono"
-              disabled={submitting}
-            />
-            <Button
-              type="button"
-              variant="brand"
-              size="sm"
-              onClick={() => void submitCallback()}
-              disabled={submitting || !code.trim()}
-            >
-              {submitting ? t('common.submitting') : t('common.submit')}
-            </Button>
-          </div>
+          <OAuthSubmitRow
+            id={`oauth-code-${backend}`}
+            value={code}
+            onChange={setCode}
+            onSubmit={() => void submitCallback()}
+            submitting={submitting}
+            placeholder="http://127.0.0.1:..../callback?code=..."
+            submitLabel={t('common.submit') as string}
+            submittingLabel={t('common.submitting') as string}
+          />
           <p className="text-[12px] leading-relaxed text-muted">
             {t('settings.backends.opencodeCallbackUrlHint')}
           </p>

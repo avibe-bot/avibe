@@ -1,9 +1,11 @@
+import getpass
 import ipaddress
 import json
 import logging
 import os
 import signal
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -121,6 +123,8 @@ def ensure_dirs():
 
 
 def default_config():
+    from config.v2_config import ModelHubConfig
+
     work_dir = Path.home() / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     return V2Config(
@@ -133,6 +137,7 @@ def default_config():
             claude=ClaudeConfig(enabled=True, cli_path="claude"),
             codex=CodexConfig(enabled=False, cli_path="codex"),
         ),
+        model_hub=ModelHubConfig.fresh(),
     )
 
 
@@ -572,10 +577,29 @@ def _path_is_service_entry(path: Path, current_main: Path | None) -> bool:
     return False
 
 
+def _systemd_scope_target_argv(args: list[str]) -> list[str] | None:
+    if not args:
+        return None
+    executable_name = Path(args[0].strip("\"'")).name.lower()
+    if executable_name != "systemd-run":
+        return None
+    try:
+        separator = args.index("--")
+    except ValueError:
+        return None
+    if "--scope" not in args[1:separator]:
+        return None
+    target = args[separator + 1 :]
+    return target or None
+
+
 def _service_entry_arg_from_argv(args: list[str]) -> str | None:
     if not args:
         return None
     executable_name = Path(args[0].strip("\"'")).name.lower()
+    scope_target = _systemd_scope_target_argv(args)
+    if scope_target is not None:
+        return _service_entry_arg_from_argv(scope_target)
     if executable_name.startswith("python"):
         for arg in args[1:]:
             cleaned_arg = arg.strip("\"'")
@@ -590,12 +614,19 @@ def _service_entry_arg_from_argv(args: list[str]) -> str | None:
     return None
 
 
-def _command_looks_like_service_entry(command: str | None, *, cwd: str | None = None) -> bool:
+def _command_looks_like_service_entry(
+    command: str | None,
+    *,
+    cwd: str | None = None,
+    include_scope_wrapper: bool = True,
+) -> bool:
     if not command:
         return False
     try:
         args = shlex.split(command, posix=(os.name != "nt"))
     except ValueError:
+        return False
+    if not include_scope_wrapper and _systemd_scope_target_argv(args) is not None:
         return False
     current_main = _safe_resolve_path(get_service_main_path())
     cwd_path = _safe_resolve_path(cwd) if cwd else None
@@ -694,7 +725,11 @@ def service_processes(*, include_unverified: bool = False) -> list[dict]:
             continue
         session_leader = _process_is_service_session_leader(pid)
         command = _process_command_from_info(proc)
-        if not _command_looks_like_service_entry(command, cwd=_process_cwd(proc)):
+        if not _command_looks_like_service_entry(
+            command,
+            cwd=_process_cwd(proc),
+            include_scope_wrapper=False,
+        ):
             continue
         lock_owner = service_lock_held_by(pid)
         home_match = _process_home_matches_current(proc)
@@ -885,8 +920,27 @@ def _record_service_pid_reservation(pid: int) -> None:
     pid_path.write_text(str(pid), encoding="utf-8")
 
 
+def _reap_service_start_process(pid: int) -> None:
+    process = _SERVICE_START_PROCESSES.pop(pid, None)
+    wait = getattr(process, "wait", None)
+    if not callable(wait):
+        return
+
+    def _wait() -> None:
+        try:
+            wait()
+        except Exception:
+            logger.debug("Failed to reap service launcher pid=%s", pid, exc_info=True)
+
+    threading.Thread(
+        target=_wait,
+        name=f"vibe-service-launcher-reaper-{pid}",
+        daemon=True,
+    ).start()
+
+
 def _clear_service_pid_reservation(pid: int) -> None:
-    _SERVICE_START_PROCESSES.pop(pid, None)
+    _reap_service_start_process(pid)
     pid_path = paths.get_runtime_pid_path()
     try:
         recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
@@ -978,7 +1032,7 @@ def wait_for_service_pid(pid: int, timeout: float = SERVICE_LOCK_READY_TIMEOUT_S
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if service_pid_recorded(pid):
-            _SERVICE_START_PROCESSES.pop(pid, None)
+            _reap_service_start_process(pid)
             return True
         if _service_start_exit_code(pid) is not None:
             return False
@@ -988,7 +1042,7 @@ def wait_for_service_pid(pid: int, timeout: float = SERVICE_LOCK_READY_TIMEOUT_S
         time.sleep(0.1)
     ready = service_pid_recorded(pid)
     if ready:
-        _SERVICE_START_PROCESSES.pop(pid, None)
+        _reap_service_start_process(pid)
     elif _service_start_exit_code(pid) is not None:
         return False
     return ready
@@ -1124,6 +1178,273 @@ def _raise_service_start_not_ready(pid: int, *, timeout: float) -> None:
     raise RuntimeError(f"Vibe service process pid={pid} did not acquire the service lock")
 
 
+# --- cgroup resource-governance bootstrap -----------------------------------
+#
+# ``core/resource_governance.py`` can only move agent subprocesses into a
+# memory-capped cgroup when Avibe itself runs inside a *delegated* cgroup
+# subtree. A normal login lands the service in a root-owned, non-delegated
+# ``session-*.scope`` where ``mkdir`` returns EPERM, so governance is inert.
+#
+# The kernel's delegation-containment rule forbids a non-root process from
+# migrating itself out of that session scope into the user manager's delegated
+# tree (the common ancestor ``user-<uid>.slice`` is root-owned). The only way
+# in is to be *launched* inside the delegated tree. ``systemd-run --user
+# --scope`` does exactly that: it asks the user systemd manager to create a
+# transient scope under ``user@<uid>.service/app.slice`` (qiqi-owned, memory +
+# pids delegated) and then ``execve()``s into the target — so the launched
+# process keeps its real pid and cmdline (no supervising parent), and Avibe's
+# pid-tracking is unaffected.
+#
+# This is best-effort and fails open: on macOS, without systemd, without a live
+# user manager, when governance is disabled, or when linger can't be confirmed,
+# the prefix is empty and the service starts exactly as before.
+
+SYSTEMD_SCOPE_PREFIX = (
+    "systemd-run",
+    "--user",
+    "--scope",
+    "-q",  # suppress the "Running scope as unit ..." banner from the log sink
+    "-p",
+    "Delegate=yes",
+    "--",
+)
+
+
+def _resource_governance_mode() -> str:
+    try:
+        from config.v2_config import V2Config
+        from core.resource_governance import config_from_runtime
+
+        return str(config_from_runtime(V2Config.load()).get("mode") or "auto").strip().lower()
+    except Exception:
+        # Absent/broken config must not block startup; treat as the default.
+        return "auto"
+
+
+def _current_username() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return str(os.getuid())
+
+
+def _linger_is_enabled(user: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["loginctl", "show-user", user, "-p", "Linger"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return "Linger=yes" in (result.stdout or "")
+
+
+def _ensure_linger_enabled(*, allow_enable: bool) -> bool:
+    """Confirm that the user lingers, enabling it only when explicitly allowed.
+
+    Once the service lives under ``user@<uid>.service`` instead of a login
+    session scope, logind tears that manager down on last-session-end unless
+    lingering is enabled — which would kill Avibe on the first SSH logout.
+    ``loginctl enable-linger`` changes persistent account state, so automatic
+    governance only observes it. Explicitly enabled governance may opt in to
+    that change. Fail open: if we can't confirm linger, skip the scope wrap.
+    """
+    user = _current_username()
+    if _linger_is_enabled(user):
+        return True
+    if not allow_enable:
+        return False
+    try:
+        subprocess.run(
+            ["loginctl", "enable-linger", user],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return _linger_is_enabled(user)
+
+
+def _systemd_run_self_test_ok(timeout: float = 5.0) -> bool:
+    """Bounded dry-run so DBus/user-manager flakiness surfaces here, not as an
+    opaque 'service did not acquire lock' timeout 30s later."""
+    try:
+        result = subprocess.run(
+            ["systemd-run", "--user", "--scope", "-q", "-p", "Delegate=yes", "--", "true"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def maybe_systemd_scope_prefix() -> list[str]:
+    """Return the ``systemd-run --user --scope`` argv prefix to launch the
+    service inside a delegated user cgroup, or ``[]`` to start unwrapped.
+
+    All predicates must hold; any failure fails open to today's behavior. There
+    is deliberately no "already inside our own scope" guard: nested
+    ``systemd-run --scope`` creates a harmless *sibling* scope (not a nested
+    child), and such a guard would misfire when a governed agent shells out to
+    ``vibe restart`` — landing the restarted service inside the old
+    memory-capped, ``oom.group`` agent cgroup.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    if shutil.which("systemd-run") is None:
+        return []
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return []
+    if not Path(f"/run/user/{getuid()}/systemd/private").is_socket():
+        return []
+    try:
+        from core.resource_governance import detect_cgroup_root
+
+        if detect_cgroup_root() is None:
+            return []
+    except Exception:
+        return []
+    governance_mode = _resource_governance_mode()
+    if governance_mode == "disabled":
+        return []
+    if not _ensure_linger_enabled(allow_enable=governance_mode == "enabled"):
+        logger.warning(
+            "cgroup scope bootstrap: could not confirm user linger; "
+            "starting service without a delegated user scope"
+        )
+        return []
+    if not _systemd_run_self_test_ok():
+        logger.warning(
+            "cgroup scope bootstrap: systemd-run self-test failed; "
+            "starting service without a delegated user scope"
+        )
+        return []
+    return list(SYSTEMD_SCOPE_PREFIX)
+
+
+def _adopt_scoped_service_owner(prev_pid: int) -> int | None:
+    """Adopt the authoritative ``service.lock`` holder if it differs from ``prev_pid``.
+
+    Called on every tick of ``_wait_for_scoped_service_pid``. ``--scope`` exec()s
+    into the target, so ``prev_pid`` is normally already the real service pid and
+    the owner matches it (no-op). This exists to stay correct on any host where a
+    shim survives as a distinct parent: the flock in ``service.lock`` is the
+    authoritative owner signal (see ``resolve_service_owner_pid``), so if a
+    *different* live process now holds it, adopt that pid instead of the shim's.
+    Returns the adopted pid, or ``None`` to leave ``prev_pid`` in place.
+    """
+    owner = resolve_service_owner_pid(include_starting=False)
+    if owner and owner != prev_pid and pid_alive(owner):
+        # The shim's Popen must not be attributed to `owner`, but a long-lived
+        # caller still needs to wait() it after the service exits.
+        _reap_service_start_process(prev_pid)
+        _record_service_pid_reservation(owner)
+        logger.info(
+            "cgroup scope bootstrap: adopting lock-holder pid=%s as the service owner (shim pid=%s)",
+            owner,
+            prev_pid,
+        )
+        return owner
+    return None
+
+
+def _wait_for_scoped_service_pid(spawn_pid: int, timeout: float) -> int | None:
+    """Poll a ``systemd-run --user --scope`` launch until it is lock-verified.
+
+    ``--scope`` exec()s into the target, so ``spawn_pid`` is normally already the
+    service pid. To stay correct even if a shim ever survives as a distinct
+    parent, the ``service.lock`` flock holder is authoritative: on every tick we
+    adopt a differing live lock holder, so we never settle on an unverified
+    (possibly wrapper) pid. Returns the ready pid, or ``None`` if it neither
+    became ready nor left a live owner within ``timeout``.
+    """
+    pid = spawn_pid
+    deadline = time.monotonic() + timeout
+    while True:
+        if service_pid_recorded(pid):
+            _reap_service_start_process(pid)
+            return pid
+        adopted = _adopt_scoped_service_owner(pid)
+        if adopted is not None:
+            pid = adopted
+            continue
+        # The spawn process is gone and nobody holds the lock -> startup failed.
+        if _service_start_exit_code(spawn_pid) is not None:
+            if resolve_service_owner_pid(include_starting=False) is None:
+                return None
+        elif not pid_alive(pid) and resolve_service_owner_pid(include_starting=False) is None:
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
+def wait_for_service_ready(
+    spawn_pid: int, timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS
+) -> int | None:
+    """Wait until the service is lock-verified and return the authoritative owner pid.
+
+    Unlike ``wait_for_service_pid()``, which only confirms a *specific* pid, this
+    resolves the real ``service.lock`` holder: if the pid handed back by
+    ``start_service()`` was a launcher/wrapper that never takes the lock (e.g. a
+    surviving ``systemd-run`` parent under some host configuration), this adopts
+    and returns the live lock holder instead of waiting forever on a pid that can
+    never be recorded. Returns the resolved owner pid, or ``None`` if no owner
+    became ready within ``timeout``. In the common case ``spawn_pid`` already IS
+    the owner and this behaves like ``wait_for_service_pid`` returning that pid.
+    """
+    return _wait_for_scoped_service_pid(spawn_pid, timeout)
+
+
+def _start_scoped_service_result(
+    spawn_pid: int,
+    *,
+    initial_ready_timeout: float,
+    wait_for_ready: bool,
+) -> int:
+    """Resolve the final service pid for a scoped launch, polling+adopting the
+    authoritative lock holder rather than trusting the spawn pid."""
+    # A scoped launch must resolve to a lock-verified pid, so give the first
+    # phase a floor even when the caller passed initial_ready_timeout=0 (e.g.
+    # restart_supervisor): the spawn pid alone is not a trustworthy owner signal
+    # under a scope wrapper. In the common exec() case this returns as soon as
+    # the service acquires the lock, so the floor rarely costs anything.
+    first_timeout = max(initial_ready_timeout, SERVICE_LOCK_READY_TIMEOUT_SECONDS)
+    ready = _wait_for_scoped_service_pid(spawn_pid, first_timeout)
+    if ready is not None:
+        return ready
+    exit_code = _service_start_exit_code(spawn_pid)
+    if exit_code is not None and resolve_service_owner_pid(include_starting=False) is None:
+        raise RuntimeError(
+            f"Vibe service process pid={spawn_pid} exited with code {exit_code} before acquiring the service lock"
+        )
+    if not wait_for_ready:
+        candidate = resolve_service_owner_pid() or spawn_pid
+        if pid_alive(candidate):
+            logger.warning(
+                "Scoped Vibe service pid=%s has not acquired the service lock yet; "
+                "continuing while it finishes startup",
+                candidate,
+            )
+            return candidate
+    ready = _wait_for_scoped_service_pid(spawn_pid, SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    if ready is not None:
+        return ready
+    exit_code = _service_start_exit_code(spawn_pid)
+    if exit_code is not None:
+        raise RuntimeError(
+            f"Vibe service process pid={spawn_pid} exited with code {exit_code} before acquiring the service lock"
+        )
+    _raise_service_start_not_ready(spawn_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    return spawn_pid
+
+
 def start_service(
     *,
     wait_for_ready: bool = True,
@@ -1147,8 +1468,12 @@ def start_service(
                     if _pid_reservation_is_fresh(pid_path, existing_pid):
                         if not wait_for_ready:
                             return existing_pid
-                        if wait_for_service_pid(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS):
-                            return existing_pid
+                        ready_pid = wait_for_service_ready(
+                            existing_pid,
+                            timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS,
+                        )
+                        if ready_pid is not None:
+                            return ready_pid
                         _raise_service_start_not_ready(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
                     logger.warning(
                         "Ignoring stale service pid file pid=%s because it never acquired the service lock",
@@ -1183,8 +1508,11 @@ def start_service(
             raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=extra_pids[0])
 
         main_path = get_service_main_path()
+        scope_prefix = maybe_systemd_scope_prefix()
+        if scope_prefix:
+            logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
         process = spawn_service_background_process(
-            [sys.executable, str(main_path)],
+            [*scope_prefix, sys.executable, str(main_path)],
             "service_stdout.log",
             "service_stderr.log",
             env={
@@ -1196,6 +1524,14 @@ def start_service(
         pid = process.pid
         _SERVICE_START_PROCESSES[pid] = process
         _record_service_pid_reservation(pid)
+        if scope_prefix:
+            # Scoped launches resolve their pid via the authoritative lock holder
+            # (poll-and-adopt), never by trusting the spawn pid alone.
+            return _start_scoped_service_result(
+                pid,
+                initial_ready_timeout=initial_ready_timeout,
+                wait_for_ready=wait_for_ready,
+            )
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
         exit_code = _service_start_exit_code(pid)

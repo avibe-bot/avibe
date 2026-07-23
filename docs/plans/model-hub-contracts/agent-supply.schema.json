@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/agent-supply.schema.json",
+  "title": "AgentSupply",
+  "description": "Per-backend supply status & configuration (spec §4.3, frames 01r/04/05r).",
+  "type": "object",
+  "required": ["backend", "mode", "menu_kind"],
+  "additionalProperties": false,
+  "properties": {
+    "backend": { "enum": ["claude", "codex", "opencode"] },
+    "mode": {
+      "enum": ["hub", "direct"],
+      "description": "中枢/直连. Existing users stay direct until they migrate; fresh installs default hub (plan §4). Under Option 1, hub mode for claude still consumes the subscription via the native channel per turn."
+    },
+    "menu_kind": { "enum": ["fixed", "open"] },
+    "current": {
+      "type": ["object", "null"],
+      "description": "What the next turn would use (frame 01r composite pill). null when mode=direct.",
+      "required": ["model_id", "source_id", "channel"],
+      "additionalProperties": false,
+      "properties": {
+        "model_id": { "type": "string" },
+        "source_id": { "type": "string" },
+        "channel": { "enum": ["native_cli", "hub"] }
+      }
+    },
+    "mappings": {
+      "type": "array",
+      "description": "fixed-menu backends only; per-agent scope (spec §4.2). Absent entry = 跟随原生 (identity).",
+      "items": {
+        "type": "object",
+        "required": ["builtin_id", "target_model_id", "enabled"],
+        "additionalProperties": false,
+        "properties": {
+          "builtin_id": { "type": "string", "description": "real built-in model id, e.g. claude-opus-4-6" },
+          "target_model_id": { "type": "string" },
+          "enabled": { "type": "boolean" }
+        }
+      }
+    },
+    "menu": {
+      "type": ["object", "null"],
+      "description": "open-menu backends only (frame 05r).",
+      "required": ["view", "checked"],
+      "additionalProperties": false,
+      "properties": {
+        "view": { "enum": ["featured", "full"] },
+        "checked": {
+          "type": "array",
+          "description": "prefixed identifiers, e.g. zhipuai/glm-5.2 (see opencode-overlay.md)",
+          "items": { "type": "string", "pattern": "^[a-z0-9_-]+/.+$" },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "backend": "claude",
+      "mode": "hub",
+      "menu_kind": "fixed",
+      "current": { "model_id": "claude-opus-4-6", "source_id": "src_claudepro1", "channel": "native_cli" },
+      "mappings": [ { "builtin_id": "claude-opus-4-6", "target_model_id": "glm-5.2", "enabled": false } ],
+      "menu": null
+    },
+    {
+      "backend": "opencode",
+      "mode": "hub",
+      "menu_kind": "open",
+      "current": { "model_id": "glm-5.2", "source_id": "src_zhipukey01", "channel": "hub" },
+      "mappings": [],
+      "menu": { "view": "featured", "checked": ["anthropic/claude-opus-4-6", "openai/gpt-5.6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air"] }
+    }
+  ]
+}

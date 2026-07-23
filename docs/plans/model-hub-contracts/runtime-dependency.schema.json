@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/runtime-dependency.schema.json",
+  "title": "RuntimeDependency",
+  "description": "Managed engine dependency manifest + status (spec §8; S3 verdict: generalize the Show Runtime managed-archive installer, effort M; process/health/config stay per-runtime). Pinned values below are the S1 survey result and are normative until the next explicit re-pin.",
+  "type": "object",
+  "required": ["manifest", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest": {
+      "type": "object",
+      "required": ["name", "version", "source_sha", "assets"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "const": "cliproxyapi" },
+        "version": { "type": "string" },
+        "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["platform", "url", "size_bytes", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "platform": { "enum": ["darwin-arm64", "linux-amd64"] },
+              "url": { "type": "string" },
+              "size_bytes": { "type": "integer" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["installed_version", "verified", "health"],
+      "additionalProperties": false,
+      "properties": {
+        "installed_version": { "type": ["string", "null"] },
+        "verified": { "type": "boolean", "description": "SHA256 of installed binary matches manifest" },
+        "listening": {
+          "type": ["object", "null"],
+          "required": ["host", "port"],
+          "additionalProperties": false,
+          "properties": {
+            "host": { "const": "127.0.0.1" },
+            "port": { "type": "integer" }
+          }
+        },
+        "health": { "enum": ["ok", "degraded", "down", "not_installed"] },
+        "last_check": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "manifest": {
+        "name": "cliproxyapi",
+        "version": "v7.2.95",
+        "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
+        "assets": [
+          { "platform": "darwin-arm64", "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/<darwin-arm64-asset>", "size_bytes": 14384655, "sha256": "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978" },
+          { "platform": "linux-amd64", "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/<linux-amd64-asset>", "size_bytes": 15401775, "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5" }
+        ]
+      },
+      "status": {
+        "installed_version": "v7.2.95",
+        "verified": true,
+        "listening": { "host": "127.0.0.1", "port": 15220 },
+        "health": "ok",
+        "last_check": "2026-07-23T03:40:00+08:00"
+      }
+    }
+  ]
+}

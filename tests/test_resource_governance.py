@@ -129,6 +129,25 @@ def test_known_runtime_member_rejects_unrelated_main_py(
     assert _is_known_avibe_runtime_member(1234, uid=1000) is False
 
 
+def test_known_runtime_member_accepts_scoped_package_service_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_service_main = Path(__file__).resolve().parents[1] / "vibe" / "service_main.py"
+
+    monkeypatch.setattr("core.resource_governance._pid_uid", lambda pid: 1000)
+    monkeypatch.setattr("core.resource_governance._pid_cwd", lambda pid: None)
+    monkeypatch.setattr("core.resource_governance._current_runtime_cwd", lambda: None)
+    monkeypatch.setattr(
+        "core.resource_governance._pid_cmdline",
+        lambda pid: (
+            "systemd-run --user --scope -q -p Delegate=yes -- "
+            f"/opt/avibe/venv/bin/python {package_service_main}"
+        ),
+    )
+
+    assert _is_known_avibe_runtime_member(1234, uid=1000) is True
+
+
 def test_known_runtime_member_accepts_custom_avibe_runtime_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

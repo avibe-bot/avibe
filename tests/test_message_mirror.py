@@ -26,11 +26,17 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.message_mirror import mirror_harness_inbound, mirror_inbound, persist_agent_message
+from core.message_mirror import (
+    mirror_harness_inbound,
+    mirror_inbound,
+    persist_agent_message,
+    persist_silent_completion_marker,
+)
 from modules.im import MessageContext
+from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_events, agent_sessions, messages, scopes
+from storage.models import agent_events, agent_sessions, media_objects, messages, scopes
 from storage.settings_service import upsert_scope
 
 
@@ -754,6 +760,112 @@ def test_harness_inbound_avibe_session_scoped(isolated_state):
     assert row["content_text"] == "the watched condition fired"
 
 
+def test_background_standalone_persists_full_turn_without_realtime_delivery(isolated_state):
+    from core import inbox_events
+
+    engine = create_sqlite_engine()
+    now = "2026-07-23T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_background",
+                scope_id=None,
+                visibility="background",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_background",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="ses_background",
+        platform="avibe",
+        message_id="scheduled:def_bg:exec_1",
+        platform_specific={
+            "agent_session_id": "ses_background",
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "def_bg",
+            "suppress_delivery": True,
+        },
+    )
+
+    async def scenario():
+        sub_id, queue = inbox_events.bus.subscribe()
+        try:
+            mirror_harness_inbound(context, "background prompt")
+            persist_agent_message(context, "result", "background result")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(queue.get(), timeout=0.1)
+        finally:
+            inbox_events.bus.unsubscribe(sub_id)
+
+    asyncio.run(scenario())
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(messages).where(messages.c.session_id == "ses_background").order_by(messages.c.author)
+        ).mappings().all()
+    assert [(row["author"], row["content_text"]) for row in rows] == [
+        ("agent", "background result"),
+        ("harness", "background prompt"),
+    ]
+    assert {row["scope_id"] for row in rows} == {None}
+
+
+def test_background_standalone_rewrites_agent_file_links(isolated_state, tmp_path):
+    local_file = tmp_path / "report.txt"
+    local_file.write_text("standalone artifact", encoding="utf-8")
+    engine = create_sqlite_engine()
+    now = "2026-07-23T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_background_media",
+                scope_id=None,
+                visibility="background",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_background_media",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    context = MessageContext(
+        user_id="agent",
+        channel_id="ses_background_media",
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": "ses_background_media",
+            "suppress_delivery": True,
+        },
+    )
+    persist_agent_message(context, "result", f"[report]({local_file.as_uri()})")
+
+    with engine.connect() as conn:
+        message = conn.execute(
+            select(messages).where(messages.c.session_id == "ses_background_media")
+        ).mappings().one()
+        media = conn.execute(
+            select(media_objects).where(media_objects.c.session_id == "ses_background_media")
+        ).mappings().one()
+
+    assert "file://" not in message["content_text"]
+    assert "/api/media/" in message["content_text"]
+    assert media["scope_id"] is None
+    assert media["local_path"] == str(local_file)
+
+
 def test_harness_inbound_im_scope_keyed(isolated_state):
     """A harness turn delivered to an IM channel with NO source session resolved
     falls back to a scope-keyed row (null session_id), tagged source='harness'.
@@ -854,3 +966,89 @@ def test_avibe_inbound_is_noop(isolated_state):
     with engine.connect() as conn:
         rows = conn.execute(select(messages).where(messages.c.author == "user")).mappings().all()
     assert rows == []
+
+
+def test_silent_completion_marker_persisted_but_invisible(isolated_state):
+    """``persist_silent_completion_marker`` writes an agent-authored ``silent`` row
+    (empty text, content.kind='silent') that is EXCLUDED from the transcript allowlist
+    and from the inbox conversation clock, so the last visible message is unchanged."""
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_sil", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_sil", scope_id=scope_id, agent_backend="claude", agent_variant="default",
+                session_anchor="anchor_ses_sil", native_session_id="", status="active", metadata_json="{}",
+                created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+        # A real, visible reply for an earlier turn — must stay the "last visible" one.
+        conn.execute(
+            messages.insert().values(
+                id="m_vis", scope_id=scope_id, session_id="ses_sil", platform="avibe", author="agent",
+                type="result", source="agent", content_text="the visible answer", content_json="{}",
+                metadata_json="{}", created_at=now, updated_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_sil", platform="avibe",
+        platform_specific={"agent_session_id": "ses_sil"},
+    )
+    persist_silent_completion_marker(ctx)
+
+    with engine.connect() as conn:
+        rows = conn.execute(select(messages).where(messages.c.session_id == "ses_sil")).mappings().all()
+        transcript = messages_service.list_session_messages(
+            conn, session_id="ses_sil", limit=50, tail=True, types=messages_service.TRANSCRIPT_TYPES
+        )["messages"]
+
+    silent_rows = [r for r in rows if r["type"] == "silent"]
+    assert len(silent_rows) == 1  # persisted
+    assert silent_rows[0]["author"] == "agent"
+    assert (silent_rows[0]["content_text"] or "") == ""
+    assert json.loads(silent_rows[0]["content_json"]).get("kind") == "silent"
+
+    # Invisible: excluded from the transcript allowlist; last visible row unchanged.
+    assert "silent" not in [m["type"] for m in transcript]
+    assert transcript[-1]["type"] == "result" and transcript[-1]["text"] == "the visible answer"
+    # And kept out of the inbox conversation clock (never bumps last-activity/author).
+    assert messages_service.SILENT_TYPE in messages_service.NON_CONVERSATION_TYPES
+    assert messages_service.SILENT_TYPE not in messages_service.TRANSCRIPT_TYPES
+
+
+def test_silent_completion_marker_publishes_inbox_update_not_message(isolated_state):
+    """The marker clears the inbox awaiting flag, so it publishes ``inbox.session.updated``
+    (live sidebar refresh) — but NOT ``message.new`` (no transcript bubble)."""
+    from unittest import mock
+
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_pub", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_pub", scope_id=scope_id, agent_backend="claude", agent_variant="default",
+                session_anchor="anchor_ses_pub", native_session_id="", status="active", metadata_json="{}",
+                created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+        conn.execute(
+            messages.insert().values(
+                id="m_vis", scope_id=scope_id, session_id="ses_pub", platform="avibe", author="agent",
+                type="result", source="agent", content_text="visible", content_json="{}",
+                metadata_json="{}", created_at=now, updated_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_pub", platform="avibe",
+        platform_specific={"agent_session_id": "ses_pub"},
+    )
+    with mock.patch("core.inbox_events.bus.publish") as publish:
+        persist_silent_completion_marker(ctx)
+
+    published = [call.args[0] for call in publish.call_args_list]
+    assert "inbox.session.updated" in published  # sidebar awaiting clears live
+    assert "message.new" not in published  # invisible: no transcript bubble

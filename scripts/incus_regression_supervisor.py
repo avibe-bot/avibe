@@ -79,15 +79,18 @@ def main() -> int:
     bind_host = runtime.effective_ui_bind_host(config)
     ui_pid = runtime.start_ui(bind_host, config.ui.setup_port)
 
-    if runtime.service_pid_recorded(service_pid):
-        runtime.write_status("running", "incus regression started", service_pid, ui_pid)
-    elif runtime.wait_for_service_pid(service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS):
-        runtime.write_status("running", "incus regression started", service_pid, ui_pid)
-    else:
-        runtime.write_status("error", "service did not become ready", service_pid, ui_pid)
-        runtime.stop_ui()
-        runtime.stop_service()
-        return 1
+    if not runtime.service_pid_recorded(service_pid):
+        ready_service_pid = runtime.wait_for_service_ready(
+            service_pid,
+            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+        )
+        if ready_service_pid is None:
+            runtime.write_status("error", "service did not become ready", service_pid, ui_pid)
+            runtime.stop_ui()
+            runtime.stop_service()
+            return 1
+        service_pid = ready_service_pid
+    runtime.write_status("running", "incus regression started", service_pid, ui_pid)
 
     while not stopping:
         # _restart_in_progress() is read fresh at each decision below rather than

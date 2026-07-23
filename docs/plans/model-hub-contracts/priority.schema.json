@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/priority.schema.json",
+  "title": "Priority",
+  "description": "The single global spend order (spec §4.2). Authoritative and fully ordered: the server always returns the complete order after any mutation; clients never compute partial reorders (S1 freeze item: authoritative ordered priority). Per-request candidates = this order filtered by 'source supplies the requested model' and channel eligibility.",
+  "type": "object",
+  "required": ["contract_version", "order"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 1 },
+    "order": {
+      "type": "array",
+      "description": "source ids, position 0 = spend first; MUST contain every non-deleted source exactly once",
+      "items": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+      "uniqueItems": true
+    }
+  },
+  "examples": [
+    { "contract_version": 1, "order": ["src_claudepro1", "src_chatgptplus", "src_anthkey01", "src_zhipukey01", "src_relay9c1x"] }
+  ]
+}

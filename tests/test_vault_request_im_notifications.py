@@ -49,6 +49,7 @@ def _seed_session(
     scope_type: str = "channel",
     native_id: str = "C123",
     session_anchor: str | None = None,
+    visibility: str = "foreground",
     metadata_json: str = "{}",
 ) -> None:
     engine = create_sqlite_engine(db_path)
@@ -88,6 +89,7 @@ def _seed_session(
                 native_session_id="native-1",
                 title=None,
                 status="active",
+                visibility=visibility,
                 agent_status="idle",
                 metadata_json=metadata_json,
                 created_at=now,
@@ -217,9 +219,9 @@ def test_workbench_session_is_not_notified(tmp_path: Path) -> None:
     assert controller.emitted == []
 
 
-def test_suppressed_delivery_session_is_not_notified(tmp_path: Path) -> None:
+def test_background_session_is_not_notified(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite"
-    _seed_session(db_path, metadata_json='{"no_delivery": true}')
+    _seed_session(db_path, visibility="background")
     controller = FakeController()
 
     result = asyncio.run(

@@ -506,6 +506,41 @@
     "routingSaving": "正在保存 Agent 路由设置...",
     "routingCanceled": "已取消更新 Agent 路由设置。"
   },
+  "modelHub": {
+    "errors": {
+      "source_not_found": "未找到模型来源。",
+      "flow_not_found": "未找到授权流程。",
+      "flow_expired": "授权流程已过期。",
+      "discovery_failed": "无法验证或发现此来源。",
+      "invalid_priority_order": "优先级必须完整且不重复地包含所有来源。",
+      "mapping_target_unavailable": "所选模型无法用于此后端。",
+      "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
+      "engine_down": "本地模型中枢运行时不可用。",
+      "consent_required": "实验性订阅路由需要明确同意。",
+      "migration_item_conflict": "此迁移项与当前模型中枢状态冲突。",
+      "stream_interrupted": "上游流已中断。",
+      "upstream_protocol_error": "上游响应不符合预期协议。",
+      "upstream_request_invalid": "上游服务拒绝了请求。",
+      "upstream_unauthorized": "刷新后上游服务仍拒绝授权。",
+      "upstream_error": "上游服务返回错误。"
+    },
+    "events": {
+      "sourceFallback": "来源",
+      "switch": "{from_source}：{reason} -> 已切到 {to_source}",
+      "cooldown": "{from_source}：{reason}，暂时冷却",
+      "recover": "{to_source}：已恢复可用",
+      "status": "{from_source}：{reason}",
+      "reason": {
+        "quota_exhausted": "额度用完",
+        "rate_limited": "请求受限",
+        "server_error": "上游服务暂不可用",
+        "network": "网络暂不可用",
+        "recovery": "已恢复",
+        "manual": "手动调整",
+        "mapping": "已应用模型映射"
+      }
+    }
+  },
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "重新登录",

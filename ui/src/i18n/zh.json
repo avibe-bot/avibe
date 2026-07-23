@@ -13,6 +13,11 @@
     "retry": "重试",
     "reload": "刷新页面"
   },
+  "remoteLogin": {
+    "title": "登录后继续",
+    "body": "使用 Avibe Cloud 登录后即可安全地继续访问。",
+    "action": "重新登录"
+  },
   "preview": {
     "title": "预览",
     "unsupported": "此文件无法预览。",
@@ -38,6 +43,7 @@
     "confirm": "确定",
     "clear": "清除",
     "retry": "重试",
+    "undo": "撤销",
     "loading": "加载中...",
     "saving": "保存中...",
     "saved": "已保存",
@@ -77,6 +83,7 @@
     "copy": "复制",
     "copied": "已复制",
     "copyFailed": "复制失败，请手动复制",
+    "localLinkUnavailable": "这个本机链接只能在运行 Avibe 的电脑上打开。",
     "remove": "移除",
     "removing": "移除中…",
     "delete": "删除",
@@ -117,7 +124,8 @@
     "capabilities": "能力",
     "more": "更多",
     "apps": "Apps",
-    "workbench": "工作台"
+    "workbench": "工作台",
+    "models": "模型"
   },
   "more": {
     "title": "更多",
@@ -601,7 +609,177 @@
     "inProgressTitle": "这个设置页已经有新路由，但功能 UI 还在迁移中",
     "inProgressBody": "新版路由和页面壳子已经就位，但这个分区的具体界面还在从旧 Dashboard 和向导流程迁移。",
     "inProgressHint": "在该分区完成重构前，底层配置仍可先通过设置向导进行调整。",
-    "openSetup": "打开设置向导"
+    "openSetup": "打开设置向导",
+    "models": {
+      "title": "模型",
+      "subtitle": "连一次来源，所有 Agent 统一供给；顺序即优先级，用完自动切换、恢复自动切回。",
+      "addSource": "添加来源",
+      "loadError": "加载失败：{{detail}}",
+      "statusPill": {
+        "ok": "一切正常 · {{count}} 个 Agent 已接入",
+        "degraded": "部分来源需留意 · {{count}} 个 Agent 已接入"
+      },
+      "sources": {
+        "title": "来源",
+        "subtitle": "全局一份；拖动调整顺序 —— 顺序就是花钱顺序",
+        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。"
+      },
+      "source": {
+        "nativeSupply": "原生供给",
+        "hubHosted": "中枢托管",
+        "officialEndpoint": "官方地址",
+        "customEndpoint": "自定义地址",
+        "retryIn": "{{minutes}} 分后重试",
+        "reorder": "拖动排序",
+        "cooldown": {
+          "timeout": "连续超时"
+        }
+      },
+      "billing": {
+        "monthly": "包月",
+        "metered": "按量 ¥"
+      },
+      "state": {
+        "active": "使用中",
+        "standby": "备用",
+        "cooldown": "暂不可用",
+        "error": "不可用"
+      },
+      "usage": {
+        "monthSpend": "本月 {{amount}}"
+      },
+      "supplyTooltip": {
+        "label": "供应："
+      },
+      "mode": {
+        "hub": "中枢 Hub",
+        "direct": "直连 Direct"
+      },
+      "menuKind": {
+        "fixed": "菜单固定",
+        "open": "菜单开放"
+      },
+      "experimental": "实验",
+      "agents": {
+        "title": "Agent",
+        "subtitle": "每个 Agent 用什么模型、由谁供给",
+        "backendSettings": "后端设置",
+        "modelMenu": "模型菜单",
+        "connectHub": "接入中枢",
+        "menuComingSoon": "模型菜单即将上线（随下一个里程碑发布）",
+        "modelCount": "{{count}} 个模型",
+        "multiSource": "多来源",
+        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义"
+      },
+      "recent": {
+        "title": "最近切换",
+        "viewAll": "查看全部",
+        "collapse": "收起",
+        "today": "今天",
+        "yesterday": "昨天",
+        "empty": "暂无切换记录"
+      },
+      "advanced": {
+        "title": "高级",
+        "detail": "跨厂商自动顶替（默认关）· 请求日志 · 诊断",
+        "comingSoon": "高级设置即将上线"
+      },
+      "addMenu": {
+        "claude": {
+          "title": "连接 Claude 订阅",
+          "subtitle": "Pro / Max · 浏览器登录"
+        },
+        "chatgpt": {
+          "title": "连接 ChatGPT 订阅",
+          "subtitle": "Plus / Pro · 浏览器登录"
+        },
+        "apiKey": {
+          "title": "添加 API Key…",
+          "subtitle": "任何厂商或兼容服务，可改地址"
+        }
+      },
+      "addKey": {
+        "title": "添加 API Key",
+        "subtitle": "任何厂商或兼容服务；连接一次，所有 Agent 共用。",
+        "vendorLabel": "服务商",
+        "vendorHint": "选择 Anthropic / OpenAI / 智谱 / Kimi 等厂商时，自动填官方地址。",
+        "keyLabel": "API KEY",
+        "baseUrlLabel": "服务地址（BASE URL）",
+        "baseUrlHint": "官方厂商已预填，可改；使用兼容服务（如中转、自建网关）时填它提供的地址。",
+        "discovered": "连接成功 · 发现 {{count}} 个可用模型，已加入供应清单",
+        "failed": "连接失败：{{detail}}",
+        "testing": "连接中…",
+        "vaultNote": "只存本机，可入 Vault",
+        "vendors": {
+          "custom": "自定义 · OpenAI / Anthropic 兼容",
+          "anthropic": "Anthropic",
+          "openai": "OpenAI",
+          "zhipuai": "智谱",
+          "kimi": "Kimi",
+          "xai": "xAI"
+        }
+      },
+      "oauth": {
+        "title": {
+          "anthropic": "连接 Claude 订阅",
+          "openai": "连接 ChatGPT 订阅",
+          "generic": "连接订阅"
+        },
+        "starting": "正在准备…",
+        "connected": "连接成功，已加入来源列表",
+        "step1": {
+          "authLink": "打开授权链接（任何设备的浏览器都行）",
+          "devicePage": "打开设备授权页"
+        },
+        "pasteCode": {
+          "hint": "登录同意后，把页面给的授权码粘贴回来"
+        },
+        "callback": {
+          "hint": "登录后，把浏览器最终停留的回调地址粘贴回来"
+        },
+        "deviceCode": {
+          "hint": "在那个页面输入设备码，这里会自动继续"
+        },
+        "status": {
+          "awaitingPaste": "等待授权 · {{time}} 后超时",
+          "awaitingDevice": "等待完成 · 自动检测，无需回填",
+          "verifying": "验证中…",
+          "success": "连接成功"
+        },
+        "error": {
+          "start": "无法开始授权，请重试",
+          "timeout": "授权超时，请重新连接",
+          "generic": "连接失败，请重试"
+        },
+        "hubOption": {
+          "title": "由中枢托管此订阅（实验）",
+          "subtitle": "凭据由中枢保存并转发，可能违反厂商条款",
+          "on": "已开启",
+          "off": "关"
+        }
+      },
+      "consent": {
+        "title": "由中枢托管订阅 · 风险提示",
+        "subtitle": "启用前请确认你已了解以下风险。",
+        "points": [
+          "该来源使用你本人订阅的登录凭据；厂商条款通常要求订阅仅供个人在官方客户端内使用，经由中枢代理转发属于非官方用法，可能违反其服务条款。",
+          "存在账号被风控、限流或封禁的真实风险（已有 Claude 订阅经代理使用被自动封号的先例）；是否启用由你自行决定并承担后果。",
+          "追求最稳妥时，请对订阅使用直连模式（官方客户端直接连接），或改用 API Key 来源（厂商明确允许程序化 / 代理调用）。"
+        ],
+        "confirm": "我已了解风险，继续"
+      },
+      "toast": {
+        "reorderFailed": "顺序保存失败",
+        "connected": "已接入中枢",
+        "connectFailed": "接入失败，请重试",
+        "refreshFailed": "刷新失败，请重试"
+      },
+      "backends": {
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "opencode": "OpenCode"
+      }
+    }
   },
   "remoteAccess": {
     "badge": "Avibe Cloud Provider",
@@ -1022,6 +1200,8 @@
     "sessionReference": "引用该会话",
     "sessionFork": "复刻会话",
     "sessionForkUnavailable": "此会话还没有可复刻的原生 Agent 会话。",
+    "sessionHideToBackground": "隐藏到后台",
+    "sessionHiddenToast": "已隐藏到后台 · 可在 Agents→Runs 找回",
     "sessionArchive": "归档会话",
     "archiveSession": {
       "title": "永久归档此会话？",
@@ -1760,7 +1940,9 @@
     "chatMessageFontSize": "聊天消息字号",
     "chatMessageFontSizeHint": "Web UI 聊天页里用户和 Agent 消息气泡的文字大小",
     "showAgentActivity": "显示 Agent 执行过程",
-    "showAgentActivityHint": "在 Web 聊天中实时显示 Agent 的中间步骤——中间消息与工具调用摘要，回复到达后自动折叠为一行摘要。仅 Web 聊天，不影响 IM 平台。默认关闭。",
+    "showAgentActivityHint": "在聊天中实时显示 Agent 的中间步骤 —— 中间消息与工具调用摘要，工作完成后自动折叠。",
+    "showToolCalls": "显示工具调用",
+    "showToolCallsHint": "在执行过程面板中显示工具调用行 —— 关闭后仅保留 Agent 的叙述文字。步数与耗时不受影响。也可在面板的「工具」按钮上实时切换。",
     "slackLinkPreviews": "关闭 Slack 链接预览",
     "slackLinkPreviewsHint": "关闭 Avibe 发送到 Slack 的 URL 和媒体预览卡片",
     "allowedChannels": "允许的群组",
@@ -1935,7 +2117,7 @@
     "subtitle": "已登记 {{count}} 个 Agent。",
     "tabs": {
       "definitions": "定义",
-      "running": "运行中"
+      "running": "运行"
     },
     "running": {
       "empty": "当前没有正在运行的 Agent。",
@@ -1956,6 +2138,82 @@
       "endedToast": "已结束",
       "endFailedToast": "无法结束（{{error}}）",
       "pidShared": "（共享）"
+    },
+    "graph": {
+      "subtitle": "谁启动了谁、向谁汇报 — 点节点看详情，双击进入会话。",
+      "livePill": "{{active}} 个运行中 · {{queued}} 排队",
+      "empty": "该视图暂无会话。",
+      "error": "无法加载运行图。",
+      "unreachable": "运行时不可达 — 仅显示历史。",
+      "truncated": "仅显示最近 300 个会话 — 收窄筛选条件可查看其余。",
+      "orphans": {
+        "title": "{{count}} 个会话外进程",
+        "description": "无法归属到会话的运行时,不作为图节点显示,可在此结束。"
+      },
+      "filters": {
+        "modeLabel": "时间范围",
+        "active": "活跃",
+        "withHistory": "含历史",
+        "project": "项目",
+        "projectAll": "全部",
+        "showBackground": "显示后台会话"
+      },
+      "window": {
+        "1h": "近 1 小时",
+        "6h": "近 6 小时",
+        "24h": "近 24 小时",
+        "7d": "近 7 天"
+      },
+      "trigger": {
+        "task": "TASK",
+        "watch": "WATCH",
+        "disabled": "已禁用"
+      },
+      "legend": {
+        "spawn": "启动",
+        "trigger": "Task / Watch 触发",
+        "background": "后台会话",
+        "callbackNote": "汇报关系只在详情面板"
+      },
+      "status": {
+        "active": "运行中",
+        "idle": "空闲",
+        "orphan": "孤儿",
+        "queued": "排队",
+        "succeeded": "已完成",
+        "failed": "失败",
+        "canceled": "已取消"
+      },
+      "detail": {
+        "background": "后台",
+        "foreground": "前台",
+        "standalone": "独立",
+        "project": "项目",
+        "workdir": "工作目录",
+        "visibility": "可见性",
+        "visibilityForeground": "前台",
+        "visibilityBackground": "后台 · 不在会话列表",
+        "startedBy": "启动方",
+        "reportsTo": "汇报到",
+        "trigger": "触发",
+        "triggerAgentRun": "agent · vibe agent run",
+        "triggerHuman": "人工发起",
+        "callback": {
+          "pending": "待回传",
+          "sent": "已回传",
+          "failed": "回传失败",
+          "skipped": "已跳过"
+        },
+        "runsTitle": "RUNS · 本会话",
+        "viewAllInHarness": "在 Harness 查看全部",
+        "openChat": "打开会话 · 查看 Chat 记录",
+        "toForeground": "移到前台",
+        "toBackground": "隐藏",
+        "cancelRun": "取消 Run",
+        "movedForeground": "已移到前台",
+        "movedBackground": "已移到后台",
+        "endGone": "该会话已不在运行。"
+      }
     },
     "showDisabled": "显示已禁用",
     "statusEnabled": "已启用",
@@ -2179,8 +2437,8 @@
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
-      "title": "后台工作横幅",
-      "description": "在会话底部显示进行中的后台工作。"
+      "title": "后台任务横幅",
+      "description": "在会话底部显示进行中的后台任务。"
     },
     "sessionFilter": {
       "chip": "仅看:本会话 {{id}}",
@@ -2235,6 +2493,9 @@
       "openInAgents": "在 Agents 打开",
       "agentInherit": "继承默认 Agent",
       "sessionNone": "未绑定会话",
+      "source": "来源",
+      "parentRun": "父 Run",
+      "callback": "回传",
       "effort": "推理 {{value}}"
     },
     "sessionPolicy": {
@@ -2282,6 +2543,17 @@
     "showPage": {
       "open": "可视化",
       "backToChat": "回聊天",
+      "annotate": {
+        "toggle": "标注",
+        "smart": "Smart",
+        "screenshot": "截图",
+        "smartDesc": "点选元素 · 选文字 · 框选区域",
+        "screenshotDesc": "框选区域 · 多条编号评论",
+        "closeAnnotation": "关闭标注",
+        "modeTitle": "标注模式",
+        "rememberHint": "记住上次选择",
+        "unavailable": "标注暂不可用"
+      },
       "title": "Show Page",
       "prompt": "Please visualize this session as a Show Page.",
       "share": "分享",
@@ -2328,7 +2600,9 @@
       "scheduled": "定时任务",
       "watch": "Watch 监听",
       "webhook": "Webhook",
-      "harness": "自动触发"
+      "harness": "来自 Agent",
+      "from": "来自",
+      "agentFallback": "智能体"
     },
     "picker": {
       "agent": "Agent",
@@ -2375,9 +2649,9 @@
       "zoomOut": "缩小"
     },
     "activities": {
-      "running": "后台工作 · {{count}}",
+      "running": "后台任务 · {{count}}",
       "delivering": "正在投递后台输出 · {{count}}",
-      "toggle": "展开后台工作",
+      "toggle": "展开后台任务",
       "manageInHarness": "在 Harness 中管理",
       "openHarness": "在 Harness 中打开 · {{kind}}",
       "status": {
@@ -2385,13 +2659,11 @@
       },
       "kind": {
         "backendActivity": "后台任务",
-        "watch": "监视",
-        "task": "定时任务",
+        "watch": "监听",
+        "task": "任务",
+        "taskOneShot": "一次性",
+        "taskRecurring": "周期性",
         "agentRun": "Agent 运行"
-      },
-      "connection": {
-        "reconnecting": "重连中",
-        "disconnected": "已断开"
       }
     },
     "agentActivity": {
@@ -2410,7 +2682,20 @@
       "retry": "重试",
       "durationMin": "{{minutes}} 分 {{seconds}} 秒",
       "durationSec": "{{seconds}} 秒",
-      "empty": "本轮没有执行过程记录。"
+      "empty": "本轮没有执行过程记录。",
+      "tools": "工具",
+      "showTools": "显示工具调用",
+      "hideTools": "隐藏工具调用",
+      "toolsHidden": "已隐藏 {{count}} 条工具调用",
+      "toolsHiddenLive": "工具调用已隐藏 · 进行中",
+      "params": "参数",
+      "viewJson": "JSON",
+      "jsonLoading": "加载中…",
+      "copy": "复制",
+      "copied": "已复制",
+      "opCreate": "新增",
+      "opModify": "修改",
+      "opDelete": "删除"
     },
     "queue": {
       "title": "排队中 · {{count}}",

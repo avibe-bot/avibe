@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from config import paths
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -75,6 +77,28 @@ def test_list_type_filter(monkeypatch, tmp_path, capsys):
     _seed(engine, "seschat", platform="slack", native="C1")
     _, payload = _run(cli.cmd_session_list, ["session", "list", "--type", "slack"], capsys)
     assert [s["id"] for s in payload["sessions"]] == ["seschat"]
+
+
+def test_list_avibe_type_includes_foreground_standalone(monkeypatch, tmp_path, capsys):
+    from core.services import sessions as sessions_service
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesweb", platform="avibe", native="proj_a")
+    _seed(engine, "seschat", platform="slack", native="C1")
+    with engine.begin() as conn:
+        standalone = sessions_service.create_session(
+            conn,
+            scope_id=None,
+            agent_backend="codex",
+            visibility="foreground",
+        )
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--type", "avibe"], capsys)
+
+    assert {session["id"] for session in payload["sessions"]} == {
+        "sesweb",
+        standalone["id"],
+    }
 
 
 def test_list_pagination_fixed_ten_no_limit_flag(monkeypatch, tmp_path, capsys):
@@ -219,6 +243,99 @@ def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
     _seed(engine, "sesaaa", title="Old")
     _, payload = _run(cli.cmd_session_update, ["session", "update", "sesaaa", "--title", ""], capsys)
     assert payload["session"]["title"] is None
+
+
+def test_update_help_teaches_visibility_sugar(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["session", "update", "--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--visible" in help_text
+    assert "--hidden" in help_text
+    assert "--visibility {foreground,background}" in help_text
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [("--visible", "foreground"), ("--hidden", "background")],
+)
+def test_update_visibility_sugar_parses(flag, expected):
+    args = cli.build_parser().parse_args(["session", "update", "sesaaa", flag])
+
+    assert args.visibility == expected
+
+
+@pytest.mark.parametrize(
+    "visibility_args",
+    [
+        ["--visible", "--hidden"],
+        ["--visible", "--visibility", "background"],
+        ["--hidden", "--visibility", "foreground"],
+    ],
+)
+def test_update_visibility_sugar_rejects_conflicts(visibility_args, capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["session", "update", "sesaaa", *visibility_args])
+
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "invalid_arguments"
+    assert "not allowed with argument" in payload["error"]
+
+
+def test_update_visibility_and_make_standalone_keeps_workdir(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    original_scope_id = _seed(engine, "sesaaa", title="Old")
+    posted: dict = {}
+    monkeypatch.setattr(
+        cli,
+        "_post_session_activity_to_live_ui",
+        lambda session_id, **kwargs: posted.update(session_id=session_id, **kwargs),
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "sesaaa")
+            .values(workdir=str(tmp_path / "original-workdir"))
+        )
+        original_workdir = conn.execute(
+            agent_sessions.select().where(agent_sessions.c.id == "sesaaa")
+        ).mappings().one()["workdir"]
+
+    code, payload = _run(
+        cli.cmd_session_update,
+        [
+            "session",
+            "update",
+            "sesaaa",
+            "--visibility",
+            "background",
+            "--scope-id",
+            "none",
+        ],
+        capsys,
+    )
+
+    assert code == 0
+    assert payload["session"]["visibility"] == "background"
+    assert payload["session"]["scope_id"] is None
+    assert payload["session"]["project_id"] is None
+    assert payload["session"]["workdir"] == original_workdir
+    assert posted == {
+        "session_id": "sesaaa",
+        "previous_scope_id": original_scope_id,
+        "previous_visibility": "foreground",
+    }
+    with engine.connect() as conn:
+        anchor = conn.execute(
+            agent_sessions.select().where(agent_sessions.c.id == "sesaaa")
+        ).mappings().one()["session_anchor"]
+    assert anchor == "sesaaa"
 
 
 def test_update_archived_is_not_found(monkeypatch, tmp_path, capsys):
@@ -400,6 +517,66 @@ def test_cli_activity_endpoint_publishes_with_token(monkeypatch):
     events = [data for topic, data in published if topic == "session.activity"]
     assert events and events[0]["session_id"] == "seslive"
     assert events[0]["event"] == "updated" and events[0]["title"] == "Renamed"
+
+
+def test_cli_activity_placement_events_match_patch(monkeypatch):
+    import vibe.sse_broker as sse_broker
+    from core.services import sessions as sessions_service
+    from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe.ui_server import app
+
+    ensure_sqlite_state(primary_platform="avibe")
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    scope_id = _seed(engine, "sesplacement", title="Placement")
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        sse_broker.broker,
+        "publish",
+        lambda topic, data: published.append((topic, data)),
+    )
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/sessions/sesplacement",
+        json={"visibility": "background"},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+    patch_events = [data for topic, data in published if topic == "session.activity"]
+
+    with engine.begin() as conn:
+        sessions_service.update_session(
+            conn,
+            "sesplacement",
+            visibility="foreground",
+        )
+        previous = sessions_service.get_session(conn, "sesplacement")
+        sessions_service.update_session(
+            conn,
+            "sesplacement",
+            visibility="background",
+        )
+    published.clear()
+
+    response = client.post(
+        "/api/sessions/sesplacement/cli-activity",
+        json={
+            "previous_scope_id": previous["scope_id"],
+            "previous_visibility": previous["visibility"],
+        },
+        headers={
+            "X-Vibe-Show-Client": "cli",
+            SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token(),
+        },
+    )
+    assert response.status_code == 200
+    cli_events = [data for topic, data in published if topic == "session.activity"]
+
+    assert previous["scope_id"] == scope_id
+    assert cli_events == patch_events
 
 
 def test_cli_activity_endpoint_rejects_without_token(monkeypatch):

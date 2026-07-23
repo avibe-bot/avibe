@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useRef } from 'react';
 import { AlertTriangle, CheckCircle, XCircle, X } from 'lucide-react';
 
+import { shouldCoalesceToast, type ToastAction } from './toastCoalesce';
+
 type ToastType = 'success' | 'error' | 'warning';
 
 interface Toast {
@@ -12,10 +14,11 @@ interface Toast {
   // 503-ing endpoint during a daemon restart) we coalesce instead of
   // stacking 5+ identical popups.
   repeats: number;
+  action?: ToastAction;
 }
 
 interface ToastContextType {
-  showToast: (message: string, type?: ToastType) => void;
+  showToast: (message: string, type?: ToastType, action?: ToastAction) => void;
 }
 
 const ToastContext = createContext<ToastContextType | null>(null);
@@ -26,37 +29,46 @@ let toastId = 0;
 // existing toast's repeat counter instead of stacking a new toast.
 const DEDUPE_WINDOW_MS = 4000;
 
+// Actionable toasts stay a bit longer so there is time to hit the action (undo).
+const ACTION_TOAST_MS = 6000;
+const PLAIN_TOAST_MS = 3000;
+
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
   // Ref so dedupe lookups don't rerender. Maps message -> {id, expiresAt}
   // for currently-visible toasts; we evict on auto-dismiss.
   const recentRef = useRef<Map<string, { id: number; expiresAt: number }>>(new Map());
 
-  const showToast = useCallback((message: string, type: ToastType = 'success') => {
-    // Coalesce duplicate messages from polling / retry loops. The user
-    // sees one toast with a "(×N)" badge instead of a wall of identical
-    // popups; this matters most for transient 503s during daemon restarts.
-    const now = Date.now();
-    const existing = recentRef.current.get(message);
-    if (existing && existing.expiresAt > now) {
-      setToasts((prev) =>
-        prev.map((t) => (t.id === existing.id ? { ...t, repeats: t.repeats + 1, type } : t)),
-      );
-      return;
-    }
-    const id = ++toastId;
-    recentRef.current.set(message, { id, expiresAt: now + DEDUPE_WINDOW_MS });
-    setToasts((prev) => [...prev, { id, message, type, repeats: 0 }]);
+  const showToast = useCallback(
+    (message: string, type: ToastType = 'success', action?: ToastAction) => {
+      // Coalesce duplicate messages from polling / retry loops. The user
+      // sees one toast with a "(×N)" badge instead of a wall of identical
+      // popups; this matters most for transient 503s during daemon restarts.
+      // Actionable toasts opt out (see shouldCoalesceToast).
+      const now = Date.now();
+      const existing = recentRef.current.get(message);
+      if (shouldCoalesceToast(!!action, existing, now)) {
+        setToasts((prev) =>
+          prev.map((t) => (t.id === existing!.id ? { ...t, repeats: t.repeats + 1, type } : t)),
+        );
+        return;
+      }
+      const id = ++toastId;
+      // Only track plain toasts for dedupe; actionable ones are always distinct.
+      if (!action) recentRef.current.set(message, { id, expiresAt: now + DEDUPE_WINDOW_MS });
+      setToasts((prev) => [...prev, { id, message, type, repeats: 0, action }]);
 
-    // Auto dismiss after 3 seconds
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-      // Best-effort cleanup of the dedupe map — the entry may have been
-      // re-issued under a different id during the window.
-      const tracked = recentRef.current.get(message);
-      if (tracked && tracked.id === id) recentRef.current.delete(message);
-    }, 3000);
-  }, []);
+      // Auto dismiss (longer for actionable toasts so undo is reachable).
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+        // Best-effort cleanup of the dedupe map — the entry may have been
+        // re-issued under a different id during the window.
+        const tracked = recentRef.current.get(message);
+        if (tracked && tracked.id === id) recentRef.current.delete(message);
+      }, action ? ACTION_TOAST_MS : PLAIN_TOAST_MS);
+    },
+    [],
+  );
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -95,6 +107,17 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               <span className="ml-1 rounded-full bg-current/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums opacity-80">
                 ×{toast.repeats + 1}
               </span>
+            )}
+            {toast.action && (
+              <button
+                onClick={() => {
+                  toast.action!.onClick();
+                  dismissToast(toast.id);
+                }}
+                className="ml-1 shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold underline underline-offset-2 hover:opacity-80"
+              >
+                {toast.action.label}
+              </button>
             )}
             <button
               onClick={() => dismissToast(toast.id)}

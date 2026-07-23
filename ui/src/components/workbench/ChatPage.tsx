@@ -2,7 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useTranslation } from 'react-i18next';
 import { memoryStatusBuckets } from '../../lib/memoryStatus';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -18,7 +18,14 @@ import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { activityItemKind, harnessNavPath, resolveActivityLabel, sortBackgroundActivities } from '../../lib/backgroundActivity';
+import {
+  activityItemKind,
+  activityKindI18nKey,
+  harnessNavPath,
+  resolveActivityLabel,
+  sortBackgroundActivities,
+} from '../../lib/backgroundActivity';
+import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -29,6 +36,8 @@ import {
 } from '../../lib/memoryCommandResult';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
+import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
+import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnotation';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import { InstallHint } from '../InstallHint';
 import { Button } from '../ui/button';
@@ -60,6 +69,15 @@ import {
   type LiveActivityState,
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
+
+// The chat host marks its Show Page iframe with ``vibe-embed=1`` (annotation
+// contract §6) so the in-page overlay switches to embedded mode — floating
+// toolbar hidden, controlled via postMessage from the header control. Applied
+// wherever the iframe src is composed (first open + visibility re-point).
+const SHOW_PAGE_EMBED_PARAM = 'vibe-embed=1';
+function embedShowPageSrc(path: string): string {
+  return path.includes('?') ? `${path}&${SHOW_PAGE_EMBED_PARAM}` : `${path}?${SHOW_PAGE_EMBED_PARAM}`;
+}
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -173,6 +191,17 @@ export const ChatPage: React.FC = () => {
   // document so the (non-modal) popover dismisses, without modal-blocking the
   // sibling header buttons (which would then need two taps).
   const [shareOpen, setShareOpen] = useState(false);
+  // True while the mobile annotation mode-picker popover is open. Like the share
+  // popover it floats over the iframe, so it also makes the iframe inert.
+  const [annotateOpen, setAnnotateOpen] = useState(false);
+  // postMessage bridge to the Show Page iframe: sends annotation control
+  // messages and derives the header control's state from the overlay's state
+  // broadcasts (contract §3). Keyed off showPageMode+showPageUrl (null while the
+  // iframe is hidden) so leaving Show Page mode resets state to unknown — else
+  // closing then reopening the SAME session's page (showPageUrl unchanged) would
+  // show the stale enabled/mode and could send control messages to the freshly
+  // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
+  const annotation = useShowPageAnnotation(showPageMode ? showPageUrl : null);
   useEffect(() => {
     // ChatPage is reused across :sessionId — clear all show-page state so the
     // next chat starts in chat view with a live (not stuck-busy) toggle.
@@ -328,6 +357,7 @@ export const ChatPage: React.FC = () => {
   const workingRef = useRef(working);
   workingRef.current = working;
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>(emptyRuntimeState);
+  const [eventStreamConnected, setEventStreamConnected] = useState(false);
   // Global background-work banner toggle (spec req 2), persisted server-side.
   // Tri-state: null = not yet known → suppress the banner so a stored "off"
   // never flashes on first paint; resolves to the stored value (ON when absent),
@@ -356,6 +386,18 @@ export const ChatPage: React.FC = () => {
   const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
   const [liveStartedAt, setLiveStartedAt] = useState<number | null>(null);
   const [activityCardExpanded, setActivityCardExpanded] = useState(false);
+  // Tool-row visibility (``config.ui.show_tool_calls``, default on). Global +
+  // cross-device: the eye pill and the Settings toggle write the same config field.
+  const [showToolCalls, setShowToolCalls] = useState(true);
+  const toggleToolCalls = useCallback(() => {
+    setShowToolCalls((prev) => {
+      const next = !prev;
+      // Optimistic; persist the minimal ui patch (save_config deep-merges). A failed
+      // save leaves the local flag as the user set it for this session.
+      void api.saveConfig({ ui: { show_tool_calls: next } }).catch(() => {});
+      return next;
+    });
+  }, [api]);
   const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
   const [loadingActivity, setLoadingActivity] = useState<Record<string, boolean>>({});
   // Groups whose lazy detail fetch failed — the chip shows a retry affordance
@@ -379,10 +421,6 @@ export const ChatPage: React.FC = () => {
     setLiveRows(next.rows);
     setLiveStartedAt(next.startedAt);
   }, []);
-  // Bumped on resume (tab visible again / network back) to force the transcript
-  // subscription effect to reopen a possibly-dead SSE stream — see the
-  // visibility effect below.
-  const [connectionEpoch, setConnectionEpoch] = useState(0);
   // Lifecycle guards for ``syncTurnState``'s clear-on-idle (Codex P2):
   //  - ``turnEpochRef`` bumps every time a turn STARTS (local send / send-now /
   //    observed ``turn.start``). syncTurnState captures it before its request and
@@ -776,11 +814,11 @@ export const ChatPage: React.FC = () => {
   // directions: sets Stop when a turn is live, and clears a stale Stop (a
   // ``turn.end`` we missed while the socket was down) when the controller reports
   // idle — guarded so it can't drop a turn that's genuinely starting.
-  const syncTurnState = useCallback(async () => {
+  const syncTurnState = useCallback(async (options?: { quiet?: boolean }) => {
     if (!sessionId) return;
     const epochAtRequest = turnEpochRef.current;
     try {
-      const res = await api.getTurnState(sessionId);
+      const res = await api.getTurnState(sessionId, { handleError: !options?.quiet });
       if (sessionId !== sessionIdRef.current) return;
       if (res.foreground === 'unknown') return;
       setRuntimeState(res);
@@ -850,6 +888,8 @@ export const ChatPage: React.FC = () => {
       const activityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
       setShowAgentActivity(activityEnabled);
       showAgentActivityRef.current = activityEnabled;
+      // Default on: only an explicit ``false`` hides tool rows.
+      setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the
       // load isn't clobbered; the session-change reset keeps prior sessions out.
       setMessages((prev) => mergeById(bootstrap.messages, prev));
@@ -977,6 +1017,10 @@ export const ChatPage: React.FC = () => {
           return;
         }
         appendMessage(msg);
+        // A9a: a live agent-callback prompt is published before its source
+        // session is resolved, so pull the enriched REST row (mergeById fills
+        // source_session_* in place) — the chip appears without a reload/refocus.
+        if (isUnresolvedAgentCallback(msg)) void reconcile();
         // Agent Activity: a terminal reply settles the turn → mark the generation
         // settled and rebuild groups from storage (chip, rows, status, duration all
         // come from the endpoint, never the lossy live buffer).
@@ -1056,15 +1100,21 @@ export const ChatPage: React.FC = () => {
         // a native bind whose turn.end we missed.
         void reconcile();
         void refreshQueue();
-        void syncTurnState();
+        void syncTurnState({ quiet: true });
         void refreshSessionRowUntilNativeBound();
       },
-      onError: () => {
-        // Browser EventSource auto-reconnects; keep the page usable.
+      onConnectionState: (state) => {
+        const connected = state === 'connected';
+        setEventStreamConnected(connected);
+        if (!connected) void syncTurnState({ quiet: true });
       },
-    }, { reconnect: connectionEpoch > 0 });
+      onError: () => {
+        // ApiContext owns the explicit retry loop; keep the page usable while
+        // the turn-state fallback below reconciles durable activity data.
+      },
+    });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, connectionEpoch, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1072,32 +1122,21 @@ export const ChatPage: React.FC = () => {
   // catch up to durable storage.
   useEffect(() => {
     if (!sessionId) return;
-    const onVisible = () => {
+    const resync = () => {
       if (document.visibilityState !== 'visible') return;
       // A suspended tab can drop the reply AND the turn.end, so recover all
       // three: missed rows, the queue, and the working/Stop state (Codex P2).
       void reconcile();
       void refreshQueue();
-      void syncTurnState();
-      // The immediate reconcile above only catches up to NOW; if the socket
-      // itself is dead (iOS can leave EventSource in a zombie OPEN state that
-      // never auto-reconnects), it would be the last update until the next
-      // resume. Reopen the stream so live events keep flowing while the page
-      // stays foregrounded — the reopen's onConnected re-runs reconcile
-      // (idempotent).
-      setConnectionEpoch((e) => e + 1);
+      void syncTurnState({ quiet: true });
     };
-    document.addEventListener('visibilitychange', onVisible);
-    // Network flaps (mobile handoff, sleep/wake) can kill the stream without a
-    // visibility change; reopen it on ``online`` too (only while foregrounded —
-    // a background resume is handled by visibilitychange).
-    const onOnline = () => {
-      if (document.visibilityState === 'visible') setConnectionEpoch((e) => e + 1);
-    };
-    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', resync);
+    window.addEventListener('online', resync);
+    window.addEventListener('focus', resync);
     return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', resync);
+      window.removeEventListener('online', resync);
+      window.removeEventListener('focus', resync);
     };
   }, [sessionId, reconcile, refreshQueue, syncTurnState]);
 
@@ -1119,13 +1158,14 @@ export const ChatPage: React.FC = () => {
       runtimeState.background_activities.length > 0 ||
       runtimeState.pending_activity_output_count > 0 ||
       runtimeState.connection === 'reconnecting';
-    if (!working && !hasBackgroundState) return;
+    const needsStreamFallback = !eventStreamConnected;
+    if (!working && !hasBackgroundState && !needsStreamFallback) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
-      void syncTurnState();
-    }, hasBackgroundState ? ACTIVITY_RECONCILE_INTERVAL_MS : WORKING_RECONCILE_INTERVAL_MS);
+      void syncTurnState({ quiet: needsStreamFallback });
+    }, hasBackgroundState || needsStreamFallback ? ACTIVITY_RECONCILE_INTERVAL_MS : WORKING_RECONCILE_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [working, runtimeState.background_activities.length, runtimeState.pending_activity_output_count, runtimeState.connection, syncTurnState]);
+  }, [working, runtimeState.background_activities.length, runtimeState.pending_activity_output_count, runtimeState.connection, eventStreamConnected, syncTurnState]);
 
   const sendMessage = useCallback(
     async (
@@ -1315,9 +1355,11 @@ export const ChatPage: React.FC = () => {
       if (res?.ok) {
         // Public pages are served under /p/<share_id>/; private under /show/<id>/.
         setShowPageUrl(
-          res.visibility === 'public' && res.share_id
-            ? `/p/${encodeURIComponent(res.share_id)}/`
-            : `/show/${encodeURIComponent(sid)}/`,
+          embedShowPageSrc(
+            res.visibility === 'public' && res.share_id
+              ? `/p/${encodeURIComponent(res.share_id)}/`
+              : `/show/${encodeURIComponent(sid)}/`,
+          ),
         );
         setShowPageMode(true);
         // First open (or a prior prompt that failed to send) asks the agent to
@@ -1346,7 +1388,7 @@ export const ChatPage: React.FC = () => {
   // so it never stays on a route that now 404s.
   const handleShowPagePayload = useCallback((next: ShowPageLinkInfo) => {
     const path = localPath(next);
-    if (path) setShowPageUrl(path);
+    if (path) setShowPageUrl(embedShowPageSrc(path));
   }, []);
 
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
@@ -1825,6 +1867,8 @@ export const ChatPage: React.FC = () => {
           onToggleShowPage={toggleShowPage}
           onShowPageVisibilityChange={handleShowPagePayload}
           onShareOpenChange={setShareOpen}
+          annotation={annotation}
+          onAnnotateOpenChange={setAnnotateOpen}
         />
 
       {showPageMode && showPageUrl && (
@@ -1842,11 +1886,16 @@ export const ChatPage: React.FC = () => {
         // isolation isn't the security boundary anyway. We still drop the exotic
         // capabilities the page never needs (top navigation, pointer lock, etc.).
         <iframe
+          ref={annotation.iframeRef}
+          onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
           src={showPageUrl}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
-          className={clsx('min-h-0 w-full flex-1 border-0 bg-background', shareOpen && 'pointer-events-none')}
+          className={clsx(
+            'min-h-0 w-full flex-1 border-0 bg-background',
+            (shareOpen || annotateOpen) && 'pointer-events-none',
+          )}
         />
       )}
 
@@ -1892,6 +1941,8 @@ export const ChatPage: React.FC = () => {
             error: activityError,
             onToggleGroup: toggleActivityGroup,
             onRetryGroup: loadActivityDetail,
+            showToolCalls,
+            onToggleTools: toggleToolCalls,
           }}
           footer={
             sessionId ? (
@@ -1903,7 +1954,11 @@ export const ChatPage: React.FC = () => {
             ) : null
           }
         />
-        <ActivityStrip state={runtimeState} sessionId={sessionId ?? ''} enabled={bannerEnabled === true} />
+        <ActivityStrip
+          state={runtimeState}
+          sessionId={sessionId ?? ''}
+          enabled={bannerEnabled === true}
+        />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         {sessionId && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
@@ -2070,14 +2125,6 @@ const ACTIVITY_ITEM_TINT: Record<SessionActivityItemKind, string> = {
   agent_run: 'bg-violet/15 text-violet',
 };
 
-// item_kind (snake_case wire value) -> chat.activities.kind.* i18n leaf.
-const ACTIVITY_ITEM_I18N: Record<SessionActivityItemKind, string> = {
-  backend_activity: 'backendActivity',
-  watch: 'watch',
-  task: 'task',
-  agent_run: 'agentRun',
-};
-
 // One expanded popover row: colored kind icon box + two-line label / subtitle.
 // Backend activities are display-only with a colored status word (no landing
 // page); harness rows navigate to their Harness surface on click.
@@ -2088,7 +2135,7 @@ const ActivityRow: React.FC<{
   const { t } = useTranslation();
   const kind = activityItemKind(item);
   const Icon = ACTIVITY_ITEM_ICON[kind];
-  const kindLabel = t(`chat.activities.kind.${ACTIVITY_ITEM_I18N[kind]}`);
+  const kindLabel = t(`chat.activities.kind.${activityKindI18nKey(item)}`);
   const label = resolveActivityLabel(item, kindLabel);
   const relative = formatRelativeTime(item.since ?? item.started_at, t);
   const isHarness = kind !== 'backend_activity';
@@ -2158,11 +2205,8 @@ const ActivityStrip: React.FC<{
 
   const first = active[0];
   const firstLabel = first
-    ? resolveActivityLabel(first, t(`chat.activities.kind.${ACTIVITY_ITEM_I18N[activityItemKind(first)]}`))
+    ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
     : '';
-  const connectionVisible =
-    active.length > 0 &&
-    (state.connection === 'reconnecting' || state.connection === 'disconnected');
   const expandable = active.length > 0;
   const navigateTo = (path: string) => {
     setOpen(false);
@@ -2175,7 +2219,7 @@ const ActivityStrip: React.FC<{
       role="status"
       aria-live="polite"
       className={clsx(
-        'min-h-7 min-w-0 max-w-[420px] gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
+        'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
@@ -2193,11 +2237,6 @@ const ActivityStrip: React.FC<{
               : t('chat.activities.delivering', { count: pendingOutputs })}
             {firstLabel ? ` · ${firstLabel}` : ''}
           </span>
-          {connectionVisible ? (
-            <span className="shrink-0 border-l border-border-strong pl-2 text-gold">
-              {t(`chat.activities.connection.${state.connection}`)}
-            </span>
-          ) : null}
           {expandable ? (
             <ChevronDown
               className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-180')}
@@ -2218,7 +2257,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 aria-label={t('chat.activities.toggle')}
-                className="block max-w-full rounded-full outline-none focus-visible:ring-2 focus-visible:ring-mint/40"
+                className="block w-fit max-w-[min(420px,100%)] rounded-full outline-none focus-visible:ring-2 focus-visible:ring-mint/40"
               >
                 {pill}
               </button>
@@ -2338,9 +2377,11 @@ interface ChatHeaderBarProps {
   onToggleShowPage: () => void;
   onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
   onShareOpenChange?: (open: boolean) => void;
+  annotation: AnnotationBridge;
+  onAnnotateOpenChange?: (open: boolean) => void;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2425,9 +2466,20 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             the page + prompts the agent. It shows its label on desktop and stays
             icon-only on mobile. In Show Page mode a Share control sits beside the
             back-to-chat button. */}
-        {/* Back-to-chat (or Visualize when in chat) stays leftmost; the Share
-            control sits to its right, only while the Show Page is open. */}
+        {/* In Show Page mode the order is: annotation control · back-to-chat ·
+            Share. The annotation control sits immediately left of back-to-chat;
+            the Share control stays rightmost. In chat mode only the Visualize
+            toggle shows. */}
         <div className="ml-auto flex items-center gap-1.5">
+          {showPageMode && (
+            <ShowPageAnnotateControl
+              state={annotation.state}
+              onEnable={annotation.enable}
+              onDisable={annotation.disable}
+              onSetMode={annotation.setMode}
+              onPopoverOpenChange={onAnnotateOpenChange}
+            />
+          )}
           <Button
             type="button"
             variant={showPageMode ? 'secondary' : 'ghost'}
@@ -2563,6 +2615,8 @@ interface TranscriptProps {
     error: Record<string, boolean>;
     onToggleGroup: (group: ActivityGroup) => void;
     onRetryGroup: (group: ActivityGroup) => void;
+    showToolCalls: boolean;
+    onToggleTools: () => void;
   };
   // Rendered at the end of the scroll content, after the last message (e.g. the in-scroll
   // vault request cards). Part of the timeline, so it scrolls with the conversation.
@@ -2695,6 +2749,8 @@ const Transcript: React.FC<TranscriptProps> = ({
         error={!!activity.error[group.id]}
         onToggle={() => activity.onToggleGroup(group)}
         onRetry={() => activity.onRetryGroup(group)}
+        showToolCalls={activity.showToolCalls}
+        onToggleTools={activity.onToggleTools}
       />
     ) : null;
   const empty = messages.length === 0 && !working;
@@ -2975,6 +3031,8 @@ const Transcript: React.FC<TranscriptProps> = ({
               startedAtMs={activity.liveStartedAt}
               expanded={activity.cardExpanded}
               onToggleExpanded={activity.onToggleCard}
+              showToolCalls={activity.showToolCalls}
+              onToggleTools={activity.onToggleTools}
             />
           ) : showThinking ? (
             <ThinkingBubble session={session} />
@@ -3067,23 +3125,6 @@ const ThinkingBubble: React.FC<{ session: WorkbenchSession }> = ({ session }) =>
   );
 };
 
-// Maps a harness trigger kind (the ``author_name`` on a source='harness' row)
-// to a friendly provenance label. Distinguishes Task vs Watch per the spec; a
-// finer kind (webhook) gets its own label, anything else falls back.
-const harnessLabel = (kind: string | null | undefined, t: (k: string) => string): string => {
-  switch (kind) {
-    case 'watch':
-      return t('chat.source.watch');
-    case 'webhook':
-      return t('chat.source.webhook');
-    case 'scheduled':
-    case 'task_run':
-      return t('chat.source.scheduled');
-    default:
-      return t('chat.source.harness');
-  }
-};
-
 type MessageRowProps = {
   message: WorkbenchMessage;
   session: WorkbenchSession;
@@ -3106,6 +3147,7 @@ type MessageRowProps = {
 // useCallback), so the default shallow compare is correct here.
 const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, highlighted }: MessageRowProps) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
   const [expanded, setExpanded] = useState(false);
 
@@ -3124,6 +3166,9 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   // watch / webhook); collapsed by default so it doesn't dominate.
   const isHarness = !isNotify && !isAgent && !isSystem && message.source === 'harness';
   const isUser = !isNotify && !isAgent && !isSystem && !isHarness;
+  // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
+  // rows link to the source session's chat; task/watch rows to the Harness view.
+  const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
 
   // User-uploaded attachments ride in ``content.attachments`` (agent-reply media
@@ -3252,7 +3297,33 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
           <div className="flex items-center gap-2 px-0.5">
             <RoleAvatar tone="cyan"><Clock /></RoleAvatar>
-            <span className="text-[11px] font-medium text-cyan">{harnessLabel(message.author_name, t)}</span>
+            {triggerLink?.kind === 'harness' ? (
+              // A9b: task/watch label deep-links to the Harness filtered view.
+              <button
+                type="button"
+                onClick={() => navigate(triggerLink.to)}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
+              >
+                {t(harnessChipLabelKey(message))}
+                <ArrowUpRight className="size-3 shrink-0" />
+              </button>
+            ) : (
+              <span className="text-[11px] font-medium text-cyan">{t(harnessChipLabelKey(message))}</span>
+            )}
+            {triggerLink?.kind === 'source' && (
+              // A9a: agent-callback shows the SOURCE session + links to its chat.
+              <>
+                <span className="text-[11px] text-muted">·</span>
+                <button
+                  type="button"
+                  onClick={() => navigate(triggerLink.to)}
+                  className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
+                >
+                  <span className="min-w-0 truncate">{triggerLink.label}</span>
+                  <ArrowUpRight className="size-3 shrink-0" />
+                </button>
+              </>
+            )}
           </div>
           <Button
             type="button"

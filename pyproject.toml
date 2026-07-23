@@ -99,6 +99,7 @@ artifacts = [
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
     "vibe/memory_runtime_manifest.json",
+    "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -122,6 +123,7 @@ include = [
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
     "vibe/memory_runtime_manifest.json",
+    "vibe/model_hub_runtime/cliproxyapi_manifest.json",
     "README.md",
     "LICENSE",
 ]
@@ -143,5 +145,6 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26.0",
     "pytest>=9.0.3",
 ]

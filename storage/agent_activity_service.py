@@ -44,13 +44,16 @@ MESSAGE_SCAN_LIMIT = 500
 EVENT_SCAN_LIMIT = 2000
 
 # Message types that participate in turn structure: turn openers (user/harness),
-# terminals (result/error/notify), and the interim assistant activity rows.
+# terminals (result/error/notify/silent-marker), and the interim assistant activity
+# rows. The invisible ``silent`` marker is fetched here (it is NOT in TRANSCRIPT_TYPES)
+# so a turn that completed with no user-visible reply still has a terminal to close on.
 _RELEVANT_MESSAGE_TYPES = (
     "user",
     messages_service.HARNESS_TYPE,
     "result",
     "error",
     "notify",
+    messages_service.SILENT_TYPE,
     "assistant",
 )
 
@@ -86,18 +89,37 @@ def _duration_ms(started_iso: Optional[str], ended_iso: Optional[str]) -> Option
 
 
 def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
-    """Mirror the frontend ``isTerminalAgentMessage`` predicate."""
+    """Whether an agent message legally CLOSES a turn.
+
+    Terminals: a visible ``result``/``error`` reply, a ``backend_failure`` ``notify``
+    diagnostic, OR — when the turn produced nothing user-visible (a ``<silent>``-
+    stripped/empty final, or a reply-less bookkeeping turn) — the invisible ``silent``
+    marker persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
+    stays ``interrupted``.
+
+    A PLAIN ``notify`` is deliberately NOT terminal: agents emit mid-turn notify rows
+    that explicitly do not end the turn (e.g. Claude's model-refusal fallback), so
+    treating every notify as terminal would split one turn into two groups. A genuine
+    notify-only COMPLETION is instead closed by the ``silent`` marker (its turn still
+    emits an empty final result at the chokepoint), not by the notify row.
+    """
     if author != "agent":
         return False
-    if msg_type in ("result", "error"):
+    if msg_type in ("result", "error", messages_service.SILENT_TYPE):
         return True
     if msg_type == "notify" and (metadata or {}).get("event") == "backend_failure":
         return True
     return False
 
 
-def _terminal_status(msg_type: Any) -> str:
-    return "done" if msg_type == "result" else "failed"
+def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
+    """done for a normal completion (result / silent marker); failed for an ``error``
+    or a ``backend_failure`` notify."""
+    if msg_type == "error":
+        return "failed"
+    if msg_type == "notify" and (metadata or {}).get("event") == "backend_failure":
+        return "failed"
+    return "done"
 
 
 # Fallback tiebreak only (used when a row's microsecond id prefix can't be decoded,
@@ -169,6 +191,12 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "mtype": mtype,
                 "row_kind": "assistant",
                 "text": msg.get("text") if include_text else None,
+                # The silent marker is a terminal that is INVISIBLE in the transcript,
+                # so a group closing on it must anchor to the (visible) turn trigger
+                # rather than the marker itself; ``terminal_status`` is resolved here so
+                # ``notify`` failure/normal is decided with its metadata in hand.
+                "is_silent": mtype == messages_service.SILENT_TYPE,
+                "terminal_status": _terminal_status(mtype, metadata) if kind == "terminal" else None,
             }
         )
     # Bound events to the scanned message window: in a long session the 500-message
@@ -280,12 +308,21 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
             last_boundary_id = item["id"]
         elif kind == "terminal":
             if pending:
+                # A silent marker is invisible in the transcript, so its DONE group
+                # anchors to the (visible) turn trigger AFTER it — never to the marker,
+                # which the frontend can't position against (#935 backward-anchor). A
+                # visible terminal (result/error/notify) anchors to itself, BEFORE it
+                # (the chip hugs the reply from above).
+                if item["is_silent"]:
+                    anchor_id, anchor_position = last_boundary_id, "after"
+                else:
+                    anchor_id, anchor_position = item["id"], "before"
                 groups.append(
                     _make_group(
                         pending,
-                        status=_terminal_status(item["mtype"]),
-                        anchor_id=item["id"],
-                        anchor_position="before",
+                        status=item["terminal_status"],
+                        anchor_id=anchor_id,
+                        anchor_position=anchor_position,
                         open_turn=False,
                         started_iso=turn_start_iso,
                         ended_iso=item["created_at"],
@@ -294,7 +331,11 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 )
                 pending = []
             turn_start_iso = None
-            last_boundary_id = item["id"]
+            # Keep ``last_boundary_id`` on a TRANSCRIPT-VISIBLE row: a visible terminal
+            # becomes the new boundary; the invisible silent marker does NOT (a later
+            # turn must still anchor to a row the frontend can render).
+            if not item["is_silent"]:
+                last_boundary_id = item["id"]
         # kind == "ignore": leave pending + boundary + turn_start untouched
     if pending:
         # The last un-terminated turn. Anchor AFTER its trigger (never the tail); the

@@ -88,6 +88,11 @@ Change visibility:
 `vibe show update --visibility offline`
 
 For more usage details, run `vibe show --help` or a subcommand help such as `vibe show update --help`.
+
+### Show Page annotations & reverse marks
+- Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
+- After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
+- Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`.
 $avibe_cloud_guidance_section
 History contract:
 $show_git_agent_contract
@@ -274,11 +279,13 @@ Useful Harness queries include schema discovery, current session lookup, existin
 
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals. Watches created from an Avibe Agent shell follow up in this conversation by default. If `--cwd` is omitted, Avibe runs the waiter from the caller working directory when available.
 
-Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. By default this creates a private/background Session for the target Agent, returns immediately, and from this Avibe Agent shell sends the final result back to this conversation. Avibe records caller provenance for both async and `--sync` runs. Pass `--sync` only when the current process must wait for the result. Pass `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later; pass `--callback-session-id <id>` only to route the final result elsewhere. Add `--same-scope` when the new Session should live under the same Workbench project or IM scope as the caller. Add `--scope-id <scopes.id>` only when placing the new Session in a specific existing scope.
+Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. By default this creates a background Session in the caller's scope and returns immediately; when the run completes, the final result is sent back to this conversation. Background Sessions stay out of the session list and never deliver outward, but remain visible in the Agents run graph, where the user can open their full chat history or promote them at any time. Pass `--visible` only when the new Session should be user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later; pass `--callback-session-id <id>` only to route the final result elsewhere. Add `--scope-id <scopes.id>` only when placing the new Session in a specific existing scope.
 
 Use `vibe agent run --fork-self --message ...` when work should branch from this current Session's native backend context without mutating it. Use `--fork-session <source-session-id>` only when branching from a different explicit Session. Forks keep the source Session backend, scope, and cwd by default; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same.
 
 When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings; those properties belong to the Session itself. Use a new Session or a fork when those properties need to differ.
+
+Use `vibe session update --visible|--hidden` (`--visibility foreground|background`) to promote or hide a persisted Session independently of its scope. Use `--scope-id <scopes.id>` to move it to another scope or `--scope-id none` to make it standalone; moving scope never changes its stored workdir.
 
 For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--message "..."` or `--message-file <path>` as the follow-up instruction template sent with waiter output. Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement.
 
@@ -293,7 +300,7 @@ The table below is generated from currently enabled Agents at prompt-injection t
 
 Rules:
 - All Agents listed in the generated table are enabled. Use the `Agent Name` value exactly as listed in shell commands such as `vibe agent show <agent-name>` and `vibe agent run --agent <agent-name> ...`.
-- `--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing. Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate private/background Session for the target Agent.
+- `--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing. Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate background Session for the target Agent.
 - `--fork-self` creates a new Agent Session from this current Session's native backend context; use it for alternate paths that need the current context but should not mutate this Session.
 - `--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context.
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.

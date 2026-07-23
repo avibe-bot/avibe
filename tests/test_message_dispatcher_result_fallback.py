@@ -494,19 +494,21 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 
-    async def test_suppressed_delivery_is_not_persisted(self):
-        """Suppressed scheduled output is intentionally private — it must NOT
-        leak into the cross-platform messages history."""
+    async def test_suppressed_delivery_is_persisted_without_platform_send(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(
             user_id="U1", channel_id="C1", platform="slack",
             platform_specific={"suppress_delivery": True},
         )
-        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value={"id": "msg-background"},
+        ) as persist:
             message_id = await dispatcher.emit_agent_message(context, "result", "private output")
-        persist.assert_not_called()
-        self.assertTrue(message_id.startswith("suppressed:"))
+        persist.assert_called_once()
+        self.assertEqual(message_id, "msg-background")
+        self.assertEqual(controller.im_client.sent_messages, [])
 
     async def test_suppressed_result_records_folded_footer(self):
         """A suppressed (private) result can't ride subtext, so the footnote must
@@ -771,6 +773,55 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
         self.assertEqual(controller.status_calls, [("ses-1", "failed")])
+
+    async def test_clean_silent_completion_writes_marker(self):
+        # The fix: a clean (non-error) terminal result with no visible body — a
+        # ``<silent>``-stripped / empty final reply — persists the invisible ``silent``
+        # marker so the activity grouping closes the turn as DONE, not interrupted.
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        ctx = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(ctx, "result", "")
+        marker.assert_called_once_with(ctx)
+
+    async def test_user_stop_writes_no_marker(self):
+        # The REAL stop paths (codex/claude/opencode) emit a terminal result with
+        # ``level='silent'`` and ``is_error=False`` — a stop legitimately stays
+        # interrupted, so NO silent marker. (``not is_error`` alone would wrongly mark
+        # it — the gate keys on ``level != 'silent'`` too. P1.)
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", level="silent")
+        marker.assert_not_called()
+
+    async def test_error_completion_writes_no_marker(self):
+        # An ``is_error`` terminal is a FAILURE, never a done marker.
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
+        marker.assert_not_called()
+
+    async def test_suppress_delivery_writes_local_marker(self):
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        ctx = MessageContext(
+            user_id="U1", channel_id="ses-1", platform="avibe",
+            platform_specific={"agent_session_id": "ses-1", "suppress_delivery": True},
+        )
+        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
+            "core.message_dispatcher.persist_silent_completion_marker"
+        ) as marker:
+            await dispatcher.emit_agent_message(ctx, "result", "")
+        marker.assert_called_once_with(ctx)
 
     async def test_silent_backend_failure_collapses_status_as_failed(self):
         controller = _AvibeStatusController()

@@ -82,7 +82,7 @@ def test_public_surface_is_stable():
         "update_session",
         # Legacy IM-style reservation helpers added in C2 for the CLI:
         "reserve_agent_session",
-        "reserve_private_agent_session",
+            "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
     }
@@ -172,6 +172,34 @@ def test_update_then_list_reflects_changes(isolated_state):
     assert page["sessions"][0]["model"] == "claude-sonnet-4-6"
 
 
+def test_session_lists_only_include_foreground_sessions(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        foreground = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            title="Foreground",
+        )
+        background = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            title="Background",
+            visibility="background",
+        )
+
+    with engine.connect() as conn:
+        workbench = sessions_service.list_sessions(conn, scope_id=scope_id)
+        cli_page = sessions_service.list_sessions_page(conn)
+        direct = sessions_service.get_session(conn, background["id"])
+
+    assert [row["id"] for row in workbench["sessions"]] == [foreground["id"]]
+    assert [row["id"] for row in cli_page.items] == [foreground["id"]]
+    assert direct["visibility"] == "background"
+
+
 def test_list_sessions_title_query_filters_by_title(isolated_state):
     """``#``-mention search: case-insensitive title LIKE, escaping LIKE metachars."""
     engine = create_sqlite_engine()
@@ -243,6 +271,47 @@ def test_update_session_present_null_clears_model_and_effort(isolated_state):
     assert kept["model"] == "claude-sonnet-4-6"
     assert kept["reasoning_effort"] == "low"
     assert kept["title"] == "renamed"
+
+
+def test_update_session_scope_move_drops_stale_legacy_mapping(isolated_state):
+    from config import paths
+    from core.scheduled_tasks import resolve_session_id_target
+    from storage.sessions_service import SQLiteSessionsService
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        original_scope_id = _seed_avibe_scope(conn)
+        target_scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_moved",
+            now="2026-05-26T13:00:00Z",
+        )
+        session = sessions_service.create_session(
+            conn,
+            scope_id=original_scope_id,
+            agent_backend="claude",
+            metadata={"legacy_scope_key": original_scope_id, "kept": True},
+        )
+        moved = sessions_service.update_session(conn, session["id"], scope_id=target_scope_id)
+
+    assert moved["scope_id"] == target_scope_id
+    assert moved["metadata"]["kept"] is True
+    assert "legacy_scope_key" not in moved["metadata"]
+    assert moved["session_anchor"] == f"avibe_proj_moved:session_{session['id']}"
+
+    target = resolve_session_id_target(session["id"])
+    assert target.scope_id == target_scope_id
+    assert target.session_key.thread_id is None
+
+    legacy = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        mappings = legacy.load_state().session_mappings
+    finally:
+        legacy.close()
+    assert "avibe::proj_moved" in mappings
+    assert original_scope_id not in mappings
 
 
 def test_update_session_present_null_clears_agent_route(isolated_state):

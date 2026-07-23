@@ -31,7 +31,11 @@ from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
     is_empty_terminal_opencode_message,
 )
-from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
+from modules.agents.opencode.utils import (
+    resolve_opencode_configured_default_model,
+    resolve_opencode_model_id,
+    resolve_opencode_reasoning_effort,
+)
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from core.resource_governance import governor_from_controller
 from core.message_output import MessageOutput, terminal_turn_output
@@ -2325,7 +2329,7 @@ class AgentAuthService:
 
         ``model`` is the model id (e.g. ``"gpt-4o-mini"``); we wrap it
         into the ``{providerID, modelID}`` shape OpenCode expects. When
-        ``None``, OpenCode uses the provider's configured default.
+        ``None``, the probe resolves Avibe's effective Agent default first.
         """
         provider_id = (provider_id or "").strip()
         if not provider_id:
@@ -2335,11 +2339,34 @@ class AgentAuthService:
         if server is None:
             return {"ok": False, "error": "opencode_server_unavailable"}
 
-        # Resolve the model id: caller-supplied wins; otherwise look up
-        # the provider's default from the live catalog so the probe
-        # doesn't fail with "model is required" on providers that don't
-        # carry a config-level default.
+        # Match normal OpenCode turns: caller override, the selected OpenCode
+        # agent's model, Avibe's V2 fallback, then the provider catalog.
         chosen_model = (model or "").strip()
+        backend_config = self._resolve_backend_config("opencode")
+        default_provider = getattr(backend_config, "default_provider", None)
+        if not chosen_model:
+            try:
+                default_agent = server.get_default_agent_from_config()
+                runtime_agent_model = server.get_agent_model_from_config(default_agent)
+            except Exception:  # noqa: BLE001
+                runtime_agent_model = None
+            chosen_model = (
+                resolve_opencode_configured_default_model(
+                    runtime_agent_model,
+                    default_provider=default_provider,
+                    provider_id=provider_id,
+                )
+                or ""
+            )
+        if not chosen_model and backend_config is not None:
+            chosen_model = (
+                resolve_opencode_configured_default_model(
+                    getattr(backend_config, "default_model", None),
+                    default_provider=default_provider,
+                    provider_id=provider_id,
+                )
+                or ""
+            )
         if not chosen_model:
             try:
                 catalog = await server.get_available_models(os.path.expanduser("~"))
@@ -2508,6 +2535,15 @@ class AgentAuthService:
                                 detail = await server.get_provider_api_diagnostic(provider_id, chosen_model)
                             except Exception:  # noqa: BLE001
                                 detail = None
+                        classified = _classify_test_failure("", detail or "")
+                        if classified != "cli_failed":
+                            return {
+                                "ok": False,
+                                "error": classified,
+                                "detail": (detail or "")[:600],
+                                "duration_ms": int((time.monotonic() - started) * 1000),
+                                "model": chosen_model,
+                            }
                         i18n_key = (
                             "error.opencodeProviderRuntimeError"
                             if detail
@@ -2528,12 +2564,51 @@ class AgentAuthService:
                             "model": chosen_model,
                         }
                     break
+                try:
+                    detail = await server.get_recent_session_error(
+                        session_id,
+                        since=prompt_started_at,
+                    )
+                except Exception:  # noqa: BLE001
+                    detail = None
+                if detail:
+                    classified = _classify_test_failure("", detail)
+                    if classified in {
+                        "invalid_credentials",
+                        "forbidden",
+                        "model_not_found",
+                    }:
+                        return {
+                            "ok": False,
+                            "error": classified,
+                            "detail": detail[:600],
+                            "duration_ms": int((time.monotonic() - started) * 1000),
+                            "model": chosen_model,
+                        }
                 await asyncio.sleep(poll_interval)
             else:
+                try:
+                    detail = await server.get_recent_session_error(
+                        session_id,
+                        since=prompt_started_at,
+                    )
+                except Exception:  # noqa: BLE001
+                    detail = None
+                if detail:
+                    classified = _classify_test_failure("", detail)
+                    if classified != "cli_failed":
+                        return {
+                            "ok": False,
+                            "error": classified,
+                            "detail": detail[:600],
+                            "duration_ms": int((time.monotonic() - started) * 1000),
+                            "model": chosen_model,
+                        }
                 return {
                     "ok": False,
                     "error": "timed_out",
                     "duration_ms": int((time.monotonic() - started) * 1000),
+                    "model": chosen_model,
                 }
 
             duration_ms = int((time.monotonic() - started) * 1000)

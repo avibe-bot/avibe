@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/resolution-event.schema.json",
+  "title": "ResolutionEvent",
+  "description": "最近切换 feed entry. ADAPTER-OWNED: our adapter classifies per-source outcomes and emits these; the engine's own usage feed stays disabled because it leaks inbound keys (S1 gap ②). Redaction invariant: no credential material, no raw upstream error bodies.",
+  "type": "object",
+  "required": ["id", "ts", "agent", "kind", "model_id", "reason", "human_zh", "human_en"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string" },
+    "ts": { "type": "string", "format": "date-time" },
+    "agent": { "enum": ["claude", "codex", "opencode", "system"] },
+    "kind": { "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"] },
+    "model_id": { "type": "string" },
+    "from_source": { "type": ["string", "null"] },
+    "to_source": { "type": ["string", "null"] },
+    "reason": {
+      "enum": ["quota_exhausted", "rate_limited", "server_error", "network", "recovery", "manual", "mapping"],
+      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events."
+    },
+    "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame 01r" },
+    "human_zh": { "type": "string", "maxLength": 200 },
+    "human_en": { "type": "string", "maxLength": 200 }
+  },
+  "examples": [
+    {
+      "id": "evt_20260723a",
+      "ts": "2026-07-23T06:32:00+08:00",
+      "agent": "claude",
+      "kind": "switch",
+      "model_id": "claude-opus-4-6",
+      "from_source": "src_claudepro1",
+      "to_source": "src_anthkey01",
+      "reason": "quota_exhausted",
+      "billing_note": "entered_metered",
+      "human_zh": "Claude Code:Claude Pro 本周期额度用完 → 已切到 Anthropic API Key(按量)",
+      "human_en": "Claude Code: Claude Pro cycle quota exhausted → switched to Anthropic API Key (metered)"
+    }
+  ]
+}

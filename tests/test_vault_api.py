@@ -780,6 +780,32 @@ def test_vault_request_ui_payload_resolves_workbench_session_summary():
     assert "session" not in agent_payload["request"]
 
 
+def test_vault_request_ui_payload_links_standalone_session():
+    with api._vault_engine().begin() as conn:
+        _insert_workbench_session(conn, session_id="ses_vault_standalone", title="Standalone deploy")
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "ses_vault_standalone")
+            .values(scope_id=None)
+        )
+        vault_service.create_provision_request(
+            conn,
+            "STANDALONE_TOKEN",
+            requester={"source": "agent-cli", "session_id": "ses_vault_standalone"},
+        )
+
+    listed = api.get_vault_requests(session="ses_vault_standalone")
+
+    assert listed["requests"][0]["session"] == {
+        "id": "ses_vault_standalone",
+        "title": "Standalone deploy",
+        "label": "Standalone deploy",
+        "platform": None,
+        "scope_kind": None,
+        "is_workbench": True,
+    }
+
+
 def test_list_requests_scopes_by_session():
     # A session-scoped query returns only that session's requests (filtered before the limit).
     with api._vault_engine().begin() as conn:

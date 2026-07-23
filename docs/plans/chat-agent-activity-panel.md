@@ -291,3 +291,161 @@ layout measurement (`offsetHeight >= cap`) gates the fade, so the height behavio
 itself is CSS-driven — not unit-testable under jsdom, which does no layout. Expanded
 mode is unchanged: `max-h-[40vh]` + internal scroll already fits content up to its
 cap. Tail auto-follow (the Transcript scroller) is untouched.
+
+## As-built implementation notes (P2 — items A–E)
+
+Owner-approved iteration package (design signed off 2026-07-20). Frontend-only
+except one new display-config field. NO-TOUCH held: IM adapters,
+`message_dispatcher`, mirror publish logic, endpoint grouping.
+
+### A — Tool-row summary v2 (3-tier degrade, frontend-only parse)
+
+`ActivityRow.text` for a tool call is the backend `format_toolcall` STRING
+(`modules/im/formatters/base_formatter.py`): `` 🔧 `ToolName` `{compact json}` ``.
+Names/arg-keys differ per backend (Claude Capitalized `file_path`/`command`; Codex
+`bash`/`file_change` with `file`+`type`; OpenCode lowercase `file_path||path`; a
+restore path emits `` `name`: `arg` `` with no JSON) — hence the degrade. Pure
+helpers in `ui/src/lib/agentActivity.ts`: `parseToolCall` (name + parsed JSON args
+or `null`), `toolRecipe` (tier-1 known-tool recipe: command → `$ cmd`; read → dir
+muted + basename; edit/write → basename + op badge, op from name or Codex `type`;
+web/search/grep → quoted query/URL; task → description — case-insensitive prefix,
+paths probe `file_path`→`path`→`file`), `genericChips` (tier-2 ≤3 scalar chips +
+overflow), `toolSummary` (tier-3 raw, unchanged). Any parse failure / non-object /
+oversize (>20k) → `args: null` → tier 3; `ActivityToolRow` also wraps the parse in
+try/catch so nothing can blank a row. Rendered by `ToolSummary` in
+`AgentActivityGroup.tsx`. Unit-tested per tier + exception fallback in
+`agentActivity.test.ts`.
+
+### B — Tool-row visibility eye toggle + `config.ui.show_tool_calls`
+
+New bool `UiConfig.show_tool_calls` (default **true**), coerced in
+`V2Config.from_payload` like `show_agent_activity`. Both runtime serializers are
+`__dict__`-based so it rides along automatically and the #939 serializer-coverage
+guard is satisfied with no serializer edits (it derives fields from
+`fields(UiConfig)`). Display-only → NO `message_mirror` cache / reset hook. The eye
+pill (`ToolsEyePill`, eye/eye-off + "Tools"/"工具", icon-only < `sm`) sits in the
+running-card header and the expanded-panel header (never the collapsed chip); it
+flips the same config the Settings toggle writes (global, cross-device) via
+`api.saveConfig({ ui: { show_tool_calls } })`, threaded through the `activity` prop
+in `ChatPage`. Filter is the pure `filterActivityRows` (assistant narration ALWAYS
+shows; step counts use the unfiltered length). All-filtered placeholders:
+expanded → "已隐藏 N 条工具调用"; compact LIVE → "工具调用已隐藏 · 进行中" (never
+falls back to ThinkingBubble). Settings row added in `SettingsMessagingPage.tsx`
+(`dashboard.showToolCalls*`). i18n en+zh.
+
+### C — Done/history expanded height cap
+
+The expanded settled panel (`ActivityChip`, done/interrupted/failed incl. history)
+body is `max-h-[60vh] overflow-y-auto` → height = min(content, ~60vh), opening at
+the TOP (natural `scrollTop=0`, no tail-follow). The LIVE running card's expanded
+scroller is unchanged (`max-h-[40vh]`, follows tail). Page-level scroll anchoring
+untouched.
+
+### D — Inline detail v2 + full-JSON dialog
+
+Row-click detail (`ToolDetail`) renders the SAME parse as A: a kv table (key mono
+muted; long/multiline values as wrapping code blocks; `timeout` ms humanized);
+parse failure → raw text (unchanged fallback). A "{ } JSON" button opens
+`ToolJsonDialog` — the shared `components/ui/dialog` + the lazy `preview-json`
+viewer FileViewer uses (zero new deps), scrollable, copy button
+(`copyTextToClipboard(JSON.stringify(args,null,2))`), ESC/backdrop close. Parse
+failure → dialog shows raw text, still copyable.
+
+### E — Settings copy
+
+`dashboard.showAgentActivityHint` retrimmed per owner dictation (dropped the
+Web-only / default-off tail) in en + zh.
+
+### Verification & real-browser residual
+
+`ui` build green; `vitest` full suite green (A/D parse tiers + B filter logic +
+existing reducer/wire tests); backend `pytest` green (new
+`test_show_tool_calls_defaults_on_and_round_trips` + the #939 serializer-coverage
+guard auto-covering the new field); `ruff` clean; changed-file `eslint` clean.
+**jsdom does no layout**, so these need the owner's Incus/real-browser pass: the C
+60vh scroll feel + top-open, the compact fade-at-cap, the eye-pill live toggle +
+cross-device persistence, the D JSON dialog open/copy/close, and the tier-1/2/3
+rendering against real per-backend `format_toolcall` output.
+
+## As-built implementation notes (silent-completion terminal taxonomy)
+
+**Bug.** P1 defined `interrupted` as "a turn's activity that ends without a terminal
+result". That wrongly captured **silent completions** (final reply is entirely a
+`<silent>` block → stripped → nothing delivered) and **reply-less bookkeeping turns**
+(common for watch/scheduled orchestration): the turn ran tool steps, finished
+normally, but wrote no `messages` row, so the grouping saw "activity + no terminal"
+and rendered a gold "Interrupted · stopped at step N" chip. Nothing was interrupted.
+
+**Terminal taxonomy (as-built).** A turn's activity group closes as:
+
+| Ending | Grouping status |
+| --- | --- |
+| visible `result` reply | `done` |
+| **invisible `silent` marker** (silent-stripped / empty final, or reply-less completion) | `done` |
+| `error`, or `backend_failure` `notify` | `failed` |
+| cancel / Stop, or no terminal at all | `interrupted` |
+
+A **plain `notify` is NOT terminal** — agents emit mid-turn notify rows that keep the
+turn going (e.g. Claude's model-refusal fallback), so treating every notify as terminal
+would split one turn into two. A genuine notify-only COMPLETION is closed by the
+`silent` marker instead (its turn still emits an empty final result at the chokepoint).
+
+**Invisible `silent` marker.** When a turn completes NORMALLY with nothing
+user-visible to send, the delivery chokepoint
+(`MessageDispatcher.emit_agent_message`, the `mutates_turn_lifecycle` branch) persists
+ONE `messages` row of a **dedicated `type='silent'`** via
+`message_mirror.persist_silent_completion_marker` → `messages_service.append`
+(bypassing the empty-text guard and the `message.new` publish — no transcript bubble).
+**Gate: `level != "silent" and not is_error and not suppress_delivery`.** This is the
+load-bearing distinction: the real user-stop paths (codex/claude/opencode) emit a
+terminal `result` with `level="silent"` and `is_error=False`, so `not is_error` ALONE
+would wrongly mark a stop as done — a stop must stay `interrupted`. A genuine
+`<silent>`-block/empty completion is `level="normal"` with an empty body; backend
+failures arrive `level="silent"` (after a visible notify); a `suppress_delivery`
+private/background run intentionally leaves NO history — all excluded.
+
+The marker DOES recompute + publish `inbox.session.updated` (avibe): since it now
+clears the inbox awaiting/replied flag, an open sidebar must drop "awaiting the agent"
+live rather than staying stale until reconnect. But it publishes NO `message.new` (no
+transcript bubble) and NO web-push (a silent completion is not a notifiable reply).
+
+A **dedicated type** (not the originally-sketched `result` + `content.kind='silent'`)
+was chosen after finding the read layer is **allowlist**-based: `type='silent'` is
+auto-excluded from the transcript (`TRANSCRIPT_TYPES`), inbox preview, unread, web-push
+and the live-publish gate with ZERO new guards — mirroring the invisible-type precedent
+(`pending`/`queued`/`draft`/`harness_dedupe`). (A `result`-typed marker would have
+leaked into ~8 allowlist reads.) Teaching the rest of the system about the new type:
+- **`NON_CONVERSATION_TYPES`** gains `silent` — the marker never bumps the inbox
+  activity clock / last-author.
+- **Inbox awaiting/replied** compares `last_input_at` against a terminal timestamp that
+  INCLUDES `silent` (not the visible-only `preview_*`), so a silently-completed turn is
+  no longer stuck showing "awaiting the agent"; the preview TEXT stays the last visible
+  reply.
+- **`ix_messages_inbox_activity`** partial-index predicate adds `silent` (models.py +
+  migrations.py + alembic `20260721_0031`) — a stricter `NOT IN` query predicate does
+  NOT reuse a looser partial index on SQLite, so the predicates must match or inbox
+  refreshes fall back to scans.
+- **Session fork** treats `silent` as terminal in BOTH the anchor query
+  (`_latest_source_message_anchor`, else the anchor falls back to the input row and the
+  completed turn is trimmed/rolled back as if running) and `TERMINAL_AGENT_OUTPUT_TYPES`.
+
+**Grouping.** `agent_activity_service` adds `silent` to `_RELEVANT_MESSAGE_TYPES` (so
+its timeline — separate from the transcript allowlist — sees the marker) and
+`_is_terminal` (result/error/silent + `backend_failure` notify). Because the marker is
+invisible in the transcript, a group closing on it anchors to the **visible turn
+trigger** AFTER it (never the marker — which the frontend can't position against, per
+the #935 backward anchor invariant), and the marker never becomes `last_boundary_id`. A
+visible terminal still anchors to itself, BEFORE it. **Frontend: no change** — the
+marker never reaches it; `done` flows through `groupFromWire` and renders as the ✓ chip.
+
+**Evidence.** `tests/test_agent_activity_service.py` — silent completion → done
+(watch-triggered, tool steps, silent finish; anchored to the visible trigger); a
+mid-turn notify does NOT split/close a turn; backend_failure notify → failed; Stop (no
+terminal) → interrupted. `tests/test_message_dispatcher_result_fallback.py` — the
+chokepoint writes the marker on a clean completion, NOT on a `level="silent"` stop nor
+an `is_error` result. `tests/test_message_mirror.py` — the marker persists but is
+excluded from the transcript allowlist + `NON_CONVERSATION_TYPES`.
+`tests/test_messages_service.py` — a silent completion clears the inbox "awaiting" flag
+while the preview stays the last visible reply. `tests/test_session_fork.py` — a
+silently-completed codex/opencode source turn is terminal (no trim). IM delivery
+untouched (marker is avibe-persistence only).

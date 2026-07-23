@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
 import type { ProjectDefaultAgent, WorkbenchProject, WorkbenchSession, WorkbenchSessionCreate } from './ApiContext';
+import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -412,7 +413,17 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         if (!REORDER_ACTIVITY_EVENTS.has(data.event)) return;
         const projectId = projectsRef.current?.find((project) => project.scope_id === data.scope_id)?.id;
         if (!projectId) return;
-        void reconcileSessions(projectId, { minCount: data.event === 'created' ? 1 : 0 });
+        // Grow the window ONLY for a synthesized foreground-restore (`data.restored`,
+        // set by visibilityActivityEvents on Undo): reconcile one past the loaded
+        // page so a restored row ranked just past it returns (a flat minCount 1 stops
+        // at the first page → Undo looks broken). A real backend `created` (a new
+        // session, never marked) keeps the original minCount 1 — otherwise repeated
+        // local create/fork, which already prepend the row before this event fires,
+        // would inflate the window by one each time (Codex r3). See createdReconcileMinCount.
+        const loaded = sessionsRef.current[projectId]?.sessions?.length ?? 0;
+        const minCount =
+          data.event === 'created' ? createdReconcileMinCount(!!data.restored, loaded) : 0;
+        void reconcileSessions(projectId, { minCount });
       },
       onSessionStatus: ({ session_id, agent_status }) => {
         setSessions((prev) =>

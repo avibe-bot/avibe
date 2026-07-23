@@ -354,7 +354,11 @@ def _run_restart_job(
         if not runtime.service_pid_recorded(new_pid):
             write(f"start runtime returned while service pid={new_pid} is still acquiring its lock")
             wait_lock_started_at = time.monotonic()
-            if not runtime.wait_for_service_pid(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS):
+            # Resolve the real lock holder: under a delegated user scope the
+            # returned pid may be a launcher that never records itself, so adopt
+            # the authoritative owner instead of waiting on a pid that can't win.
+            resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
+            if resolved_pid is None:
                 mark_duration("wait_service_lock_seconds", wait_lock_started_at)
                 return _fail(
                     payload,
@@ -363,6 +367,7 @@ def _run_restart_job(
                     3,
                     started_at=restart_started_at,
                 )
+            new_pid = resolved_pid
             mark_duration("wait_service_lock_seconds", wait_lock_started_at)
             recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid
             runtime.write_status("running", f"pid={new_pid}", new_pid, recorded_ui_pid if isinstance(recorded_ui_pid, int) else None)

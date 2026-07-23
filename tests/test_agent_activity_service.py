@@ -461,3 +461,94 @@ def test_get_turn_group_unknown_id_returns_none(isolated_state):
         assert agent_activity_service.get_turn_group(conn, session_id=sid, group_id="nope") is None
         found = agent_activity_service.get_turn_group(conn, session_id=sid, group_id="e_t")
     assert found is not None and found["steps"] == 1
+
+
+# ===== Terminal taxonomy (silent completions, notify, error, Stop) =====
+# result / notify / silent-marker = done; backend_failure notify / error = failed;
+# no terminal at all (cancel/Stop) = interrupted.
+
+
+def test_silent_completion_marks_turn_done(isolated_state):
+    """The reported bug: a watch-triggered turn runs tool steps then finishes with a
+    ``<silent>`` reply (stripped, nothing delivered → an invisible ``silent`` marker).
+    It MUST be ``done``, not ``interrupted``, and — since the marker is invisible in
+    the transcript — anchored to the (visible) trigger AFTER it, not the marker."""
+    engine = create_sqlite_engine()
+    sid = "ses_silent"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_h1", mtype="harness", author="harness", created_at="2026-06-01T10:00:00.000000+00:00", text="watch fired", source="harness")
+        _evt(conn, scope, sid, eid="e_s1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"a\"}`")
+        _evt(conn, scope, sid, eid="e_s2", created_at="2026-06-01T10:00:02Z", text="🔧 `Read` `{\"file_path\":\"b\"}`")
+        # The invisible marker (type='silent', empty text) written at the chokepoint.
+        _msg(conn, scope, sid, mid="m_sil1", mtype="silent", author="agent", created_at="2026-06-01T10:00:03.000000+00:00", text="")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["status"] == "done"
+    assert g["anchor_message_id"] == "m_h1"  # visible trigger, not the invisible marker
+    assert g["anchor_position"] == "after"
+    assert g["open"] is False
+    assert g["steps"] == 2
+
+
+def test_midturn_notify_does_not_split_or_close_a_turn(isolated_state):
+    """A plain (non-backend-failure) ``notify`` is NOT terminal: agents emit mid-turn
+    notify rows that keep the turn going (e.g. Claude's model-refusal fallback). It must
+    not close the pending group or split the turn — the turn still closes on its real
+    terminal, keeping all steps in ONE group. (A genuine notify-only completion is
+    closed by the silent marker instead — see test_silent_completion_marks_turn_done.)"""
+    engine = create_sqlite_engine()
+    sid = "ses_notify"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _evt(conn, scope, sid, eid="e_n1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"x\"}`")
+        _msg(conn, scope, sid, mid="m_n1", mtype="notify", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="refusal fallback")
+        _evt(conn, scope, sid, eid="e_n2", created_at="2026-06-01T10:00:03Z", text="🔧 `Read` `{\"file_path\":\"y\"}`")
+        _msg(conn, scope, sid, mid="m_r1", mtype="result", author="agent", created_at="2026-06-01T10:00:04.000000+00:00", text="answer")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    # ONE done group spanning both tool steps — the mid-turn notify neither closed nor
+    # split it; the turn closed on its real terminal.
+    assert [g["status"] for g in groups] == ["done"]
+    assert groups[0]["steps"] == 2
+    assert groups[0]["anchor_message_id"] == "m_r1"
+    assert groups[0]["anchor_position"] == "before"
+
+
+def test_backend_failure_notify_is_failed(isolated_state):
+    """A ``backend_failure`` notify stays a FAILED terminal (not done)."""
+    engine = create_sqlite_engine()
+    sid = "ses_bf"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _evt(conn, scope, sid, eid="e_b1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"x\"}`")
+        _msg(conn, scope, sid, mid="m_bf", mtype="notify", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="backend died", metadata={"event": "backend_failure"})
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [g["status"] for g in groups] == ["failed"]
+
+
+def test_stop_without_terminal_stays_interrupted(isolated_state):
+    """Cancel/Stop writes NO marker (no visible terminal, no silent marker), so a
+    turn with activity and no terminal before the next turn stays ``interrupted``."""
+    engine = create_sqlite_engine()
+    sid = "ses_stop"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u1", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q1", source="user")
+        _evt(conn, scope, sid, eid="e_st1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"x\"}`")
+        # User stopped it, then started a new turn — no terminal for turn 1.
+        _msg(conn, scope, sid, mid="m_u2", mtype="user", author="user", created_at="2026-06-01T10:01:00.000000+00:00", text="q2", source="user")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [g["status"] for g in groups] == ["interrupted"]
+    assert groups[0]["anchor_message_id"] == "m_u1"  # anchored to its own trigger
+    assert groups[0]["anchor_position"] == "after"

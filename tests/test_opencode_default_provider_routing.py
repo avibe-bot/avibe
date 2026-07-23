@@ -14,7 +14,10 @@ import dataclasses
 
 from config.v2_config import OpenCodeConfig
 from modules.agents.opencode.agent import resolve_opencode_model_dict
-from modules.agents.opencode.utils import resolve_opencode_model_id
+from modules.agents.opencode.utils import (
+    resolve_opencode_configured_default_model,
+    resolve_opencode_model_id,
+)
 
 
 def test_opencode_config_default_provider_is_unset_by_default() -> None:
@@ -59,6 +62,47 @@ def test_prefixed_model_ignores_default_provider() -> None:
         "providerID": "openai",
         "modelID": "gpt-5",
     }
+
+
+def test_configured_default_model_matches_bare_model_to_default_provider() -> None:
+    assert (
+        resolve_opencode_configured_default_model(
+            "gpt-5.4",
+            default_provider="openai",
+            provider_id="openai",
+        )
+        == "gpt-5.4"
+    )
+
+
+def test_configured_default_model_matches_explicit_provider_prefix() -> None:
+    assert (
+        resolve_opencode_configured_default_model(
+            "openai/gpt-5.4",
+            default_provider="anthropic",
+            provider_id="openai",
+        )
+        == "gpt-5.4"
+    )
+
+
+def test_configured_default_model_rejects_other_provider() -> None:
+    assert (
+        resolve_opencode_configured_default_model(
+            "gpt-5.4",
+            default_provider="openai",
+            provider_id="anthropic",
+        )
+        is None
+    )
+    assert (
+        resolve_opencode_configured_default_model(
+            "openai/gpt-5.4",
+            default_provider="openai",
+            provider_id="anthropic",
+        )
+        is None
+    )
 
 
 def test_model_id_uses_catalog_casing_for_unique_match() -> None:

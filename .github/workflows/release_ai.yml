@@ -65,12 +65,12 @@ jobs:
             artifact: win32-arm64
     steps:
       - name: Checkout Show Runtime
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           repository: avibe-bot/vibe-show-runtime
           ref: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -82,7 +82,7 @@ jobs:
           cp dist/vibe-show-runtime-node-*.tgz .
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
       - name: Upload Show Runtime bundle
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: show-runtime-${{ matrix.artifact }}
           path: |
@@ -139,12 +139,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -157,7 +157,7 @@ jobs:
           npm run build
 
       - name: Download Show Runtime bundles
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           pattern: show-runtime-*
           path: runtime-artifacts
@@ -188,7 +188,7 @@ jobs:
             --output vibe/memory_runtime_manifest.json
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -242,7 +242,7 @@ jobs:
           fi
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: release-dist
           path: dist/
@@ -252,7 +252,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
 
@@ -569,7 +569,7 @@ jobs:
           fi
 
       - name: Download release artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           name: release-dist
           path: dist/

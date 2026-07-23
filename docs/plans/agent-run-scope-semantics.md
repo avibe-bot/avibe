@@ -16,9 +16,9 @@ context as a first-class API.
 - Callback routing is a run-level completion policy, not a session-level
   default. Synchronous runs should still record the callback route so a future
   long-running sync turn can detach into async without losing its return path.
-- Scope placement is a session-level decision. It decides where a newly-created
-  session lives: a private/background scope, the caller/source scope, or a
-  specific `scopes.id`.
+- Scope placement is a session-level decision. It decides whether a newly-created
+  session lives under the caller/source scope, a specific `scopes.id`, or as a
+  standalone session (`scope_id=NULL`). Visibility is independent of placement.
 - Message delivery overrides are not scope placement. Legacy transport
   overrides should leave the agent-facing CLI surface.
 - New commands should use `--scope-id` or `--same-scope`.
@@ -31,9 +31,10 @@ When an agent runs another agent with no explicit target:
 vibe agent run --agent claude --message "Review this patch"
 ```
 
-Avibe treats it as:
+Avibe treats it as (superseded by
+[`agents-run-graph-and-session-visibility.md`](agents-run-graph-and-session-visibility.md#part-c--scope--visibility-decoupling--standalone-sessions)):
 
-- create a new private/background session;
+- create a new background session in the caller session's scope;
 - use the caller shell cwd as the new session cwd;
 - record callback route to the caller session when `AVIBE_SESSION_ID` exists;
 - queue the run and return immediately by default.
@@ -49,7 +50,8 @@ Use `--sync` only when the CLI process must wait for the run result. The legacy
 | `--fork-session <session-id>` | Fork the specified source session. |
 | `--same-scope` | Place a newly-created session in the caller/source session's scope. |
 | `--scope-id <scopes.id>` | Place a newly-created session in the exact scope row. |
-| no scope parameter on create | Create a private/background session. |
+| no scope parameter on create, with caller | Use the caller scope and background visibility. |
+| no scope parameter on create, without caller | Create a standalone background session. |
 
 Forks inherit the source session's scope and cwd by default. `--same-scope` is
 therefore redundant but acceptable for fork commands. `--scope-id` may be used
@@ -59,7 +61,8 @@ to fork into a different scope.
 
 | Operation | Default cwd |
 | --- | --- |
-| create private/background session | caller shell cwd |
+| create with implicit caller scope | caller shell cwd |
+| create standalone without caller | session Show workspace |
 | create with `--same-scope` | selected scope workdir |
 | create with `--scope-id` | selected scope workdir |
 | fork self/session | source session cwd |
@@ -86,13 +89,12 @@ sync runs, the route is recorded for future detach-to-async behavior.
 - Single-object session commands may default object id from `AVIBE_SESSION_ID`.
 - `vibe task add` / `vibe watch add` default their target session to
   `AVIBE_SESSION_ID` when they continue an existing session.
-- When a task or watch creates sessions, agents should use `--same-scope` or
-  `--scope-id <scopes.id>`. The selected placement scope is stored in definition
-  metadata as `session_scope_id`, so future `create-session-per-run` triggers
-  can create the session in the right Workbench project or IM scope.
-- `vibe task add` and `vibe watch add` snapshot the caller shell cwd when
-  `--cwd` is omitted. That cwd is reused when the definition later creates
-  sessions.
+- A task/watch `create-session-per-run` definition uses stored
+  `session_scope_id` when present; without one it creates a standalone
+  background session. See the newer Part C specification linked above.
+- `--cwd` remains an explicit per-definition override. Without it, scoped
+  create-per-run sessions snapshot the selected scope workdir at reservation;
+  standalone create-per-run sessions use their own Show workspace.
 
 ## Migration
 

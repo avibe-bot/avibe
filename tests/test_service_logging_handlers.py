@@ -59,6 +59,10 @@ def test_start_service_disables_stdout_logging_for_background_process(monkeypatc
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
     monkeypatch.setattr(runtime, "get_service_main_path", lambda: Path("/tmp/main.py"))
     monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, 0))
+    # Exercise the generic (non-scoped) spawn path deterministically: on a Linux
+    # dev host maybe_systemd_scope_prefix() is truthy and would route through the
+    # scoped poll-and-adopt path instead of wait_for_service_pid.
+    monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: [])
     # Stub the real spawn so we never fork a real vibe service, and short-circuit
     # the post-spawn lock wait. This captures the env start_service would launch with.
     monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, *args, **kwargs: True)

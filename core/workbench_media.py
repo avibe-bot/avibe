@@ -16,23 +16,50 @@ frontend renders images vs files purely from element type.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 import logging
 import os
+import re
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Connection
 
+from config import paths
 from core.reply_enhancer import _FILE_LINK_RE, _file_uri_to_local_path
 from storage import media_service
 
 logger = logging.getLogger(__name__)
 
+MAX_SHOW_SCREENSHOT_LONG_EDGE = 2048
+MAX_SHOW_SCREENSHOT_BYTES = 25 * 1024 * 1024
+_SHOW_SCREENSHOT_DATA_URL_RE = re.compile(
+    r"\Adata:(image/(?P<format>png|webp));base64,(?P<data>[A-Za-z0-9+/=]+)\Z",
+    re.IGNORECASE,
+)
+
+
+class InvalidShowScreenshot(ValueError):
+    """Raised when an annotation screenshot cannot be safely materialized."""
+
+
+@dataclass(frozen=True)
+class MaterializedShowScreenshot:
+    attachment_id: str
+    path: str
+    content_type: str
+    width: int
+    height: int
+
 
 def register_agent_reply_media(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: str | None,
     session_id: str | None,
     kind: str,
     local_path: str,
@@ -50,7 +77,86 @@ def register_agent_reply_media(
     )
 
 
-def rewrite_agent_media(conn: Connection, *, scope_id: str, session_id: str, text: str) -> str:
+def materialize_show_screenshot(
+    conn: Connection,
+    *,
+    scope_id: str,
+    session_id: str,
+    data_url: object,
+) -> MaterializedShowScreenshot:
+    """Persist an annotation screenshot and register it with the media proxy.
+
+    Show Page clients still submit a data URL. This boundary validates the
+    encoded image, writes it into the existing session attachment tree, and
+    returns the opaque media token plus the canonical path for the local agent.
+    """
+    if not isinstance(data_url, str):
+        raise InvalidShowScreenshot("screenshot.dataUrl must be a PNG or WebP data URL.")
+    match = _SHOW_SCREENSHOT_DATA_URL_RE.fullmatch(data_url)
+    if match is None:
+        raise InvalidShowScreenshot("screenshot.dataUrl must be a PNG or WebP data URL.")
+
+    encoded = match.group("data")
+    if len(encoded) > ((MAX_SHOW_SCREENSHOT_BYTES + 2) // 3) * 4:
+        raise InvalidShowScreenshot("screenshot.dataUrl is too large.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise InvalidShowScreenshot("screenshot.dataUrl contains invalid base64.") from exc
+    if not raw or len(raw) > MAX_SHOW_SCREENSHOT_BYTES:
+        raise InvalidShowScreenshot("screenshot.dataUrl is empty or too large.")
+
+    image_format = match.group("format").lower()
+    content_type = f"image/{image_format}"
+    if image_format == "png":
+        valid_signature = raw.startswith(b"\x89PNG\r\n\x1a\n")
+    else:
+        valid_signature = len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    if not valid_signature:
+        raise InvalidShowScreenshot(f"screenshot.dataUrl is not a valid {image_format.upper()} image.")
+
+    try:
+        import imagesize
+
+        width, height = imagesize.get(io.BytesIO(raw))
+    except Exception as exc:
+        raise InvalidShowScreenshot("screenshot.dataUrl image dimensions could not be read.") from exc
+    if width <= 0 or height <= 0:
+        raise InvalidShowScreenshot("screenshot.dataUrl image dimensions could not be read.")
+    if max(width, height) > MAX_SHOW_SCREENSHOT_LONG_EDGE:
+        raise InvalidShowScreenshot(
+            f"screenshot.dataUrl long edge exceeds {MAX_SHOW_SCREENSHOT_LONG_EDGE}px."
+        )
+
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    local_path = upload_dir / f"screenshot_{uuid.uuid4().hex[:16]}.{image_format}"
+    try:
+        local_path.write_bytes(raw)
+        canonical_path = str(local_path.resolve(strict=True))
+        token = media_service.register(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            kind="image",
+            source="show_annotation",
+            local_path=canonical_path,
+            file_name=local_path.name,
+            content_type=content_type,
+        )
+    except Exception:
+        local_path.unlink(missing_ok=True)
+        raise
+    return MaterializedShowScreenshot(
+        attachment_id=token,
+        path=canonical_path,
+        content_type=content_type,
+        width=int(width),
+        height=int(height),
+    )
+
+
+def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: str, text: str) -> str:
     """Return *text* with ``file://`` links rewritten to media-proxy URLs.
 
     Registers each referenced file in ``media_objects`` (same transaction as the

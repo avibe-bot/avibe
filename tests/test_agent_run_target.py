@@ -148,6 +148,46 @@ def test_im_channel_scope_workdir_creates_session_snapshot(tmp_path):
     assert session["agent_variant"] == "codex"
 
 
+def test_existing_background_im_target_carries_visibility(tmp_path):
+    workdir = tmp_path / "channel"
+    controller = _controller(tmp_path)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C123",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, scope_id, workdir=str(workdir))
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            agent_backend="codex",
+            agent_variant="codex",
+            session_anchor="slack_171717.123",
+            native_session_id="native-codex",
+            workdir=str(workdir),
+            visibility="background",
+        )
+
+    ctx = MessageContext(
+        user_id="U1",
+        channel_id="C123",
+        platform="slack",
+        thread_id="171717.123",
+    )
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="slack_171717.123",
+    )
+
+    assert target.agent_session_id == session_id
+    assert target.visibility == "background"
+    assert ctx.platform_specific["agent_run_target"]["visibility"] == "background"
+
+
 def test_new_im_session_uses_resolved_vibe_agent(tmp_path):
     workdir = tmp_path / "channel"
     agent = SimpleNamespace(

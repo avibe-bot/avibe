@@ -493,10 +493,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Watches created from an Avibe Agent shell follow up in this conversation by default", prompt)
         self.assertIn("`vibe watch add` creates a managed monitor", prompt)
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
-        self.assertIn("Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work", prompt)
-        self.assertIn("returns immediately, and from this Avibe Agent shell sends the final result back to this conversation", prompt)
+        delegate_guidance = (
+            "Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. "
+            "By default this creates a background Session in the caller's scope and returns immediately; when the run "
+            "completes, the final result is sent back to this conversation. Background Sessions stay out of the session "
+            "list and never deliver outward, but remain visible in the Agents run graph, where the user can open their "
+            "full chat history or promote them at any time. Pass `--visible` only when the new Session should be "
+            "user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass "
+            "`--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later; "
+            "pass `--callback-session-id <id>` only to route the final result elsewhere. Add `--scope-id <scopes.id>` "
+            "only when placing the new Session in a specific existing scope."
+        )
+        self.assertIn(delegate_guidance, prompt)
+        self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
-        self.assertIn("Add `--same-scope` when the new Session should live under the same Workbench project or IM scope", prompt)
+        self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)
         self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
         self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)
         self.assertIn("It does not change that Session's cwd, scope, Agent, model, or reasoning settings", prompt)
@@ -519,7 +530,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("CLI Token", prompt)
         self.assertIn("Use the `Agent Name` value exactly as listed in shell commands", prompt)
         self.assertIn("`--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing", prompt)
-        self.assertIn("Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate private/background Session", prompt)
+        self.assertIn("Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate background Session", prompt)
+        self.assertIn(
+            "Use `vibe session update --visible|--hidden` (`--visibility foreground|background`)",
+            prompt,
+        )
         self.assertIn("`--fork-self` creates a new Agent Session from this current Session's native backend context", prompt)
         self.assertIn("`--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context", prompt)
         self.assertIn("vibe agent run --agent <agent-name> --message ...", prompt)
@@ -658,6 +673,27 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`vibe show path`", prompt)
         self.assertNotIn("`vibe show path --session-id sesk8m4q2p7x`", prompt)
         self.assertIn("export async function GET(request) { return Response.json({ ok: true }) }", prompt)
+
+    def test_show_pages_prompt_includes_annotation_capability_guidance(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+            )
+
+        guidance = """### Show Page annotations & reverse marks
+- Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
+- After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
+- Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`."""
+        self.assertIn(guidance, prompt)
+        self.assertNotIn("prefer replying on the page", prompt)
 
     def test_prompt_uses_fallback_platform_for_unannotated_context(self):
         context = MessageContext(

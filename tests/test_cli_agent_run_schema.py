@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -56,6 +57,7 @@ _EXPECTED_KEYS = {
     "session_id",
     "deliver_key",
     "scope_id",
+    "visibility",
     "callback_session_id",
     "caller_context",
     "callback_notice",
@@ -70,6 +72,7 @@ _EXPECTED_RUN_KEYS_QUEUED = {
     "agent_name",
     "session_id",
     "scope_id",
+    "visibility",
     "callback_session_id",
     "source_kind",
     "source_actor",
@@ -967,6 +970,7 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
     assert row["native_session_id"] == ""
     assert row["model"] == "gpt-5.2"
     assert row["reasoning_effort"] == "low"
+    assert row["scope_id"] == "avibe::project::proj_fork_cli"
     assert row["session_anchor"] == payload["session_id"]
 
 
@@ -1064,6 +1068,101 @@ def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, cap
         engine.dispose()
     assert row["scope_id"] == "avibe::project::proj_fork_cli"
     assert row["workdir"] == str(tmp_path)
+
+
+def test_agent_run_same_scope_rejects_standalone_caller(tmp_path: Path, capsys) -> None:
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        with create_sqlite_engine(db_path).begin() as conn:
+            caller_session_id = sessions_service.create_session(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                agent_name="worker",
+            )["id"]
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            ["--agent", "worker", "--same-scope", "--async", "--no-callback", "--message", "hi"]
+        )
+
+        with (
+            patch.dict("os.environ", {"AVIBE_SESSION_ID": caller_session_id}),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "standalone_session_has_no_scope"
+    assert payload["details"]["session_id"] == caller_session_id
+
+
+def test_agent_run_same_scope_rejects_standalone_fork_source(monkeypatch) -> None:
+    args = _parse_agent_run(
+        [
+            "--agent",
+            "worker",
+            "--fork-session",
+            "ses-standalone",
+            "--same-scope",
+            "--async",
+            "--no-callback",
+            "--message",
+            "hi",
+        ]
+    )
+    monkeypatch.setattr(cli, "_scope_id_from_session_id", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._resolve_agent_run_scope_key(
+            args,
+            caller_context=None,
+            source_session_id="ses-standalone",
+        )
+
+    assert exc_info.value.code == "standalone_session_has_no_scope"
+
+
+def test_agent_run_fork_defaults_to_source_scope_not_caller_scope(monkeypatch) -> None:
+    args = _parse_agent_run(
+        [
+            "--agent",
+            "worker",
+            "--fork-session",
+            "ses-source",
+            "--async",
+            "--no-callback",
+            "--message",
+            "hi",
+        ]
+    )
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "_scope_id_from_session_id",
+        lambda session_id, **_kwargs: resolved.append(session_id) or "avibe::project::proj_caller",
+    )
+
+    scope_id = cli._resolve_agent_run_scope_key(
+        args,
+        caller_context=SimpleNamespace(session_id="ses-caller"),
+        source_session_id="ses-source",
+    )
+
+    # None is intentional: reserve_forked_session interprets it as inherit the
+    # source scope. Reaching the caller resolver here would override placement.
+    assert scope_id is None
+    assert resolved == []
 
 
 def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -1256,13 +1355,8 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
     assert payload["code"] == "session_fork_failed"
 
 
-def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path, capsys, monkeypatch) -> None:
-    """A private (no --deliver-key) reservation snapshots the CLI invocation's
-    cwd as the new session's workdir — like every other CLI tool — instead of
-    leaving it blank and falling to the global default cwd at dispatch."""
-
-    import os
-
+def test_agent_run_callerless_session_workdir_uses_show_workspace(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A caller-less run reserves a standalone Session in its Show workspace."""
     from storage.importer import ensure_sqlite_state
 
     state_home = tmp_path / "home"
@@ -1276,7 +1370,6 @@ def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hi"])
         monkeypatch.chdir(invoke_dir)
-        expected = os.getcwd()
 
         with (
             patch("vibe.cli._agent_store", return_value=agent_store),
@@ -1288,7 +1381,9 @@ def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert _read_session_workdir(db_path, payload["session_id"]) == expected
+    expected = state_home / "show" / payload["session_id"]
+    assert _read_session_workdir(db_path, payload["session_id"]) == str(expected)
+    assert expected.is_dir()
 
 
 def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -1350,14 +1445,22 @@ def test_agent_run_cwd_rejected_with_existing_session(capsys) -> None:
 
 
 def test_resolve_run_cwd_defaults_by_session_target(monkeypatch, tmp_path: Path) -> None:
-    """Without --cwd, private sessions snapshot the caller cwd, while scoped
-    sessions leave cwd unset so creation snapshots the selected scope workdir."""
+    """Caller placement uses its cwd; standalone/scoped reservations derive theirs."""
 
     from types import SimpleNamespace
 
     monkeypatch.chdir(tmp_path)
     args = SimpleNamespace(cwd=None)
-    assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") == str(tmp_path)
+    assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") is None
+    assert (
+        cli._resolve_run_cwd(
+            args,
+            session_policy="create",
+            invocation_cwd_default=True,
+            help_command="x",
+        )
+        == str(tmp_path)
+    )
     assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") is None
 
     args = SimpleNamespace(cwd=str(tmp_path), deliver_key="slack::channel::C123")

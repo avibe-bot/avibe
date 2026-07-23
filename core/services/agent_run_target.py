@@ -43,6 +43,7 @@ class AgentRunTarget:
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
     native_session_id: Optional[str] = None
+    visibility: str = "foreground"
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -62,6 +63,7 @@ class AgentRunTarget:
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
             "native_session_id": self.native_session_id,
+            "visibility": self.visibility,
         }
 
 
@@ -307,6 +309,7 @@ def _cached_target(
         model=_optional_str(cached.get("model")),
         reasoning_effort=_optional_str(cached.get("reasoning_effort")),
         native_session_id=_optional_str(cached.get("native_session_id")),
+        visibility=str(cached.get("visibility") or "foreground"),
     )
 
 
@@ -593,6 +596,7 @@ def _target_from_session_row(
         model=_optional_str(row.get("model")),
         reasoning_effort=_optional_str(row.get("reasoning_effort")),
         native_session_id=_optional_str(row.get("native_session_id")),
+        visibility=str(row.get("visibility") or "foreground"),
     )
 
 

@@ -68,6 +68,9 @@ class ManagedRuntimeSpec:
     version_field: str
     default_bin_path: str
     package: str = "vibe"
+    archives_field: str = "archives"
+    archive_size_field: str = "size"
+    platform_aliases: tuple[tuple[str, str], ...] = ()
 
     @property
     def metadata_filename(self) -> str:
@@ -235,7 +238,7 @@ class ManagedRuntimeManager:
     def status(self) -> dict[str, Any]:
         manifest = self._load_manifest(allow_network=False)
         platform_tag = runtime_platform_tag()
-        archive = manifest.archives.get(platform_tag) if manifest else None
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
         install_dir = self._manifest_install_dir(manifest, archive) if manifest and archive else None
         binary = self.resolve_binary() if manifest and archive else None
         return {
@@ -423,15 +426,23 @@ class ManagedRuntimeManager:
             if not isinstance(data, dict):
                 raise ValueError("manifest root must be an object")
             archives: dict[str, ManagedRuntimeArchive] = {}
-            for platform_tag, item in (data.get("archives") or {}).items():
+            raw_archives = data.get(self.spec.archives_field) or {}
+            if isinstance(raw_archives, dict):
+                archive_entries = raw_archives.items()
+            elif isinstance(raw_archives, list):
+                archive_entries = ((item.get("platform"), item) for item in raw_archives if isinstance(item, dict))
+            else:
+                raise ValueError("invalid archive collection")
+            for platform_tag, item in archive_entries:
                 if not isinstance(platform_tag, str) or not isinstance(item, dict):
                     raise ValueError("invalid archive entry")
-                name = str(item["name"])
                 url = str(item["url"])
+                name = str(item.get("name") or Path(urllib.parse.urlparse(url).path).name)
                 sha256 = str(item["sha256"]).lower()
                 binary_sha256 = str(item["binary_sha256"]).lower()
                 bin_path = str(item.get("bin_path") or self.spec.default_bin_path)
-                size = int(item["size"]) if item.get("size") is not None else None
+                raw_size = item.get(self.spec.archive_size_field)
+                size = int(raw_size) if raw_size is not None else None
                 if Path(name).name != name or not name:
                     raise ValueError("unsafe archive name")
                 if not _SHA256_RE.fullmatch(sha256):
@@ -474,7 +485,12 @@ class ManagedRuntimeManager:
         self,
         manifest: ManagedRuntimeManifest,
     ) -> ManagedRuntimeArchive | None:
-        archive = manifest.archives.get(runtime_platform_tag())
+        platform_tag = runtime_platform_tag()
+        platform_aliases = dict(self.spec.platform_aliases)
+        archive = manifest.archives.get(platform_tag)
+        if archive is None:
+            alias = platform_aliases.get(platform_tag)
+            archive = manifest.archives.get(alias) if alias else None
         if archive is None:
             self._install_reason = self._reason("platform_unsupported")
         return archive

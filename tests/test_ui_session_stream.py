@@ -956,6 +956,136 @@ def test_patch_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_p
     in_flight.assert_awaited_once()
 
 
+def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_path, monkeypatch):
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    import vibe.sse_broker as sse_broker
+    from vibe.ui_server import app
+
+    original_scope_id, session_id = _make_session(tmp_path)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(sse_broker.broker, "publish", lambda topic, data: published.append((topic, data)))
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        original_workdir = conn.execute(
+            agent_sessions.select().where(agent_sessions.c.id == session_id)
+        ).mappings().one()["workdir"]
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    visibility_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"visibility": "background"},
+        headers=headers,
+    )
+    assert visibility_response.status_code == 200
+    assert visibility_response.get_json()["visibility"] == "background"
+    assert visibility_response.get_json()["scope_id"] == original_scope_id
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert activity[-2]["event"] == "updated"
+    assert activity[-2]["visibility"] == "background"
+    assert activity[-1] == {
+        "session_id": session_id,
+        "scope_id": original_scope_id,
+        "event": "user_message",
+        "reason": "session_placement_changed",
+    }
+
+    published.clear()
+    scope_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"scope_id": None},
+        headers=headers,
+    )
+    assert scope_response.status_code == 200
+    body = scope_response.get_json()
+    assert body["visibility"] == "background"
+    assert body["scope_id"] is None
+    assert body["project_id"] is None
+    assert body["workdir"] == original_workdir
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert [event["event"] for event in activity] == ["updated", "user_message"]
+    assert activity[-1]["scope_id"] == original_scope_id
+
+    published.clear()
+    foreground_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"visibility": "foreground", "scope_id": original_scope_id},
+        headers=headers,
+    )
+    assert foreground_response.status_code == 200
+    assert foreground_response.get_json()["workdir"] == original_workdir
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert [event["event"] for event in activity] == ["updated", "created"]
+    assert activity[-1]["scope_id"] == original_scope_id
+
+
+def test_patch_session_rejects_invalid_visibility(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"visibility": "hidden"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+
+
+def test_patch_session_rejects_unknown_target_scope_as_invalid_value(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"scope_id": "avibe::project::missing"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+
+
+def test_standalone_session_accepts_attachment_upload(isolated_state):
+    import base64
+
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.models import media_objects
+    from vibe.ui_server import app
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = sessions_service.create_session(
+            conn,
+            scope_id=None,
+            agent_backend="codex",
+            visibility="foreground",
+        )
+
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session['id']}/attachments",
+        json={
+            "name": "standalone.txt",
+            "mime": "text/plain",
+            "data": base64.b64encode(b"standalone upload").decode("ascii"),
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 201
+    token = response.get_json()["token"]
+    with engine.connect() as conn:
+        row = conn.execute(
+            media_objects.select().where(media_objects.c.token == token)
+        ).mappings().one()
+    assert row["scope_id"] is None
+    assert row["session_id"] == session["id"]
+
+
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
     """A selected Vibe Agent implies its backend. The UI often sends only
     ``agent_name`` when changing the picker, so the route must derive the

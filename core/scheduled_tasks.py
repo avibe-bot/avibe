@@ -184,6 +184,8 @@ class ResolvedSessionIdTarget:
     agent_backend: str
     agent_variant: str
     native_session_id: str
+    scope_id: Optional[str] = None
+    visibility: str = "foreground"
     agent_id: Optional[str] = None
     agent_name: Optional[str] = None
     model: Optional[str] = None
@@ -220,7 +222,9 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
             row = conn.execute(
                 select(
                     agent_sessions.c.id,
+                    agent_sessions.c.scope_id,
                     agent_sessions.c.status,
+                    agent_sessions.c.visibility,
                     agent_sessions.c.agent_id,
                     agent_sessions.c.agent_name,
                     agent_sessions.c.agent_backend,
@@ -233,7 +237,6 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
                     scopes.c.platform,
                     scopes.c.scope_type,
                     scopes.c.native_id,
-                    scopes.c.metadata_json.label("scope_metadata_json"),
                     agent_sessions.c.metadata_json.label("session_metadata_json"),
                 )
                 .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
@@ -253,32 +256,39 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
     # in depth for manual ``--session-id`` runs and any stragglers).
     if str(row["status"] or "") == "archived":
         raise ValueError(f"agent session is archived: {raw}")
+    persisted_scope_id = str(row["scope_id"] or "").strip() or None
     platform = str(row["platform"] or "")
     scope_type = str(row["scope_type"] or "")
-    scope_id = str(row["native_id"] or "")
+    native_scope_id = str(row["native_id"] or "")
     # ``project`` is the avibe workbench's scope type (sessions live under
     # ``avibe::project::proj_<hex>``). A session-id target carries the concrete
     # ``session_id`` (the row PK) regardless of scope type, and the dispatch binds
     # the reply to that reserved session via ``agent_session_target`` — so a
     # project-scoped row IS a valid task target. (``--session-key`` targeting stays
     # channel/user-only: a bare project key wouldn't identify a single session.)
-    if not platform or scope_type not in {"channel", "user", "project"} or not scope_id:
+    if persisted_scope_id is None:
+        platform = "avibe"
+        scope_type = "project"
+        native_scope_id = raw
+    elif not platform or scope_type not in {"channel", "user", "project"} or not native_scope_id:
         raise ValueError(f"agent session id cannot be used as a task target: {raw}")
 
     anchor = str(row["session_anchor"] or "")
-    thread_id = _thread_id_from_session_anchor(anchor, platform=platform, scope_id=scope_id)
-    session_metadata = _json_loads(row["session_metadata_json"], {})
-    scope_metadata = _json_loads(row["scope_metadata_json"], {})
-    suppress_delivery = bool(
-        (isinstance(session_metadata, dict) and session_metadata.get("no_delivery"))
-        or (isinstance(scope_metadata, dict) and scope_metadata.get("no_delivery"))
+    thread_id = (
+        None
+        if persisted_scope_id is None or anchor == raw
+        else _thread_id_from_session_anchor(anchor, platform=platform, scope_id=native_scope_id)
     )
+    session_metadata = _json_loads(row["session_metadata_json"], {})
+    visibility = str(row["visibility"] or "foreground")
     return ResolvedSessionIdTarget(
         session_id=raw,
+        scope_id=persisted_scope_id,
+        visibility=visibility,
         session_key=ParsedSessionKey(
             platform=platform,
             scope_type=scope_type,
-            scope_id=scope_id,
+            scope_id=native_scope_id,
             thread_id=thread_id,
         ),
         agent_backend=str(row["agent_backend"] or ""),
@@ -291,7 +301,7 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         workdir=row["workdir"],
         session_anchor=str(row["session_anchor"] or ""),
         metadata=session_metadata if isinstance(session_metadata, dict) else {},
-        suppress_delivery=suppress_delivery,
+        suppress_delivery=visibility == "background",
     )
 
 
@@ -1712,15 +1722,6 @@ class ScheduledTaskService:
             registry.ack_completed_output(activity)
             return
 
-        if target.suppress_delivery:
-            logger.info(
-                "Recovered Activity %s targets a no-delivery Session; settling without output",
-                getattr(activity, "id", ""),
-            )
-            self._settle_activity_without_output(activity)
-            registry.ack_completed_output(activity)
-            return
-
         delivery_target = target.session_key
         delivery_key = str(
             (getattr(activity, "metadata", None) or {}).get("delivery_key_external")
@@ -2612,24 +2613,29 @@ class ScheduledTaskService:
         workdir: Optional[str] = None,
     ) -> str:
         scope_id = ""
-        legacy_delivery_target: Optional[ParsedSessionKey] = None
         if isinstance(metadata, dict):
             scope_id = str(metadata.get("session_scope_id") or "").strip()
-        if not scope_id:
-            legacy_delivery_target = parse_session_key(str(deliver_key or "").strip()) if deliver_key else None
-            scope_id = legacy_delivery_target.session_scope if legacy_delivery_target is not None else ""
-        if not scope_id:
-            raise ValueError("session creation requires scope_id")
+        if not scope_id and deliver_key:
+            # Definitions created before session_scope_id stored placement only
+            # in deliver_key. Preserve those recurring definitions while new
+            # definitions continue to persist the explicit metadata field.
+            try:
+                scope_id = parse_scope_id(deliver_key).session_scope
+            except ValueError:
+                try:
+                    scope_id = parse_session_key(deliver_key).session_scope
+                except ValueError:
+                    pass
         from config import paths as config_paths
         from core.vibe_agents import VibeAgentStore
         from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
         from storage.sessions_service import SQLiteSessionsService
 
-        target = parse_scope_id(scope_id)
+        target = parse_scope_id(scope_id) if scope_id else None
         ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(config_paths.get_state_dir()))
         agent_store = VibeAgentStore()
         try:
-            scope_target = self._resolve_scope_agent_target(scope_id) if not agent_name else _ScopeAgentTarget(None)
+            scope_target = self._resolve_scope_agent_target(scope_id) if scope_id and not agent_name else _ScopeAgentTarget(None)
             resolved_agent_name = agent_name or scope_target.agent_name
             agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
         finally:
@@ -2639,16 +2645,27 @@ class ScheduledTaskService:
         agent_backend = agent.backend
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
-            session_id = service.reserve_agent_session(
-                scope_key=target.session_scope,
-                agent_backend=agent_backend,
-                session_anchor=f"{session_anchor_for_target(target)}:runtime_{uuid4().hex[:12]}",
-                agent_id=agent.id if agent else None,
-                agent_name=agent.name if agent else None,
-                model=agent.model if agent else None,
-                reasoning_effort=agent.reasoning_effort if agent else None,
-                workdir=workdir,
-            )
+            common = {
+                "agent_backend": agent_backend,
+                "session_anchor": (
+                    f"{session_anchor_for_target(target)}:runtime_{uuid4().hex[:12]}"
+                    if target is not None
+                    else f"runtime_{uuid4().hex[:12]}"
+                ),
+                "agent_id": agent.id if agent else None,
+                "agent_name": agent.name if agent else None,
+                "model": agent.model if agent else None,
+                "reasoning_effort": agent.reasoning_effort if agent else None,
+                "workdir": workdir,
+                "visibility": "background",
+            }
+            if target is None:
+                session_id = service.reserve_standalone_agent_session(**common)
+            else:
+                session_id = service.reserve_agent_session(
+                    scope_key=target.session_scope,
+                    **common,
+                )
         finally:
             service.close()
         if not session_id:

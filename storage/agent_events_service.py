@@ -61,7 +61,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
 def append(
     conn: Connection,
     *,
-    scope_id: str,
+    scope_id: Optional[str],
     session_id: Optional[str],
     platform: str,
     event_type: str,

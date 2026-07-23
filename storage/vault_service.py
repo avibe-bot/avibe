@@ -987,6 +987,7 @@ def _request_session_summary(conn: Connection, session_id: str | None) -> dict[s
     row = conn.execute(
         select(
             agent_sessions.c.id,
+            agent_sessions.c.scope_id,
             agent_sessions.c.title,
             scopes.c.platform,
             scopes.c.scope_type,
@@ -1008,7 +1009,7 @@ def _request_session_summary(conn: Connection, session_id: str | None) -> dict[s
         }
     platform = str(row["platform"] or "").strip()
     scope_kind = str(row["scope_type"] or "").strip()
-    is_workbench = platform == "avibe" or scope_kind == "project"
+    is_workbench = row["scope_id"] is None or platform == "avibe" or scope_kind == "project"
     title = row["title"]
     label = title if is_workbench else (row["display_name"] or row["native_id"] or title or session_id)
     return {

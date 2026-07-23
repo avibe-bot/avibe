@@ -14,7 +14,9 @@ from core.show_pages import (
     _extract_icon_path,
     ensure_show_page_dir,
     show_cli_event_token,
+    show_event_write_token,
     show_page_payload,
+    show_public_event_write_token,
 )
 from storage.pagination import PageRequest
 from vibe import cli
@@ -59,6 +61,17 @@ def _stub_runtime_prepare_dependencies(
     return calls
 
 
+def test_public_show_write_token_is_share_scoped_and_distinct(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    first = show_public_event_write_token("share-one", "ses-one")
+
+    assert first == show_public_event_write_token("share-one", "ses-one")
+    assert first != show_public_event_write_token("share-two", "ses-one")
+    assert first != show_public_event_write_token("share-one", "ses-two")
+    assert first != show_event_write_token("share-one")
+
+
 def test_show_without_subcommand_prints_help(capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["show"])
@@ -69,7 +82,8 @@ def test_show_without_subcommand_prints_help(capsys):
     assert cli.cmd_show(args) == 0
     captured = capsys.readouterr()
     assert "Manage the one visual Show Page attached to an Agent Session." in captured.out
-    assert "usage: vibe show [-h] {list,path,status,update,mark,event} ..." in captured.out
+    assert "usage: vibe show [-h]" in captured.out
+    assert "{list,path,status,update,mark,reply,marks,unmark,event,annotate} ..." in " ".join(captured.out.split())
     assert "vibe show list" in captured.out
     assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
 
@@ -732,12 +746,16 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert "declare global" in main_tsx
     assert "const injected: VibeShowRuntimeConfig = globalThis.__AVIBE_SHOW__ ?? {}" in main_tsx
     assert "globalThis.__AVIBE_SHOW__ = {" in main_tsx
+    assert "...injected," in main_tsx
     assert main_tsx.index("const injected: VibeShowRuntimeConfig") < main_tsx.index("globalThis.__AVIBE_SHOW__ = {")
     assert "sessionId: injected.sessionId ??" in main_tsx
     assert "basePath: injected.basePath ??" in main_tsx
     assert 'eventsPath: injected.eventsPath ?? "__show/events"' in main_tsx
     assert 'streamPath: injected.streamPath ?? "__show/events?stream=1"' in main_tsx
     assert 'writeToken: injected.writeToken ?? readCookie("vibe_show_event_token")' in main_tsx
+    assert "annotation?: {" in main_tsx
+    assert "authenticated: boolean" in main_tsx
+    assert "mePath: string" in main_tsx
     # The runtime-owned shell just renders <App/>; routing is NOT moved into
     # main.tsx/index.html, so adding a page never requires touching the shell.
     assert 'import App from "./App"' in main_tsx
@@ -1708,6 +1726,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert payload["url_guidance"] is None
     assert "Do not send implementation details such as local paths to the user unless they ask for them." in payload["next_actions"]
     assert "Treat the Show Page as the primary collaboration surface; put meaningful updates there first." in payload["next_actions"]
+    assert "Annotations: users can mark up this page; see vibe show marks / reply / annotate." in payload["next_actions"]
     assert (
         "Use visual thinking: diagrams, timelines, maps, comparisons, dashboards, or small prototypes when they help."
         in payload["next_actions"]
@@ -1716,6 +1735,20 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm"
     assert captured["payload"] == {}
     assert captured["timeout"] == 3
+
+
+def test_show_path_cli_prints_annotation_capabilities(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123"])
+    assert cli.cmd_show_path(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Use it:" in output
+    assert "- Annotations: users can mark up this page; see vibe show marks / reply / annotate." in output
 
 
 def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, capsys):
@@ -2057,6 +2090,35 @@ def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, cap
     assert payload["code"] == "not_public"
 
 
+def _seed_show_cli_session(session_id: str = "ses123") -> None:
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=f"anchor_{session_id}",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+
 def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions, messages, show_session_events
@@ -2110,7 +2172,7 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    assert payload["event"]["transcript_text"].startswith("[agent-mark:default:created] mark-default-summary")
+    assert payload["event"]["transcript_text"].startswith("[agent-mark] mark-default-summary")
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
@@ -2200,7 +2262,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
                         "scope": "default",
                         "anchor": {},
                         "payload": {},
-                        "transcript_text": "[agent-mark:default] mark-default-summary\n\nReview this summary.",
+                        "transcript_text": "[agent-mark] mark-default-summary\n\nReview this summary.",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",
@@ -2240,6 +2302,182 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
     assert captured["cli_token"] == show_cli_event_token()
     assert captured["payload"]["type"] == "assistant.mark.created"
     assert captured["timeout"] == 3
+
+
+def test_show_reply_copies_annotation_anchor_and_replaces_prior_reply(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    store = ShowSessionEventStore()
+    try:
+        annotation = store.append(
+            "ses123",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "question",
+                    "comment": "Why did this change?",
+                    "anchor": {
+                        "kind": "text-range",
+                        "selector": "#revenue-card",
+                        "textQuote": "Revenue",
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    first_args = cli.build_parser().parse_args(
+        ["show", "reply", annotation["id"], "--session-id", "ses123", "--message", "First answer.", "--json"]
+    )
+    assert cli.cmd_show(first_args) == 0
+    first = json.loads(capsys.readouterr().out)
+
+    second_args = cli.build_parser().parse_args(
+        ["show", "reply", annotation["id"], "--session-id", "ses123", "--message", "Better answer.", "--json"]
+    )
+    assert cli.cmd_show(second_args) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["mark_id"] == second["mark_id"]
+    assert first["event"]["anchor"] == annotation["anchor"]
+    assert first["event"]["payload"]["target"] == "#revenue-card"
+    assert first["event"]["payload"]["replyTo"] == annotation["id"]
+    assert second["replaced"] is True
+    assert "vibe show marks" in second["replacement_notice"]
+
+    store = ShowSessionEventStore()
+    try:
+        active = store.active_marks("ses123")
+    finally:
+        store.close()
+    assert len(active) == 1
+    assert active[0]["kind"] == "reply"
+    assert active[0]["body"] == "Better answer."
+
+
+def test_show_reply_unknown_id_lists_recent_session_annotation_ids(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    store = ShowSessionEventStore()
+    try:
+        recent = store.append(
+            "ses123",
+            {"type": "human.annotation.created", "annotation": {"comment": "Known annotation."}},
+        )
+    finally:
+        store.close()
+
+    args = cli.build_parser().parse_args(
+        ["show", "reply", "show_evt_foreign", "--session-id", "ses123", "--message", "Answer.", "--json"]
+    )
+    assert cli.cmd_show(args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["code"] == "show_annotation_not_found"
+    assert error["details"]["recent_annotation_event_ids"] == [recent["id"]]
+    assert recent["id"] in error["error"]
+
+
+def test_show_mark_positional_target_replaces_same_target(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+
+    first_args = cli.build_parser().parse_args(
+        ["show", "mark", "#revenue-card", "--session-id", "ses123", "--message", "First note.", "--json"]
+    )
+    assert cli.cmd_show(first_args) == 0
+    first = json.loads(capsys.readouterr().out)
+    second_args = cli.build_parser().parse_args(
+        ["show", "mark", "--target", "#revenue-card", "--session-id", "ses123", "--body", "New note.", "--json"]
+    )
+    assert cli.cmd_show(second_args) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["mark_id"] == second["mark_id"]
+    assert second["replaced"] is True
+    store = ShowSessionEventStore()
+    try:
+        active = store.active_marks("ses123")
+    finally:
+        store.close()
+    assert [(mark["target"], mark["body"]) for mark in active] == [("#revenue-card", "New note.")]
+
+
+def test_show_marks_filters_resolved_and_unmark_reports_partial_success(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore, stable_assistant_mark_id
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    first_id = stable_assistant_mark_id(scope="default", target="#first")
+    second_id = stable_assistant_mark_id(scope="default", target="#second")
+    store = ShowSessionEventStore()
+    try:
+        first = store.append(
+            "ses123",
+            {"type": "assistant.mark.created", "mark": {"id": first_id, "target": "#first", "body": "First."}},
+        )
+        store.append(
+            "ses123",
+            {"type": "assistant.mark.created", "mark": {"id": second_id, "target": "#second", "body": "Second."}},
+        )
+        store.append(
+            "ses123",
+            {
+                "type": "assistant.mark.resolved",
+                "mark": {"id": first_id, "updatedAt": first["payload"]["updatedAt"]},
+            },
+        )
+    finally:
+        store.close()
+
+    marks_args = cli.build_parser().parse_args(["show", "marks", "--session-id", "ses123", "--json"])
+    assert cli.cmd_show(marks_args) == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["marks"] == [
+        {
+            "id": second_id,
+            "kind": "note",
+            "target": "#second",
+            "body_head": "Second.",
+            "read_state": "unread",
+        }
+    ]
+
+    unmark_args = cli.build_parser().parse_args(
+        ["show", "unmark", second_id, "missing-target", "--session-id", "ses123", "--json"]
+    )
+    assert cli.cmd_show(unmark_args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    assert [item["ok"] for item in result["results"]] == [True, False]
+
+    missing_args = cli.build_parser().parse_args(
+        ["show", "unmark", "missing-one", "missing-two", "--session-id", "ses123", "--json"]
+    )
+    assert cli.cmd_show(missing_args) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["succeeded"] == 0
+
+    store = ShowSessionEventStore()
+    try:
+        assert store.active_marks("ses123") == []
+    finally:
+        store.close()
 
 
 def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
@@ -2306,6 +2544,211 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Clarify this." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+def test_show_annotate_cli_posts_single_enable_event_to_live_ui(monkeypatch, tmp_path, capsys):
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses123",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_ses123",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    captured = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "event": {
+                        "id": "show_evt_control",
+                        "type": "system.annotation.control",
+                        "payload": {"action": "enable", "mode": "screenshot"},
+                        "message_id": None,
+                    },
+                }
+            ).encode("utf-8")
+
+    def _urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["url"] = request.full_url
+        return _Response()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "annotate",
+            "--session-id",
+            "ses123",
+            "--on",
+            "--mode",
+            "screenshot",
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["event"]["id"] == "show_evt_control"
+    assert captured["payload"] == {
+        "type": "system.annotation.control",
+        "payload": {"action": "enable", "mode": "screenshot"},
+    }
+    assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/events"
+
+
+def test_show_annotate_cli_defaults_session_and_records_offline_control(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(["show", "annotate", "--mode", "smart", "--json"])
+    assert cli.cmd_show(args) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["session_id"] == "sesCaller"
+    assert result["session_default_notice"]["session_id"] == "sesCaller"
+    assert result["event"]["payload"] == {"action": "set-mode", "mode": "smart"}
+    assert result["event"]["transcript_text"] == ""
+    assert result["event"]["message_id"] is None
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.id)).scalar_one() == result["event"]["id"]
+        assert conn.execute(select(messages.c.id)).first() is None
+
+
+def test_show_annotate_cli_rejects_off_with_mode(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+
+    args = cli.build_parser().parse_args(
+        ["show", "annotate", "--session-id", "ses123", "--off", "--mode", "smart", "--json"]
+    )
+
+    assert cli.cmd_show(args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == "invalid_arguments"
+
+
+@pytest.mark.parametrize(
+    ("session_id", "status", "expected_code"),
+    [
+        ("ses-missing", None, "session_not_found"),
+        ("ses-archived", "archived", "session_archived"),
+    ],
+)
+def test_show_annotate_cli_does_not_create_page_for_unwritable_session(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    session_id,
+    status,
+    expected_code,
+):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_pages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+
+    engine = create_sqlite_engine()
+    if status is not None:
+        now = messages_service._utc_now_iso()
+        with engine.begin() as conn:
+            scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=session_id,
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_variant="default",
+                    session_anchor="anchor_" + session_id,
+                    native_session_id="",
+                    status=status,
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+
+    args = cli.build_parser().parse_args(
+        ["show", "annotate", "--session-id", session_id, "--on", "--json"]
+    )
+
+    assert cli.cmd_show(args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == expected_code
+    with engine.connect() as conn:
+        assert conn.execute(select(show_pages.c.session_id)).first() is None
 
 
 def test_show_event_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
@@ -2391,7 +2834,7 @@ def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tm
                         "scope": "default",
                         "anchor": {},
                         "payload": {"dispatch": True},
-                        "transcript_text": "[show-annotation:default:created] comment",
+                        "transcript_text": "[show-annotation] comment",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",

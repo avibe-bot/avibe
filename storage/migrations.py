@@ -68,7 +68,7 @@ PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
 HEAD_REQUIRED_COLUMNS = {
     "agents": {"enabled"},
     "scope_settings": {"agent_name"},
-    "agent_sessions": {"agent_id", "agent_name"},
+    "agent_sessions": {"agent_id", "agent_name", "visibility"},
     "messages": {"type", "source"},
     "run_definitions": {
         "deleted_at",
@@ -599,6 +599,12 @@ def _repair_initial_required_columns(conn: sqlite3.Connection, tables: set[str])
         if "agent_name" not in columns:
             conn.execute('alter table "agent_sessions" add column "agent_name" VARCHAR')
             changed = True
+        if "visibility" not in columns:
+            conn.execute(
+                'alter table "agent_sessions" add column "visibility" '
+                "VARCHAR not null default 'foreground'"
+            )
+            changed = True
     return changed
 
 
@@ -613,10 +619,15 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_session_created on agent_runs (session_id, created_at)')
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
+    conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
 
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
     if "agent_sessions" in tables:
+        conn.execute(
+            "create index if not exists ix_agent_sessions_visibility "
+            "on agent_sessions (visibility)"
+        )
         conn.execute(
             "create index if not exists ix_agent_sessions_scope_status_activity "
             "on agent_sessions (scope_id, status, last_active_at, created_at, id)"
@@ -638,7 +649,7 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
     conn.execute(
         "create index ix_messages_inbox_activity "
         "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
+        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
     )
     conn.execute(
         "create index if not exists ix_messages_inbox_agent_reply "

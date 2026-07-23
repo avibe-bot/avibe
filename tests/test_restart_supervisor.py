@@ -358,7 +358,7 @@ def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", slow_start_runtime)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: False)
-    monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: pid == 222)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 222 if pid == 222 else None)
 
     rc = restart_supervisor._run_restart_job(job_id="jobslow", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
 

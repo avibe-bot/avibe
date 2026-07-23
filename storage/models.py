@@ -120,6 +120,7 @@ agent_sessions = Table(
     Column("native_session_id", Text, nullable=False),
     Column("title", Text, nullable=True),
     Column("status", String, nullable=False),
+    Column("visibility", String, nullable=False, server_default="foreground"),
     # Live agent-runtime status, distinct from the lifecycle ``status``
     # (active/archived). One of ``idle`` / ``running`` / ``failed`` —
     # ``running`` while a turn is in flight, ``failed`` when the most recent
@@ -132,6 +133,7 @@ agent_sessions = Table(
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
+    Index("ix_agent_sessions_visibility", "visibility"),
     Index("ix_agent_sessions_scope_status_activity", "scope_id", "status", "last_active_at", "created_at", "id"),
     Index("ix_agent_sessions_native_session", "native_session_id"),
 )
@@ -250,6 +252,9 @@ agent_runs = Table(
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
     Index("ix_agent_runs_agent_created", "agent_name", "created_at"),
     Index("ix_agent_runs_callback_status", "callback_status", "completed_at"),
+    # Leading-timestamp index for the run-graph window scan: updated_at bumps on
+    # every state change, so it is the single column that scan filters on.
+    Index("ix_agent_runs_updated", "updated_at"),
 )
 
 # Backwards-compatible Python aliases for legacy callers. The physical table
@@ -295,7 +300,7 @@ agent_events = Table(
     "agent_events",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
     Column("turn_id", String, nullable=True),
     Column("run_id", String, nullable=True),
@@ -328,7 +333,7 @@ messages = Table(
     "messages",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
     Column("platform", String, nullable=False),
     Column("author", String, nullable=False),
@@ -366,7 +371,9 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text("session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"),
+        sqlite_where=text(
+            "session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
+        ),
     ),
     Index(
         "ix_messages_inbox_agent_reply",
@@ -409,7 +416,7 @@ media_objects = Table(
     "media_objects",
     metadata,
     Column("token", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
     Column("message_id", String, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True),
     Column("kind", String, nullable=False),

@@ -129,6 +129,8 @@ def _make_row(
         "platform": None,
         "scope_type": None,
         "scope_display_name": None,
+        "scope_id": None,
+        "visibility": None,
         "trigger_source": None,
         "agent_name": None,
         "openable_in_chat": False,
@@ -407,10 +409,10 @@ def _enrich_from_db(rows: list[dict[str, Any]]) -> None:
                     agent_sessions.c.workdir,
                     agent_sessions.c.agent_name,
                     agent_sessions.c.last_active_at,
+                    agent_sessions.c.visibility,
                     scopes.c.platform.label("scope_platform"),
                     scopes.c.scope_type.label("scope_scope_type"),
                     scopes.c.display_name.label("scope_display_name"),
-                    scopes.c.native_type.label("scope_native_type"),
                 )
                 .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
                 .where(agent_sessions.c.session_anchor.in_(anchors))
@@ -460,32 +462,20 @@ def _apply_session_meta(r: dict[str, Any], meta: dict[str, Any]) -> None:
     # scope row is missing (FK is nullable / SET NULL).
     split_platform, split_scope_type = _split_scope_id(scope_id)
     platform = meta.get("scope_platform") or split_platform
-    # Private agent runs (``vibe agent run`` / one agent invoking another) are
-    # NOT IM sessions: ``reserve_private_agent_session`` stamps the scope with a
-    # PLACEHOLDER platform (the configured primary platform — slack/discord/…,
-    # only "slack" when config is unreadable) but marks it
-    # ``native_type="private_agent_run"``. So keying off ``native_type`` (not the
-    # platform) catches these uniformly on every install. Without this guard the
-    # row would be mislabeled as a real IM session. Treat it as an agent-initiated
-    # internal run: no IM platform, ``trigger_source="agent"``, not chat-openable.
-    is_private_run = meta.get("scope_native_type") == "private_agent_run"
     r["session_id"] = meta.get("id")
     r["title"] = meta.get("title")
-    r["platform"] = None if is_private_run else platform
+    r["platform"] = platform
+    r["scope_id"] = scope_id
     r["scope_type"] = meta.get("scope_scope_type") or split_scope_type
     r["scope_display_name"] = meta.get("scope_display_name")
+    r["visibility"] = meta.get("visibility") or "foreground"
     r["agent_name"] = meta.get("agent_name")
     if not r.get("workdir"):
         r["workdir"] = meta.get("workdir")
-    # Trigger source: agent-initiated for private agent runs; otherwise human.
-    # (scheduled/watch/webhook/callback are only asserted when a harness run
-    # reliably links them, which is not modeled here.)
-    r["trigger_source"] = "agent" if is_private_run else "human"
-    # Private agent runs are internal (``no_delivery``) — not user chat sessions —
-    # so they are not openable. Any other persisted session IS openable in the
-    # workbench Chat by its id, IM sessions included (mirrors how the Inbox /
-    # sidebar navigate to ``/chat/<session_id>``).
-    r["openable_in_chat"] = bool(meta.get("id")) and not is_private_run
+    # Run lineage owns precise trigger provenance; this live-process view only
+    # distinguishes whether a persisted Session exists.
+    r["trigger_source"] = r.get("trigger_source") or "human"
+    r["openable_in_chat"] = bool(meta.get("id"))
 
 
 async def _end_orphan_pid(pid: int) -> dict[str, Any]:

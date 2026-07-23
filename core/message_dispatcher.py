@@ -19,7 +19,11 @@ from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
-from core.message_mirror import agent_message_exists, persist_agent_message
+from core.message_mirror import (
+    agent_message_exists,
+    persist_agent_message,
+    persist_silent_completion_marker,
+)
 from core.message_output import MessageOutput, output_for_message
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.session_turns import emit_matches_active_turn
@@ -1426,6 +1430,26 @@ class ConsolidatedMessageDispatcher:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(context)
+                    if level != "silent" and not is_error:
+                        # A CLEAN silent completion — ``level='normal'`` with an
+                        # empty/``<silent>``-stripped body (we're already inside the
+                        # ``level=='silent' or not text.strip()`` branch, so here the
+                        # body is empty). Persist an INVISIBLE ``silent`` terminal
+                        # marker; without it the activity grouping sees "activity rows +
+                        # no terminal" and misreads a legal completion as interrupted.
+                        #
+                        # This must NOT fire for ``level='silent'``: the user-stop paths
+                        # (codex/claude/opencode) emit a terminal ``result`` with
+                        # ``level='silent'`` and ``is_error=False`` — a stop legitimately
+                        # stays ``interrupted``, so ``not is_error`` is the wrong gate.
+                        # Backend failures also arrive ``level='silent'`` (after a
+                        # visible notify), and are excluded here too. Background
+                        # sessions still keep this local terminal marker; visibility
+                        # suppresses outward delivery, not durable history.
+                        try:
+                            persist_silent_completion_marker(context)
+                        except Exception:
+                            logger.exception("emit_agent_message: silent completion marker failed")
                 return None
             finally:
                 if mutates_turn_lifecycle:
@@ -1484,8 +1508,7 @@ class ConsolidatedMessageDispatcher:
                     self._release_runtime_turn(context)
 
         # Persistence is decided per delivery path below, not here, so that:
-        #   * suppressed scheduled runs (intentionally private) never leak into
-        #     the cross-platform messages history,
+        #   * background sessions retain local history without platform delivery,
         #   * a user-facing result/notify that fails every IM send isn't recorded
         #     as if the user received it (matches the old success-only mirror),
         #   * intermediate assistant/tool_call log rows STILL persist pre-mute so
@@ -1496,13 +1519,48 @@ class ConsolidatedMessageDispatcher:
 
         if (context.platform_specific or {}).get("suppress_delivery"):
             try:
-                message_id = f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
+                recorded_text = self._fold_footer(persist_text, result_footer)
+                persisted_output = None
+                if canonical_type == "result":
+                    result_type = "error" if is_error else "result"
+                    if target_context.platform == "avibe":
+                        background_enhanced = process_reply(
+                            text,
+                            include_quick_replies=quick_replies_on,
+                            keep_file_links=True,
+                        )
+                        recorded_text = self._fold_footer(
+                            background_enhanced.text or persist_text,
+                            result_footer,
+                        )
+                        persisted_output = persist_agent_message(
+                            target_context,
+                            result_type,
+                            recorded_text,
+                            quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            metadata=output_metadata,
+                            native_message_id=native_output_id,
+                        )
+                    else:
+                        persisted_output = persist_agent_message(
+                            target_context,
+                            result_type,
+                            recorded_text,
+                            metadata=output_metadata,
+                            native_message_id=native_output_id,
+                        )
+                else:
+                    persisted_output = persist_agent_message(
+                        target_context,
+                        canonical_type,
+                        recorded_text,
+                        metadata=output_metadata,
+                        native_message_id=native_output_id,
+                    )
+                message_id = (persisted_output or {}).get("id") or (
+                    f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
+                )
                 terminal_status = None
-                # Delivery is suppressed (private scheduled/agent_run), so the footer
-                # can't ride subtext — fold the show_duration footnote into the
-                # RECORDED text so the stored result keeps the duration/token info
-                # that used to live in the body. No-op when there is no footer.
-                recorded_text = self._fold_footer(text, result_footer)
                 if (
                     canonical_type == "result"
                     and (context.platform_specific or {}).get("task_trigger_kind") == "agent_run"

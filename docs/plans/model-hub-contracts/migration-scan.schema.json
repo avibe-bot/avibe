@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/migration-scan.schema.json",
+  "title": "MigrationScan",
+  "description": "Result of scanning native backend configs (spec §6, frame 03). Non-destructive: apply copies only; originals are never modified or deleted (tested property, plan M4).",
+  "type": "object",
+  "required": ["items"],
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "backend", "kind", "masked_detail", "proposed_action", "selected"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "backend": { "enum": ["claude", "codex", "opencode"] },
+          "kind": { "enum": ["api_key", "oauth_native", "opencode_provider"] },
+          "masked_detail": { "type": "string", "description": "e.g. 'sk-…dd3c + 自定义 Base URL'; never full secrets" },
+          "proposed_action": {
+            "enum": ["import", "controlled_import", "keep_native", "reauth"],
+            "description": "Option 1: Claude oauth_native → keep_native (sanctioned as-is; NOT re-authed into the hub). Codex auth.json → controlled_import behind the consent-gated flag, else keep_native. Keys/base URLs → import."
+          },
+          "selected": { "type": "boolean" },
+          "notes_key": { "type": ["string", "null"], "description": "i18n key for the row's secondary line" }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "items": [
+        { "id": "mig_1", "backend": "claude", "kind": "api_key", "masked_detail": "sk-…dd3c + custom base URL", "proposed_action": "import", "selected": true, "notes_key": null },
+        { "id": "mig_2", "backend": "claude", "kind": "oauth_native", "masked_detail": "Claude 账号登录(OAuth)", "proposed_action": "keep_native", "selected": true, "notes_key": "models.migration.keep_native.sanctioned" },
+        { "id": "mig_3", "backend": "opencode", "kind": "opencode_provider", "masked_detail": "智谱 API Key · glm-…c31b", "proposed_action": "import", "selected": true, "notes_key": null }
+      ]
+    }
+  ]
+}

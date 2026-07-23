@@ -19,7 +19,10 @@ from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
-TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error"}
+# ``silent`` is the invisible completion marker (messages_service.SILENT_TYPE): a turn
+# that finished with no user-visible reply is still TERMINAL, so a fork created after
+# it must not trim/roll back the completed turn as if it were still running.
+TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error", "silent"}
 SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
@@ -109,6 +112,7 @@ def reserve_forked_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     scope_id: Optional[str] = None,
+    visibility: str = "foreground",
     trim_latest_running_turn: bool = False,
     native_turn_started: bool = False,
     db_path: Optional[Path] = None,
@@ -235,8 +239,6 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
-                metadata.pop("private_agent_run", None)
-                metadata.pop("no_delivery", None)
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,
@@ -253,6 +255,7 @@ def reserve_forked_session(
                 workdir=row["workdir"],
                 native_session_id="",
                 title=target_title,
+                visibility=visibility,
                 metadata=metadata,
                 now=now,
                 require_workdir=False,
@@ -539,7 +542,7 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import func, or_, select
 
-    from storage.messages_service import TRANSCRIPT_TYPES
+    from storage.messages_service import SILENT_TYPE, TRANSCRIPT_TYPES
     from storage.models import messages
 
     row = conn.execute(
@@ -547,7 +550,11 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         .where(
             messages.c.session_id == source_session_id,
             or_(
-                messages.c.type.in_(list(TRANSCRIPT_TYPES)),
+                # Include the invisible ``silent`` completion marker so a turn that
+                # finished silently is the anchor (a terminal, NOT a running input),
+                # otherwise the anchor falls back to the input row and the fork treats
+                # the completed turn as still running and trims/rolls it back.
+                messages.c.type.in_([*TRANSCRIPT_TYPES, SILENT_TYPE]),
                 func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
             ),
         )

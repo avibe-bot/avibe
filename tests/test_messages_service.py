@@ -16,8 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages, scopes
+from storage.models import agent_runs, agent_sessions, messages, scopes
 from storage.settings_service import upsert_scope
+from vibe.message_identity import HARNESS_TYPE
 
 
 @pytest.fixture()
@@ -49,6 +50,108 @@ def _seed_session(conn, scope_id: str, session_id: str) -> None:
             last_active_at=now,
         )
     )
+
+
+def _insert_harness_msg(conn, scope_id, session_id, *, author_name, native_message_id,
+                        author_id=None, msg_id, created_at):
+    conn.execute(
+        messages.insert().values(
+            id=msg_id, scope_id=scope_id, session_id=session_id, platform="avibe",
+            author="harness", type=HARNESS_TYPE, source="harness",
+            author_name=author_name, author_id=author_id,
+            native_message_id=native_message_id,
+            content_text="prompt", content_json="{}", metadata_json="{}",
+            created_at=created_at, updated_at=created_at,
+        )
+    )
+
+
+def _seed_titled_agent_session(conn, scope_id, session_id, *, title, agent_name):
+    now = messages_service._utc_now_iso()
+    conn.execute(
+        agent_sessions.insert().values(
+            id=session_id, scope_id=scope_id, agent_name=agent_name,
+            agent_backend="claude", agent_variant="default",
+            session_anchor="anchor_" + session_id, native_session_id="",
+            status="active", title=title, metadata_json="{}",
+            created_at=now, updated_at=now, last_active_at=now,
+        )
+    )
+
+
+def _insert_agent_run(conn, run_id, *, session_id, source_kind, source_actor=None, parent_run_id=None):
+    now = messages_service._utc_now_iso()
+    conn.execute(
+        agent_runs.insert().values(
+            id=run_id, run_type="agent_run", status="succeeded", cancel_requested=0,
+            source_kind=source_kind, source_actor=source_actor, parent_run_id=parent_run_id,
+            session_id=session_id, created_at=now, updated_at=now, metadata_json="{}",
+        )
+    )
+
+
+def test_agent_run_message_provenance_enrichment(isolated_state):
+    # A9a read-side enrichment resolves the SOURCE session per run kind:
+    #  - source_kind='agent'    → source_actor is the caller session.
+    #  - source_kind='callback' → source_actor is a run id; the source is the
+    #    PARENT (delegated) run's session.
+    # A non-agent_run harness message (task trigger) is left untouched.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        _seed_titled_agent_session(conn, scope_id, "ses_caller", title="Caller 总控", agent_name="pm")
+        _seed_titled_agent_session(conn, scope_id, "ses_delegated", title="Delegated 审计", agent_name="evm")
+        # Agent spawn: source_actor is the caller session.
+        _insert_agent_run(conn, "execAgent", session_id="ses_target",
+                          source_kind="agent", source_actor="ses_caller")
+        # Callback: source_actor is a decorated run id; parent run ran in ses_delegated.
+        _insert_agent_run(conn, "parentRun", session_id="ses_delegated", source_kind="agent",
+                          source_actor="ses_caller")
+        _insert_agent_run(conn, "execCb", session_id="ses_target", source_kind="callback",
+                          source_actor="parentRun:terminal:succeeded", parent_run_id="parentRun")
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="agent_run",
+                            native_message_id="agent_run:execAgent", msg_id="msg_agent",
+                            created_at="2026-05-30T10:00:00Z")
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="agent_run",
+                            native_message_id="agent_run:execCb", msg_id="msg_cb",
+                            created_at="2026-05-30T10:00:01Z")
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="scheduled",
+                            author_id="def_1", native_message_id="scheduled:def_1:execB",
+                            msg_id="msg_task", created_at="2026-05-30T10:00:02Z")
+
+    with engine.connect() as conn:
+        result = messages_service.list_session_messages(conn, session_id="ses_target")
+    by_id = {m["id"]: m for m in result["messages"]}
+    assert by_id["msg_agent"]["source_session_id"] == "ses_caller"
+    assert by_id["msg_agent"]["source_session_title"] == "Caller 总控"
+    assert by_id["msg_agent"]["source_session_agent_name"] == "pm"
+    # Callback resolves through the parent run's session, not the run-id source_actor.
+    assert by_id["msg_cb"]["source_session_id"] == "ses_delegated"
+    assert by_id["msg_cb"]["source_session_title"] == "Delegated 审计"
+    # A non-agent_run harness message gets no source fields.
+    assert "source_session_id" not in by_id["msg_task"]
+
+
+def test_agent_run_provenance_skips_missing_source_session(isolated_state):
+    # Dead-link guard: if the resolved source session no longer has an
+    # agent_sessions row (stale/imported/deleted), the enrichment must NOT attach
+    # source_session_id — a /chat/<missing id> link would only show the fallback.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        # source_actor points at a session that was never seeded (deleted/stale).
+        _insert_agent_run(conn, "execGhost", session_id="ses_target",
+                          source_kind="agent", source_actor="ses_ghost")
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="agent_run",
+                            native_message_id="agent_run:execGhost", msg_id="msg_ghost",
+                            created_at="2026-05-30T10:00:00Z")
+
+    with engine.connect() as conn:
+        result = messages_service.list_session_messages(conn, session_id="ses_target")
+    by_id = {m["id"]: m for m in result["messages"]}
+    assert "source_session_id" not in by_id["msg_ghost"]
 
 
 def test_mark_session_read_ties_break_on_id(isolated_state):
@@ -622,6 +725,72 @@ def test_list_inbox_sessions_per_session_feed(isolated_state):
     assert b["unread_count"] == by_session["ses_b"]
 
 
+def test_inbox_and_unread_queries_exclude_background_sessions(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_foreground", "Foreground")
+        _seed_titled_session(conn, scope_id, "ses_background", "Background")
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "ses_background")
+            .values(visibility="background")
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_foreground",
+            "agent",
+            "visible",
+            "2026-05-30T10:00:00Z",
+            read=False,
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_background",
+            "agent",
+            "hidden",
+            "2026-05-30T10:01:00Z",
+            read=False,
+        )
+
+    with engine.connect() as conn:
+        feed = messages_service.list_inbox_sessions(conn, platform="avibe")
+        unread = messages_service.unread_counts_by_session(conn, platform="avibe")
+        hidden = messages_service.get_inbox_session(conn, "ses_background")
+
+    assert [row["session_id"] for row in feed["sessions"]] == ["ses_foreground"]
+    assert unread == {"ses_foreground": 1}
+    assert hidden is None
+
+
+def test_list_inbox_sessions_only_session_returns_row_past_window(isolated_state):
+    """``only_session`` fetches one specific foreground session regardless of how
+    many other sessions are more recently active — the path the Inbox foreground
+    reconcile (contract A6) uses to re-add a restored session that sorts past the
+    paged window."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_old", "Old")
+        _insert_msg(conn, scope_id, "ses_old", "agent", "older", "2026-05-30T09:00:00Z", read=True)
+        # Two newer sessions that fill a small window ahead of ses_old.
+        for idx, ts in enumerate(("2026-05-30T10:00:00Z", "2026-05-30T11:00:00Z")):
+            sid = f"ses_new{idx}"
+            _seed_titled_session(conn, scope_id, sid, f"New{idx}")
+            _insert_msg(conn, scope_id, sid, "agent", "newer", ts, read=True)
+
+    with engine.connect() as conn:
+        windowed = messages_service.list_inbox_sessions(conn, platform="avibe", limit=1)
+        targeted = messages_service.list_inbox_sessions(
+            conn, platform="avibe", only_session="ses_old", limit=1
+        )
+
+    assert "ses_old" not in [row["session_id"] for row in windowed["sessions"]]
+    assert [row["session_id"] for row in targeted["sessions"]] == ["ses_old"]
+
+
 def test_list_inbox_sessions_includes_notify_only_failed_turn(isolated_state):
     """A turn that fails before producing any ``result`` persists only a terminal
     ``notify``; that failed conversation must still surface in the inbox (with the
@@ -688,6 +857,29 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
         row2 = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
     assert row2["replied"] is False
     assert row2["preview_text"] == "R2"
+
+
+def test_list_inbox_sessions_silent_completion_clears_awaiting(isolated_state):
+    """A turn that completes with only the INVISIBLE ``silent`` marker still counts as
+    the agent having replied — ``replied`` (awaiting) clears — while the preview text
+    stays the last VISIBLE reply (silent is not a preview type)."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_sil", "Silent")
+        _insert_msg(conn, scope_id, "ses_sil", "user", "first", "2026-05-30T10:00:00Z")
+        _insert_msg(conn, scope_id, "ses_sil", "agent", "R1", "2026-05-30T10:01:00Z")  # visible reply
+        # turn 2: user follows up; the agent runs and finishes SILENTLY (marker only).
+        _insert_msg(conn, scope_id, "ses_sil", "user", "second", "2026-05-30T10:05:00Z")
+        _insert_msg(
+            conn, scope_id, "ses_sil", "agent", "", "2026-05-30T10:07:00Z",
+            read=False, msg_type=messages_service.SILENT_TYPE,
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+    assert row["replied"] is False  # the silent completion answered the follow-up
+    assert row["preview_text"] == "R1"  # preview stays the last VISIBLE reply
 
 
 def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_state):

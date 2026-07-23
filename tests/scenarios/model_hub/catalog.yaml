@@ -1,0 +1,73 @@
+version: 1
+capability:
+  id: model_hub
+  name: Model Hub source resolution and supply configuration
+  canonical_tests:
+    - tests/test_model_hub_api.py
+    - tests/test_model_hub_config.py
+    - tests/test_model_hub_resolution.py
+status_legend:
+  covered: closed-loop scenario coverage exists
+  partial: unit or contract coverage exists but the cross-lane loop is incomplete
+  gap: owned by a later lane or integration pass
+scenarios:
+  - id: MH-RES-001
+    name: Quota-exhausted failover and recovery switchback
+    status: partial
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
+  - id: MH-PRI-001
+    name: Priority reorder takes effect on the next turn
+    status: partial
+    kind: ordering
+    layer: unit_contract
+    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+  - id: MH-MAP-001
+    name: Mapping applies to Claude Code only
+    status: partial
+    kind: mapping
+    layer: unit_contract
+    test: tests/test_model_hub_resolution.py::test_mapping_is_scoped_to_the_requesting_backend
+  - id: MH-OC-001
+    name: OpenCode identifiers stay stable across mode switches
+    status: gap
+    kind: stability
+    layer: scenario
+  - id: MH-MIG-001
+    name: Migration copies without modifying native configuration
+    status: gap
+    kind: migration
+    layer: scenario
+  - id: MH-OAUTH-A-001
+    name: Paste-code OAuth happy path
+    status: partial
+    kind: oauth
+    layer: contract
+    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+  - id: MH-OAUTH-B-001
+    name: Device-code OAuth happy path
+    status: gap
+    kind: oauth
+    layer: scenario
+  - id: MH-OAUTH-C-001
+    name: Callback-replay OAuth happy path
+    status: gap
+    kind: oauth
+    layer: scenario
+  - id: MH-OAUTH-ERR-001
+    name: OAuth timeout and cancel terminate cleanly
+    status: partial
+    kind: timeout_cancel
+    layer: contract
+    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+next_priority:
+  - MH-RES-001
+  - MH-PRI-001
+  - MH-MAP-001
+  - MH-OC-001
+  - MH-MIG-001
+  - MH-OAUTH-A-001
+  - MH-OAUTH-B-001
+  - MH-OAUTH-C-001
+  - MH-OAUTH-ERR-001

@@ -44,8 +44,9 @@ from core.show_pages import (
     SHOW_PAGE_ICON_MAX_UPLOAD_BYTES,
     show_cli_event_token,
     show_event_write_token,
+    show_public_event_write_token,
 )
-from core.show_session_events import show_event_payload_session_mismatch
+from core.show_session_events import HUMAN_EVENT_TYPES, show_event_payload_session_mismatch
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
@@ -1136,14 +1137,23 @@ def _is_trusted_tailscale_peer(peer_address: ipaddress._BaseAddress) -> bool:
     payload = _tailscale_whois(peer_address)
     trusted = False
     if payload is not None:
-        machine = payload.get("Machine") or payload.get("machine") or {}
+        # Modern `tailscale whois --json` nests the peer record under "Node"
+        # (where "Machine" is just the machine-key string); older builds used a
+        # top-level "Machine" object. Accept a dict from either shape.
+        machine = payload.get("Machine") or payload.get("machine")
+        if not isinstance(machine, dict):
+            machine = payload.get("Node") or payload.get("node") or {}
         if isinstance(machine, dict):
             addresses = set()
             for raw_address in _json_list(machine, "Addresses", "addresses"):
+                # "Node" payloads list addresses as host CIDRs ("100.64.0.2/32");
+                # older "Machine" payloads used bare IPs.
                 try:
-                    addresses.add(ipaddress.ip_address(str(raw_address)))
+                    interface = ipaddress.ip_interface(str(raw_address))
                 except ValueError:
                     continue
+                if interface.network.prefixlen == interface.network.max_prefixlen:
+                    addresses.add(interface.ip)
             allowed_networks = []
             for raw_network in _json_list(machine, "AllowedIPs", "allowedIPs", "allowedIps"):
                 try:
@@ -3023,6 +3033,270 @@ def config_get():
     return jsonify(api.config_to_payload(config))
 
 
+_MODEL_HUB_ENGINE_ADAPTER = None
+_MODEL_HUB_NATIVE_OAUTH_ADAPTER = None
+_MODEL_HUB_SERVICE = None
+
+
+def _model_hub_service():
+    from core.handlers.model_hub import create_default_service
+
+    global _MODEL_HUB_SERVICE
+    if _MODEL_HUB_SERVICE is None:
+        _MODEL_HUB_SERVICE = create_default_service(
+            adapter=_MODEL_HUB_ENGINE_ADAPTER,
+            native_oauth_adapter=_MODEL_HUB_NATIVE_OAUTH_ADAPTER,
+        )
+    return _MODEL_HUB_SERVICE
+
+
+def _model_hub_success(**payload):
+    return jsonify({"ok": True, "contract_version": 1, **payload})
+
+
+def _model_hub_error(exc):
+    body = {"ok": False, "contract_version": 1, "error": exc.code}
+    if exc.detail:
+        body["detail"] = exc.detail
+    return jsonify(body), exc.status
+
+
+def _model_hub_json_object(error: str = "discovery_failed", *, status: int = 400):
+    from core.handlers.model_hub import ModelHubError
+
+    payload = request.json
+    if not isinstance(payload, dict):
+        raise ModelHubError(error, status=status)
+    return payload
+
+
+@app.route("/api/models/sources", methods=["GET"])
+def model_hub_sources_get():
+    return _model_hub_success(sources=_model_hub_service().list_sources())
+
+
+@app.route("/api/models/sources", methods=["POST"])
+async def model_hub_sources_post():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().create_source(_model_hub_json_object())
+        return _model_hub_success(source=source), 201
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>", methods=["PATCH"])
+async def model_hub_sources_patch(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>", methods=["DELETE"])
+async def model_hub_sources_delete(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        force = str(request.args.get("force") or "").lower() in _TRUE_BOOL_STRINGS
+        await _model_hub_service().delete_source(source_id, force=force)
+        return _model_hub_success()
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>/test", methods=["POST"])
+async def model_hub_sources_test(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        _, discovered = await _model_hub_service().test_source(source_id)
+        return _model_hub_success(discovered=discovered)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/priority", methods=["GET"])
+def model_hub_priority_get():
+    priority = _model_hub_service().priority()
+    return _model_hub_success(order=priority["order"])
+
+
+@app.route("/api/models/priority", methods=["PUT"])
+async def model_hub_priority_put():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        priority = await _model_hub_service().set_priority(
+            _model_hub_json_object("invalid_priority_order").get("order")
+        )
+        return _model_hub_success(order=priority["order"])
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents", methods=["GET"])
+def model_hub_agents_get():
+    return _model_hub_success(agents=_model_hub_service().list_agents())
+
+
+@app.route("/api/models/agents/<backend>/mode", methods=["PATCH"])
+async def model_hub_agent_mode_patch(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = await _model_hub_service().set_agent_mode(
+            backend,
+            _model_hub_json_object("mode_switch_blocked").get("mode"),
+        )
+        return _model_hub_success(agent=agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/mappings", methods=["PUT"])
+async def model_hub_agent_mappings_put(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = await _model_hub_service().set_mappings(
+            backend,
+            _model_hub_json_object("mapping_target_unavailable").get("mappings"),
+        )
+        return _model_hub_success(agent=agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/opencode/menu", methods=["PUT"])
+async def model_hub_opencode_menu_put():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = await _model_hub_service().set_opencode_menu(
+            _model_hub_json_object("mapping_target_unavailable").get("menu")
+        )
+        return _model_hub_success(agent=agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/custom-models", methods=["POST"])
+async def model_hub_custom_models_post():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().add_custom_model(
+            _model_hub_json_object("source_not_found", status=404)
+        )
+        return _model_hub_success(source=source), 201
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/custom-models", methods=["DELETE"])
+async def model_hub_custom_models_delete():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        payload = _model_hub_json_object("mapping_target_unavailable")
+        source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/events", methods=["GET"])
+def model_hub_events_get():
+    try:
+        limit = int(request.args.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    events = _model_hub_service().list_events(limit=limit, before=request.args.get("before") or None)
+    return _model_hub_success(events=events)
+
+
+@app.route("/api/models/oauth/start", methods=["POST"])
+async def model_hub_oauth_start():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(
+            flow=await _model_hub_service().oauth_start(_model_hub_json_object("flow_not_found"))
+        )
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/oauth/status/<flow_id>", methods=["GET"])
+async def model_hub_oauth_status(flow_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(flow=await _model_hub_service().oauth_status(flow_id))
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/oauth/submit", methods=["POST"])
+async def model_hub_oauth_submit():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(
+            flow=await _model_hub_service().oauth_submit(
+                _model_hub_json_object("flow_not_found", status=404)
+            )
+        )
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/oauth/cancel", methods=["POST"])
+async def model_hub_oauth_cancel():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        await _model_hub_service().oauth_cancel(
+            _model_hub_json_object("flow_not_found", status=404).get("flow_id")
+        )
+        return _model_hub_success()
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/migration/scan", methods=["POST"])
+def model_hub_migration_scan():
+    return _model_hub_success(**_model_hub_service().migration_scan())
+
+
+@app.route("/api/models/migration/apply", methods=["POST"])
+def model_hub_migration_apply():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = _model_hub_service().migration_apply(
+            _model_hub_json_object("migration_item_conflict", status=409).get("item_ids")
+        )
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/runtime/status", methods=["GET"])
+async def model_hub_runtime_status():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(runtime=await _model_hub_service().runtime_status())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/platforms", methods=["GET"])
 def platforms_get():
     from vibe import api
@@ -3114,6 +3388,55 @@ async def running_agents_end():
     body = result.get("body") or {}
     # Surface the controller's status (409 when the target couldn't be ended).
     return jsonify(body), (result.get("status_code") or 200)
+
+
+# Contract A7: the run-graph endpoint lives OUTSIDE the ``/api/agents/<name>``
+# namespace (``/api/agents-graph``). ``<name>`` is a user-creatable agent slug,
+# so a ``/api/agents/graph`` path would be shadowed by — or shadow — an agent
+# literally named ``graph``; a distinct top-level path avoids the collision.
+@app.route("/api/agents-graph", methods=["GET"])
+async def agents_graph_get():
+    """Read-only run-graph payload for the Agents → 运行 tab.
+
+    Assembles ``agent_sessions`` + ``agent_runs`` + ``scopes`` into the frozen
+    contract §3 shape (``docs/plans/agents-run-graph-contract.md``). Liveness is
+    controller-owned, so it is fetched from the internal running-agents snapshot
+    and merged in; when the controller is unreachable the graph still renders
+    from the DB (all nodes non-live) with a ``live_unreachable`` hint so the tab
+    can show a "runtime unreachable — history only" state instead of a
+    misleading empty graph."""
+    from core.services import agent_graph
+    from vibe import internal_client
+
+    def _flag(value, default: bool) -> bool:
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    window = request.args.get("window") or agent_graph.DEFAULT_WINDOW
+    project = request.args.get("project") or "all"
+    include_ended = _flag(request.args.get("include_ended"), True)
+    include_background = _flag(request.args.get("include_background"), True)
+
+    live_agents: list = []
+    live_unreachable = False
+    try:
+        result = await internal_client.list_running_agents()
+        live_agents = (result.get("body") or {}).get("agents") or []
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        # Controller down: fall back to a DB-only graph (history stays visible).
+        live_unreachable = True
+
+    payload = await asyncio.to_thread(
+        agent_graph.build_graph,
+        live_agents=live_agents,
+        window=window,
+        project=project,
+        include_ended=include_ended,
+        include_background=include_background,
+        live_unreachable=live_unreachable,
+    )
+    return jsonify(payload)
 
 
 @app.route("/api/agents/<name>", methods=["GET"])
@@ -6019,6 +6342,64 @@ def _backend_locked_response(err):
     )
 
 
+def _publish_session_update_activity(
+    broker,
+    *,
+    session_id: str,
+    session: dict,
+    previous_session: dict | None = None,
+) -> None:
+    """Publish one canonical title/placement reconciliation sequence."""
+    broker.publish(
+        "session.activity",
+        {
+            "session_id": session_id,
+            "scope_id": session.get("scope_id"),
+            "event": "updated",
+            "title": session.get("title"),
+            "visibility": session.get("visibility"),
+        },
+    )
+    if previous_session is None:
+        return
+
+    previous_scope_id = previous_session.get("scope_id")
+    current_scope_id = session.get("scope_id")
+    placement_changed = (
+        previous_scope_id != current_scope_id
+        or previous_session.get("visibility") != session.get("visibility")
+    )
+    if not placement_changed:
+        return
+
+    # The current sidebar listener patches title-only `updated` events, then
+    # reconciles project windows for ordering activity. Reconcile the old scope
+    # to remove the row, and treat a foreground row in its new scope as newly
+    # visible so an empty loaded project also fetches it.
+    if previous_scope_id and (
+        previous_scope_id != current_scope_id or session.get("visibility") == "background"
+    ):
+        broker.publish(
+            "session.activity",
+            {
+                "session_id": session_id,
+                "scope_id": previous_scope_id,
+                "event": "user_message",
+                "reason": "session_placement_changed",
+            },
+        )
+    if current_scope_id and session.get("visibility") == "foreground":
+        broker.publish(
+            "session.activity",
+            {
+                "session_id": session_id,
+                "scope_id": current_scope_id,
+                "event": "created",
+                "reason": "session_placement_changed",
+            },
+        )
+
+
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
@@ -6036,6 +6417,8 @@ async def sessions_update(session_id: str):
             "agent_variant",
             "model",
             "reasoning_effort",
+            "visibility",
+            "scope_id",
         )
         if key in payload
     }
@@ -6085,25 +6468,29 @@ async def sessions_update(session_id: str):
 
     try:
         with engine.begin() as conn:
+            previous_session = (
+                workbench_sessions_service.get_session(conn, session_id)
+                if {"visibility", "scope_id"}.intersection(updatable)
+                else None
+            )
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except (ValueError, PermissionError) as err:
+        return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:
         # A session is pinned to its backend once it has a conversation (or a
         # running turn); the UI may switch the agent within the same backend,
         # but not across backends.
         return _backend_locked_response(err)
     # Broadcast so other surfaces (e.g. the sidebar session list) reflect the
-    # edit live — renaming a session in the chat header should rename its
-    # sidebar row without a manual refresh.
-    broker.publish(
-        "session.activity",
-        {
-            "session_id": session_id,
-            "scope_id": session.get("scope_id"),
-            "event": "updated",
-            "title": session.get("title"),
-        },
+    # edit live. The local CLI route below uses this same sequence after its
+    # out-of-process DB write.
+    _publish_session_update_activity(
+        broker,
+        session_id=session_id,
+        session=session,
+        previous_session=previous_session,
     )
     return jsonify(session)
 
@@ -6121,20 +6508,25 @@ def sessions_cli_activity(session_id: str):
     from core.services import sessions as workbench_sessions_service
     from vibe.sse_broker import broker
 
+    payload = request.json or {}
+    previous_session = None
+    if "previous_scope_id" in payload and "previous_visibility" in payload:
+        previous_session = {
+            "scope_id": payload.get("previous_scope_id"),
+            "visibility": payload.get("previous_visibility"),
+        }
+
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
             session = workbench_sessions_service.get_session(conn, session_id)
     except LookupError:
         return jsonify({"error": "not found"}), 404
-    broker.publish(
-        "session.activity",
-        {
-            "session_id": session_id,
-            "scope_id": session.get("scope_id"),
-            "event": "updated",
-            "title": session.get("title"),
-        },
+    _publish_session_update_activity(
+        broker,
+        session_id=session_id,
+        session=session,
+        previous_session=previous_session,
     )
     return jsonify({"ok": True})
 
@@ -7253,6 +7645,15 @@ def media_get(token: str):
     ``inline`` (so images render in ``<img>`` and PDFs preview); ``?download=1``
     forces an attachment download.
     """
+    return _registered_media_response(token)
+
+
+def _registered_media_response(
+    token: str,
+    *,
+    expected_session_id: str | None = None,
+    expected_source: str | None = None,
+):
     from urllib.parse import quote
 
     from storage import media_service
@@ -7261,6 +7662,10 @@ def media_get(token: str):
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
     if not row or row.get("revoked_at"):
+        return jsonify({"error": "not_found"}), 404
+    if expected_session_id is not None and row.get("session_id") != expected_session_id:
+        return jsonify({"error": "not_found"}), 404
+    if expected_source is not None and row.get("source") != expected_source:
         return jsonify({"error": "not_found"}), 404
     stored = row["local_path"]
     try:
@@ -7948,6 +8353,10 @@ def inbox_list():
     except (TypeError, ValueError):
         limit = 30
     before = request.args.get("before") or None
+    # Targeted single-session fetch: lets a client (e.g. the Inbox visibility
+    # reconcile) guarantee one specific session's row is (re)loaded even when its
+    # activity sorts past the paged window.
+    only_session = request.args.get("session") or None
 
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -7957,6 +8366,7 @@ def inbox_list():
             unread_only=unread_only,
             limit=limit,
             before=before,
+            only_session=only_session,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
@@ -8632,7 +9042,13 @@ def _show_page_runtime_unavailable_response():
 
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
+    if relative == "__show/annotation.js":
+        return False
     return relative == "api" or relative.startswith("api/") or relative == "__show" or relative.startswith("__show/")
+
+
+def _is_show_annotation_asset(asset_path: str) -> bool:
+    return (asset_path or "").strip("/") == "__show/annotation.js"
 
 
 def _is_show_page_entry_asset(asset_path: str) -> bool:
@@ -8822,7 +9238,82 @@ def _show_event_write_authorized(session_id: str) -> bool:
     return hmac.compare_digest(token, expected)
 
 
-def _show_event_response_from_payload(session_id: str, payload: dict[str, Any]):
+def _public_show_event_write_authorized(share_id: str, session_id: str) -> bool:
+    token = request.headers.get(SHOW_EVENT_WRITE_TOKEN_HEADER)
+    if not token:
+        return False
+    try:
+        expected = show_public_event_write_token(share_id, session_id)
+    except Exception:
+        return False
+    return hmac.compare_digest(token, expected)
+
+
+def _public_show_referer_matches(share_id: str) -> bool:
+    referer = request.headers.get("Referer")
+    if not referer:
+        return False
+    expected_path = f"/p/{quote(share_id, safe='')}/"
+    return urlsplit(referer).path.startswith(expected_path)
+
+
+def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    for key in ("id", "dispatch", "sessionId", "session_id"):
+        sanitized.pop(key, None)
+    for key in ("payload", "annotation", "mark"):
+        nested = sanitized.get(key)
+        if isinstance(nested, dict):
+            sanitized[key] = {
+                nested_key: value
+                for nested_key, value in nested.items()
+                if nested_key not in {"dispatch", "sessionId", "session_id"}
+            }
+    return sanitized
+
+
+def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if config is not None:
+        session = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+        email = str(session.get("email", "")).strip() if session is not None else ""
+        if email:
+            return {"kind": "user", "email": email}
+
+        cloud = config.remote_access.vibe_cloud
+        if public and cloud.enabled:
+            return None
+
+    if public and not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
+        return None
+    return {"kind": "local"}
+
+
+def _show_me_response(author: dict[str, str] | None, *, write_token: str | None = None):
+    authenticated = author is not None
+    payload = {"authenticated": authenticated, "canAnnotate": authenticated}
+    if authenticated and write_token:
+        payload["writeToken"] = write_token
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+def _show_event_response_from_payload(
+    session_id: str,
+    payload: dict[str, Any],
+    *,
+    author: dict[str, str] | None = None,
+    public: bool = False,
+    public_share_id: str | None = None,
+    allow_dispatch: bool = True,
+):
     if show_event_payload_session_mismatch(session_id, payload):
         return (
             jsonify(
@@ -8836,15 +9327,28 @@ def _show_event_response_from_payload(session_id: str, payload: dict[str, Any]):
         )
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload)
+        event_payload = store.append(session_id, payload, author=author)
     except Exception as exc:
         return _show_session_event_error_response(exc)
     finally:
         store.close()
 
     _publish_show_session_event(event_payload)
-    _dispatch_show_event_if_requested(event_payload)
-    return jsonify({"ok": True, "event": event_payload}), 201
+    if allow_dispatch:
+        _dispatch_show_event_if_requested(event_payload)
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "event": _show_event_response_payload(
+                    event_payload,
+                    public=public,
+                    public_share_id=public_share_id,
+                ),
+            }
+        ),
+        201,
+    )
 
 
 def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
@@ -8918,7 +9422,7 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
         return
     dispatch_payload = {
         "session_id": session_id,
-        "text": transcript_text,
+        "text": _show_event_dispatch_text(event_payload),
         "scope_id": scope_id,
         "user_message_id": event_payload.get("message_id"),
         "message_id": event_payload.get("message_id"),
@@ -8939,6 +9443,31 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
         _publish_show_dispatch_event(event_payload, "stream.error", {"reason": "dispatch_failed", "detail": str(exc)})
 
 
+def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
+    transcript_text = str(event_payload.get("transcript_text") or "").strip()
+    if event_payload.get("type") != "human.annotation.created":
+        return transcript_text
+
+    event_id = str(event_payload.get("id") or "").strip()
+    if not event_id:
+        return transcript_text
+    lines = [transcript_text, "", f"Show event id: {event_id}"]
+    payload = event_payload.get("payload")
+    intent = "comment"
+    if isinstance(payload, dict):
+        intent = str(payload.get("intent") or "").strip() or "comment"
+    if intent in {"question", "comment"}:
+        lines.extend(
+            [
+                "",
+                "如需在页面上原位回应，可执行：",
+                f"  vibe show reply {event_id} --message '<你的回答>'",
+                "（也可以直接修改页面内容来响应，按场景选择。）",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str, data: Any) -> None:
     from vibe.sse_broker import broker
 
@@ -8954,14 +9483,47 @@ def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str,
     )
 
 
-def _show_event_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
+def _show_event_response_payload(
+    event_payload: dict[str, Any],
+    *,
+    public: bool = False,
+    public_share_id: str | None = None,
+) -> dict[str, Any]:
     if not public:
         return event_payload
-    return {
+    public_event = {
         key: value
         for key, value in event_payload.items()
         if key not in {"session_id", "scope_id", "message_id", "message"}
     }
+    payload = public_event.get("payload")
+    if isinstance(payload, dict):
+        public_payload = dict(payload)
+        author = public_payload.get("author")
+        if isinstance(author, dict) and "email" in author:
+            public_payload["author"] = {key: value for key, value in author.items() if key != "email"}
+        screenshot = public_payload.get("screenshot")
+        if isinstance(screenshot, dict):
+            local_path = screenshot.get("path")
+            public_screenshot = {key: value for key, value in screenshot.items() if key != "path"}
+            attachment_id = public_screenshot.get("attachmentId")
+            if (
+                public_share_id
+                and isinstance(local_path, str)
+                and local_path
+                and isinstance(attachment_id, str)
+                and attachment_id
+            ):
+                public_screenshot["url"] = (
+                    f"/p/{quote(public_share_id, safe='')}/__show/media/{quote(attachment_id, safe='')}"
+                )
+            public_payload["screenshot"] = public_screenshot
+            transcript_text = public_event.get("transcript_text")
+            if isinstance(local_path, str) and local_path and isinstance(transcript_text, str):
+                public_ref = str(public_screenshot.get("attachmentId") or "screenshot attachment")
+                public_event["transcript_text"] = transcript_text.replace(local_path, public_ref)
+        public_event["payload"] = public_payload
+    return public_event
 
 
 def _show_dispatch_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
@@ -8986,20 +9548,35 @@ def _redact_public_dispatch_value(value: Any) -> Any:
     return value
 
 
-def _show_events_list_payload(payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
+def _show_events_list_payload(
+    payload: dict[str, Any],
+    *,
+    public: bool = False,
+    public_share_id: str | None = None,
+) -> dict[str, Any]:
     if not public:
         return payload
     return {
         **payload,
         "events": [
-            _show_event_response_payload(event_payload, public=True)
+            _show_event_response_payload(
+                event_payload,
+                public=True,
+                public_share_id=public_share_id,
+            )
             for event_payload in payload.get("events", [])
             if isinstance(event_payload, dict)
         ],
     }
 
 
-async def _show_events_stream(session_id: str, *, after_id: str | None = None, public: bool = False):
+async def _show_events_stream(
+    session_id: str,
+    *,
+    after_id: str | None = None,
+    public: bool = False,
+    public_share_id: str | None = None,
+):
     import asyncio
 
     from fastapi.responses import StreamingResponse
@@ -9025,7 +9602,14 @@ async def _show_events_stream(session_id: str, *, after_id: str | None = None, p
                     for event_payload in events:
                         if isinstance(event_payload.get("id"), str):
                             replayed_ids.add(event_payload["id"])
-                        yield _sse_frame("show.event", _show_event_response_payload(event_payload, public=public))
+                        yield _sse_frame(
+                            "show.event",
+                            _show_event_response_payload(
+                                event_payload,
+                                public=public,
+                                public_share_id=public_share_id,
+                            ),
+                        )
                     cursor = batch.get("next_after_id")
                     if not cursor:
                         break
@@ -9043,7 +9627,14 @@ async def _show_events_stream(session_id: str, *, after_id: str | None = None, p
                             continue
                         if isinstance(event_id, str):
                             replayed_ids.add(event_id)
-                        yield _sse_frame("show.event", _show_event_response_payload(event_payload, public=public))
+                        yield _sse_frame(
+                            "show.event",
+                            _show_event_response_payload(
+                                event_payload,
+                                public=public,
+                                public_share_id=public_share_id,
+                            ),
+                        )
                     elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
@@ -9065,13 +9656,19 @@ async def _show_events_stream(session_id: str, *, after_id: str | None = None, p
     )
 
 
-async def _show_events_response(session_id: str, *, public: bool = False):
+async def _show_events_response(
+    session_id: str,
+    *,
+    public: bool = False,
+    public_share_id: str | None = None,
+):
     if request.method == "GET":
         if request.args.get("stream") == "1":
             return await _show_events_stream(
                 session_id,
                 after_id=request.args.get("after_id") or _last_event_id_from_request(),
                 public=public,
+                public_share_id=public_share_id,
             )
         store = _show_session_event_store()
         try:
@@ -9080,7 +9677,13 @@ async def _show_events_response(session_id: str, *, public: bool = False):
             except (TypeError, ValueError):
                 limit = 100
             payload = store.list(session_id, after_id=request.args.get("after_id") or None, limit=limit)
-            return jsonify(_show_events_list_payload(payload, public=public))
+            return jsonify(
+                _show_events_list_payload(
+                    payload,
+                    public=public,
+                    public_share_id=public_share_id,
+                )
+            )
         finally:
             store.close()
 
@@ -9089,7 +9692,11 @@ async def _show_events_response(session_id: str, *, public: bool = False):
     if not _show_event_write_authorized(session_id):
         return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
 
-    return _show_event_response_from_payload(session_id, _show_events_payload_from_request())
+    return _show_event_response_from_payload(
+        session_id,
+        _show_events_payload_from_request(),
+        author=_show_request_author(),
+    )
 
 
 @app.route("/api/show/sessions/<session_id>/events", methods=["POST"])
@@ -9258,7 +9865,9 @@ async def _show_page_runtime_response(
     starlette_request: FastAPIRequest,
     *,
     external_prefix: str | None = None,
-    inject_private_config: bool = False,
+    inject_show_config: bool = False,
+    show_authenticated: bool = False,
+    show_config_session_id: str | None = None,
 ):
     from core.show_runtime import get_show_runtime_manager
 
@@ -9322,8 +9931,21 @@ async def _show_page_runtime_response(
             external_prefix=external_prefix,
         )
         content = _rewrite_public_show_runtime_client(content, response_headers, external_prefix=external_prefix)
-    if _should_inject_show_runtime_config(proxied.status_code, response_headers, inject_private_config=inject_private_config):
-        content = _inject_show_runtime_config(content, session_id)
+    if _should_inject_show_runtime_config(
+        proxied.status_code,
+        response_headers,
+        inject_show_config=inject_show_config,
+    ):
+        base_path = f"{external_prefix.rstrip('/')}/" if external_prefix else f"/show/{quote(session_id, safe='')}/"
+        content = _inject_show_runtime_config(
+            content,
+            show_config_session_id or session_id,
+            base_path=base_path,
+            authenticated=show_authenticated,
+            include_write_token=external_prefix is None,
+        )
+        if external_prefix:
+            response_headers["Referrer-Policy"] = "same-origin"
         _mark_show_runtime_document_no_store(response_headers)
     elif _is_show_page_entry_asset(asset_path) and 200 <= proxied.status_code < 300:
         # The entry document is per-session/per-share dynamic (it embeds the import map
@@ -9338,9 +9960,9 @@ def _should_inject_show_runtime_config(
     status_code: int,
     headers: dict[str, str],
     *,
-    inject_private_config: bool,
+    inject_show_config: bool,
 ) -> bool:
-    if not inject_private_config or status_code != 200:
+    if not inject_show_config or status_code != 200:
         return False
     if _show_response_is_attachment(_response_header(headers, "content-disposition")):
         return False
@@ -9581,20 +10203,46 @@ def _show_response_is_attachment(content_disposition: str | None) -> bool:
     return bool(content_disposition and content_disposition.lstrip().lower().startswith("attachment"))
 
 
-def _show_runtime_config_payload(session_id: str) -> dict[str, str]:
-    session_path = quote(session_id, safe="")
-    events_path = f"/show/{session_path}/__show/events"
-    return {
+def _show_runtime_config_payload(
+    session_id: str,
+    *,
+    base_path: str,
+    authenticated: bool,
+    include_write_token: bool,
+) -> dict[str, Any]:
+    events_path = f"{base_path}__show/events"
+    payload: dict[str, Any] = {
         "sessionId": session_id,
-        "basePath": f"/show/{session_path}/",
+        "basePath": base_path,
         "eventsPath": events_path,
         "streamPath": f"{events_path}?stream=1",
-        "writeToken": show_event_write_token(session_id),
+        "annotation": {
+            "authenticated": authenticated,
+            "mePath": "__show/me",
+        },
     }
+    if include_write_token:
+        payload["writeToken"] = show_event_write_token(session_id)
+    return payload
 
 
-def _show_runtime_config_script(session_id: str) -> str:
-    payload = json.dumps(_show_runtime_config_payload(session_id), ensure_ascii=False, separators=(",", ":"))
+def _show_runtime_config_script(
+    session_id: str,
+    *,
+    base_path: str,
+    authenticated: bool,
+    include_write_token: bool,
+) -> str:
+    payload = json.dumps(
+        _show_runtime_config_payload(
+            session_id,
+            base_path=base_path,
+            authenticated=authenticated,
+            include_write_token=include_write_token,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     payload = payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return (
         "<script>"
@@ -9606,12 +10254,25 @@ def _show_runtime_config_script(session_id: str) -> str:
     )
 
 
-def _inject_show_runtime_config(content: bytes, session_id: str) -> bytes:
+def _inject_show_runtime_config(
+    content: bytes,
+    session_id: str,
+    *,
+    base_path: str,
+    authenticated: bool,
+    include_write_token: bool,
+) -> bytes:
     try:
         html = content.decode("utf-8")
     except UnicodeDecodeError:
         return content
-    script = _show_runtime_config_script(session_id)
+    script = _show_runtime_config_script(
+        session_id,
+        base_path=base_path,
+        authenticated=authenticated,
+        include_write_token=include_write_token,
+    )
+    bootstrap = f'<script type="module" src="{base_path}__show/annotation.js"></script>'
     module_match = _SHOW_RUNTIME_MODULE_SCRIPT_RE.search(html)
     if module_match:
         html = f"{html[: module_match.start()]}{script}\n    {html[module_match.start() :]}"
@@ -9621,6 +10282,12 @@ def _inject_show_runtime_config(content: bytes, session_id: str) -> bytes:
         html = html.replace("</body>", f"{script}\n  </body>", 1)
     else:
         html = f"{script}\n{html}"
+    if "</body>" in html:
+        html = html.replace("</body>", f"{bootstrap}\n  </body>", 1)
+    elif "</html>" in html:
+        html = html.replace("</html>", f"{bootstrap}\n</html>", 1)
+    else:
+        html = f"{html}\n{bootstrap}"
     return html.encode("utf-8")
 
 
@@ -9740,6 +10407,13 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
             return _show_page_file_not_found_response()
+        if asset_path.strip("/") == "__show/me":
+            if request.method not in {"GET", "HEAD"}:
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            return _show_me_response(
+                {"kind": "local"},
+                write_token=show_event_write_token(page.session_id),
+            )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
         page_dir = ensure_show_page_dir(page.session_id)
@@ -9751,10 +10425,11 @@ async def serve_private_show_page(session_id, asset_path):
                     page.session_id,
                     asset_path,
                     starlette_request,
-                    inject_private_config=request.method == "GET" and not _is_show_api_asset(asset_path),
+                    inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
+                    show_authenticated=True,
                 )
             except Exception:
-                if _is_show_api_asset(asset_path):
+                if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
                 if _is_show_page_entry_asset(asset_path):
                     response = _show_page_recovery_response(page.session_id)
@@ -9811,10 +10486,64 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id, public=True):
             return _show_page_file_not_found_response()
+        if asset_path.strip("/") == "__show/me":
+            if request.method not in {"GET", "HEAD"}:
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            author = _show_request_author(public=True)
+            return _show_me_response(
+                author,
+                write_token=(
+                    show_public_event_write_token(share_id, page.session_id) if author is not None else None
+                ),
+            )
+        if asset_path.strip("/").startswith("__show/media/"):
+            if request.method not in {"GET", "HEAD"}:
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            token = asset_path.strip("/").removeprefix("__show/media/")
+            if not token or "/" in token:
+                return _show_page_file_not_found_response()
+            return _registered_media_response(
+                token,
+                expected_session_id=page.session_id,
+                expected_source="show_annotation",
+            )
         if asset_path.strip("/") in {"__show/events", "__events"}:
-            if request.method != "GET":
-                return jsonify({"ok": False, "code": "public_show_events_read_only"}), 403
-            return await _show_events_response(page.session_id, public=True)
+            if request.method == "GET":
+                return await _show_events_response(
+                    page.session_id,
+                    public=True,
+                    public_share_id=share_id,
+                )
+            if request.method != "POST":
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            author = _show_request_author(public=True)
+            if author is None:
+                return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
+            if not _public_show_referer_matches(share_id):
+                return jsonify({"ok": False, "code": "public_show_events_origin_mismatch"}), 403
+            if not _public_show_event_write_authorized(share_id, page.session_id):
+                return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
+            payload = _sanitize_public_show_event_payload(_show_events_payload_from_request())
+            event_type = str(payload.get("type") or "").strip()
+            if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "code": "unsupported_event_type",
+                            "error": "Public Show Page writes require a supported human event or mark resolution type.",
+                        }
+                    ),
+                    400,
+                )
+            return _show_event_response_from_payload(
+                page.session_id,
+                payload,
+                author=author,
+                public=True,
+                public_share_id=share_id,
+                allow_dispatch=False,
+            )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):
                 return shim_response
@@ -9828,9 +10557,12 @@ async def serve_public_show_page(share_id, asset_path):
                     asset_path,
                     starlette_request,
                     external_prefix=f"/p/{quote(share_id, safe='')}",
+                    inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
+                    show_authenticated=_show_request_author(public=True) is not None,
+                    show_config_session_id=share_id,
                 )
             except Exception:
-                if _is_show_api_asset(asset_path):
+                if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
                 if _is_show_page_entry_asset(asset_path):
                     response = _show_page_recovery_response(page.session_id)

@@ -367,6 +367,43 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
     assert payload["watch"]["agent_name"] == "project-agent"
 
 
+def test_watch_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    args = _parse_watch_add(
+        [
+            "--agent",
+            "worker",
+            "--create-session-per-run",
+            "--shell",
+            "echo done",
+        ]
+    )
+
+    with (
+        patch.dict(os.environ, {"AVIBE_SESSION_ID": ""}, clear=False),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *items, **kwargs: _startup_ok(store, runtime_store, items[2]),
+        ),
+    ):
+        result = cli.cmd_watch_add(args)
+
+    assert result == 0
+    watch = json.loads(capsys.readouterr().out)["watch"]
+    assert watch["session_policy"] == "create_per_run"
+    assert watch["session_id"] is None
+    assert watch["deliver_key"] is None
+    assert "session_scope_id" not in watch["metadata"]
+    assert "session_workdir" not in watch["metadata"]
+
+
 def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
@@ -426,6 +463,8 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     target = cli.resolve_session_id_target(payload["watch"]["session_id"], db_path=db_path)
+    assert target.visibility == "foreground"
+    assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
     assert payload["watch"]["cwd"] == str(invoke_dir)
     assert "session_workdir" not in payload["watch"]["metadata"]

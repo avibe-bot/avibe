@@ -1,9 +1,15 @@
-import React, { createContext, useContext, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
+import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
+import {
+  WorkbenchEventReconnectLoop,
+  type WorkbenchEventConnectionState,
+} from '../lib/workbenchEventConnection';
 import type { DockDoc } from './DockContext';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
@@ -609,11 +615,11 @@ export type ApiContextType = {
   listSessionQueue: (sessionId: string, options?: { cache?: boolean }) => Promise<{ queued: WorkbenchMessage[] }>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
-  getTurnState: (sessionId: string) => Promise<SessionRuntimeState>;
+  getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
-  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; cache?: boolean }) => Promise<InboxFeedResult>;
-  connectWorkbenchEvents: (handlers: WorkbenchEventHandlers, options?: { reconnect?: boolean }) => () => void;
+  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
+  connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -679,6 +685,13 @@ export type ApiContextType = {
   listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
   getHarnessRun: (runId: string) => Promise<{ ok: boolean; run: HarnessRun }>;
   getRunningAgents: () => Promise<RunningAgentsResult>;
+  // Agents · 运行图 graph payload (contract §3). Realtime — refetched off SSE,
+  // so it bypasses the read cache. ``live_unreachable`` is set when the
+  // controller is down and the graph fell back to DB-only (history).
+  getAgentsGraph: (params?: AgentGraphParams) => Promise<AgentGraphResult & { live_unreachable?: boolean }>;
+  // Foreground/background toggle from the graph detail panel (contract §2,
+  // M1-owned PATCH). Returns the updated session payload.
+  setSessionVisibility: (sessionId: string, visibility: AgentGraphVisibility) => Promise<WorkbenchSession>;
   endRunningAgent: (payload: {
     backend?: string | null;
     state?: string | null;
@@ -921,9 +934,22 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 
 export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
+  onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
-  onSessionActivity?: (data: { session_id: string; scope_id: string | null; event: string; title?: string | null }) => void;
+  // ``visibility`` (contract A6): the backend carries the session's current
+  // foreground/background on visibility/scope changes so the Inbox can drop /
+  // restore the card live. Absent on pre-M1 backends ⇒ consumers no-op.
+  onSessionActivity?: (data: {
+    session_id: string;
+    scope_id: string | null;
+    event: string;
+    title?: string | null;
+    visibility?: 'foreground' | 'background';
+    // Client-synthesized marker (never on a real backend event): a foreground
+    // restore, so the projects tree grows its window to bring the row back.
+    restored?: boolean;
+  }) => void;
   onInboxUnreadChanged?: (data: {
     session_id?: string;
     scope_id?: string | null;
@@ -985,6 +1011,13 @@ export type WorkbenchMessage = {
   source: 'user' | 'agent' | 'harness' | string | null;
   author_id: string | null;
   author_name: string | null;
+  // Read-side provenance for an agent-callback ("自动触发") harness message (A9a):
+  // the session that triggered the run, resolved from the run's source_actor.
+  // Present only on agent_run harness messages; enables the source-session chip
+  // + /chat/<source_session_id> deep-link.
+  source_session_id?: string | null;
+  source_session_title?: string | null;
+  source_session_agent_name?: string | null;
   native_message_id: string | null;
   parent_native_message_id: string | null;
   text: string;
@@ -1038,8 +1071,9 @@ export type MessageSearchResult = {
 // process-local SessionActivityRegistry) and live-derived harness items
 // (watches / scheduled tasks / delegated agent runs) share this shape. The
 // legacy fields stay for backward compatibility; `item_kind` / `label` /
-// `since` are the unified fields the banner renders and routes on. `item_kind`
-// is optional so a pre-union payload degrades to a backend activity.
+// `since` / `schedule_type` are the unified fields the banner renders and
+// routes on. `item_kind` is optional so a pre-union payload degrades to a
+// backend activity.
 export type SessionActivityItemKind = 'backend_activity' | 'watch' | 'task' | 'agent_run';
 
 export type SessionActivityState = {
@@ -1055,6 +1089,7 @@ export type SessionActivityState = {
   item_kind?: SessionActivityItemKind;
   label?: string | null;
   since?: string;
+  schedule_type?: 'at' | 'cron' | null;
 };
 
 export type SessionRuntimeState = {
@@ -1221,6 +1256,12 @@ export type HarnessRun = {
   source_kind: string | null;
   source_actor: string | null;
   parent_run_id: string | null;
+  // Callback (report-back) lineage — serialized by the backend run row but
+  // previously unrendered; the run detail surfaces these (Part B).
+  callback_session_id: string | null;
+  callback_run_id: string | null;
+  callback_status: string | null;
+  callback_error: string | null;
   agent_name: string | null;
   agent_id: string | null;
   agent_backend: string | null;
@@ -1885,6 +1926,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
   const eventBridgeConnectedRef = useRef(false);
+  const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
+  const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
+  const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const stopWorkbenchEventsRef = useRef<() => void>(() => {});
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -1984,6 +2029,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Feed a locally-synthesized session.activity event through the SAME handler
+  // set + read-cache invalidation the SSE 'session.activity' listener uses, so a
+  // client-originated change (e.g. a visibility PATCH) reconciles every workbench
+  // cache via its own reducer even when the SSE stream is down. Idempotent with a
+  // later real SSE event carrying the same change.
+  const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
+    if (data.session_id) clearSessionReadCache(data.session_id);
+    dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
+  };
+
+  const setWorkbenchEventConnectionState = (state: WorkbenchEventConnectionState) => {
+    if (eventConnectionStateRef.current === state) return;
+    eventConnectionStateRef.current = state;
+    dispatchToWorkbenchHandlers((handlers) => handlers.onConnectionState?.(state));
+  };
+
   const parseWorkbenchEnvelope = <T,>(raw: string): WorkbenchEventEnvelope<T> | null => {
     try {
       return JSON.parse(raw) as WorkbenchEventEnvelope<T>;
@@ -1993,22 +2054,53 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const closeWorkbenchEventSource = () => {
-    eventSourceRef.current?.close();
+  const closeActiveWorkbenchEventSource = () => {
+    const source = eventSourceRef.current;
     eventSourceRef.current = null;
+    source?.close();
     eventConnectionRef.current = null;
     eventBridgeConnectedRef.current = false;
   };
 
-  const ensureWorkbenchEventSource = (options?: { reconnect?: boolean }) => {
-    if (options?.reconnect) {
-      closeWorkbenchEventSource();
-    }
-    if (eventSourceRef.current) return;
+  function reconnectWorkbenchEventSource(): void {
+    if (eventHandlersRef.current.size === 0) return;
+    closeActiveWorkbenchEventSource();
+    openWorkbenchEventSource();
+  }
 
-    const source = new EventSource('/api/events');
+  function getWorkbenchEventReconnectLoop(): WorkbenchEventReconnectLoop {
+    if (!eventReconnectLoopRef.current) {
+      eventReconnectLoopRef.current = new WorkbenchEventReconnectLoop({
+        reconnect: reconnectWorkbenchEventSource,
+        isVisible: () => document.visibilityState === 'visible',
+      });
+    }
+    return eventReconnectLoopRef.current;
+  }
+
+  function openWorkbenchEventSource(): void {
+    if (
+      eventSourceRef.current ||
+      eventHandlersRef.current.size === 0 ||
+      document.visibilityState !== 'visible'
+    ) return;
+
+    let source: EventSource;
+    try {
+      source = new EventSource('/api/events');
+    } catch (err) {
+      setWorkbenchEventConnectionState('reconnecting');
+      getWorkbenchEventReconnectLoop().failed();
+      const event = err instanceof Event ? err : new Event('error');
+      dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(event));
+      return;
+    }
+
     eventSourceRef.current = source;
+    setWorkbenchEventConnectionState('reconnecting');
+    getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
@@ -2018,6 +2110,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         if (sourceKind === 'controller') {
           eventBridgeConnectedRef.current = true;
+          setWorkbenchEventConnectionState('connected');
           dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: true }));
         }
       } catch (err) {
@@ -2025,6 +2118,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         eventConnectionRef.current = null;
       }
       if (eventConnectionRef.current) {
+        getWorkbenchEventReconnectLoop().streamOpened();
         const connected = eventConnectionRef.current;
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
       }
@@ -2154,21 +2248,61 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     });
     source.addEventListener('workbench.events.bridge.status', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
+      getWorkbenchEventReconnectLoop().streamOpened();
       eventBridgeConnectedRef.current = envelope.data.connected;
+      setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'reconnecting');
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onEventBridgeStatus?.(envelope.data);
       });
     });
     source.onerror = (err) => {
-      eventConnectionRef.current = null;
-      eventBridgeConnectedRef.current = false;
+      if (eventSourceRef.current !== source) return;
+      closeActiveWorkbenchEventSource();
+      setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
+      getWorkbenchEventReconnectLoop().failed();
     };
+  }
+
+  const ensureWorkbenchEventSource = () => {
+    getWorkbenchEventReconnectLoop();
+    openWorkbenchEventSource();
   };
+
+  const stopWorkbenchEventSource = () => {
+    closeActiveWorkbenchEventSource();
+    eventReconnectLoopRef.current?.stop();
+    eventReconnectLoopRef.current = null;
+    setWorkbenchEventConnectionState('reconnecting');
+  };
+  stopWorkbenchEventsRef.current = stopWorkbenchEventSource;
+
+  const wakeWorkbenchEvents = () => {
+    if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
+    setWorkbenchEventConnectionState('reconnecting');
+    getWorkbenchEventReconnectLoop().wake();
+  };
+  wakeWorkbenchEventsRef.current = wakeWorkbenchEvents;
+
+  useEffect(() => {
+    const wakeIfVisible = () => {
+      if (document.visibilityState === 'visible') wakeWorkbenchEventsRef.current();
+    };
+    document.addEventListener('visibilitychange', wakeIfVisible);
+    window.addEventListener('online', wakeIfVisible);
+    window.addEventListener('focus', wakeIfVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', wakeIfVisible);
+      window.removeEventListener('online', wakeIfVisible);
+      window.removeEventListener('focus', wakeIfVisible);
+      stopWorkbenchEventsRef.current();
+    };
+  }, []);
 
   const requestJson = async (
     path: string,
@@ -2624,7 +2758,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       return { ok: res.ok, ...payloadJson };
     },
-    getTurnState: async (sessionId) => {
+    getTurnState: async (sessionId, options) => {
       const path = `/api/sessions/${encodeURIComponent(sessionId)}/turn-state`;
       const res = await apiFetch(path);
       if (res.status === 504) {
@@ -2640,6 +2774,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
       if (!res.ok) {
+        if (options?.handleError === false) {
+          throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+        }
         await handleApiError(res, path);
       }
       return res.json();
@@ -2659,9 +2796,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.unreadOnly) search.set('unread_only', '1');
       if (params?.limit) search.set('limit', String(params.limit));
       if (params?.before) search.set('before', params.before);
+      if (params?.onlySession) search.set('session', params.onlySession);
       const qs = search.toString();
       const path = qs ? `/api/inbox?${qs}` : '/api/inbox';
-      return params?.cache === false ? getJson(path) : getCachedJson(path);
+      const options = { handleError: params?.handleError };
+      return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
     },
     listVibeAgents: (params) => {
       const search = new URLSearchParams();
@@ -2838,9 +2977,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs');
     },
     getHarnessRun: (runId) => getCachedJson(`/api/harness/runs/${encodeURIComponent(runId)}`),
-    connectWorkbenchEvents: (handlers, options) => {
+    connectWorkbenchEvents: (handlers) => {
       eventHandlersRef.current.add(handlers);
-      ensureWorkbenchEventSource(options);
+      ensureWorkbenchEventSource();
+      queueMicrotask(() => {
+        if (eventHandlersRef.current.has(handlers)) {
+          handlers.onConnectionState?.(eventConnectionStateRef.current);
+        }
+      });
       if (
         eventConnectionRef.current &&
         (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
@@ -2865,9 +3009,38 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return () => {
         eventHandlersRef.current.delete(handlers);
         if (eventHandlersRef.current.size === 0) {
-          closeWorkbenchEventSource();
+          stopWorkbenchEventSource();
         }
       };
+    },
+    getAgentsGraph: (params) => {
+      const search = new URLSearchParams();
+      if (params?.window) search.set('window', params.window);
+      if (params?.project) search.set('project', params.project);
+      if (params?.includeEnded === false) search.set('include_ended', '0');
+      if (params?.includeBackground === false) search.set('include_background', '0');
+      const qs = search.toString();
+      return getJson(qs ? `/api/agents-graph?${qs}` : '/api/agents-graph');
+    },
+    setSessionVisibility: async (sessionId, visibility) => {
+      const session = (await patchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        visibility,
+      })) as WorkbenchSession;
+      // Single chokepoint: replay the committed PATCH as the same session.activity
+      // event sequence the backend emits, through the existing workbench-event
+      // pipeline, so the projects tree AND the inbox reconcile via their own
+      // reducers even when the SSE stream is down (remote/mobile). Any caller
+      // (sidebar hide, graph toggle) inherits this; a real SSE event arriving
+      // later is an idempotent no-op.
+      for (const event of visibilityActivityEvents({
+        sessionId,
+        scopeId: session.scope_id,
+        title: session.title,
+        visibility,
+      })) {
+        emitLocalSessionActivity(event);
+      }
+      return session;
     },
     getRunningAgents: async () => {
       const res = await apiFetch('/api/running-agents');

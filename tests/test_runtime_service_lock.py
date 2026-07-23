@@ -15,8 +15,16 @@ class RuntimeServiceLockTests(unittest.TestCase):
     def setUp(self):
         self._extra_service_pids = patch("vibe.runtime.extra_service_process_pids", return_value=[])
         self._extra_service_pids.start()
+        # These tests target the generic (non-scoped) start_service contract via
+        # wait_for_service_pid. On a Linux dev host with a user systemd manager,
+        # maybe_systemd_scope_prefix() is truthy and would route start_service
+        # through the scoped poll-and-adopt path (and real host lock state), so
+        # pin it off here. The scoped path has its own dedicated tests.
+        self._no_scope = patch("vibe.runtime.maybe_systemd_scope_prefix", return_value=[])
+        self._no_scope.start()
 
     def tearDown(self):
+        self._no_scope.stop()
         self._extra_service_pids.stop()
 
     def test_start_service_reuses_existing_live_pid(self):
@@ -236,6 +244,67 @@ class RuntimeServiceLockTests(unittest.TestCase):
             self.assertEqual(pid, 67890)
             spawn_background.assert_not_called()
 
+    def test_start_service_reuses_scoped_wrapper_reservation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "service.pid"
+            pid_path.write_text("67890", encoding="utf-8")
+            command = runtime.shlex.join(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    "-q",
+                    "-p",
+                    "Delegate=yes",
+                    "--",
+                    sys.executable,
+                    str(runtime.get_service_main_path()),
+                ]
+            )
+
+            with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                with patch("vibe.runtime.pid_alive", return_value=True):
+                    with patch("vibe.runtime.get_process_command", return_value=command):
+                        with patch("vibe.runtime.service_pid_recorded", return_value=False):
+                            with patch("vibe.runtime.spawn_service_background_process") as spawn_background:
+                                pid = runtime.start_service(wait_for_ready=False)
+
+            self.assertEqual(pid, 67890)
+            spawn_background.assert_not_called()
+
+    def test_start_service_adopts_scoped_wrapper_lock_holder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "service.pid"
+            pid_path.write_text("67890", encoding="utf-8")
+            command = runtime.shlex.join(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    "-q",
+                    "-p",
+                    "Delegate=yes",
+                    "--",
+                    sys.executable,
+                    str(runtime.get_service_main_path()),
+                ]
+            )
+
+            with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                with patch("vibe.runtime.pid_alive", return_value=True):
+                    with patch("vibe.runtime.get_process_command", return_value=command):
+                        with patch("vibe.runtime.service_pid_recorded", return_value=False):
+                            with patch("vibe.runtime.wait_for_service_ready", return_value=78901) as wait_for_ready:
+                                with patch("vibe.runtime.spawn_service_background_process") as spawn_background:
+                                    pid = runtime.start_service()
+
+            self.assertEqual(pid, 78901)
+            wait_for_ready.assert_called_once_with(
+                67890,
+                timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+            )
+            spawn_background.assert_not_called()
+
     def test_stop_service_stops_pending_pid_reservation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             pid_path = Path(tmpdir) / "service.pid"
@@ -335,6 +404,40 @@ class RuntimeServiceLockTests(unittest.TestCase):
             self.assertEqual([process["pid"] for process in processes], [33333])
             self.assertTrue(processes[0]["home_match"])
             self.assertFalse(processes[0]["lock_owner"])
+
+    def test_service_processes_ignores_systemd_scope_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            command = [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "-q",
+                "-p",
+                "Delegate=yes",
+                "--",
+                sys.executable,
+                str(runtime.get_service_main_path()),
+            ]
+
+            class FakeProcess:
+                info = {"pid": 33333, "cmdline": command}
+
+                def cwd(self):
+                    return str(runtime.get_working_dir())
+
+                def environ(self):
+                    return {
+                        "AVIBE_HOME": str(home),
+                        "VIBE_REQUIRE_SHUTDOWN_INTENT": "1",
+                    }
+
+            with patch("vibe.runtime.paths.get_vibe_remote_dir", return_value=home):
+                with patch("vibe.runtime.psutil.process_iter", return_value=[FakeProcess()]):
+                    with patch("vibe.runtime.pid_alive", return_value=True):
+                        with patch("vibe.runtime.service_lock_held_by", return_value=False):
+                            self.assertEqual(runtime.service_processes(), [])
 
     def test_service_processes_ignores_same_user_service_main_without_avibe_marker(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 import json
+import struct
+import zlib
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
-from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
+from core.show_session_events import ShowSessionEventError, ShowSessionEventStore, _format_transcript_text
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages, show_session_events
+from storage.models import agent_sessions, media_objects, messages, show_session_events
 from storage.settings_service import upsert_scope
 
 
@@ -52,6 +55,25 @@ def _seed_session(session_id: str = "ses_mark") -> str:
     return scope_id
 
 
+def _png_bytes(width: int, height: int) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    scanlines = (b"\x00" + b"\x00\x00\x00" * width) * height
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(scanlines))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _image_data_url(content_type: str, raw: bytes) -> str:
+    return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
 def test_show_event_store_records_assistant_mark_and_transcript_message(isolated_state):
     _seed_session()
     engine = create_sqlite_engine()
@@ -84,7 +106,7 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert event["scope"] == "default"
     assert event["message_id"]
     assert event["message"]["id"] == event["message_id"]
-    assert "[agent-mark:default:created] mark-default-summary" in event["transcript_text"]
+    assert "[agent-mark] mark-default-summary" in event["transcript_text"]
     assert "Anchor: [mark-default='summary']" in event["transcript_text"]
 
     with engine.connect() as conn:
@@ -131,8 +153,9 @@ def test_show_event_store_records_human_annotation_with_anchor_context(isolated_
     assert event["actor"] == "human"
     assert event["scope"] == "default"
     assert event["payload"]["status"] == "pending"
+    assert event["payload"]["author"] == {"kind": "local"}
     assert event["message_id"]
-    assert "[show-annotation:default:created] question" in event["transcript_text"]
+    assert "[show-annotation] question" in event["transcript_text"]
     assert "Clarify this claim." in event["transcript_text"]
     assert "Quote: Quarterly summary" in event["transcript_text"]
 
@@ -141,6 +164,107 @@ def test_show_event_store_records_human_annotation_with_anchor_context(isolated_
         message_row = conn.execute(select(messages).where(messages.c.id == event["message_id"])).mappings().one()
 
     assert message_row["author"] == "user"
+    assert json.loads(message_row["metadata_json"])["author"] == {"kind": "local"}
+
+
+def test_show_event_store_records_remote_human_author_in_event_and_message(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Review this."},
+            },
+            author={"kind": "user", "email": "alex@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert event["payload"]["author"] == {"kind": "user", "email": "alex@example.com"}
+    assert event["message"]["metadata"]["author"] == {
+        "kind": "user",
+        "email": "alex@example.com",
+    }
+
+
+def test_show_event_store_keeps_remote_author_out_of_intent_fallback_text(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.intent.submitted",
+                "payload": {
+                    "intent": "choose",
+                    "author": {"kind": "user", "email": "spoofed@example.com"},
+                },
+            },
+            author={"kind": "user", "email": "alex@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert event["payload"]["author"] == {"kind": "user", "email": "alex@example.com"}
+    assert "alex@example.com" not in event["transcript_text"]
+    assert "spoofed@example.com" not in event["transcript_text"]
+    assert '"author"' not in event["transcript_text"]
+
+
+def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
+    from vibe.ui_server import _show_event_requests_dispatch
+
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "system.annotation.control",
+                "payload": {"action": "enable", "mode": "screenshot"},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["actor"] == "system"
+    assert event["payload"] == {"action": "enable", "mode": "screenshot"}
+    assert event["transcript_text"] == ""
+    assert event["message_id"] is None
+    assert event["message"] is None
+    assert _show_event_requests_dispatch(event) is False
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.id)).scalar_one() == event["id"]
+        assert conn.execute(select(messages.c.id)).first() is None
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"action": "toggle"},
+        {"action": "enable", "mode": "area"},
+        {"action": "set-mode"},
+    ],
+)
+def test_annotation_control_event_rejects_invalid_payload(isolated_state, control):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {"type": "system.annotation.control", "payload": control},
+            )
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "invalid_payload"
 
 
 def test_show_event_store_rejects_mismatched_session_id(isolated_state):
@@ -241,6 +365,140 @@ def test_show_event_store_records_element_group_annotation_context(isolated_stat
     assert "Matched elements: 2" in event["transcript_text"]
 
 
+def test_show_event_store_materializes_screenshot_attachment(isolated_state):
+    scope_id = _seed_session()
+    raw = _png_bytes(4, 3)
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "review",
+                    "comment": "Review the captured area.",
+                    "screenshot": {
+                        "attachmentId": "screenshot_client_only",
+                        "mimeType": "image/png",
+                        "width": 4,
+                        "height": 3,
+                        "capturedRegion": {"x": 24, "y": 32, "width": 640, "height": 360},
+                        "dataUrl": _image_data_url("image/png", raw),
+                        "items": [{"label": "1", "comment": "This counter looks stale."}],
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    screenshot = event["payload"]["screenshot"]
+    local_path = Path(screenshot["path"])
+    assert screenshot["attachmentId"] != "screenshot_client_only"
+    assert screenshot["mimeType"] == "image/png"
+    assert screenshot["width"] == 4
+    assert screenshot["height"] == 3
+    assert screenshot["capturedRegion"] == {"x": 24, "y": 32, "width": 640, "height": 360}
+    assert screenshot["items"] == [{"label": "1", "comment": "This counter looks stale."}]
+    assert "dataUrl" not in screenshot
+    assert local_path.is_absolute()
+    assert local_path.parent == isolated_state / "attachments" / "avibe" / "ses_mark"
+    assert local_path.read_bytes() == raw
+    assert f"Screenshot: {local_path} (4x3)" in event["transcript_text"]
+    assert "Screenshot region: x:24, y:32, 640x360" in event["transcript_text"]
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        media_row = conn.execute(select(media_objects)).mappings().one()
+        stored_payload = json.loads(conn.execute(select(show_session_events.c.payload_json)).scalar_one())
+    assert media_row["token"] == screenshot["attachmentId"]
+    assert media_row["scope_id"] == scope_id
+    assert media_row["session_id"] == "ses_mark"
+    assert media_row["source"] == "show_annotation"
+    assert media_row["local_path"] == str(local_path)
+    assert "dataUrl" not in stored_payload["screenshot"]
+
+
+def test_show_event_store_materializes_webp_without_conversion(isolated_state):
+    _seed_session()
+    raw = base64.b64decode("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Review this image.",
+                    "screenshot": {
+                        "mimeType": "image/webp",
+                        "width": 1,
+                        "height": 1,
+                        "capturedRegion": {"x": 0, "y": 0, "width": 1, "height": 1},
+                        "dataUrl": _image_data_url("image/webp", raw),
+                        "items": [],
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    screenshot = event["payload"]["screenshot"]
+    local_path = Path(screenshot["path"])
+    assert screenshot["mimeType"] == "image/webp"
+    assert local_path.suffix == ".webp"
+    assert local_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "data_url,mime_type,width,height",
+    [
+        ("not-a-data-url", "image/png", 1, 1),
+        ("data:image/png;base64,%%%%", "image/png", 1, 1),
+        (_image_data_url("image/webp", _png_bytes(1, 1)), "image/webp", 1, 1),
+        (_image_data_url("image/png", _png_bytes(1, 1)), "image/webp", 1, 1),
+        (_image_data_url("image/png", _png_bytes(2049, 1)), "image/png", 2049, 1),
+    ],
+)
+def test_show_event_store_rejects_invalid_screenshot_data_url(
+    isolated_state, data_url, mime_type, width, height
+):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {
+                        "comment": "Invalid screenshot.",
+                        "screenshot": {
+                            "mimeType": mime_type,
+                            "width": width,
+                            "height": height,
+                            "capturedRegion": {"x": 0, "y": 0, "width": width, "height": height},
+                            "dataUrl": data_url,
+                            "items": [],
+                        },
+                    },
+                },
+            )
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "invalid_payload"
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events)).first() is None
+        assert conn.execute(select(media_objects)).first() is None
+    attachment_root = isolated_state / "attachments"
+    assert not attachment_root.exists() or not any(path.is_file() for path in attachment_root.rglob("*"))
+
+
 def test_show_event_store_records_screenshot_annotation_batch(isolated_state):
     _seed_session()
 
@@ -330,8 +588,7 @@ def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_stat
                 "type": "assistant.mark.resolved",
                 "mark": {
                     "id": "mark_1",
-                    "target": "summary",
-                    "body": "Resolved.",
+                    "updatedAt": created["payload"]["updatedAt"],
                 },
             },
         )
@@ -343,6 +600,118 @@ def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_stat
     assert created["id"] != "mark_1"
     assert resolved["id"] != "mark_1"
     assert created["id"] != resolved["id"]
+
+
+def test_show_event_store_hydrates_read_receipt_from_active_mark(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        created = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"id": "mark_1", "target": "summary", "body": "Server body."},
+                "anchor": {"selector": "#summary", "text": "Summary"},
+            },
+        )
+        resolved = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.resolved",
+                "mark": {
+                    "id": "mark_1",
+                    "updatedAt": created["payload"]["updatedAt"],
+                    "target": "forged",
+                    "body": "Forged body.",
+                },
+                "anchor": {"selector": "#forged"},
+            },
+            author={"kind": "user", "email": "reader@example.com"},
+        )
+    finally:
+        store.close()
+
+    assert resolved["payload"]["target"] == "summary"
+    assert resolved["payload"]["body"] == "Server body."
+    assert resolved["anchor"] == {"selector": "#summary", "text": "Summary"}
+    assert resolved["payload"]["author"] == {"kind": "user", "email": "reader@example.com"}
+    assert resolved["transcript_text"] == ""
+    assert resolved["message_id"] is None
+    assert resolved["message"] is None
+
+
+@pytest.mark.parametrize(
+    ("mark", "expected_code"),
+    [
+        ({"id": "missing", "updatedAt": "2026-07-23T00:00:00Z"}, "mark_not_active"),
+        ({"id": "mark_1"}, "mark_version_required"),
+    ],
+)
+def test_show_event_store_rejects_invalid_mark_resolution(isolated_state, mark, expected_code):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"id": "mark_1", "target": "summary", "body": "Current."},
+            },
+        )
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append("ses_mark", {"type": "assistant.mark.resolved", "mark": mark})
+    finally:
+        store.close()
+
+    assert exc_info.value.code == expected_code
+
+
+def test_show_event_store_rejects_stale_mark_read_receipt(isolated_state):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        original = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {
+                    "id": "mark_1",
+                    "target": "summary",
+                    "body": "Original.",
+                    "createdAt": "2026-07-23T00:00:00Z",
+                    "updatedAt": "2026-07-23T00:00:00Z",
+                },
+            },
+        )
+        store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.updated",
+                "mark": {
+                    "id": "mark_1",
+                    "target": "summary",
+                    "body": "Replacement.",
+                    "createdAt": original["payload"]["createdAt"],
+                    "updatedAt": "2026-07-23T00:00:01Z",
+                },
+            },
+        )
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {
+                    "type": "assistant.mark.resolved",
+                    "mark": {"id": "mark_1", "updatedAt": original["payload"]["updatedAt"]},
+                },
+                author={"kind": "local"},
+            )
+        active = store.active_marks("ses_mark")
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "mark_version_conflict"
+    assert [(mark["id"], mark["body"]) for mark in active] == [("mark_1", "Replacement.")]
 
 
 def test_show_event_store_records_intent_dispatch_payload(isolated_state):
@@ -367,7 +736,7 @@ def test_show_event_store_records_intent_dispatch_payload(isolated_state):
         store.close()
 
     assert event["payload"]["dispatch"] is True
-    assert "[show-intent:default] choose" in event["transcript_text"]
+    assert "[show-intent] choose" in event["transcript_text"]
     assert "Pick B." in event["transcript_text"]
 
 
@@ -391,6 +760,62 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
     assert event["actor"] == "assistant"
     assert event["message_id"]
     assert "[show-page-updated] Updated the Show Page" in event["transcript_text"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "expected_header"),
+    [
+        (
+            "assistant.mark.created",
+            {"scope": "default", "target": "summary", "body": "Created."},
+            "[agent-mark] summary",
+        ),
+        (
+            "assistant.mark.resolved",
+            {"scope": "default", "target": "summary", "body": "Resolved."},
+            "[agent-mark resolved] summary",
+        ),
+        (
+            "assistant.mark.updated",
+            {"scope": "review", "target": "summary", "body": "Updated."},
+            "[agent-mark updated scope=review] summary",
+        ),
+        (
+            "human.intent.submitted",
+            {"scope": "default", "intent": "question", "text": "Why?"},
+            "[show-intent] question",
+        ),
+        (
+            "human.intent.submitted",
+            {"scope": "review", "intent": "question", "text": "Why?"},
+            "[show-intent scope=review] question",
+        ),
+        (
+            "human.annotation.created",
+            {"scope": "default", "intent": "question", "comment": "Why?"},
+            "[show-annotation] question",
+        ),
+        (
+            "human.annotation.resolved",
+            {"scope": "default", "intent": "comment", "comment": "Done."},
+            "[show-annotation resolved] comment",
+        ),
+        (
+            "human.annotation.created",
+            {"scope": "review", "intent": "question", "comment": "Why?"},
+            "[show-annotation scope=review] question",
+        ),
+        (
+            "human.annotation.resolved",
+            {"scope": "review", "intent": "comment", "comment": "Done."},
+            "[show-annotation resolved scope=review] comment",
+        ),
+    ],
+)
+def test_show_event_transcript_headers_only_render_deviations(event_type, payload, expected_header):
+    transcript = _format_transcript_text(event_type, payload, {})
+
+    assert transcript.splitlines()[0] == expected_header
 
 
 def test_show_event_store_rejects_unknown_session(isolated_state):
@@ -494,3 +919,52 @@ def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeyp
         "turn.chunk",
         "turn.end",
     ]
+
+
+@pytest.mark.parametrize(
+    ("intent", "expects_guidance"),
+    [
+        ("question", True),
+        ("comment", True),
+        (None, True),
+        ("fix", False),
+        ("change", False),
+        ("approve", False),
+    ],
+)
+def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monkeypatch, intent, expects_guidance):
+    import asyncio
+
+    from vibe import internal_client, ui_server
+
+    captured = []
+
+    async def fake_stream_dispatch(payload, **kwargs):
+        captured.append(payload)
+        if False:
+            yield None
+
+    monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
+    label = intent or "comment"
+    event = {
+        "id": "show_evt_1a2b3c4d",
+        "type": "human.annotation.created",
+        "session_id": "ses_show",
+        "scope_id": "scope1",
+        "payload": {"intent": intent} if intent is not None else {},
+        "transcript_text": f"[show-annotation] {label}\n\nReview this.",
+        "message_id": "m1",
+    }
+
+    asyncio.run(ui_server._run_show_event_dispatch(event))
+
+    assert event["transcript_text"] == f"[show-annotation] {label}\n\nReview this."
+    assert "Show event id: show_evt_1a2b3c4d" in captured[0]["text"]
+    guidance = (
+        "如需在页面上原位回应，可执行：\n"
+        "  vibe show reply show_evt_1a2b3c4d --message '<你的回答>'\n"
+        "（也可以直接修改页面内容来响应，按场景选择。）"
+    )
+    assert (guidance in captured[0]["text"]) is expects_guidance
+    if expects_guidance:
+        assert captured[0]["text"].endswith(guidance)

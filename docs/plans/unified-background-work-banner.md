@@ -1,6 +1,6 @@
 # Unified Background-Work Banner (P1) — spec
 
-Owner decision (2026-07-16 20:51): the workbench chat's "后台工作 · N" banner must present ONE
+Owner decision (2026-07-16 20:51): the workbench chat's background-task banner must present ONE
 unified concept of background work for a session, regardless of where the work runs. Harness
 items (watches, scheduled tasks, delegated agent runs) join the same banner that today only
 shows backend-reported Activities (e.g. Claude background tasks).
@@ -25,14 +25,18 @@ The banner's source of truth is a **union assembled at runtime-state build time*
 
 Each unified item carries: `kind` (`backend_activity` | `watch` | `task` | `agent_run`),
 `label` (watch name / task summary / target agent + short message head / activity description),
-`since` timestamp, and a stable id. The banner count = union size. No controls (pause/cancel)
-in this phase — the expanded list links to the Harness page (watches/tasks) or run detail.
+`since` timestamp, and a stable id. Task items also carry the durable `schedule_type` (`at` |
+`cron`) used for display classification. The banner count = union size. No controls
+(pause/cancel) in this phase — the expanded list links to the Harness page (watches/tasks) or
+run detail.
 
 ## UX
 
-- Banner line unchanged: `后台工作 · N` (existing `chat.activities.running` string).
+- Banner line: `后台任务 · N` (`chat.activities.running`).
 - Expanded list: one row per item — kind icon + label + relative time. Rows for harness items
   navigate to their Harness surface on click; backend-activity rows keep current behavior.
+- Chinese row kinds use `监听` for watches, `一次性` for `schedule_type=at`, and `周期性` for
+  `schedule_type=cron`. Classification must use `schedule_type`, never parse the task label.
 - Empty union → banner hidden (current behavior).
 - All new strings through i18n (en + zh).
 
@@ -50,7 +54,7 @@ in this phase — the expanded list links to the Harness page (watches/tasks) or
 
 1. **Popover opens UPWARD.** The banner sits at the bottom of the chat (above the composer);
    the expanded list anchors to the pill's TOP edge and grows upward. Never downward.
-2. **Harness-page toggle.** A switch on the Harness page ("后台工作横幅", default ON) hides the
+2. **Harness-page toggle.** A switch on the Harness page ("后台任务横幅", default ON) hides the
    banner entirely for users who don't want it. Global (not per-session), persisted server-side
    (same `state_meta` family as other workbench prefs — lane picks the exact key, declares it).
    When off, the banner never renders; the underlying data/API is unaffected.

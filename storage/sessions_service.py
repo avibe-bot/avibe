@@ -21,6 +21,7 @@ from storage.agent_session_rows import (
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
+    new_session_id,
     normalize_workdir,
     snapshot_scope_workdir,
 )
@@ -156,6 +157,7 @@ class SQLiteSessionsService:
         model: str | None = None,
         reasoning_effort: str | None = None,
         workdir: str | None = None,
+        visibility: str = "foreground",
         metadata: dict[str, Any] | None = None,
     ) -> str | None:
         now = _utc_now_iso()
@@ -176,15 +178,15 @@ class SQLiteSessionsService:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 workdir=_new_session_workdir(conn, scope_id, workdir),
+                visibility=visibility,
                 metadata={"legacy_scope_key": str(scope_key), **dict(metadata or {})},
                 now=now,
                 require_workdir=False,
             )
 
-    def reserve_private_agent_session(
+    def reserve_standalone_agent_session(
         self,
         *,
-        platform: str,
         agent_backend: str,
         session_anchor: str,
         agent_id: str | None = None,
@@ -192,30 +194,22 @@ class SQLiteSessionsService:
         model: str | None = None,
         reasoning_effort: str | None = None,
         workdir: str | None = None,
+        visibility: str = "background",
         metadata: dict[str, Any] | None = None,
     ) -> str:
+        """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
-        platform_key = str(platform or "slack").strip() or "slack"
-        native_id = f"private-agent-run-{secrets.token_hex(8)}"
-        scope_key = f"{platform_key}::{native_id}"
         backend = str(agent_backend or "default")
-        metadata_payload = {"private_agent_run": True, "no_delivery": True}
         with self.engine.begin() as conn:
-            scope_id = upsert_scope(
-                conn,
-                platform_key,
-                "channel",
-                native_id,
-                display_name="Private Agent Run",
-                native_type="private_agent_run",
-                is_private=True,
-                supports_threads=False,
-                metadata=metadata_payload,
-                now=now,
-            )
+            session_id = new_session_id(conn)
+            resolved_workdir = normalize_workdir(workdir)
+            if resolved_workdir is None:
+                resolved_workdir = str(paths.get_show_page_dir(session_id))
+            Path(resolved_workdir).mkdir(parents=True, exist_ok=True)
             return create_agent_session_row(
                 conn,
-                scope_id=scope_id,
+                session_id=session_id,
+                scope_id=None,
                 agent_backend=_agent_backend(backend),
                 agent_variant=backend,
                 session_anchor=session_anchor,
@@ -224,10 +218,10 @@ class SQLiteSessionsService:
                 agent_name=agent_name,
                 model=model,
                 reasoning_effort=reasoning_effort,
-                workdir=workdir,
-                metadata={"legacy_scope_key": scope_key, **metadata_payload, **dict(metadata or {})},
+                workdir=resolved_workdir,
+                visibility=visibility,
+                metadata=dict(metadata or {}),
                 now=now,
-                require_workdir=False,
             )
 
     def ensure_agent_session_id(
