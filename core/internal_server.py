@@ -33,7 +33,6 @@ import logging
 import os
 import socket
 import stat
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -431,11 +430,6 @@ def create_app(controller: "Controller") -> FastAPI:
     def _memory_runtime():
         return getattr(controller, "memory_runtime", None)
 
-    # Keep accepted Workbench captures alive after their UDS request returns. The
-    # caller waits only for this task handoff, so it can order capture before
-    # dispatch without waiting for the durable queue receipt.
-    memory_capture_tasks: set[asyncio.Task[Any]] = set()
-
     @app.post("/internal/reconcile-memory")
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
@@ -527,22 +521,23 @@ def create_app(controller: "Controller") -> FastAPI:
 
         from core.memory import CaptureRequest
 
-        capture_request = CaptureRequest(**payload)
-        started_at = time.monotonic()
-
-        async def _capture_in_background() -> None:
-            try:
-                await module.capture(capture_request)
-            except Exception:
-                logger.warning(
-                    "internal memory capture failed latency_ms=%d",
-                    int((time.monotonic() - started_at) * 1000),
-                )
-
-        task = asyncio.create_task(_capture_in_background(), name="internal-memory-capture")
-        memory_capture_tasks.add(task)
-        task.add_done_callback(memory_capture_tasks.discard)
-        return {"status": "accepted"}
+        try:
+            # ``capture`` performs just the local idempotent queue insert; it
+            # never waits for EverOS or a model endpoint. Returning only after
+            # it finishes gives the UI a durable capture-before-dispatch
+            # handoff while its outcome remains non-critical to agent dispatch.
+            receipt = await module.capture(CaptureRequest(**payload))
+        except Exception:
+            logger.warning("internal memory capture failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        response: dict[str, Any] = {"status": receipt.status}
+        reason = getattr(receipt, "reason", None)
+        error = getattr(receipt, "error", None)
+        if reason is not None:
+            response["reason"] = reason
+        if error is not None:
+            response["error"] = error
+        return response
 
     @app.post("/internal/memory/clear")
     async def _memory_clear(request: Request) -> Any:

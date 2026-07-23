@@ -406,9 +406,9 @@ async def memory_capture(
     occurred_at_ms: int,
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 0.5,
+    timeout: float = 2.0,
 ) -> dict[str, Any]:
-    """Hand one Workbench capture to the controller without awaiting its receipt."""
+    """Durably enqueue one Workbench capture before ordinary dispatch starts."""
 
     return await _memory_request(
         "POST",

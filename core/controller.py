@@ -1322,6 +1322,17 @@ class Controller:
                 return False
             if getattr(raw_message, "attachments", None) or getattr(raw_message, "embeds", None):
                 return False
+            flags = getattr(raw_message, "flags", None)
+            if bool(getattr(flags, "forwarded", False)) or getattr(raw_message, "message_snapshots", None):
+                return False
+            is_system = getattr(raw_message, "is_system", False)
+            if callable(is_system):
+                try:
+                    is_system = is_system()
+                except Exception:
+                    return False
+            if bool(is_system):
+                return False
         return True
 
     async def capture_memory_from_im(self, context: MessageContext, text: str, session_id: str) -> None:

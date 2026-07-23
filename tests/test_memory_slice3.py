@@ -194,6 +194,46 @@ def test_private_memory_command_rejects_nonordinary_human_input(payload, files) 
     assert controller.client.replies == ["memory.command.unavailable"]
 
 
+@pytest.mark.parametrize(
+    "raw_message",
+    [
+        SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            edited_at=None,
+            attachments=[],
+            embeds=[],
+            flags=SimpleNamespace(forwarded=True),
+            message_snapshots=(),
+        ),
+        SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            edited_at=None,
+            attachments=[],
+            embeds=[],
+            flags=SimpleNamespace(forwarded=False),
+            message_snapshots=[object()],
+        ),
+        SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            edited_at=None,
+            attachments=[],
+            embeds=[],
+            flags=SimpleNamespace(forwarded=False),
+            message_snapshots=(),
+            is_system=lambda: True,
+        ),
+    ],
+)
+def test_private_memory_command_rejects_nonordinary_discord_messages(raw_message) -> None:
+    controller = _controller()
+    context = _context("discord", message=raw_message)
+
+    asyncio.run(controller.handle_memory_command(context, "profile"))
+
+    assert controller.memory_runtime.calls == []
+    assert controller.client.replies == ["memory.command.unavailable"]
+
+
 def test_private_memory_command_hides_disabled_memory_as_unavailable() -> None:
     controller = _controller()
     controller.config.memory.enabled = False
