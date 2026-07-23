@@ -8789,6 +8789,15 @@ def _show_event_response_payload(event_payload: dict[str, Any], *, public: bool 
         author = public_payload.get("author")
         if isinstance(author, dict) and "email" in author:
             public_payload["author"] = {key: value for key, value in author.items() if key != "email"}
+        screenshot = public_payload.get("screenshot")
+        if isinstance(screenshot, dict):
+            local_path = screenshot.get("path")
+            public_screenshot = {key: value for key, value in screenshot.items() if key != "path"}
+            public_payload["screenshot"] = public_screenshot
+            transcript_text = public_event.get("transcript_text")
+            if isinstance(local_path, str) and local_path and isinstance(transcript_text, str):
+                public_ref = str(public_screenshot.get("attachmentId") or "screenshot attachment")
+                public_event["transcript_text"] = transcript_text.replace(local_path, public_ref)
         public_event["payload"] = public_payload
     return public_event
 
