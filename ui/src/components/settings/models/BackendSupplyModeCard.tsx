@@ -130,7 +130,11 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   if (!agent) return null;
 
   const mode = agent.mode;
-  const detectItem = detected.find((i) => i.kind === 'api_key' || i.kind === 'opencode_provider') ?? detected[0] ?? null;
+  // Only surface the import strip for configs the migration dialog can actually
+  // apply — a reauth-only scan would open a dead-end dialog (reauth rows are
+  // disabled and excluded from apply), so those don't count as importable.
+  const importable = detected.filter((i) => i.proposed_action !== 'reauth');
+  const detectItem = importable.find((i) => i.kind === 'api_key' || i.kind === 'opencode_provider') ?? importable[0] ?? null;
 
   return (
     <Card>

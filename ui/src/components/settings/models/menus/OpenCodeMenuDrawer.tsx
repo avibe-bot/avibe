@@ -231,9 +231,10 @@ export const OpenCodeMenuDrawer: React.FC<{
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onSaved={(identifier) => {
-          // The new/edited model becomes checked so it shows in 精选, and we
-          // re-fetch sources so the grouped list picks up the new supply entry.
-          setChecked((prev) => new Set(prev).add(identifier));
+          // Auto-check only a NEWLY added model (so it shows in 精选). Editing an
+          // existing entry's metadata must not flip its menu-selection state — a
+          // display-name edit on an unchecked model would otherwise re-add it.
+          if (!editTarget) setChecked((prev) => new Set(prev).add(identifier));
           onRefresh();
         }}
       />
