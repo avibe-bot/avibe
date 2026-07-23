@@ -412,7 +412,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         if (!REORDER_ACTIVITY_EVENTS.has(data.event)) return;
         const projectId = projectsRef.current?.find((project) => project.scope_id === data.scope_id)?.id;
         if (!projectId) return;
-        void reconcileSessions(projectId, { minCount: data.event === 'created' ? 1 : 0 });
+        // A `created` placement means a row is (re)entering this window: a brand-new
+        // session (top rank) or one restored from the background via Undo, whose
+        // prior activity rank can sit just past the loaded page (e.g. a create/fork
+        // grew the window to 9, hiding the 9th leaves 8). Reconcile one past the
+        // current window so the (re)entering row is included even at a page boundary
+        // — a flat minCount 1 stops at the first page and would leave a restored row
+        // ranked beyond it invisible until Load more, making Undo look broken.
+        const loaded = sessionsRef.current[projectId]?.sessions?.length ?? 0;
+        void reconcileSessions(projectId, { minCount: data.event === 'created' ? loaded + 1 : 0 });
       },
       onSessionStatus: ({ session_id, agent_status }) => {
         setSessions((prev) =>
