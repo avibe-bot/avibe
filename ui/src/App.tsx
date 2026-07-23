@@ -18,6 +18,7 @@ import { AgentsPage } from './components/workbench/AgentsPage';
 import { SkillsPage } from './components/workbench/SkillsPage';
 import { HarnessPage } from './components/workbench/HarnessPage';
 import { VaultsPage } from './components/workbench/VaultsPage';
+import { MemoryPage } from './components/workbench/MemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { Dashboard } from './components/Dashboard';
@@ -476,6 +477,7 @@ const router = createBrowserRouter(
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/harness" element={<HarnessPage />} />
         <Route path="/vaults" element={<VaultsPage />} />
+        <Route path="/memory" element={<MemoryPage />} />
         <Route path="/projects" element={<ProjectsPage />} />
         {/* /more retired: the workbench Apps tab now summons the Dock drawer
             (§7.1b), which absorbed the old More-page content. Redirect any

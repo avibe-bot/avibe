@@ -6,6 +6,7 @@ import {
   Archive,
   ArrowRight,
   Bot,
+  Brain,
   ChevronDown,
   ChevronRight,
   CodeXml,
@@ -55,6 +56,7 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
   { to: '/skills', i18nKey: 'workbench.nav.skills', icon: WandSparkles },
   { to: '/harness', i18nKey: 'workbench.nav.harness', icon: Activity },
   { to: '/vaults', i18nKey: 'workbench.nav.vaults', icon: KeyRound },
+  { to: '/memory', i18nKey: 'workbench.nav.memory', icon: Brain },
 ];
 
 const CAPS_COLLAPSED_KEY = 'vibe-remote:caps-collapsed';

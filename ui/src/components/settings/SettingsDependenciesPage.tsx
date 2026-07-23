@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowUpRight,
+  Brain,
   Download,
   Hexagon,
   KeyRound,
@@ -37,6 +38,7 @@ const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan' },
+  'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
 };
@@ -112,7 +114,11 @@ export const SettingsDependenciesPage: React.FC = () => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
             const showAction =
-              d.id === 'askill' || d.id === 'avault' || d.id === 'show-runtime' || d.id === 'tmux';
+              d.id === 'askill' ||
+              d.id === 'avault' ||
+              d.id === 'show-runtime' ||
+              d.id === 'memory-runtime' ||
+              d.id === 'tmux';
             return (
               <SettingsResourceRow
                 key={d.id}
@@ -145,7 +151,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                         {installing
                           ? t('settings.dependencies.installing')
                           : d.installed
-                            ? d.id === 'show-runtime'
+                            ? d.id === 'show-runtime' || d.id === 'memory-runtime'
                               ? t('settings.dependencies.repair')
                               : t('settings.dependencies.reinstall')
                             : t('settings.dependencies.install')}

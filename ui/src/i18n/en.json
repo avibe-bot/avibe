@@ -97,7 +97,8 @@
     "step": "Step",
     "proxyUrl": "Proxy URL (optional)",
     "proxyUrlHint": "SOCKS5, SOCKS4, HTTP or HTTPS proxy. Leave empty to fall back to system SOCKS proxy detection or direct connection.",
-    "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)"
+    "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)",
+    "locked": "Locked"
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -318,6 +319,10 @@
         "node": {
           "label": "Node.js",
           "detail": "Shared prerequisite for the runtimes above."
+        },
+        "memory-runtime": {
+          "label": "Memory runtime",
+          "detail": "Runs local memory distillation and search on your machine."
         }
       }
     },
@@ -685,7 +690,21 @@
     "remote_access_not_running": "Start Remote Access before optimizing its route.",
     "route_optimization_unavailable": "A route optimization is already running or cooling down.",
     "route_optimization_start_failed": "Avibe could not start route optimization. Check the remote access runtime logs.",
-    "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another."
+    "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
+    "memory_disabled": "Memory is disabled, or this connection can't reach it.",
+    "memory_invalid_input": "That Memory request wasn't valid.",
+    "memory_input_too_large": "That input is too large for Memory.",
+    "memory_queue_full": "The Memory queue is full right now.",
+    "memory_low_disk_space": "There isn't enough free disk space for Memory right now.",
+    "memory_store_unavailable": "The Memory store is unavailable right now.",
+    "memory_runtime_missing": "The memory-runtime dependency isn't installed yet.",
+    "memory_runtime_unsupported": "The memory-runtime dependency isn't supported on this platform.",
+    "memory_runtime_install_failed": "The memory-runtime dependency failed to install.",
+    "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
+    "memory_provider_timeout": "The Memory request timed out.",
+    "memory_provider_response_invalid": "Memory returned an invalid response.",
+    "memory_processing_failed": "Memory processing failed.",
+    "memory_clear_failed": "Clearing Memory data failed."
   },
   "apps": {
     "title": "Apps",
@@ -1039,7 +1058,8 @@
       "agents": "Agents",
       "skills": "Skills",
       "harness": "Harness",
-      "vaults": "Vaults"
+      "vaults": "Vaults",
+      "memory": "Memory"
     },
     "search": {
       "roleYou": "You",
@@ -1123,6 +1143,11 @@
         "eyebrow": "Vaults",
         "title": "Vaults",
         "description": "Secrets and API keys that the Agent can pull into ENV / .env without you copy-pasting."
+      },
+      "memory": {
+        "eyebrow": "Memory",
+        "title": "Memory",
+        "description": "A personal memory distilled from your Workbench and private-IM messages — review it, search it, or clear it."
       }
     }
   },
@@ -2659,6 +2684,123 @@
     "audit": {
       "title": "Recent activity",
       "empty": "No activity yet."
+    }
+  },
+  "memory": {
+    "title": "Memory",
+    "subtitle": "A personal memory distilled from your Workbench and private-IM messages — review it, search it, or clear it here.",
+    "tabs": {
+      "status": "Status",
+      "profile": "Profile",
+      "search": "Search",
+      "settings": "Settings"
+    },
+    "remoteUnavailable": {
+      "title": "Available on this device only",
+      "description": "Memory settings and data are visible only from a direct connection to this Avibe install — not through Avibe Cloud or another remote route."
+    },
+    "status": {
+      "title": "Status",
+      "loading": "Checking status…",
+      "loadFailed": "Couldn't load Memory status.",
+      "refresh": "Refresh",
+      "state": {
+        "disabled": "Disabled",
+        "starting": "Starting",
+        "ready": "Ready",
+        "indexing": "Indexing",
+        "degraded": "Degraded",
+        "down": "Down",
+        "clearing": "Clearing",
+        "error": "Error"
+      },
+      "pending": "Pending",
+      "processingCount": "Processing",
+      "dead": "Dead",
+      "missed": "Missed",
+      "queueBytes": "Queued text",
+      "storageUsed": "Local storage used",
+      "lastSuccess": "Last successful processing",
+      "lastSuccessNever": "Never",
+      "lastError": "Last error"
+    },
+    "profile": {
+      "description": "The provider's current distilled profile of you, built from captured messages.",
+      "loading": "Loading profile…",
+      "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
+      "loadFailed": "Couldn't load your profile.",
+      "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
+      "disabledHint": "Enable Memory to view your profile.",
+      "refresh": "Refresh",
+      "sourceNote": "Distilled from your conversation history."
+    },
+    "search": {
+      "description": "Search your distilled profile, episodes, and facts.",
+      "placeholder": "Search your memory…",
+      "button": "Search",
+      "searching": "Searching…",
+      "empty": "No results.",
+      "searchFailed": "Search failed.",
+      "disabledHint": "Enable Memory to search.",
+      "sourceNote": "Distilled from your conversation history."
+    },
+    "settings": {
+      "loading": "Loading settings…",
+      "loadFailed": "Couldn't load Memory settings.",
+      "enableLabel": "Memory",
+      "enableHint": "Distill eligible Workbench messages and bound administrator private-IM messages into a searchable personal memory.",
+      "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
+      "goToDependencies": "Open Dependencies",
+      "llmTitle": "LLM endpoint",
+      "embeddingTitle": "Embedding endpoint",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.example.com/v1",
+      "model": "Model",
+      "modelPlaceholder": "model name",
+      "apiKey": "API key",
+      "apiKeySet": "A key is set — leave blank to keep it.",
+      "apiKeyNotSet": "No key set.",
+      "apiKeyPlaceholder": "sk-…",
+      "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
+      "embeddingLocked": "Changing the embedding endpoint or model is disabled while memory data exists. Run Clear all first.",
+      "save": "Save settings",
+      "saving": "Saving…",
+      "saveFailed": "Couldn't save Memory settings.",
+      "saved": "Memory settings saved.",
+      "disclosureTitle": "Before you enable Memory",
+      "disclosure": [
+        "Eligible Workbench and bound, enabled administrator private-IM text is copied into a bounded local queue for processing.",
+        "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days.",
+        "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
+        "These remote endpoints receive captured text or search queries and may retain them under their own policy.",
+        "Private-IM text has already traveled over that platform before capture, and an IM /memory reply is subject to that platform's own retention and sync.",
+        "The local runtime retains unflushed raw messages and extracted data in local state in addition to the visible profile.",
+        "Disabling Memory freezes local data rather than deleting it — use Clear all to remove it.",
+        "Clear all removes this install's local Memory data but cannot retract copies already sent to a remote endpoint or your original chat history.",
+        "Delivery to the Memory endpoints is at-least-once — a rare duplicate derived memory is possible after a timeout or crash.",
+        "Every enabled IM administrator is a co-owner of the same personal memory pool."
+      ]
+    },
+    "clear": {
+      "button": "Clear all",
+      "confirmTitle": "Clear all local Memory data?",
+      "confirmDescription": "This removes your distilled profile, episodes, facts, and any pending queued text on this install.",
+      "removesTitle": "This removes:",
+      "removes": [
+        "Your visible distilled profile",
+        "Hidden local buffers and indexes used to build it",
+        "Pending and finished items in the local processing queue"
+      ],
+      "keepsTitle": "This does not remove:",
+      "keeps": [
+        "Your original Avibe chat history",
+        "Copies already sent to a remote Memory endpoint",
+        "Existing logs, crash reports, or backups"
+      ],
+      "confirmLabel": "Clear all",
+      "clearing": "Clearing…",
+      "cleared": "Memory data cleared.",
+      "failed": "Clear failed."
     }
   }
 }

@@ -97,7 +97,8 @@
     "step": "步骤",
     "proxyUrl": "代理地址（可选）",
     "proxyUrlHint": "SOCKS5、SOCKS4、HTTP 或 HTTPS 代理。留空则回退到系统 SOCKS 代理探测，未配置时直连。",
-    "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）"
+    "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）",
+    "locked": "已锁定"
   },
   "nav": {
     "dashboard": "控制台",
@@ -318,6 +319,10 @@
         "node": {
           "label": "Node.js",
           "detail": "上述运行时的共同前置依赖。"
+        },
+        "memory-runtime": {
+          "label": "记忆运行时",
+          "detail": "在本机运行记忆提炼与搜索。"
         }
       }
     },
@@ -685,7 +690,21 @@
     "remote_access_not_running": "请先启动远程访问，再优化线路。",
     "route_optimization_unavailable": "线路优化正在进行中，或当前仍处于冷却期。",
     "route_optimization_start_failed": "Avibe 无法启动线路优化，请查看远程访问运行日志。",
-    "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。"
+    "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。",
+    "memory_disabled": "记忆功能已禁用，或当前连接无法访问它。",
+    "memory_invalid_input": "该记忆请求无效。",
+    "memory_input_too_large": "输入内容对记忆功能来说太大了。",
+    "memory_queue_full": "记忆队列目前已满。",
+    "memory_low_disk_space": "当前磁盘空间不足，无法用于记忆功能。",
+    "memory_store_unavailable": "记忆存储当前不可用。",
+    "memory_runtime_missing": "memory-runtime 依赖尚未安装。",
+    "memory_runtime_unsupported": "memory-runtime 依赖在此平台上不受支持。",
+    "memory_runtime_install_failed": "memory-runtime 依赖安装失败。",
+    "memory_sidecar_unavailable": "记忆 sidecar 当前不可访问。",
+    "memory_provider_timeout": "记忆请求超时。",
+    "memory_provider_response_invalid": "记忆返回了无效的响应。",
+    "memory_processing_failed": "记忆处理失败。",
+    "memory_clear_failed": "清除记忆数据失败。"
   },
   "apps": {
     "title": "应用",
@@ -1039,7 +1058,8 @@
       "agents": "Agents",
       "skills": "Skills",
       "harness": "Harness",
-      "vaults": "Vaults"
+      "vaults": "Vaults",
+      "memory": "记忆"
     },
     "search": {
       "roleYou": "你",
@@ -1123,6 +1143,11 @@
         "eyebrow": "Vaults",
         "title": "Vaults",
         "description": "secrets 和 API key,Agent 可以直接写进 ENV / .env,不用你复制粘贴。"
+      },
+      "memory": {
+        "eyebrow": "记忆",
+        "title": "记忆",
+        "description": "从你的 Workbench 和私聊消息中提炼出的个人记忆——在这里查看、搜索或清除。"
       }
     }
   },
@@ -2659,6 +2684,123 @@
     "audit": {
       "title": "最近活动",
       "empty": "暂无活动。"
+    }
+  },
+  "memory": {
+    "title": "记忆",
+    "subtitle": "从你的 Workbench 和私聊消息中提炼出的个人记忆——在这里查看、搜索或清除。",
+    "tabs": {
+      "status": "状态",
+      "profile": "画像",
+      "search": "搜索",
+      "settings": "设置"
+    },
+    "remoteUnavailable": {
+      "title": "仅限本机访问",
+      "description": "记忆的设置和数据仅在直接连接到本机 Avibe 时可见——通过 Avibe Cloud 或其他远程方式无法访问。"
+    },
+    "status": {
+      "title": "状态",
+      "loading": "正在检查状态…",
+      "loadFailed": "无法加载记忆状态。",
+      "refresh": "刷新",
+      "state": {
+        "disabled": "已禁用",
+        "starting": "启动中",
+        "ready": "就绪",
+        "indexing": "索引中",
+        "degraded": "降级",
+        "down": "不可用",
+        "clearing": "清除中",
+        "error": "错误"
+      },
+      "pending": "待处理",
+      "processingCount": "处理中",
+      "dead": "已放弃",
+      "missed": "已跳过",
+      "queueBytes": "排队文本",
+      "storageUsed": "本地已用存储",
+      "lastSuccess": "上次处理成功时间",
+      "lastSuccessNever": "从未",
+      "lastError": "上次错误"
+    },
+    "profile": {
+      "description": "由已捕获的消息提炼出的、你当前的画像。",
+      "loading": "正在加载画像…",
+      "empty": "还没有画像——继续聊天，消息处理后再来看看。",
+      "loadFailed": "无法加载你的画像。",
+      "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
+      "disabledHint": "启用记忆后即可查看画像。",
+      "refresh": "刷新",
+      "sourceNote": "由你的对话历史提炼而来。"
+    },
+    "search": {
+      "description": "搜索你的画像、事件和事实。",
+      "placeholder": "搜索你的记忆…",
+      "button": "搜索",
+      "searching": "搜索中…",
+      "empty": "没有结果。",
+      "searchFailed": "搜索失败。",
+      "disabledHint": "启用记忆后即可搜索。",
+      "sourceNote": "由你的对话历史提炼而来。"
+    },
+    "settings": {
+      "loading": "正在加载设置…",
+      "loadFailed": "无法加载记忆设置。",
+      "enableLabel": "记忆",
+      "enableHint": "将符合条件的 Workbench 消息，以及已绑定管理员的私聊消息提炼为可搜索的个人记忆。",
+      "dependencyNotReady": "memory-runtime 依赖尚未就绪。请先在「设置 → 依赖」中安装或修复，然后重新尝试启用记忆。",
+      "goToDependencies": "前往依赖页面",
+      "llmTitle": "LLM 端点",
+      "embeddingTitle": "Embedding 端点",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.example.com/v1",
+      "model": "模型",
+      "modelPlaceholder": "模型名称",
+      "apiKey": "API Key",
+      "apiKeySet": "已设置密钥——留空可保留原值。",
+      "apiKeyNotSet": "尚未设置密钥。",
+      "apiKeyPlaceholder": "sk-…",
+      "apiKeyClearHint": "密钥仅可写入——Avibe 不会把已保存的密钥回显给你。",
+      "embeddingLocked": "已有记忆数据时无法更改 Embedding 端点或模型，请先执行「清除全部」。",
+      "save": "保存设置",
+      "saving": "保存中…",
+      "saveFailed": "无法保存记忆设置。",
+      "saved": "记忆设置已保存。",
+      "disclosureTitle": "启用记忆前请了解",
+      "disclosure": [
+        "符合条件的 Workbench 文本，以及已绑定、已启用管理员的私聊文本，会被复制到一个有边界的本地队列中等待处理。",
+        "一条消息处理成功或重试耗尽后，其文本会立即被清除；一个不含内容的去重标记最多保留 90 天。",
+        "记忆使用的 LLM 与 Embedding 端点与你的 Agent 模型订阅是分开的。",
+        "这些远程端点会接收到被捕获的文本或搜索查询，并可能按其自身策略保留。",
+        "私聊文本在被捕获前已经过该平台传输，IM 上的 /memory 回复同样受该平台自身的留存与同步策略约束。",
+        "本地运行时除了可见的画像外，还会在本地状态中保留尚未处理的原始消息和提取数据。",
+        "禁用记忆只会冻结本地数据，不会删除——如需删除请使用「清除全部」。",
+        "「清除全部」只会移除本机上的本地记忆数据，无法追回已发送到远程端点的副本，也不会影响原始聊天记录。",
+        "发往记忆端点的投递是至少一次——超时或崩溃后偶尔可能出现重复的派生记忆。",
+        "每一位已启用的 IM 管理员都是同一个个人记忆池的共同所有者。"
+      ]
+    },
+    "clear": {
+      "button": "清除全部",
+      "confirmTitle": "清除全部本地记忆数据？",
+      "confirmDescription": "这会移除你的画像、事件、事实，以及本机上任何尚未处理的排队文本。",
+      "removesTitle": "将会移除：",
+      "removes": [
+        "你可见的画像",
+        "用于构建画像的隐藏本地缓冲区和索引",
+        "本地处理队列中待处理和已完成的条目"
+      ],
+      "keepsTitle": "不会移除：",
+      "keeps": [
+        "你原始的 Avibe 聊天记录",
+        "已发送到远程记忆端点的副本",
+        "现有的日志、崩溃报告或备份"
+      ],
+      "confirmLabel": "清除全部",
+      "clearing": "清除中…",
+      "cleared": "记忆数据已清除。",
+      "failed": "清除失败。"
     }
   }
 }
