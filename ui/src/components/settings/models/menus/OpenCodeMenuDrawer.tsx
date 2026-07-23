@@ -17,7 +17,7 @@ import { backendVisual } from '../vendorMeta';
 import type { AgentMenu, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
 import { AddCustomModelDialog } from './AddCustomModelDialog';
-import { buildMenuGroups, type MenuModelRow } from './identifiers';
+import { buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
 import { SupplyDots } from './supplyBits';
 
 type EditTarget = { sourceId: string; modelId: string; displayName: string | null } | null;
@@ -72,11 +72,12 @@ export const OpenCodeMenuDrawer: React.FC<{
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual('opencode');
 
-  // Only hub-channel sources materialize as OpenCode providers (opencode-
-  // overlay.md): native_cli subscriptions serve their sanctioned CLI natively
-  // and never appear here, so building from them would offer un-saveable rows.
-  const hubSources = React.useMemo(() => sources.filter((s) => s.supply_channel === 'hub'), [sources]);
-  const groups = React.useMemo(() => buildMenuGroups(hubSources), [hubSources]);
+  // Only OpenCode-eligible sources materialize as providers (isSourceEligible):
+  // API-key sources only — subscriptions (native_cli AND hub-held experimental)
+  // are excluded, matching the backend predicate, so we never offer a row the
+  // live `set_opencode_menu` would reject.
+  const eligibleSources = React.useMemo(() => sources.filter((s) => isSourceEligible(s, 'opencode')), [sources]);
+  const groups = React.useMemo(() => buildMenuGroups(eligibleSources), [eligibleSources]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
@@ -202,8 +203,12 @@ export const OpenCodeMenuDrawer: React.FC<{
                         checked={checked.has(row.identifier)}
                         onToggle={() => toggle(row.identifier)}
                         onEdit={() => {
+                          // Pull the display name from the CHOSEN manual model, not the
+                          // aggregate row label (which may come from a discovered source),
+                          // so saving unchanged can't overwrite it with another source's name.
                           const custom = row.sources.find((s) => s.models.some((m) => m.id === row.modelId && m.provenance === 'manual'));
-                          setEditTarget({ sourceId: (custom ?? row.sources[0]).id, modelId: row.modelId, displayName: row.displayName });
+                          const manual = custom?.models.find((m) => m.id === row.modelId && m.provenance === 'manual');
+                          setEditTarget({ sourceId: (custom ?? row.sources[0]).id, modelId: row.modelId, displayName: manual?.display_name ?? null });
                           setCustomOpen(true);
                         }}
                       />
@@ -222,7 +227,7 @@ export const OpenCodeMenuDrawer: React.FC<{
 
       <AddCustomModelDialog
         open={customOpen}
-        sources={hubSources}
+        sources={eligibleSources}
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onSaved={(identifier) => {

@@ -7,21 +7,30 @@
 // generate and preview it.
 import type { Accent } from '../vendorMeta';
 import { sourceAccent } from '../vendorMeta';
-import type { Source } from '../types';
+import type { AgentBackend, Source } from '../types';
 
 // Standard vendor ids that map 1:1 to an OpenCode provider prefix (identical to
 // native OpenCode usage — no `avibe-` namespace).
-const STANDARD_VENDORS = new Set([
+//
+// MOCK MIRROR of the backend `STANDARD_OPENCODE_VENDOR_IDS`
+// (core/handlers/model_hub/identifiers.py). ESCALATED (2026-07-23): the UI
+// cannot import the Python list, so any divergence makes `set_opencode_menu`
+// reject identifiers in live mode. Authoritative source should be the backend
+// in the integration pass (surfaced via contract, like `builtin_models`); this
+// set is the interim mirror and the single swap point.
+const STANDARD_OPENCODE_VENDORS = new Set([
   'anthropic',
   'openai',
   'zhipuai',
   'kimi',
+  'moonshot',
   'xai',
   'google',
   'deepseek',
-  'qwen',
   'mistral',
   'groq',
+  'openrouter',
+  'together',
 ]);
 
 /**
@@ -34,12 +43,40 @@ const STANDARD_VENDORS = new Set([
  * `glm-5.2-air` yields `custom/glm-5.2-air` (not `zhipuai/…`).
  */
 export function inferProvider(sourceVendor: string): string {
-  return STANDARD_VENDORS.has(sourceVendor) ? sourceVendor : 'custom';
+  return STANDARD_OPENCODE_VENDORS.has(sourceVendor) ? sourceVendor : 'custom';
 }
 
 /** Full prefixed identifier for a (source vendor, model id). */
 export function buildIdentifier(sourceVendor: string, modelId: string): string {
   return `${inferProvider(sourceVendor)}/${modelId}`;
+}
+
+// Which backend a fixed-menu backend's own native subscription belongs to
+// (its sanctioned native_cli client): Claude sub → claude, ChatGPT sub → codex.
+const NATIVE_SUB_VENDOR: Partial<Record<AgentBackend, string>> = {
+  claude: 'anthropic',
+  codex: 'openai',
+};
+
+/**
+ * SINGLE chokepoint mirroring the backend `_eligible_for_agent` predicate — the
+ * one place that decides whether a source may feed an agent's menu/mapping, so
+ * the drawers never re-derive eligibility from `supply_channel` piecemeal.
+ *
+ * - OpenCode (open menu): only API-key sources materialize as providers;
+ *   subscriptions (native_cli AND hub-held experimental) are excluded.
+ * - Fixed-menu (Claude / Codex mapping targets): any hub-supplied API-key
+ *   source, PLUS this backend's own native subscription (a Claude sub is a
+ *   valid target for Claude Code, a ChatGPT sub for Codex).
+ *
+ * ESCALATED (2026-07-23): this mirrors backend logic the UI can't read; the
+ * integration pass should drive it from a backend-provided signal (like
+ * `builtin_models`). This function is the swap point.
+ */
+export function isSourceEligible(source: Source, backend: AgentBackend): boolean {
+  if (backend === 'opencode') return source.kind === 'api_key';
+  if (source.kind === 'api_key') return true;
+  return source.kind === 'subscription' && source.vendor === NATIVE_SUB_VENDOR[backend];
 }
 
 // ── Grouped menu model, derived from the ordered sources list ──────────────

@@ -44,6 +44,10 @@ const OptionCard: React.FC<{
     onClick={() => !disabled && onSelect()}
     onKeyDown={(e) => {
       if (disabled) return;
+      // Only act when the radio row itself is focused — Enter/Space on a nested
+      // control (the Models-page link / Import button) must drive that control,
+      // not switch the supply mode.
+      if (e.target !== e.currentTarget) return;
       if (e.key === ' ' || e.key === 'Enter') {
         e.preventDefault();
         onSelect();

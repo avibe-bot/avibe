@@ -15,7 +15,7 @@ import { modelsApi } from '../modelsApi';
 import { backendVisual } from '../vendorMeta';
 import type { AgentBackend, AgentMapping, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
-import { buildTargetModels, type TargetModel } from './identifiers';
+import { buildTargetModels, isSourceEligible, type TargetModel } from './identifiers';
 import { SupplyDots } from './supplyBits';
 import { useCompactSourceLabel } from './sourceLabel';
 
@@ -156,13 +156,12 @@ export const MappingDrawer: React.FC<{
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(backend);
-  // Override targets must be hub-suppliable: a native_cli source (e.g. another
-  // backend's subscription) can't serve this backend through the hub, and the
-  // live API rejects it with `mapping_target_unavailable` (opencode-overlay.md
-  // eligibility, spec §4.2). Build choices only from hub-channel sources.
+  // Override targets follow the backend eligibility predicate (isSourceEligible):
+  // hub-supplied API-key sources PLUS this backend's own native subscription.
+  // Anything else is rejected by the live API with `mapping_target_unavailable`.
   const targets = React.useMemo(
-    () => buildTargetModels(sources.filter((s) => s.supply_channel === 'hub')),
-    [sources],
+    () => buildTargetModels(sources.filter((s) => isSourceEligible(s, backend))),
+    [sources, backend],
   );
 
   const [draft, setDraft] = React.useState<AgentMapping[]>(() => seedDraft(agent));
