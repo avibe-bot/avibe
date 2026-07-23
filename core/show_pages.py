@@ -1055,12 +1055,14 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
 
 
 def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
+    app_path = page_dir / "src" / "App.tsx"
+    fresh_workspace = not app_path.exists()
     # Runtime-owned app shell + always-present workspace files. Each is written
     # once and skipped if it already exists, so an existing workspace keeps its
     # own copies (see the skip-if-exists loop below).
     files: dict[str, str] = {
         "index.html": _default_index_html(session_id),
-        "src/main.tsx": _default_main_tsx(),
+        "src/main.tsx": _default_main_tsx(include_legacy_hash_redirect=fresh_workspace),
         "src/styles.css": _default_styles_css(),
         "api/health.ts": _default_api_health_ts(),
     }
@@ -1073,13 +1075,15 @@ def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
     # starting point to extend or replace, not a required structure. Adding a page
     # later is just a new file under ``src/pages/`` — the router discovers it and
     # the runtime-owned shell (``index.html`` / ``src/main.tsx``) is never touched.
-    if not (page_dir / "src" / "App.tsx").exists():
+    if fresh_workspace:
         files.update(
             {
-                "src/App.tsx": _default_app_tsx(),
                 "src/router.tsx": _default_router_tsx(),
                 "src/pages/index.tsx": _default_page_home_tsx(),
                 "src/pages/second.tsx": _default_page_second_tsx(),
+                # App imports the router, so publish it after every generated
+                # dependency. A partial write remains recognizable as fresh.
+                "src/App.tsx": _default_app_tsx(),
             }
         )
     for relative_path, contents in files.items():
@@ -1097,6 +1101,7 @@ def _default_index_html(session_id: str) -> str:
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <base href="%BASE_URL%">
     <title>Show Page {escaped}</title>
     <!-- App icon (Avibe Dock / App Library): to give this app an icon, place a
          favicon FILE in this workspace — either `favicon.svg` (or .png/.ico) at the
@@ -1352,8 +1357,30 @@ def _escape_html(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _default_main_tsx() -> str:
-    return """import React from "react"
+def _default_main_tsx(*, include_legacy_hash_redirect: bool) -> str:
+    legacy_hash_redirect = (
+        """
+function redirectLegacyHashRoute() {
+  if (!window.location.hash.startsWith("#/")) return
+  const configuredBase = globalThis.__AVIBE_SHOW__?.basePath || "/"
+  const basePathname = new URL(configuredBase, window.location.origin).pathname
+  const baseParts = basePathname.split("/").filter(Boolean)
+  const base = baseParts.length ? "/" + baseParts.join("/") + "/" : "/"
+  const legacy = new URL(window.location.hash.slice(1), window.location.origin)
+  const target = new URL(window.location.href)
+  target.pathname = base + legacy.pathname.replace(/^\\/+/, "")
+  for (const [key, value] of legacy.searchParams) target.searchParams.set(key, value)
+  target.hash = legacy.hash
+  window.history.replaceState(window.history.state, "", target)
+}
+
+redirectLegacyHashRoute()
+"""
+        if include_legacy_hash_redirect
+        else ""
+    )
+    return (
+        """import React from "react"
 import { createRoot } from "react-dom/client"
 import "@avibe/show-ui/styles.css"
 import "./styles.css"
@@ -1393,13 +1420,16 @@ globalThis.__AVIBE_SHOW__ = {
   streamPath: injected.streamPath ?? "__show/events?stream=1",
   writeToken: injected.writeToken ?? readCookie("vibe_show_event_token")
 }
-
+"""
+        + legacy_hash_redirect
+        + """
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
 )
 """
+    )
 
 
 def _default_app_tsx() -> str:
@@ -1424,21 +1454,17 @@ export default function App() {
 
 
 def _default_router_tsx() -> str:
-    # A tiny, dependency-free hash router with file-based page discovery.
+    # A tiny, dependency-free History router with file-based page discovery.
     #
-    # Why hash routing: a Show Page is served as a client-only app mounted under a
-    # path prefix (/show/<id>/ privately, /p/<share>/ publicly, both proxied to the
-    # same managed Vite dev server). With hash routes the browser only ever requests
-    # the app root, so deep-linking and refreshing a nested route work identically in
-    # both serving modes with no server cooperation, and relative URLs (assets,
-    # ./api/* handlers, event endpoints) always resolve. The trade-off is a "#" in
-    # the URL, which stays bookmarkable and PWA-installable.
+    # The injected basePath is the authority for both private /show/<id>/ and public
+    # /p/<share>/ surfaces. Their servers provide the matching entry-document
+    # fallback, so clean nested URLs remain refreshable and shareable.
     #
     # Why file-based discovery: adding a route is just adding a file under src/pages/.
     # A folder becomes a nested path segment and a [param] file becomes a dynamic
     # segment, so the scaffold is not locked into a flat page list. Nothing here or in
     # the app shell needs editing to add a page.
-    return """import type { ComponentType, ReactNode } from "react"
+    return """import type { ComponentType, MouseEvent, ReactNode } from "react"
 import { useSyncExternalStore } from "react"
 
 export type PageProps = {
@@ -1520,7 +1546,7 @@ export const routes: Route[] = Object.entries(modules)
   })
 
 // decodeURIComponent throws on a malformed escape (e.g. a link built with a raw
-// "%", like #/items/50%); fall back to the raw segment so a bad param degrades to
+// "%", like /items/50%); fall back to the raw segment so a bad param degrades to
 // that page instead of throwing during render and blanking the whole app.
 function safeDecode(value: string): string {
   try {
@@ -1539,7 +1565,7 @@ function matchRoute(path: string): { route: Route | null; params: Record<string,
     for (let i = 0; i < parts.length; i++) {
       const segment = route.segments[i]
       if (segment.dynamic) params[segment.name] = safeDecode(parts[i])
-      else if (segment.name !== parts[i]) {
+      else if (segment.name !== safeDecode(parts[i])) {
         matched = false
         break
       }
@@ -1549,36 +1575,64 @@ function matchRoute(path: string): { route: Route | null; params: Record<string,
   return { route: null, params: {} }
 }
 
-function readHashPath(): string {
-  const hash = window.location.hash
-  const raw = (hash.startsWith("#") ? hash.slice(1) : hash).split("?")[0]
-  if (!raw) return "/"
-  const path = raw.startsWith("/") ? raw : "/" + raw
-  // Normalize a trailing slash so "/items/" matches the "/items" route.
-  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path
+function basePath(): string {
+  const configured = globalThis.__AVIBE_SHOW__?.basePath
+  const fallback = window.location.pathname.match(/^\\/(?:show|p)\\/[^/]+\\//)?.[0] || "/"
+  const pathname = new URL(configured || fallback, window.location.origin).pathname
+  const parts = pathname.split("/").filter(Boolean)
+  return parts.length ? "/" + parts.join("/") + "/" : "/"
+}
+
+function normalizeRoutePath(path: string): string {
+  const withLeadingSlash = path.startsWith("/") ? path : "/" + path
+  return withLeadingSlash.length > 1 && withLeadingSlash.endsWith("/")
+    ? withLeadingSlash.slice(0, -1)
+    : withLeadingSlash
+}
+
+function readRoutePath(): string {
+  const base = basePath()
+  const pathname = window.location.pathname
+  if (!pathname.startsWith(base)) return "/"
+  const routePath = normalizeRoutePath("/" + pathname.slice(base.length))
+  return routePath === "/index.html" ? "/" : routePath
 }
 
 function subscribe(onChange: () => void): () => void {
-  window.addEventListener("hashchange", onChange)
-  return () => window.removeEventListener("hashchange", onChange)
+  window.addEventListener("popstate", onChange)
+  return () => window.removeEventListener("popstate", onChange)
 }
 
 export function useRoutePath(): string {
-  return useSyncExternalStore(subscribe, readHashPath, () => "/")
+  return useSyncExternalStore(subscribe, readRoutePath, () => "/")
+}
+
+function routeUrl(to: string): URL {
+  const normalizedTo = to.startsWith("/") ? to : "/" + to
+  const route = new URL(normalizedTo, window.location.origin)
+  const current = new URL(window.location.href)
+  const target = new URL(basePath(), window.location.origin)
+  const embed = current.searchParams.get("vibe-embed")
+  target.pathname = basePath() + route.pathname.replace(/^\\/+/, "")
+  target.search = route.search
+  if (embed && !target.searchParams.has("vibe-embed")) target.searchParams.set("vibe-embed", embed)
+  target.hash = route.hash
+  return target
 }
 
 export function navigate(to: string): void {
-  window.location.hash = to.startsWith("/") ? to : "/" + to
+  const target = routeUrl(to)
+  window.history.pushState({}, "", target)
+  window.dispatchEvent(new PopStateEvent("popstate"))
 }
 
 export function Link({ to, className, children }: { to: string; className?: string; children: ReactNode }) {
-  // A plain hash anchor: the browser updates the fragment and fires "hashchange"
-  // without a full navigation, so no click handler or pushState is needed.
-  return (
-    <a href={"#" + to} className={className}>
-      {children}
-    </a>
-  )
+  function onClick(event: MouseEvent<HTMLAnchorElement>) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    navigate(to)
+  }
+  return <a href={routeUrl(to).toString()} className={className} onClick={onClick}>{children}</a>
 }
 
 export function RouterView() {
@@ -1592,7 +1646,7 @@ export function RouterView() {
           No route matches <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
         </p>
         <p className="mt-4 text-sm">
-          <a className="font-medium underline underline-offset-4" href="#/">Back to Home</a>
+          <Link className="font-medium underline underline-offset-4" to="/">Back to Home</Link>
         </p>
       </div>
     )

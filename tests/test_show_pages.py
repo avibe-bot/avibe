@@ -1610,9 +1610,13 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     assert "import.meta.glob" in router
     assert '"./pages/**/*.tsx"' in router
     assert "eager: true" in router
-    # Hash-based client routing: nested deep-link + refresh work in both private
-    # /show/ and public /p/ serving modes with no server cooperation.
-    assert "hashchange" in router
+    # History routing derives its mount point from the injected basePath and uses
+    # clean URLs while preserving iframe mode across client navigation.
+    assert "globalThis.__AVIBE_SHOW__?.basePath" in router
+    assert "popstate" in router
+    assert "pushState" in router
+    assert 'searchParams.get("vibe-embed")' in router
+    assert "hashchange" not in router
     assert "useSyncExternalStore" in router
     # A concrete path wins over a matching [param] route of the same length.
     assert "routeSpecificity" in router
@@ -1625,6 +1629,14 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     # The locale/nav machinery from the old rich demo is gone (English-only, no nav).
     assert "activeLocale" not in router
     assert "navItems" not in router
+
+    # Only the fresh scaffold translates its legacy #/ links once at entry.
+    main = (page_dir / "src" / "main.tsx").read_text(encoding="utf-8")
+    assert "redirectLegacyHashRoute" in main
+    assert 'startsWith("#/")' in main
+    assert "history.replaceState" in main
+    index = (page_dir / "index.html").read_text(encoding="utf-8")
+    assert '<base href="%BASE_URL%">' in index
 
     # The home page is the user-facing "building" placeholder: a pulsing dot, and a
     # nudge prompt revealed only after a delay. It hints the built-in UI by rendering
@@ -1684,8 +1696,30 @@ def test_existing_single_page_workspace_is_preserved(monkeypatch, tmp_path):
     # Missing shell/workspace files are still materialized.
     assert (page_dir / "index.html").exists()
     assert (page_dir / "src" / "main.tsx").exists()
+    assert "redirectLegacyHashRoute" not in (page_dir / "src" / "main.tsx").read_text(encoding="utf-8")
     assert (page_dir / "src" / "styles.css").exists()
     assert (page_dir / "api" / "health.ts").exists()
+
+
+def test_existing_hash_router_workspace_is_preserved(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    page_dir = paths.get_show_page_dir("seshashlegacy")
+    (page_dir / "src").mkdir(parents=True, exist_ok=True)
+    existing = {
+        "index.html": '<div id="root"></div>\n',
+        "src/main.tsx": 'import "./router"\n',
+        "src/App.tsx": "export default function App() { return null }\n",
+        "src/router.tsx": 'window.addEventListener("hashchange", () => {})\n',
+    }
+    for relative, contents in existing.items():
+        target = page_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents, encoding="utf-8")
+
+    ensure_show_page_dir("seshashlegacy")
+
+    for relative, contents in existing.items():
+        assert (page_dir / relative).read_text(encoding="utf-8") == contents
 
 
 def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
