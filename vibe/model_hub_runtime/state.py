@@ -287,6 +287,7 @@ class EngineStateStore:
     def clear_runtime_configs(self) -> None:
         """Remove persisted engine configs after any credential is revoked."""
         with self._lock:
+            self._ensure_private_dir(self.root)
             instances_dir = self.root / "instances"
             if not instances_dir.exists():
                 return
@@ -317,6 +318,7 @@ class EngineStateStore:
         return str(value) if value else None
 
     def audit_auth_permissions(self, *, enforce: bool = False) -> None:
+        self._ensure_private_dir(self.root)
         if not self.auth_dir.exists():
             self.auth_dir.mkdir(parents=True, mode=0o700)
         auth_mode = self.auth_dir.lstat().st_mode
@@ -337,15 +339,17 @@ class EngineStateStore:
     def _credential_path(self, credential_ref: str) -> Path:
         if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
             raise EngineStateError("invalid credential reference")
+        self._ensure_private_dir(self.root)
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         return credentials_dir / f"{credential_ref}.json"
 
     def _oauth_credentials(self) -> list[tuple[str, dict[str, Any]]]:
+        self._ensure_private_dir(self.root)
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         result: list[tuple[str, dict[str, Any]]] = []
-        for path in credentials_dir.iterdir():
+        for path in credentials_dir.glob("cred_*.json"):
             mode = path.lstat().st_mode
             if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
                 raise EngineStateError("credential permissions are unsafe")

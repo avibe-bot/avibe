@@ -248,11 +248,17 @@ def test_state_removes_secret_bearing_configs_on_upgrade_and_revocation(tmp_path
 
 def test_oauth_source_bindings_are_scoped_and_follow_reauthentication(tmp_path: Path) -> None:
     store = EngineStateStore(tmp_path / "state")
+    credentials_dir = store.root / "credentials"
+    credentials_dir.mkdir(parents=True, mode=0o700)
+    interrupted_write = credentials_dir / ".cred_interrupted.json.temporary"
+    interrupted_write.write_text("{}", encoding="utf-8")
+    interrupted_write.chmod(0o600)
     first_ref = store.bind_oauth_credential(
         "src_fixture123",
         "anthropic",
         "claude-first.json",
     )
+    assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
     binding = _binding(
         first_ref,
         vendor="anthropic",
