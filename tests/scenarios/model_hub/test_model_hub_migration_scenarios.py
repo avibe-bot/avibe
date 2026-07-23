@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,6 +99,7 @@ def _isolate_native_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
     monkeypatch.setattr(Path, "home", lambda: home)
 
 
@@ -145,6 +147,16 @@ def _write_codex(home: Path, *, malformed: bool = False) -> None:
             )
         ),
     )
+    if not malformed:
+        _write(
+            home / ".codex" / "config.toml",
+            """model_provider = "Relay"
+
+[model_providers.Relay]
+base_url = "https://codex-relay.example/v1"
+wire_api = "chat"
+""",
+        )
 
 
 def _write_opencode(home: Path, *, malformed: bool = False) -> None:
@@ -158,9 +170,8 @@ def _write_opencode(home: Path, *, malformed: bool = False) -> None:
   // JSONC is part of the native OpenCode format.
   "provider": {
     "openrouter": {
-      "options": {
-        "apiKey": "sk-openrouter-123456",
-        "baseURL": "https://openrouter.example/v1",
+      "models": {
+        "manual-openrouter-model": {"name": "Manual OpenRouter Model"},
       },
     },
     "zhipuai": {
@@ -174,7 +185,24 @@ def _write_opencode(home: Path, *, malformed: bool = False) -> None:
     )
     _write(
         home / ".local" / "share" / "opencode" / "auth.json",
-        json.dumps({"zhipuai": {"type": "api", "key": "sk-zhipu-123456"}}),
+        json.dumps(
+            {
+                "openrouter": {"type": "api", "key": "sk-openrouter-123456"},
+                "zhipuai": {"type": "api", "key": "sk-zhipu-123456"},
+            }
+        ),
+    )
+    _write(
+        home / ".cache" / "opencode" / "models.json",
+        json.dumps(
+            {
+                "openrouter": {
+                    "id": "openrouter",
+                    "npm": "@openrouter/ai-sdk-provider",
+                    "api": "https://openrouter.ai/api/v1",
+                }
+            }
+        ),
     )
 
 
@@ -212,6 +240,8 @@ def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) 
         payload = {"items": [item.to_payload() for item in valid]}
         _validate_scan(payload)
         serialized = json.dumps(payload)
+        assert "Claude OAuth" not in serialized
+        assert "Codex auth.json" not in serialized
         for secret in (
             "sk-ant-test-123456789",
             "claude-oauth-token",
@@ -224,11 +254,14 @@ def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) 
 
         malformed_home = tmp_path / f"{backend}-malformed"
         writer(malformed_home, malformed=True)
-        assert scan_native_configs(
-            ModelHubConfig(),
-            home=malformed_home,
-            mask_credential=_mask_credential,
-        ) == []
+        assert (
+            scan_native_configs(
+                ModelHubConfig(),
+                home=malformed_home,
+                mask_credential=_mask_credential,
+            )
+            == []
+        )
 
         absent_home = tmp_path / f"{backend}-absent"
         absent = scan_native_configs(
@@ -293,6 +326,19 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert len(adapter.provisioned) == 4
     assert adapter.revoked == []
     assert before == _tree_digest(native_home)
+    by_id = {source.id: source for source in store.config.sources}
+    assert all(by_id[source_id].billing == "monthly" for source_id in store.config.priority_order[:2])
+    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order[2:])
+    codex_source = next(
+        source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
+    )
+    assert codex_source.protocol == "openai_chat"
+    assert codex_source.base_url == "https://codex-relay.example/v1"
+    openrouter_source = next(source for source in store.config.sources if source.vendor == "openrouter")
+    assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
+    assert any(
+        model.id == "manual-openrouter-model" and model.provenance == "manual" for model in openrouter_source.models
+    )
 
     serialized = json.dumps(body)
     for secret in (
@@ -326,8 +372,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     result = asyncio.run(service.migration_apply([item["id"] for item in oauth_items]))
     assert result["applied"] == 2
     assert {
-        (source.vendor, source.kind, source.supply_channel, source.credential_ref)
-        for source in store.config.sources
+        (source.vendor, source.kind, source.supply_channel, source.credential_ref) for source in store.config.sources
     } == {
         ("anthropic", "subscription", "native_cli", None),
         ("openai", "subscription", "native_cli", None),
@@ -346,11 +391,7 @@ def test_mh_mig_003_experimental_flag_keeps_oauth_native(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     store.config.subscription_hub_experimental = True
-    oauth_item = next(
-        item
-        for item in service.migration_scan()["items"]
-        if item["kind"] == "oauth_native"
-    )
+    oauth_item = next(item for item in service.migration_scan()["items"] if item["kind"] == "oauth_native")
     assert oauth_item["proposed_action"] == "keep_native"
     assert oauth_item["notes_key"] == "models.migration.keep_native.reauthorize_in_hub"
 
@@ -370,11 +411,81 @@ def test_opencode_auth_only_custom_provider_without_base_url_is_not_importable(
         json.dumps({"custom-provider": {"type": "api", "key": "sk-custom-123456"}}),
     )
 
-    assert scan_native_configs(
-        ModelHubConfig(),
-        home=native_home,
-        mask_credential=_mask_credential,
-    ) == []
+    assert (
+        scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
+
+
+def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".claude" / "settings.json",
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "bearer-test-123456",
+                    "ANTHROPIC_BASE_URL": "https://bearer-relay.example/v1",
+                }
+            }
+        ),
+    )
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+
+    [item] = service.migration_scan()["items"]
+    assert item["proposed_action"] == "reauth"
+    assert item["selected"] is False
+    assert item["notes_key"] == "models.migration.reauth.auth_token"
+    assert "bearer-test-123456" not in json.dumps(item)
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.migration_apply([item["id"]]))
+    assert error.value.code == "migration_item_conflict"
+    assert adapter.provisioned == []
+    assert store.config.sources == []
+
+
+def test_codex_empty_token_bag_does_not_create_native_subscription(tmp_path: Path) -> None:
+    native_home = tmp_path / "native-home"
+    _write(native_home / ".codex" / "auth.json", json.dumps({"tokens": {}}))
+
+    assert (
+        scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
+
+
+def test_apply_scans_claude_oauth_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write_claude(native_home)
+    (native_home / ".claude" / ".credentials.json").unlink()
+    _isolate_native_home(monkeypatch, native_home)
+    service, _, _ = _service(tmp_path)
+    probe_threads: list[int] = []
+    service.migration_claude_oauth_probe = lambda: (probe_threads.append(threading.get_ident()) or False)
+    item_id = service.migration_scan()["items"][0]["id"]
+    probe_threads.clear()
+    event_loop_thread = threading.get_ident()
+
+    asyncio.run(service.migration_apply([item_id]))
+
+    assert probe_threads
+    assert all(thread_id != event_loop_thread for thread_id in probe_threads)
 
 
 def test_failed_batch_revokes_every_provisioned_credential(
@@ -424,9 +535,9 @@ def test_apply_rejects_a_credential_changed_after_scan(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     stale_id = service.migration_scan()["items"][0]["id"]
-    config_path = native_home / ".config" / "opencode" / "opencode.json"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+    auth_path = native_home / ".local" / "share" / "opencode" / "auth.json"
+    auth_path.write_text(
+        auth_path.read_text(encoding="utf-8").replace(
             "sk-openrouter-123456",
             "sk-openrouter-rotated",
         ),

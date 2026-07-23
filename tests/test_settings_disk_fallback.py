@@ -55,6 +55,7 @@ def test_codex_reads_base_url_from_user_titlecase_provider(tmp_path: Path) -> No
     )
     state = read_codex_auth_state(home=tmp_path)
     assert state["base_url"] == "https://ai-relay.chainbot.io"
+    assert state["wire_api"] == "responses"
 
 
 def test_codex_falls_back_to_managed_section_when_no_active_provider(tmp_path: Path) -> None:

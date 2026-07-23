@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -87,6 +90,7 @@ class NativeMigrationItem:
     base_url: Optional[str] = None
     secret: Optional[str] = field(default=None, repr=False)
     account_label: Optional[str] = None
+    manual_models: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -145,6 +149,7 @@ def _claude_items(
     items: list[NativeMigrationItem] = []
     env = read_claude_settings_env(home)
     api_key = env.get("ANTHROPIC_API_KEY")
+    auth_token = env.get("ANTHROPIC_AUTH_TOKEN")
     base_url = env.get("ANTHROPIC_BASE_URL")
     if api_key:
         action: MigrationAction = "import"
@@ -176,6 +181,35 @@ def _claude_items(
             )
         )
 
+    if auth_token:
+        action = "reauth"
+        item_id, source_id = _ids(
+            "claude",
+            "api_key",
+            "settings-auth-token",
+            action,
+            _stable_suffix(auth_token, base_url or ""),
+        )
+        detail = mask_credential(auth_token)
+        if base_url:
+            detail += " + ANTHROPIC_BASE_URL"
+        items.append(
+            NativeMigrationItem(
+                id=item_id,
+                source_id=source_id,
+                backend="claude",
+                kind="api_key",
+                masked_detail=detail,
+                proposed_action=action,
+                selected=False,
+                notes_key="models.migration.reauth.auth_token",
+                vendor="anthropic",
+                protocol="anthropic",
+                display_name="Anthropic",
+                base_url=base_url,
+            )
+        )
+
     oauth_signed_in = read_claude_oauth_signed_in(home)
     if not oauth_signed_in and oauth_probe is not None:
         try:
@@ -191,7 +225,7 @@ def _claude_items(
                 source_id=source_id,
                 backend="claude",
                 kind="oauth_native",
-                masked_detail="Claude OAuth",
+                masked_detail="",
                 proposed_action=action,
                 selected=True,
                 notes_key="models.migration.keep_native.sanctioned",
@@ -222,6 +256,8 @@ def _codex_items(
         base_url = state.get("base_url")
         if not isinstance(base_url, str) or not base_url.strip():
             base_url = None
+        wire_api = state.get("wire_api")
+        protocol = "openai_chat" if wire_api == "chat" else "openai_responses"
         item_id, source_id = _ids(
             "codex",
             "api_key",
@@ -243,7 +279,7 @@ def _codex_items(
                 selected=True,
                 notes_key=None,
                 vendor="openai",
-                protocol="openai_responses",
+                protocol=protocol,
                 display_name="OpenAI",
                 base_url=base_url,
                 secret=api_key,
@@ -251,7 +287,10 @@ def _codex_items(
         )
 
     tokens = auth_data.get("tokens") if isinstance(auth_data, dict) else None
-    if not isinstance(tokens, dict):
+    if not isinstance(tokens, dict) or not any(
+        isinstance(tokens.get(key), str) and bool(tokens[key].strip())
+        for key in ("access_token", "refresh_token", "id_token")
+    ):
         return items
 
     action: MigrationAction = "keep_native"
@@ -262,17 +301,14 @@ def _codex_items(
         action,
     )
     account = state.get("chatgpt_account")
-    account_label = _safe_account_label(
-        account.get("email") if isinstance(account, dict) else None
-    )
-    detail = account_label or "Codex auth.json"
+    account_label = _safe_account_label(account.get("email") if isinstance(account, dict) else None)
     items.append(
         NativeMigrationItem(
             id=item_id,
             source_id=source_id,
             backend="codex",
             kind="oauth_native",
-            masked_detail=detail,
+            masked_detail=account_label or "",
             proposed_action=action,
             selected=True,
             notes_key=(
@@ -289,17 +325,62 @@ def _codex_items(
     return items
 
 
+def _load_opencode_provider_catalog(home: Optional[Path]) -> dict[str, dict[str, Any]]:
+    if home is not None:
+        path = home / ".cache" / "opencode" / "models.json"
+    else:
+        cache_home = os.environ.get("XDG_CACHE_HOME")
+        path = (
+            Path(cache_home).expanduser() / "opencode" / "models.json"
+            if cache_home
+            else Path.home() / ".cache" / "opencode" / "models.json"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        provider_id.strip().lower(): provider
+        for provider_id, provider in payload.items()
+        if isinstance(provider_id, str) and provider_id.strip() and isinstance(provider, dict)
+    }
+
+
 def _opencode_protocol(
     provider_id: str,
     provider_config: dict[str, Any],
-) -> Literal["anthropic", "openai_responses", "openai_compatible"]:
+    catalog_provider: dict[str, Any],
+) -> Optional[Literal["anthropic", "openai_responses", "openai_compatible"]]:
     if provider_id == "anthropic":
         return "anthropic"
     if provider_id == "openai":
         return "openai_responses"
-    if get_opencode_custom_provider_adapter(provider_id, provider_config) == "anthropic-compatible":
+    custom_adapter = get_opencode_custom_provider_adapter(provider_id, provider_config)
+    if custom_adapter == "anthropic-compatible":
         return "anthropic"
-    return "openai_compatible"
+    if custom_adapter == "openai-compatible":
+        return "openai_compatible"
+    npm = provider_config.get("npm") or catalog_provider.get("npm")
+    if npm == "@ai-sdk/anthropic":
+        return "anthropic"
+    if npm == "@ai-sdk/openai":
+        return "openai_responses"
+    if npm in {"@ai-sdk/openai-compatible", "@openrouter/ai-sdk-provider"}:
+        return "openai_compatible"
+    return None
+
+
+def _opencode_manual_models(provider_config: dict[str, Any]) -> tuple[str, ...]:
+    raw_models = provider_config.get("models")
+    if not isinstance(raw_models, dict):
+        return ()
+    return tuple(
+        model_id.strip()
+        for model_id in raw_models
+        if isinstance(model_id, str) and model_id.strip() and not contains_credential_material(model_id.strip())
+    )
 
 
 def _opencode_items(
@@ -315,15 +396,14 @@ def _opencode_items(
             provider_configs = {
                 provider_id.strip().lower(): provider_config
                 for provider_id, provider_config in raw_providers.items()
-                if isinstance(provider_id, str)
-                and provider_id.strip()
-                and isinstance(provider_config, dict)
+                if isinstance(provider_id, str) and provider_id.strip() and isinstance(provider_config, dict)
             }
     auth_entries = {
         provider_id.strip().lower(): entry
         for provider_id, entry in read_opencode_provider_auth_entries(home=home).items()
         if provider_id.strip()
     }
+    provider_catalog = _load_opencode_provider_catalog(home)
     provider_ids = set(provider_configs) | set(auth_entries)
     items: list[NativeMigrationItem] = []
     for provider_id in sorted(provider_ids):
@@ -348,15 +428,26 @@ def _opencode_items(
         secret = secret.strip()
         raw_base_url = options.get("baseURL")
         base_url = raw_base_url.strip() if isinstance(raw_base_url, str) and raw_base_url.strip() else None
+        catalog_provider = provider_catalog.get(provider_id, {})
+        if base_url is None:
+            catalog_api = catalog_provider.get("api")
+            if isinstance(catalog_api, str) and catalog_api.strip():
+                base_url = catalog_api.strip()
+        protocol = _opencode_protocol(provider_id, provider_config, catalog_provider)
+        if protocol is None:
+            if base_url is None:
+                continue
+            protocol = "openai_compatible"
         if base_url is None and provider_id not in {"anthropic", "openai"}:
             continue
+        manual_models = _opencode_manual_models(provider_config)
         action: MigrationAction = "import"
         item_id, source_id = _ids(
             "opencode",
             "opencode_provider",
             provider_id,
             action,
-            _stable_suffix(secret, base_url or ""),
+            _stable_suffix(secret, base_url or "", protocol, *manual_models),
         )
         detail = f"{provider_id} · {mask_credential(secret)}"
         if base_url:
@@ -372,10 +463,11 @@ def _opencode_items(
                 selected=True,
                 notes_key=None,
                 vendor=provider_id,
-                protocol=_opencode_protocol(provider_id, provider_config),
+                protocol=protocol,
                 display_name=provider_id,
                 base_url=base_url,
                 secret=secret,
+                manual_models=manual_models,
             )
         )
     return items
@@ -461,7 +553,8 @@ async def apply_native_migration(
 
     async with host._mutation_lock:
         previous = host.store.load()
-        available = scan_native_configs(
+        available = await asyncio.to_thread(
+            scan_native_configs,
             previous,
             mask_credential=mask_credential,
             claude_oauth_probe=host.migration_claude_oauth_probe,
@@ -472,12 +565,17 @@ async def apply_native_migration(
             raise MigrationConflictError
 
         selected = [by_id[item_id] for item_id in item_ids]
+        if any(item.proposed_action in {"controlled_import", "reauth"} for item in selected):
+            raise MigrationConflictError
+        selected.sort(key=lambda item: item.proposed_action != "keep_native")
         updated = host._clone_config(previous)
         existing_ids = {source.id for source in updated.sources}
         if any(item.source_id in existing_ids for item in selected):
             raise MigrationConflictError
 
         provisioned: list[tuple[str, str]] = []
+        native_source_ids: list[str] = []
+        hub_source_ids: list[str] = []
         persisted = False
         try:
             for item in selected:
@@ -486,8 +584,6 @@ async def apply_native_migration(
                     now=host.now(),
                     validate_base_url=validate_base_url,
                 )
-                if item.proposed_action == "controlled_import":
-                    raise MigrationConflictError
                 if item.proposed_action == "import":
                     if not item.secret:
                         raise MigrationConflictError
@@ -512,9 +608,21 @@ async def apply_native_migration(
                             )
                         )
                     )
-                    host._apply_discovered_models(source, [], discovered)
+                    manual_models = [
+                        ModelHubModelConfig(id=model_id, provenance="manual") for model_id in item.manual_models
+                    ]
+                    host._apply_discovered_models(source, manual_models, discovered)
                 updated.sources.append(source)
-                updated.priority_order.append(source.id)
+                if item.proposed_action == "keep_native":
+                    native_source_ids.append(source.id)
+                else:
+                    hub_source_ids.append(source.id)
+
+            updated.priority_order = [
+                *updated.priority_order,
+                *native_source_ids,
+                *hub_source_ids,
+            ]
 
             await host._commit_synced(previous, updated)
             persisted = True

@@ -541,6 +541,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
 
     providers = toml_data.get("model_providers")
     base_url: Optional[str] = None
+    wire_api: Optional[str] = None
     if isinstance(providers, dict):
         # Codex's runtime selects the provider named by top-level
         # ``model_provider``. When that's a user-defined section (e.g.
@@ -569,6 +570,9 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
             raw = active_section.get("base_url")
             if isinstance(raw, str) and raw.strip():
                 base_url = raw.strip()
+            raw_wire_api = active_section.get("wire_api")
+            if isinstance(raw_wire_api, str) and raw_wire_api.strip():
+                wire_api = raw_wire_api.strip()
 
     store_raw = toml_data.get(CREDENTIALS_STORE_KEY)
     credentials_store = store_raw if isinstance(store_raw, str) else None
@@ -586,9 +590,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
     # guess rather than the truth and surface ``auth_mode_uncertain`` so
     # the UI can say "we can't read your auth here" instead of "no key".
     auth_mode_uncertain = (
-        not file_store_active
-        and not (isinstance(api_key, str) and api_key)
-        and not has_chatgpt_tokens
+        not file_store_active and not (isinstance(api_key, str) and api_key) and not has_chatgpt_tokens
     )
     return {
         "auth_mode": inferred_mode,
@@ -599,6 +601,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
         # JSON directly.
         "api_key_raw": api_key if isinstance(api_key, str) and api_key else None,
         "base_url": base_url,
+        "wire_api": wire_api,
         "has_chatgpt_tokens": has_chatgpt_tokens,
         # ``chatgpt_account``: best-effort identity from the OAuth JWT in
         # ``auth.json`` so the Settings page can show "Signed in as
