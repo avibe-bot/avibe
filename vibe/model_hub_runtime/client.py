@@ -127,7 +127,12 @@ class EngineClient:
         if source.protocol == "anthropic":
             headers["anthropic-version"] = "2023-06-01"
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=self.timeout,
+            sock_connect=self.timeout,
+            sock_read=None,
+        )
         session = aiohttp.ClientSession(timeout=timeout)
         try:
             response = await session.post(self._url(endpoint), json=body, headers=headers)

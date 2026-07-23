@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 class EngineUnavailableError(RuntimeError):
     """The Hub path is unavailable; callers may use explicitly configured Direct mode."""
 
+    def __init__(self, error_key: str, *, reason: str | None = None) -> None:
+        super().__init__(error_key)
+        self.error_key = error_key
+        self.reason = reason
+        self.direct_mode_available = True
+
 
 class EngineSupervisor:
     """Start-on-demand supervisor for one loopback-only Model Hub engine."""
@@ -67,6 +73,16 @@ class EngineSupervisor:
             self._stop_locked()
             self._start_locked()
 
+    def invalidate_configs(self) -> None:
+        """Remove secret-bearing configs and recreate one only for a live engine."""
+        with self._lock:
+            was_running = self._is_running_locked()
+            if was_running:
+                self._stop_locked()
+            self.state_store.clear_runtime_configs()
+            if was_running:
+                self._start_locked()
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             managed = self.installer.status()
@@ -98,9 +114,7 @@ class EngineSupervisor:
         install = self.installer.ensure()
         if not install.get("ok"):
             reason = str(install.get("reason") or "engine_install_failed")
-            raise EngineUnavailableError(
-                f"Model Hub engine unavailable ({reason}); Direct mode is the explicit escape hatch."
-            )
+            raise EngineUnavailableError("models.engine.install_failed", reason=reason)
         binary = Path(str(install["path"]))
         install_id = Path(str(install.get("install_dir") or binary.parent)).name
         instance_dir, runtime_secrets = self.state_store.prepare_instance(
@@ -134,9 +148,7 @@ class EngineSupervisor:
                 **isolated_subprocess_kwargs(),
             )
         except (OSError, ValueError) as exc:
-            raise EngineUnavailableError(
-                "Model Hub engine failed to start; Direct mode is the explicit escape hatch."
-            ) from exc
+            raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
         deadline = time.monotonic() + self.startup_timeout
@@ -149,17 +161,13 @@ class EngineSupervisor:
                     self.state_store.audit_auth_permissions()
                 except Exception as exc:
                     self._stop_locked()
-                    raise EngineUnavailableError(
-                        "Model Hub engine credential permissions are unsafe; Direct mode is the explicit escape hatch."
-                    ) from exc
+                    raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
                 logger.info("Model Hub engine started on 127.0.0.1 with managed version %s", install.get("version"))
                 return connection
             time.sleep(0.05)
         self._stop_locked()
-        raise EngineUnavailableError(
-            "Model Hub engine failed its loopback health check; Direct mode is the explicit escape hatch."
-        )
+        raise EngineUnavailableError("models.engine.health_failed")
 
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:

@@ -24,6 +24,7 @@ from core.handlers.model_hub.adapter import (
     SourceBinding,
 )
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+from vibe.model_hub_runtime.client import EngineClient
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
@@ -96,7 +97,10 @@ def _binding(credential_ref: str, **overrides: object) -> SourceBinding:
     return SourceBinding(**payload)  # type: ignore[arg-type]
 
 
-def test_packaged_manifest_matches_frozen_runtime_dependency_values(tmp_path: Path) -> None:
+def test_packaged_manifest_matches_frozen_runtime_dependency_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
 
     manifest = manager.contract_manifest()
@@ -120,6 +124,14 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(tmp_path: Pa
             },
         ],
     }
+
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "darwin-x64")
+    unsupported = EngineRuntimeManager(
+        runtime_dir=tmp_path / "unsupported-runtime",
+        offline=True,
+    ).ensure()
+    assert unsupported["ok"] is False
+    assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
@@ -217,6 +229,23 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+def test_state_removes_secret_bearing_configs_on_upgrade_and_revocation(tmp_path: Path) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    old_instance, _ = store.prepare_instance("install-old")
+    old_config = old_instance / "config.yaml"
+    old_config.write_text("api-key: old-secret\n", encoding="utf-8")
+    old_config.chmod(0o600)
+
+    current_instance, _ = store.prepare_instance("install-current")
+    assert not old_instance.exists()
+
+    current_config = current_instance / "config.yaml"
+    current_config.write_text("api-key: current-secret\n", encoding="utf-8")
+    current_config.chmod(0o600)
+    store.clear_runtime_configs()
+    assert not current_config.exists()
+
+
 def test_oauth_source_bindings_are_scoped_and_follow_reauthentication(tmp_path: Path) -> None:
     store = EngineStateStore(tmp_path / "state")
     first_ref = store.bind_oauth_credential(
@@ -286,6 +315,9 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         def __init__(self, store: EngineStateStore) -> None:
             self.state_store = store
 
+        def invalidate_configs(self) -> None:
+            self.state_store.clear_runtime_configs()
+
     async def run(base_url: str, handler) -> None:
         store = EngineStateStore(tmp_path / "state")
         adapter = CLIProxyEngineAdapter(
@@ -327,6 +359,7 @@ def _write_mock_engine(path: Path) -> None:
     script = f"""#!{sys.executable}
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import yaml
@@ -369,6 +402,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if payload['model'].endswith('/rate-limited'):
             self._json(429, {{'error': {{'type': 'quota_exceeded', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/slow-stream'):
+            first = b'data: {{"type":"content_block_delta"}}\\n\\n'
+            second = b'data: {{"type":"message_stop"}}\\n\\n'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Content-Length', str(len(first) + len(second)))
+            self.end_headers()
+            self.wfile.write(first)
+            self.wfile.flush()
+            time.sleep(0.15)
+            self.wfile.write(second)
             return
         if payload.get('stream'):
             body = b'data: {{"type":"message_stop"}}\\n\\n'
@@ -522,7 +567,39 @@ def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None
     asyncio.run(run())
 
 
-def test_oauth_flow_binds_exactly_one_new_auth_record(tmp_path: Path) -> None:
+def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> None:
+    async def run() -> None:
+        supervisor, store = _fixture_supervisor(tmp_path)
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources([_binding(credential_ref, model_ids=("slow-stream",))])
+        connection = supervisor.ensure_running()
+        source = store.get_source("src_fixture123")
+        assert source is not None
+
+        handle = await EngineClient(connection, timeout=0.05).invoke(
+            source,
+            "slow-stream",
+            {},
+            stream=True,
+        )
+        assert handle.stream is not None
+        body = b"".join([chunk async for chunk in handle.stream])
+        assert b"content_block_delta" in body
+        assert b"message_stop" in body
+        assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
+        supervisor.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("refresh_existing", [False, True])
+def test_oauth_flow_binds_new_or_refreshed_auth_record(
+    tmp_path: Path,
+    refresh_existing: bool,
+) -> None:
     class Client:
         def __init__(self) -> None:
             self.auth_calls = 0
@@ -532,13 +609,25 @@ def test_oauth_flow_binds_exactly_one_new_auth_record(tmp_path: Path) -> None:
             if path == "/auth-files":
                 self.auth_calls += 1
                 if self.auth_calls == 1:
-                    return {"files": []}
+                    if not refresh_existing:
+                        return {"files": []}
+                    return {
+                        "files": [
+                            {
+                                "id": "claude-account.json",
+                                "name": "claude-account.json",
+                                "provider": "claude",
+                                "modtime": "2026-07-23T04:00:00Z",
+                            }
+                        ]
+                    }
                 return {
                     "files": [
                         {
                             "id": "claude-account.json",
                             "name": "claude-account.json",
                             "provider": "claude",
+                            "modtime": "2026-07-23T04:01:00Z",
                         }
                     ]
                 }
@@ -668,5 +757,8 @@ def test_supervisor_fails_closed_with_direct_mode_escape(tmp_path: Path) -> None
         state_store=EngineStateStore(tmp_path / "state"),
     )
 
-    with pytest.raises(EngineUnavailableError, match="Direct mode"):
+    with pytest.raises(EngineUnavailableError) as exc_info:
         supervisor.ensure_running()
+    assert exc_info.value.error_key == "models.engine.install_failed"
+    assert exc_info.value.reason == "model_hub_engine_archive_checksum_mismatch"
+    assert exc_info.value.direct_mode_available is True

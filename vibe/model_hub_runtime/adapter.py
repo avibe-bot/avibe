@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ class _AuthRecord:
     identity: str
     name: str
     provider: str
+    fingerprint: str
 
 
 @dataclass
@@ -61,7 +63,7 @@ class _OAuthFlow:
     auth_url: str | None
     device_code: str | None
     expires_at_iso: str
-    before_auth_ids: frozenset[str]
+    before_auth_fingerprints: dict[str, str]
     state: str = "awaiting_action"
     error_key: str | None = None
     credential_ref: str | None = None
@@ -102,9 +104,7 @@ class CLIProxyEngineAdapter:
         install = await asyncio.to_thread(self.supervisor.installer.ensure)
         if not install.get("ok"):
             reason = str(install.get("reason") or "engine_install_failed")
-            raise EngineUnavailableError(
-                f"Model Hub engine unavailable ({reason}); Direct mode is the explicit escape hatch."
-            )
+            raise EngineUnavailableError("models.engine.install_failed", reason=reason)
         return await self.status()
 
     async def start(self) -> EngineStatus:
@@ -170,6 +170,7 @@ class CLIProxyEngineAdapter:
             )
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
         await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
+        await asyncio.to_thread(self.supervisor.invalidate_configs)
 
     async def discover_models(
         self,
@@ -250,7 +251,7 @@ class CLIProxyEngineAdapter:
                 auth_url=str(payload.get("url") or payload.get("verification_uri") or "").strip() or None,
                 device_code=device_code,
                 expires_at_iso=(datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat(),
-                before_auth_ids=frozenset(before),
+                before_auth_fingerprints={identity: record.fingerprint for identity, record in before.items()},
             )
         except Exception:
             with self._oauth_lock:
@@ -368,11 +369,14 @@ class CLIProxyEngineAdapter:
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         inventory = await asyncio.to_thread(_auth_inventory, client)
+        provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
         candidates = [
             record
-            for identity, record in inventory.items()
-            if identity not in flow.before_auth_ids and record.provider == flow.auth_provider
+            for record in provider_records
+            if flow.before_auth_fingerprints.get(record.identity) != record.fingerprint
         ]
+        if not candidates and len(provider_records) == 1:
+            candidates = provider_records
         if len(candidates) != 1:
             if not candidates:
                 flow.state = "verifying"
@@ -474,7 +478,29 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
         name = str(item.get("id") or item.get("name") or "").strip()
         provider = str(item.get("provider") or item.get("type") or "").strip().lower()
         if identity and name and provider:
-            inventory[identity] = _AuthRecord(identity=identity, name=name, provider=provider)
+            fingerprint = json.dumps(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "modtime",
+                        "updated_at",
+                        "last_refresh",
+                        "status",
+                        "status_message",
+                        "size",
+                        "disabled",
+                        "unavailable",
+                    )
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            inventory[identity] = _AuthRecord(
+                identity=identity,
+                name=name,
+                provider=provider,
+                fingerprint=fingerprint,
+            )
     return inventory
 
 

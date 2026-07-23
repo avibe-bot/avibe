@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import tempfile
 import threading
@@ -70,6 +71,7 @@ class EngineStateStore:
             self.audit_auth_permissions()
             instance_dir = self.root / "instances" / _safe_identifier(install_id)
             self._ensure_private_dir(instance_dir)
+            self._remove_obsolete_instances(instance_dir)
             secrets_path = instance_dir / "runtime-secrets.json"
             if not rotate:
                 existing = self._read_json(secrets_path)
@@ -268,6 +270,26 @@ class EngineStateStore:
             self.credential_metadata(credential_ref)
             path.unlink()
 
+    def clear_runtime_configs(self) -> None:
+        """Remove persisted engine configs after any credential is revoked."""
+        with self._lock:
+            instances_dir = self.root / "instances"
+            if not instances_dir.exists():
+                return
+            self._ensure_private_dir(instances_dir)
+            for instance_dir in instances_dir.iterdir():
+                mode = instance_dir.lstat().st_mode
+                if not stat.S_ISDIR(mode):
+                    raise EngineStateError("engine instance directory is unsafe")
+                config_path = instance_dir / "config.yaml"
+                try:
+                    config_mode = config_path.lstat().st_mode
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(config_mode):
+                    raise EngineStateError("engine config path is unsafe")
+                config_path.unlink()
+
     def read_api_key(self, credential_ref: str) -> str:
         payload = self.credential_metadata(credential_ref)
         value = payload.get("value") if payload.get("kind") == "api_key" else None
@@ -319,6 +341,17 @@ class EngineStateStore:
                 ]
             },
         )
+
+    def _remove_obsolete_instances(self, active_instance: Path) -> None:
+        instances_dir = active_instance.parent
+        self._ensure_private_dir(instances_dir)
+        for instance_dir in instances_dir.iterdir():
+            if instance_dir == active_instance:
+                continue
+            mode = instance_dir.lstat().st_mode
+            if not stat.S_ISDIR(mode):
+                raise EngineStateError("engine instance directory is unsafe")
+            shutil.rmtree(instance_dir)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
