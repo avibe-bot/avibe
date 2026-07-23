@@ -100,6 +100,9 @@ export const MigrationDialog: React.FC<{
     if (!open) return;
     let cancelled = false;
     setLoading(true);
+    // Drop any rows from a prior scan so a failed rescan can't display — or
+    // submit — stale migration ids.
+    setItems([]);
     modelsApi
       .scanMigration()
       .then((scan) => {
@@ -120,13 +123,17 @@ export const MigrationDialog: React.FC<{
   const toggle = (id: string) =>
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, selected: !i.selected } : i)));
 
-  const selectedCount = items.filter((i) => i.selected).length;
+  // reauth rows can't be bulk-applied (they need the interactive OAuth flow),
+  // and their checkbox is disabled — so exclude them from both the count and
+  // the submitted ids, even if a scan returned one pre-selected.
+  const appliable = items.filter((i) => i.selected && i.proposed_action !== 'reauth');
+  const selectedCount = appliable.length;
 
   const apply = async () => {
     if (applying || selectedCount === 0) return;
     setApplying(true);
     try {
-      const ids = items.filter((i) => i.selected).map((i) => i.id);
+      const ids = appliable.map((i) => i.id);
       const result = await modelsApi.applyMigration(ids);
       if (!aliveRef.current) return;
       showToast(t('settings.models.migration.applied', { count: result.applied }) as string, 'success');

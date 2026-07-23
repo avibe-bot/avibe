@@ -160,16 +160,16 @@ export function buildMockAgents(): AgentSupply[] {
       menu_kind: 'open',
       current: { model_id: 'glm-5.2', source_id: 'src_zhipukey01', channel: 'hub' },
       mappings: [],
-      // Prefixed identifiers (opencode-overlay.md), all backed by a real source
-      // in buildMockSources so the grouped menu renders honestly. checked =
-      // 精选 (in the picker); the rest live under 全量.
+      // Prefixed identifiers (opencode-overlay.md): provider = the SOURCE's
+      // vendor (custom fallback), and only hub-channel sources materialize as
+      // OpenCode providers — so every checked id is backed by a hub source in
+      // buildMockSources (the two native_cli subscriptions never appear here).
+      // checked = 精选 (in the picker); the rest live under 全量.
       menu: {
         view: 'featured',
         checked: [
           'anthropic/claude-opus-4-6',
           'anthropic/claude-sonnet-4-6',
-          'openai/gpt-5.6',
-          'openai/gpt-5.6-mini',
           'zhipuai/glm-5.2',
           'zhipuai/glm-5.2-air',
           'zhipuai/glm-5-flash',

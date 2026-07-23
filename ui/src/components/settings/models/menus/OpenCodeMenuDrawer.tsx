@@ -72,7 +72,11 @@ export const OpenCodeMenuDrawer: React.FC<{
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual('opencode');
 
-  const groups = React.useMemo(() => buildMenuGroups(sources), [sources]);
+  // Only hub-channel sources materialize as OpenCode providers (opencode-
+  // overlay.md): native_cli subscriptions serve their sanctioned CLI natively
+  // and never appear here, so building from them would offer un-saveable rows.
+  const hubSources = React.useMemo(() => sources.filter((s) => s.supply_channel === 'hub'), [sources]);
+  const groups = React.useMemo(() => buildMenuGroups(hubSources), [hubSources]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
@@ -218,7 +222,7 @@ export const OpenCodeMenuDrawer: React.FC<{
 
       <AddCustomModelDialog
         open={customOpen}
-        sources={sources}
+        sources={hubSources}
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onSaved={(identifier) => {

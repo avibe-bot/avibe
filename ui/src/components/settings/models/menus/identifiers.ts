@@ -24,34 +24,22 @@ const STANDARD_VENDORS = new Set([
   'groq',
 ]);
 
-// Model-id family → vendor, for sources whose own vendor isn't a standard id
-// (e.g. a custom relay endpoint supplying `glm-*`). First match wins.
-const MODEL_FAMILY: Array<[RegExp, string]> = [
-  [/^claude/i, 'anthropic'],
-  [/^(gpt|o[0-9]|chatgpt|text-embedding)/i, 'openai'],
-  [/^glm/i, 'zhipuai'],
-  [/^(kimi|moonshot)/i, 'kimi'],
-  [/^grok/i, 'xai'],
-  [/^gemini/i, 'google'],
-  [/^deepseek/i, 'deepseek'],
-  [/^qwen/i, 'qwen'],
-];
-
 /**
- * Provider segment for a (source vendor, model id): a standard source vendor
- * wins; otherwise infer from the model-id family; otherwise `custom`. This is
- * why `relay.example` (vendor `custom`) supplying `glm-5.2-air` still previews
- * as `zhipuai/glm-5.2-air` (frame 08).
+ * Provider segment for a source's model, per the FROZEN opencode-overlay.md
+ * contract: it is the SOURCE's vendor when that is a standard vendor id, else
+ * the single `custom` provider. It is deliberately NOT inferred from the model
+ * name — that must byte-match the backend's `opencode_model_id(source.vendor,
+ * model.id)`, or `set_opencode_menu` rejects the checked value with
+ * `mapping_target_unavailable`. So `relay.example` (vendor `custom`) supplying
+ * `glm-5.2-air` yields `custom/glm-5.2-air` (not `zhipuai/…`).
  */
-export function inferProvider(sourceVendor: string, modelId: string): string {
-  if (STANDARD_VENDORS.has(sourceVendor)) return sourceVendor;
-  for (const [re, vendor] of MODEL_FAMILY) if (re.test(modelId)) return vendor;
-  return 'custom';
+export function inferProvider(sourceVendor: string): string {
+  return STANDARD_VENDORS.has(sourceVendor) ? sourceVendor : 'custom';
 }
 
 /** Full prefixed identifier for a (source vendor, model id). */
 export function buildIdentifier(sourceVendor: string, modelId: string): string {
-  return `${inferProvider(sourceVendor, modelId)}/${modelId}`;
+  return `${inferProvider(sourceVendor)}/${modelId}`;
 }
 
 // ── Grouped menu model, derived from the ordered sources list ──────────────

@@ -6,6 +6,7 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from '../vendorMeta';
@@ -20,7 +21,9 @@ export const MenuDrawer: React.FC<{
   /** Footer content; laid out with `justify-between` (left extras · right primary). */
   footer: React.ReactNode;
   children: React.ReactNode;
-}> = ({ open, onClose, Icon, accent, title, subtitle, footer, children }) => (
+}> = ({ open, onClose, Icon, accent, title, subtitle, footer, children }) => {
+  const { t } = useTranslation();
+  return (
   <DialogPrimitive.Root open={open} onOpenChange={(v) => !v && onClose()}>
     <DialogPrimitive.Portal>
       <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
@@ -44,7 +47,7 @@ export const MenuDrawer: React.FC<{
           </div>
           <DialogPrimitive.Close className="shrink-0 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
             <X className="size-5" />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">{t('common.close')}</span>
           </DialogPrimitive.Close>
         </header>
 
@@ -56,4 +59,5 @@ export const MenuDrawer: React.FC<{
       </DialogPrimitive.Content>
     </DialogPrimitive.Portal>
   </DialogPrimitive.Root>
-);
+  );
+};

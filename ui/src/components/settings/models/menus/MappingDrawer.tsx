@@ -20,18 +20,23 @@ import { SupplyDots } from './supplyBits';
 import { useCompactSourceLabel } from './sourceLabel';
 
 // The built-in id list shown when the backend hasn't populated mappings yet
-// (e.g. Codex just switched into Hub). Fixed-menu backends own these ids.
-const FALLBACK_BUILTINS: Record<'claude' | 'codex', string[]> = {
+// (e.g. Codex just switched into Hub). Fixed-menu backends own these ids; the
+// contract stores only the OVERRIDES in agent.mappings (absent entry = 跟随原生),
+// so the full row list comes from here and the stored overrides are overlaid.
+const FIXED_BUILTINS: Record<'claude' | 'codex', string[]> = {
   claude: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   codex: ['gpt-5.6', 'gpt-5.6-mini'],
 };
 
 const seedDraft = (agent: AgentSupply): AgentMapping[] => {
-  if (agent.mappings && agent.mappings.length > 0) {
-    return agent.mappings.map((m) => ({ ...m }));
-  }
-  const ids = FALLBACK_BUILTINS[agent.backend as 'claude' | 'codex'] ?? [];
-  return ids.map((builtin_id) => ({ builtin_id, target_model_id: '', enabled: false }));
+  const byId = new Map((agent.mappings ?? []).map((m) => [m.builtin_id, m]));
+  const ids = FIXED_BUILTINS[agent.backend as 'claude' | 'codex'] ?? [];
+  // Preserve any stored builtin id we don't know about, appended after the
+  // canonical list, so a backend that adds ids stays visible.
+  const extra = (agent.mappings ?? []).map((m) => m.builtin_id).filter((id) => !ids.includes(id));
+  return [...ids, ...extra].map(
+    (builtin_id) => byId.get(builtin_id) ?? { builtin_id, target_model_id: '', enabled: false },
+  );
 };
 
 const sameDraft = (a: AgentMapping[], b: AgentMapping[]): boolean =>
@@ -142,7 +147,14 @@ export const MappingDrawer: React.FC<{
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(backend);
-  const targets = React.useMemo(() => buildTargetModels(sources), [sources]);
+  // Override targets must be hub-suppliable: a native_cli source (e.g. another
+  // backend's subscription) can't serve this backend through the hub, and the
+  // live API rejects it with `mapping_target_unavailable` (opencode-overlay.md
+  // eligibility, spec §4.2). Build choices only from hub-channel sources.
+  const targets = React.useMemo(
+    () => buildTargetModels(sources.filter((s) => s.supply_channel === 'hub')),
+    [sources],
+  );
 
   const [draft, setDraft] = React.useState<AgentMapping[]>(() => seedDraft(agent));
   const initialRef = React.useRef<AgentMapping[]>(draft);
@@ -173,7 +185,9 @@ export const MappingDrawer: React.FC<{
     }
     setSaving(true);
     try {
-      await modelsApi.putMappings(backend, draft);
+      // Contract: absent entry = 跟随原生 (identity). Send only enabled overrides
+      // — disabled rows carry an empty target_model_id that from_payload rejects.
+      await modelsApi.putMappings(backend, draft.filter((m) => m.enabled));
       onSaved();
       onClose();
     } catch {
