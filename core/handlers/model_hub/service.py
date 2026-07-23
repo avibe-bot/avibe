@@ -1127,6 +1127,7 @@ class ModelHubService:
                     config,
                     mask_credential=_mask_credential,
                     claude_oauth_probe=self.migration_claude_oauth_probe,
+                    validate_base_url=_validated_base_url,
                 )
             ]
         }
@@ -1396,6 +1397,7 @@ def create_default_service(
         from vibe.api import (
             _build_claude_status_probe_env,
             _read_claude_cli_oauth_signed_in,
+            _resolve_claude_status_probe_cwd,
         )
         from vibe.claude_config import build_claude_subprocess_env
 
@@ -1410,6 +1412,7 @@ def create_default_service(
         return _read_claude_cli_oauth_signed_in(
             claude.cli_path,
             env=env,
+            cwd=_resolve_claude_status_probe_cwd(config),
         ) is True
 
     return ModelHubService(

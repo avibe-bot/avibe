@@ -37,12 +37,11 @@ _OPENCODE_BUILTIN_PROTOCOLS: dict[
     str,
     Literal["anthropic", "openai_compatible"],
 ] = {
-    "alibaba-cn": "openai_compatible",
     "deepseek": "openai_compatible",
     "minimax": "anthropic",
     "openrouter": "openai_compatible",
-    "poe": "openai_compatible",
 }
+_OPENCODE_UNSUPPORTED_NATIVE_IDS = {"alibaba-cn", "poe"}
 
 
 class MigrationConflictError(ValueError):
@@ -82,6 +81,12 @@ class MigrationHost(Protocol):
 
 
 @dataclass(frozen=True)
+class NativeManualModel:
+    id: str
+    display_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class NativeMigrationItem:
     id: str
     source_id: str
@@ -102,7 +107,7 @@ class NativeMigrationItem:
     base_url: Optional[str] = None
     secret: Optional[str] = field(default=None, repr=False)
     account_label: Optional[str] = None
-    manual_models: tuple[str, ...] = ()
+    manual_models: tuple[NativeManualModel, ...] = ()
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -260,20 +265,16 @@ def _codex_items(
     if not isinstance(auth_data, dict):
         return []
     state = read_codex_auth_state(home)
-    # auth.json is authoritative only when Codex is explicitly using its
-    # file credential store. In auto/keyring mode it may contain stale values
-    # while the live credential remains inaccessible in the OS keyring.
-    if state.get("file_store_active") is not True:
-        return []
     items: list[NativeMigrationItem] = []
     raw_auth_mode = auth_data.get("auth_mode")
     auth_mode = raw_auth_mode.strip().lower() if isinstance(raw_auth_mode, str) else None
 
     api_key = auth_data.get("OPENAI_API_KEY")
     has_api_key = isinstance(api_key, str) and bool(api_key.strip())
-    api_key_is_active = auth_mode != "chatgpt" and has_api_key
+    importable_api_key = state.get("file_store_active") is True and has_api_key
+    api_key_is_active = auth_mode != "chatgpt" and importable_api_key
     oauth_is_active = auth_mode == "chatgpt" or (
-        auth_mode != "apikey" and not has_api_key
+        auth_mode != "apikey" and not importable_api_key
     )
     if api_key_is_active:
         assert isinstance(api_key, str)
@@ -394,15 +395,31 @@ def _opencode_protocol(
     return None
 
 
-def _opencode_manual_models(provider_config: dict[str, Any]) -> tuple[str, ...]:
+def _opencode_manual_models(
+    provider_config: dict[str, Any],
+) -> tuple[NativeManualModel, ...]:
     raw_models = provider_config.get("models")
     if not isinstance(raw_models, dict):
         return ()
-    return tuple(
-        model_id.strip()
-        for model_id in raw_models
-        if isinstance(model_id, str) and model_id.strip() and not contains_credential_material(model_id.strip())
-    )
+    models: list[NativeManualModel] = []
+    for model_id, model_config in raw_models.items():
+        if (
+            not isinstance(model_id, str)
+            or not model_id.strip()
+            or contains_credential_material(model_id.strip())
+        ):
+            continue
+        raw_name = model_config.get("name") if isinstance(model_config, dict) else None
+        display_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+        if display_name and contains_credential_material(display_name):
+            display_name = None
+        models.append(
+            NativeManualModel(
+                id=model_id.strip(),
+                display_name=display_name,
+            )
+        )
+    return tuple(models)
 
 
 def _opencode_plaintext_key(value: object) -> Optional[str]:
@@ -446,6 +463,8 @@ def _opencode_items(
             or contains_credential_material(provider_id)
         ):
             continue
+        if provider_id in _OPENCODE_UNSUPPORTED_NATIVE_IDS:
+            continue
         provider_config = provider_configs.get(provider_id, {})
         options = provider_config.get("options")
         if not isinstance(options, dict):
@@ -479,7 +498,12 @@ def _opencode_items(
             "opencode_provider",
             provider_id,
             action,
-            _stable_suffix(secret, base_url or "", protocol, *manual_models),
+            _stable_suffix(
+                secret,
+                base_url or "",
+                protocol,
+                *(f"{model.id}\0{model.display_name or ''}" for model in manual_models),
+            ),
         )
         detail = f"{provider_id} · {mask_credential(secret)}"
         items.append(
@@ -509,6 +533,7 @@ def scan_native_configs(
     mask_credential: Callable[[str], str],
     home: Optional[Path] = None,
     claude_oauth_probe: Optional[Callable[[], bool]] = None,
+    validate_base_url: Optional[Callable[[object], Optional[str]]] = None,
 ) -> list[NativeMigrationItem]:
     """Read native stores without modifying or deleting any path."""
 
@@ -521,8 +546,30 @@ def scan_native_configs(
         *_codex_items(home=home, mask_credential=mask_credential),
         *_opencode_items(home=home, mask_credential=mask_credential),
     ]
+    if validate_base_url is not None:
+        valid_items: list[NativeMigrationItem] = []
+        for item in items:
+            try:
+                validate_base_url(item.base_url)
+            except Exception:
+                continue
+            valid_items.append(item)
+        items = valid_items
     existing_source_ids = {source.id for source in config.sources}
-    return [item for item in items if item.source_id not in existing_source_ids]
+    existing_native_vendors = {
+        source.vendor
+        for source in config.sources
+        if source.kind == "subscription" and source.supply_channel == "native_cli"
+    }
+    return [
+        item
+        for item in items
+        if item.source_id not in existing_source_ids
+        and not (
+            item.proposed_action == "keep_native"
+            and item.vendor in existing_native_vendors
+        )
+    ]
 
 
 def _new_source(
@@ -592,6 +639,7 @@ async def apply_native_migration(
             previous,
             mask_credential=mask_credential,
             claude_oauth_probe=host.migration_claude_oauth_probe,
+            validate_base_url=validate_base_url,
         )
         by_id = {item.id: item for item in available}
         missing = [item_id for item_id in item_ids if item_id not in by_id]
@@ -643,7 +691,12 @@ async def apply_native_migration(
                         )
                     )
                     manual_models = [
-                        ModelHubModelConfig(id=model_id, provenance="manual") for model_id in item.manual_models
+                        ModelHubModelConfig(
+                            id=model.id,
+                            display_name=model.display_name,
+                            provenance="manual",
+                        )
+                        for model in item.manual_models
                     ]
                     host._apply_discovered_models(source, manual_models, discovered)
                 updated.sources.append(source)

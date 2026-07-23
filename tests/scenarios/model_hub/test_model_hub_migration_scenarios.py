@@ -10,12 +10,23 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft7Validator
 
-from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
+from config.v2_config import (
+    ModelHubAgentSupplyConfig,
+    ModelHubConfig,
+    ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
+)
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.migration import scan_native_configs
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
+from core.handlers.model_hub.service import (
+    ModelHubError,
+    ModelHubService,
+    _mask_credential,
+    create_default_service,
+)
+from core.services.settings import default_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
 from vibe.ui_server import app
@@ -383,7 +394,7 @@ def test_codex_scan_treats_tokens_as_stale_when_key_has_no_auth_mode(
 
 
 @pytest.mark.parametrize("credential_store", (None, "keyring"))
-def test_codex_scan_skips_auth_json_outside_file_store(
+def test_codex_scan_keeps_native_oauth_but_skips_key_outside_file_store(
     tmp_path: Path,
     credential_store: str | None,
 ) -> None:
@@ -401,14 +412,15 @@ def test_codex_scan_skips_auth_json_outside_file_store(
         encoding="utf-8",
     )
 
-    assert (
-        scan_native_configs(
-            ModelHubConfig(),
-            home=native_home,
-            mask_credential=_mask_credential,
-        )
-        == []
+    items = scan_native_configs(
+        ModelHubConfig(),
+        home=native_home,
+        mask_credential=_mask_credential,
     )
+
+    assert [(item.kind, item.proposed_action) for item in items] == [
+        ("oauth_native", "keep_native")
+    ]
 
 
 def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
@@ -490,7 +502,10 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
     assert openrouter_source.masked_credential == _mask_credential("sk-openrouter-123456")
     assert any(
-        model.id == "manual-openrouter-model" and model.provenance == "manual" for model in openrouter_source.models
+        model.id == "manual-openrouter-model"
+        and model.display_name == "Manual OpenRouter Model"
+        and model.provenance == "manual"
+        for model in openrouter_source.models
     )
 
     serialized = json.dumps(body)
@@ -553,6 +568,47 @@ def test_mh_mig_003_experimental_flag_keeps_oauth_native(
     assert adapter.provisioned == []
     assert len(store.config.sources) == 1
     assert store.config.sources[0].supply_channel == "native_cli"
+
+
+@pytest.mark.parametrize(
+    ("writer", "vendor", "protocol"),
+    (
+        (_write_claude_oauth, "anthropic", "anthropic"),
+        (_write_codex_oauth, "openai", "openai_responses"),
+    ),
+)
+def test_scan_suppresses_existing_native_subscription_semantically(
+    tmp_path: Path,
+    writer,
+    vendor: str,
+    protocol: str,
+) -> None:
+    native_home = tmp_path / vendor
+    writer(native_home)
+    config = ModelHubConfig(
+        sources=[
+            ModelHubSourceConfig(
+                id="src_existing_native",
+                kind="subscription",
+                vendor=vendor,
+                display_name="Existing native",
+                protocol=protocol,
+                supply_channel="native_cli",
+                billing="monthly",
+                state=ModelHubSourceStateConfig(),
+                models=[],
+            )
+        ]
+    )
+
+    assert (
+        scan_native_configs(
+            config,
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
 
 
 def test_opencode_auth_only_custom_provider_without_base_url_is_not_importable(
@@ -716,6 +772,79 @@ def test_opencode_builtin_provider_is_importable_without_catalog_cache(
     assert item.base_url == "https://openrouter.example/v1"
 
 
+@pytest.mark.parametrize("provider_id", ("alibaba-cn", "poe"))
+def test_opencode_native_provider_without_stable_identifier_is_not_imported(
+    tmp_path: Path,
+    provider_id: str,
+) -> None:
+    native_home = tmp_path / provider_id
+    _write(
+        native_home / ".config" / "opencode" / "opencode.json",
+        json.dumps(
+            {
+                "provider": {
+                    provider_id: {
+                        "options": {
+                            "apiKey": "provider-test-123456",
+                            "baseURL": "https://provider.example/v1",
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    _write(
+        native_home / ".cache" / "opencode" / "models.json",
+        json.dumps(
+            {
+                provider_id: {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://provider.example/v1",
+                }
+            }
+        ),
+    )
+
+    assert (
+        scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
+
+
+def test_scan_skips_invalid_endpoint_without_blocking_valid_items(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".claude" / "settings.json",
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-ant-test-123456789",
+                    "ANTHROPIC_BASE_URL": "ftp://unsupported.example/v1",
+                }
+            }
+        ),
+    )
+    _write_opencode(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, _ = _service(tmp_path)
+
+    scan = service.migration_scan()["items"]
+    assert {item["backend"] for item in scan} == {"opencode"}
+    result = asyncio.run(service.migration_apply([item["id"] for item in scan]))
+    assert result["applied"] == 2
+    assert {source.vendor for source in store.config.sources} == {
+        "openrouter",
+        "zhipuai",
+    }
+
+
 def test_opencode_env_placeholder_without_auth_fallback_is_not_importable(tmp_path: Path) -> None:
     native_home = tmp_path / "native-home"
     _write(
@@ -770,6 +899,36 @@ def test_apply_scans_claude_oauth_off_the_event_loop(
 
     assert probe_threads
     assert all(thread_id != event_loop_thread for thread_id in probe_threads)
+
+
+def test_default_service_claude_probe_uses_safe_runtime_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _isolate_native_home(monkeypatch, native_home)
+    config = default_config()
+    config.runtime.default_cwd = str(tmp_path / "runtime")
+    monkeypatch.setattr(
+        "core.handlers.model_hub.service.V2Config.load",
+        classmethod(lambda _cls: config),
+    )
+    monkeypatch.setattr(
+        "core.handlers.model_hub.service.paths.get_state_dir",
+        lambda: tmp_path / "state",
+    )
+
+    def fake_probe(_cli_path, *, env, cwd):
+        assert env is not None
+        assert cwd == str(tmp_path / "runtime")
+        return True
+
+    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", fake_probe)
+    service = create_default_service()
+
+    assert service.migration_claude_oauth_probe is not None
+    assert service.migration_claude_oauth_probe() is True
+    assert (tmp_path / "runtime").is_dir()
 
 
 def test_failed_batch_revokes_every_provisioned_credential(
