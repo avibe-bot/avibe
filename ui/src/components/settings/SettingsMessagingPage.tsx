@@ -508,24 +508,31 @@ export const SettingsMessagingPage: React.FC = () => {
           }
         />
 
-        <SettingsRow
-          title={t('dashboard.showToolCalls')}
-          description={t('dashboard.showToolCallsHint')}
-          control={
-            <ToggleSwitch
-              // Default on: absent key reads as enabled (only an explicit false hides).
-              enabled={config.ui?.show_tool_calls !== false}
-              onClick={() => {
-                const next = config.ui?.show_tool_calls === false;
-                const nextConfig = {
-                  ...config,
-                  ui: { ...(config.ui || {}), show_tool_calls: next },
-                };
-                void persist(nextConfig, { ui: { show_tool_calls: next } });
-              }}
-            />
-          }
-        />
+        {/* Tool-call rows only surface inside the Activity panel, which renders
+            only when Show Agent Activity is on — so this child control has
+            nothing to affect while the parent is off. Display-only linkage: the
+            stored ``show_tool_calls`` value is left untouched, so re-enabling the
+            parent restores the user's prior choice. */}
+        {Boolean(config.ui?.show_agent_activity) && (
+          <SettingsRow
+            title={t('dashboard.showToolCalls')}
+            description={t('dashboard.showToolCallsHint')}
+            control={
+              <ToggleSwitch
+                // Default on: absent key reads as enabled (only an explicit false hides).
+                enabled={config.ui?.show_tool_calls !== false}
+                onClick={() => {
+                  const next = config.ui?.show_tool_calls === false;
+                  const nextConfig = {
+                    ...config,
+                    ui: { ...(config.ui || {}), show_tool_calls: next },
+                  };
+                  void persist(nextConfig, { ui: { show_tool_calls: next } });
+                }}
+              />
+            }
+          />
+        )}
       </SettingsPanel>
 
       <SettingsPanel
