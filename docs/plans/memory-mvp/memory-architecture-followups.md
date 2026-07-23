@@ -41,16 +41,35 @@ contract:
 
 ## Managed Runtime Release Boundary
 
-As of 2026-07-23, the release tag `memory-runtime-v1.1.3-1` does not exist and
-the repository has no reviewed build pipeline for a relocatable Python 3.12 plus
-EverOS environment on all four declared targets. The POC virtual environment is
-host-bound and is not a publishable artifact. This branch therefore deliberately
-keeps `vibe/memory_runtime_manifest.json` at `release_state: unavailable` and
-supports local dogfood only through `AVIBE_MEMORY_DEV_RUNTIME`.
+EverOS 1.1.3 is available as an official Python package, but upstream does not
+publish the relocatable runtime archive required by Avibe's dependency manager.
+Avibe therefore builds its own four platform bundles from the POC's reviewed,
+locked `everos==1.1.3` dependency set and a uv-managed Python 3.12 distribution.
+The release pins uv 0.9.18 and Python 3.12.12. The builder verifies the
+environment before and after relocation, dereferences validated internal links,
+and emits a deterministic archive containing only regular files and directories.
 
-Managed installation remains a release blocker until a separate release change
-builds and clean-host tests all four archives, publishes those exact bytes, and
-then records their archive and embedded-Python hashes in the manifest.
+The release workflows publish those archives as immutable assets under the same
+Avibe release tag, generate the exact archive and embedded-Python hashes, and
+write that published manifest into the wheel. The repository copy remains
+`release_state: unavailable` because source checkouts have no release assets;
+`AVIBE_MEMORY_DEV_RUNTIME` remains a development-only bypass. The wheel never
+contains the large runtime archives themselves.
+
+## Delivered Product Follow-ups
+
+1. Agents receive the read-only `vibe memory search`, `vibe memory profile`, and
+   `vibe memory status` guidance only while Memory is enabled and the current
+   turn is an interactive Workbench-owner or freshly admitted administrator DM.
+   Scheduled, harness, group, and other ineligible turns do not advertise it.
+   This recall path remains distinct from shared `user_preferences.md` and
+   historical message lookup, and recalled content is explicitly treated as
+   untrusted data.
+2. Release workflows build reviewed, relocatable, verified runtime artifacts on
+   four platforms, publish the exact bytes before the wheel, and generate the
+   packaged manifest from those bytes. Every final archive must start the
+   production child and pass a UDS health probe. A scheduled manifest-verified
+   backup guard detects missing assets and restores only absent immutable bytes.
 
 ## Verification
 

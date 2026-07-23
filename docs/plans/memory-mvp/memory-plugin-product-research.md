@@ -49,12 +49,15 @@ later requirement for selective deletion, exactly-once ingestion, workspace
 isolation, or shared memory reopens the provider decision before that capability
 ships.
 
-The MVP also excludes automatic recall, all agent-facing Memory tools,
+The MVP also excludes automatic recall, registered agent-facing Memory tools,
 write-capable command/CLI operations, group and network access, non-administrator
 DM access, export/import, and foresight. It exposes the same bounded
 profile/search/status reads through Workbench `/memory`, authorized private-IM
-`/memory`, and the local CLI. Those entry adapters must not add provider
-capabilities or influence the first provider interface.
+`/memory`, and the local CLI. Eligible interactive Workbench-owner and
+administrator-DM turns may advertise that existing read-only CLI to the agent;
+scheduled, harness, group, and other ineligible turns do not. Those entry
+adapters must not add provider capabilities or influence the first provider
+interface.
 
 ## 3. Candidate summary
 
@@ -227,8 +230,8 @@ These questions belong to later capability decisions, not the MVP:
 - independent per-user pools, non-administrator DMs, group IM, and cross-platform
   human-identity linking;
 - automatic recall quality and prompt-injection handling;
-- agent-facing Memory tools, including MCP transport, turn/session binding, and
-  backend-specific registration;
+- registered agent-facing Memory tools, including MCP transport, OS-enforced
+  turn/session binding, and backend-specific registration;
 - export/import as a provider-neutral format;
 - editable memory with durable index convergence;
 - foresight and agent-skill tracks;

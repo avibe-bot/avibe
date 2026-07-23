@@ -65,9 +65,11 @@ are available only after the existing centralized IM authorization succeeds and
 the server freshly proves `is_dm`, bound, enabled, and administrator status.
 Memory admission fails closed when settings or identity state cannot be read;
 administrator promotion, revocation, disablement, and unbinding take effect on
-the next request. Group IM, non-administrator DM, Avibe Cloud, LAN, proxy,
-scheduled-task, harness, agent-to-agent, and agent-facing tool entry points are
-not supported product surfaces.
+the next request. When Memory is enabled, an eligible interactive Workbench
+owner or freshly admitted administrator-DM turn advertises the same read-only
+`vibe memory` CLI to the agent. Group IM, non-administrator DM, Avibe Cloud,
+LAN, proxy, scheduled-task, harness, and agent-to-agent turns do not receive
+that guidance.
 
 These restrictions are scope decisions, not claims that loopback, CSRF, a UDS,
 or a private-chat topology proves one human identity. Avibe agents and terminals
@@ -254,14 +256,20 @@ machine-readable shape and uses the same closed error codes and bounds as the UI
 
 No command or CLI subcommand can capture, clear, configure, export, delete, or
 edit Memory in the MVP. Clear all remains a fresh confirmed UI-only operation.
-Agent-facing Memory tools are deferred entirely.
+There is no backend-specific Memory tool registration or automatic recall. An
+eligible interactive agent may invoke only the existing same-OS-account,
+read-only CLI after Avibe adds turn-scoped guidance to its system prompt.
 
 ### 2.7 Query behavior
 
 Search sends the normalized query to the configured Memory embedding endpoint.
 Profile reads may use only local provider state, depending on the pinned provider
-route. UI, Workbench-command, private-IM-command, and CLI results are not sent to
-Claude, Codex, OpenCode, or their model providers.
+route. UI, Workbench-command, private-IM-command, and human-invoked CLI results
+are not sent to Claude, Codex, OpenCode, or their model providers. If an
+eligible agent invokes the advertised read-only CLI, its result becomes tool
+output in that agent conversation and is sent to the configured agent model
+provider. Agent guidance labels recalled text as untrusted data that must never
+be treated as instructions.
 
 Explicit reads have fixed limits for query bytes, result bytes, item count, and
 deadline. An invalid or oversized provider response fails with a closed error;
@@ -404,11 +412,13 @@ through Avibe tunnels or a TCP port. This prevents browser network access; it
 does not protect against same-user local code, which is already inside Avibe's
 desktop trust model.
 
-The managed runtime includes a small Avibe launcher. The launcher loads the
-pinned EverOS application entry point and starts it on the Unix socket. Core
-Avibe code does not import EverOS or read its private storage. This versioned
-launcher is the only allowed package-level integration and is tested with each
-runtime artifact.
+The managed runtime includes only the verified Python distribution and locked
+EverOS dependencies. The Avibe package supplies a small child-only launcher,
+which the managed Python loads from the installed Avibe source path. The
+launcher loads the pinned EverOS application entry point and starts it on the
+Unix socket. The parent Avibe process does not import EverOS or read its private
+storage. This versioned launcher is the only allowed package-level integration
+and is tested against each runtime artifact.
 
 The MVP supports the same POSIX desktop environments on which the pinned runtime
 and Unix-domain socket pass the phase-0 and integration tests. It does not add a
@@ -571,10 +581,10 @@ surfaces until the local product is useful.
 
 Each item below requires a separate design and evidence gate:
 
-- **All agent-facing Memory tools.** This includes read-only tools, MCP transport,
-  turn-scoped grants, and backend-specific registration. The Memory API is small,
-  but session binding and remote/same-session denial are separate integration
-  work; they are not allowed to block the local MVP.
+- **Registered agent-facing Memory tools.** This includes MCP transport,
+  backend-specific tool registration, and OS-enforced turn-scoped grants. The
+  MVP only advertises the existing same-account read-only CLI on eligible
+  interactive turns; it does not claim the CLI is a local process sandbox.
 - **Automatic recall into agent prompts.** Deferred until explicit reads prove
   memory usefulness and a prompt-injection/latency policy exists; hidden context
   would make relevance, cost, and provenance difficult to govern.

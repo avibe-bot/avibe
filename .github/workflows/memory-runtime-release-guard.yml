@@ -1,0 +1,160 @@
+name: Guard Memory Runtime releases
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "scripts/memory_runtime_release_guard.py"
+      - ".github/workflows/memory-runtime-release-guard.yml"
+  schedule:
+    - cron: "29 */6 * * *"
+    - cron: "53 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: memory-runtime-release-guard
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Verify and recover latest published assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve latest published Memory Runtime manifest
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag=""
+          manifest_dir="$RUNNER_TEMP/memory-runtime-manifest"
+          mkdir -p "$manifest_dir"
+          while IFS= read -r candidate_tag; do
+            candidate_dir="$RUNNER_TEMP/memory-runtime-candidate"
+            rm -rf "$candidate_dir"
+            mkdir -p "$candidate_dir"
+            if ! gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'avibe_os-*.whl' --dir "$candidate_dir" >/dev/null 2>&1; then
+              continue
+            fi
+            if CANDIDATE_TAG="$candidate_tag" CANDIDATE_DIR="$candidate_dir" MANIFEST_DIR="$manifest_dir" \
+              python3 - <<'PY'
+          import json
+          import os
+          import zipfile
+          from pathlib import Path
+
+          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_os-*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(1)
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              manifest = wheel.read("vibe/memory_runtime_manifest.json")
+          payload = json.loads(manifest)
+          if payload.get("release_state") != "published" or payload.get("release_tag") != os.environ["CANDIDATE_TAG"]:
+              raise SystemExit(1)
+          (Path(os.environ["MANIFEST_DIR"]) / "memory-runtime-manifest.json").write_bytes(manifest)
+          PY
+            then
+              release_tag="$candidate_tag"
+              break
+            fi
+          done < <(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(any(.assets[]?; (.name | startswith("avibe_os-")) and (.name | endswith(".whl")))) | .tag_name'
+          )
+          if [ -z "$release_tag" ]; then
+            echo "No published Memory Runtime manifest exists yet; guard has nothing to verify."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          manifest="$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json"
+          manifest_tag="$(jq -er '.release_tag' "$manifest")"
+          test "$manifest_tag" = "$release_tag"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$manifest" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and verify published assets
+        if: steps.manifest.outputs.available == 'true'
+        id: probe
+        continue-on-error: true
+        run: |
+          python3 scripts/memory_runtime_release_guard.py \
+            --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+            fetch --output-dir "$RUNNER_TEMP/memory-runtime-release"
+
+      - name: Recover missing assets from latest verified backup
+        if: steps.manifest.outputs.available == 'true' && steps.probe.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}
+          RELEASE_TAG: ${{ steps.manifest.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_name="memory-runtime-release-backup-$MANIFEST_SHA"
+          restore_dir="$RUNNER_TEMP/memory-runtime-restore"
+          backup_run=""
+          while IFS= read -r run_id; do
+            rm -rf "$restore_dir"
+            mkdir -p "$restore_dir"
+            if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact_name" --dir "$restore_dir"; then
+              backup_run="$run_id"
+              break
+            fi
+          done < <(
+            gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow memory-runtime-release-guard.yml --status success --limit 50 \
+              --json databaseId --jq '.[].databaseId'
+          )
+          if [ -z "$backup_run" ]; then
+            echo "::error::No verified Memory Runtime backup is available for manifest $MANIFEST_SHA."
+            exit 1
+          fi
+          python3 scripts/memory_runtime_release_guard.py \
+            --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+            verify --asset-dir "$restore_dir"
+
+          existing="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          missing=()
+          for asset in "$restore_dir"/*; do
+            name="$(basename "$asset")"
+            if ! grep -qxF "$name" <<<"$existing"; then
+              missing+=("$asset")
+            fi
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "::error::All asset names exist but integrity failed; refusing to overwrite immutable runtime bytes."
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${missing[@]}"
+
+      - name: Verify recovered release
+        if: steps.manifest.outputs.available == 'true' && steps.probe.outcome == 'failure'
+        run: |
+          python3 scripts/memory_runtime_release_guard.py \
+            --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+            fetch --output-dir "$RUNNER_TEMP/memory-runtime-release"
+
+      - name: Preserve verified release backup
+        if: >-
+          steps.manifest.outputs.available == 'true' &&
+          (github.event_name != 'schedule' ||
+           github.event.schedule == '53 4 * * 0' ||
+           steps.probe.outcome == 'failure')
+        uses: actions/upload-artifact@v6
+        with:
+          name: memory-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}
+          path: ${{ runner.temp }}/memory-runtime-release
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

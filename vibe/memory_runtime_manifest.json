@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "everos_version": "1.1.3",
+  "python_version": "3.12.12",
+  "lock_sha256": "37ab1606edf1a6299a9d52b5a99d288a81218a5a0b1eb89d60644f3ace4255eb",
+  "lock_id": "uv-lock-sha256:37ab1606edf1a6299a9d52b5a99d288a81218a5a0b1eb89d60644f3ace4255eb",
+  "uv_version": "0.9.18",
   "source": "everos",
   "source_url": "https://github.com/EverMind-AI/EverMemOS",
   "release_state": "unavailable",

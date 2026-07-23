@@ -33,6 +33,9 @@ from core.process_isolation import isolated_subprocess_kwargs
 
 
 EVEROS_VERSION = "1.1.3"
+EMBEDDED_PYTHON_VERSION = "3.12.12"
+PACKAGE_LOCK_SHA256 = "37ab1606edf1a6299a9d52b5a99d288a81218a5a0b1eb89d60644f3ace4255eb"
+RUNTIME_BUILDER_UV_VERSION = "0.9.18"
 _DEV_RUNTIME_ENV = "AVIBE_MEMORY_DEV_RUNTIME"
 _DEV_RUNTIME_FAILURE_REASON = "memory_runtime_install_failed"
 _DEV_PROVIDER_ROOT_FORMAT = f"everos-{EVEROS_VERSION}"
@@ -47,11 +50,16 @@ _SPEC = ManagedRuntimeSpec(
 )
 _SMOKE_SCRIPT = (
     "from importlib.metadata import version\n"
+    "import platform\n"
     "import everos\n"
     "import uvicorn\n"
+    "from everos.entrypoints.api.app import create_app\n"
     "assert version('everos') == '1.1.3'\n"
+    "assert platform.python_version() == '3.12.12'\n"
     "assert everos is not None and uvicorn is not None\n"
+    "assert callable(create_app)\n"
     "print(version('everos'))\n"
+    "print(platform.python_version())\n"
 )
 
 
@@ -310,6 +318,14 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if manifest.runtime_version != EVEROS_VERSION:
             self._install_reason = "memory_runtime_version_unsupported"
             return False
+        if (
+            manifest.payload.get("python_version") != EMBEDDED_PYTHON_VERSION
+            or manifest.payload.get("lock_sha256") != PACKAGE_LOCK_SHA256
+            or manifest.payload.get("lock_id") != f"uv-lock-sha256:{PACKAGE_LOCK_SHA256}"
+            or manifest.payload.get("uv_version") != RUNTIME_BUILDER_UV_VERSION
+        ):
+            self._install_reason = "memory_runtime_manifest_invalid"
+            return False
         if not _safe_metadata_value(manifest.payload.get("provider_root_format")):
             self._install_reason = "memory_runtime_manifest_invalid"
             return False
@@ -563,9 +579,14 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             )
         except (OSError, subprocess.SubprocessError):
             return {"ok": False, "reason": "memory_runtime_smoke_failed"}
-        if result.returncode != 0 or result.stdout.strip() != EVEROS_VERSION:
+        if result.returncode != 0 or result.stdout.splitlines() != [EVEROS_VERSION, EMBEDDED_PYTHON_VERSION]:
             return {"ok": False, "reason": "memory_runtime_smoke_failed"}
-        return {"ok": True, "everos_version": EVEROS_VERSION}
+        return {
+            "ok": True,
+            "everos_version": EVEROS_VERSION,
+            "python_version": EMBEDDED_PYTHON_VERSION,
+            "lock_sha256": PACKAGE_LOCK_SHA256,
+        }
 
 
 _manager: MemoryArtifactManager | None = None

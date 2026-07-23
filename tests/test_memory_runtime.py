@@ -112,6 +112,37 @@ def test_memory_artifact_uses_shared_manager_status_shape(tmp_path: Path) -> Non
     assert manager.artifact_fingerprint() is None
 
 
+def test_memory_artifact_requires_exact_python_lock_and_builder_provenance(tmp_path: Path) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    payload = {
+        "release_state": "published",
+        "python_version": memory_artifact.EMBEDDED_PYTHON_VERSION,
+        "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
+        "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
+        "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
+        "provider_root_format": "everos-1.1.3",
+        "compatible_provider_root_formats": [],
+    }
+    manifest = ManagedRuntimeManifest(
+        schema_version=1,
+        runtime_version=memory_artifact.EVEROS_VERSION,
+        source="test",
+        source_url=None,
+        archives={},
+        digest="a" * 64,
+        loaded_from="test",
+        payload=payload,
+    )
+
+    assert manager._manifest_installable(manifest) is True
+    for key in ("python_version", "lock_sha256", "lock_id", "uv_version"):
+        changed = dict(payload)
+        changed[key] = "wrong"
+        invalid = replace(manifest, payload=changed)
+        assert manager._manifest_installable(invalid) is False
+        assert manager._install_reason == "memory_runtime_manifest_invalid"
+
+
 def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
     monkeypatch, caplog, tmp_path: Path
 ) -> None:
@@ -124,7 +155,7 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
 
     def smoke_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="1.1.3\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="1.1.3\n3.12.12\n", stderr="")
 
     monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
     manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
@@ -201,7 +232,12 @@ def test_memory_artifact_dev_runtime_retries_after_failure_at_same_path(monkeypa
     def smoke_then_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
         if not everos_installed["installed"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="ModuleNotFoundError")
-        return subprocess.CompletedProcess(command, 0, stdout=memory_artifact.EVEROS_VERSION, stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{memory_artifact.EVEROS_VERSION}\n{memory_artifact.EMBEDDED_PYTHON_VERSION}\n",
+            stderr="",
+        )
 
     monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_then_succeeds)
     manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)

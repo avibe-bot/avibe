@@ -77,8 +77,9 @@ There are two kinds of failure and they must not be mixed:
 - group IM, non-administrator, unbound, or disabled DM surfaces;
 - Avibe Cloud, LAN, proxy, or other network subjects;
 - automatic recall and prompt injection;
-- all agent-facing Memory tools and their MCP, turn-capability, and
-  backend-registration plumbing;
+- registered agent-facing Memory tools and their MCP, OS-enforced
+  turn-capability, and backend-registration plumbing; the existing read-only
+  CLI may be advertised only on eligible interactive owner turns;
 - write-capable commands or CLI subcommands;
 - assistant-message capture and native-context taint;
 - workspace partitioning;
@@ -796,8 +797,9 @@ The React page localizes its label as "Memory runtime" and describes EverOS only
 as the current implementation. Transitive packages never become separate rows.
 
 The Avibe release pins one runtime manifest entry per supported target. Each
-entry contains the runtime id, provider version, embedded Python version, lock
-id, target, archive name, size, SHA-256 digest, provider-root format, and the
+entry contains the runtime id, provider version, exact embedded Python version,
+lock id and SHA-256, target, archive name, size, SHA-256 digest,
+provider-root format, and the
 older provider-root formats it declares compatible. Installation:
 
 1. uses the shared process/file install locks;
@@ -856,12 +858,14 @@ ordinary chat still start.
 
 ### 12.3 Private process lifecycle
 
-- The managed artifact contains an Avibe-owned `memory-runtime` launcher. Inside
-  the child process, that launcher loads the pinned
+- The managed artifact contains only a verified Python distribution and the
+  locked EverOS dependencies. The Avibe package supplies the child-only
+  launcher through the explicit child `PYTHONPATH`. Inside the child process,
+  that launcher loads the pinned
   `everos.entrypoints.api.app:create_app` ASGI factory and starts uvicorn with
-  `uds=<verified path>`. Core Avibe and `MemoryModule` do not import EverOS. This
-  version-pinned entry-point load is the only allowed package-internal
-  integration and is covered by artifact smoke tests.
+  `uds=<verified path>`. The parent Avibe process and `MemoryModule` do not
+  import EverOS. This version-pinned entry-point load is the only allowed
+  package-internal integration and is covered by artifact and sidecar tests.
 - The launcher wraps the ASGI application with a small text-only request guard.
   It accepts only `GET /health` and the exact MVP shapes for
   `POST /api/v1/memory/add`, `/flush`, `/search`, and `/get`. The `/get` guard
@@ -871,6 +875,12 @@ ordinary chat still start.
 - Execute only the verified embedded Python and package lock selected by the
   POC; never use a system Python, user site packages, `PATH` package tools, or an
   unbounded upstream version.
+- Release construction pins Python `3.12.12`, the exact
+  `scripts/memory_poc/harness/uv.lock` digest, and the uv installer version.
+  Every platform archive must be at most 1 GiB. The final archive is extracted
+  into a clean temporary home, loads `create_app`, starts the production child
+  launcher, and passes an owner-only UDS `/health` probe before manifest
+  generation can admit it.
 - Launch the provider as an owned child with an owner-only working home and a
   minimal allowlisted environment: proxy and TLS-override variables such as
   `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, and
@@ -1348,8 +1358,8 @@ This slice can be tested without EverOS or model credentials.
 - queue/provider and explicit-read usefulness measurements;
 - decision to harden official EverOS, maintain a small fork, or stop.
 
-No slice adds a group/non-administrator IM surface, agent-facing Memory tool,
-write-capable command/CLI operation, or automatic recall.
+No slice adds a group/non-administrator IM surface, registered agent-facing
+Memory tool, write-capable command/CLI operation, or automatic recall.
 
 ## 19. Evidence-dependent questions
 
@@ -1376,8 +1386,9 @@ The following rev37 elements are intentionally removed from the active design:
 
 - provider-neutral future capability surface;
 - same-process `OwnerGrant` restatement of entry-adapter authorization;
-- agent-facing Memory tools, MCP bridges, turn-scoped read grants, and
-  backend-specific tool registration;
+- registered agent-facing Memory tools, MCP bridges, OS-enforced turn-scoped
+  read grants, and backend-specific tool registration; eligible interactive
+  turns may receive guidance for the existing same-account read-only CLI;
 - `workspace_id` and Plan-B switch;
 - `forget`, `remember`, automatic `recall`, and export;
 - assistant capture and backend native-context taint;

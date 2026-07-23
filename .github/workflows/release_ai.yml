@@ -89,8 +89,53 @@ jobs:
             vibe-show-runtime-node-*.tgz
             show-runtime-ref-${{ matrix.artifact }}.txt
 
+  memory-runtime-bundles:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x64
+          - os: ubuntu-24.04-arm
+            artifact: linux-arm64
+          - os: macos-15-intel
+            artifact: darwin-x64
+          - os: macos-14
+            artifact: darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.9.18"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build Memory Runtime bundle
+        run: |
+          python scripts/build_memory_runtime.py \
+            --output-dir runtime-artifacts \
+            --platform "${{ matrix.artifact }}" \
+            --metadata-output "runtime-artifacts/memory-runtime-1.1.3-${{ matrix.artifact }}.json"
+
+      - name: Upload Memory Runtime bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: memory-runtime-${{ matrix.artifact }}
+          path: |
+            runtime-artifacts/memory-runtime-*.tar.gz
+            runtime-artifacts/memory-runtime-*.json
+
   build-assets:
-    needs: show-runtime-bundles
+    needs:
+      - show-runtime-bundles
+      - memory-runtime-bundles
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -127,6 +172,21 @@ jobs:
             --runtime-ref-file 'runtime-artifacts/show-runtime-ref-*.txt' \
             --output vibe/show_runtime_manifest.json
 
+      - name: Download Memory Runtime bundles
+        uses: actions/download-artifact@v6
+        with:
+          pattern: memory-runtime-*
+          path: runtime-artifacts
+          merge-multiple: true
+
+      - name: Generate Memory Runtime manifest
+        run: |
+          python scripts/generate_memory_runtime_manifest.py \
+            --archive-dir runtime-artifacts \
+            --tag "${{ github.event.inputs.tag || github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --output vibe/memory_runtime_manifest.json
+
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
@@ -137,7 +197,7 @@ jobs:
           pip install build
           python -m build
 
-      - name: Verify bundled Show Runtime archives
+      - name: Verify bundled runtime manifests
         run: |
           python - <<'PY'
           import sys
@@ -159,8 +219,13 @@ jobs:
               raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
           if "vibe/show_runtime_manifest.json" not in names:
               raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
+          if any(name.startswith("vibe/memory_runtime/") for name in names):
+              raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
+          if "vibe/memory_runtime_manifest.json" not in names:
+              raise SystemExit("Wheel is missing vibe/memory_runtime_manifest.json")
 
           print("vibe/show_runtime_manifest.json")
+          print("vibe/memory_runtime_manifest.json")
           PY
 
       - name: Add Show Runtime release assets
@@ -170,8 +235,10 @@ jobs:
           if [[ "$TAG" == gh-v* ]]; then
             cp runtime-artifacts/vibe-show-runtime-node-*.tgz dist/
             cp vibe/show_runtime_manifest.json dist/show-runtime-manifest.json
+            cp runtime-artifacts/memory-runtime-*.tar.gz dist/
+            cp vibe/memory_runtime_manifest.json dist/memory-runtime-manifest.json
           else
-            echo "Show Runtime release assets for $TAG are produced by the PyPI publish workflow."
+            echo "Runtime release assets for $TAG are produced by the PyPI publish workflow."
           fi
 
       - name: Upload release artifacts
@@ -509,16 +576,73 @@ jobs:
 
       - name: Create GitHub-only Release
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          body_path: release.md
-          files: dist/*
-          fail_on_unmatched_files: true
-          draft: false
-          prerelease: ${{ steps.release_type.outputs.prerelease == 'true' }}
-          make_latest: ${{ github.event_name == 'push' && steps.release_type.outputs.prerelease != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            ARGS=(release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release.md)
+            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
+              ARGS+=(--prerelease)
+            fi
+            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
+              ARGS+=(--latest)
+            else
+              ARGS+=(--latest=false)
+            fi
+            gh "${ARGS[@]}" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release.md
+          fi
+
+          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          runtime_to_upload=()
+          runtime_paths=(
+            dist/vibe-show-runtime-node-*.tgz
+            dist/show-runtime-manifest.json
+            dist/memory-runtime-*.tar.gz
+            dist/memory-runtime-manifest.json
+          )
+          for path in "${runtime_paths[@]}"; do
+            if [ ! -f "$path" ]; then
+              echo "::error::Missing GitHub-only runtime release asset: $path" >&2
+              exit 1
+            fi
+            name="$(basename "$path")"
+            if grep -qxF "$name" <<<"$existing"; then
+              gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$temporary" --clobber
+              if ! cmp -s "$temporary/$name" "$path"; then
+                echo "::error::Immutable runtime asset '$name' differs for $TAG; cut a new version." >&2
+                exit 1
+              fi
+            else
+              runtime_to_upload+=("$path")
+            fi
+          done
+
+          # The installable runtime bytes must exist before any wheel that
+          # advertises their published manifest becomes downloadable.
+          if [ "${#runtime_to_upload[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${runtime_to_upload[@]}"
+          fi
+
+          package_assets=()
+          for path in dist/*; do
+            case "$(basename "$path")" in
+              vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|memory-runtime-*.tar.gz|memory-runtime-manifest.json)
+                ;;
+              *) package_assets+=("$path") ;;
+            esac
+          done
+          if [ "${#package_assets[@]}" -eq 0 ]; then
+            echo "::error::No Python release assets were built." >&2
+            exit 1
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_assets[@]}" --clobber
 
       - name: Update official release notes
         if: ${{ !startsWith(steps.tag.outputs.tag, 'gh-v') }}

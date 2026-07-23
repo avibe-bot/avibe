@@ -109,10 +109,55 @@ jobs:
             vibe-show-runtime-node-*.tgz
             show-runtime-ref-${{ matrix.artifact }}.txt
 
+  memory-runtime-bundles:
+    needs: resolve-tag
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x64
+          - os: ubuntu-24.04-arm
+            artifact: linux-arm64
+          - os: macos-15-intel
+            artifact: darwin-x64
+          - os: macos-14
+            artifact: darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.9.18"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build Memory Runtime bundle
+        run: |
+          python scripts/build_memory_runtime.py \
+            --output-dir runtime-artifacts \
+            --platform "${{ matrix.artifact }}" \
+            --metadata-output "runtime-artifacts/memory-runtime-1.1.3-${{ matrix.artifact }}.json"
+
+      - name: Upload Memory Runtime bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: memory-runtime-${{ matrix.artifact }}
+          path: |
+            runtime-artifacts/memory-runtime-*.tar.gz
+            runtime-artifacts/memory-runtime-*.json
+
   build:
     needs:
       - resolve-tag
       - show-runtime-bundles
+      - memory-runtime-bundles
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -151,6 +196,22 @@ jobs:
             --runtime-ref-file 'runtime-artifacts/show-runtime-ref-*.txt' \
             --output vibe/show_runtime_manifest.json
           cp vibe/show_runtime_manifest.json runtime-artifacts/show-runtime-manifest.json
+
+      - name: Download Memory Runtime bundles
+        uses: actions/download-artifact@v6
+        with:
+          pattern: memory-runtime-*
+          path: runtime-artifacts
+          merge-multiple: true
+
+      - name: Generate Memory Runtime manifest
+        run: |
+          python scripts/generate_memory_runtime_manifest.py \
+            --archive-dir runtime-artifacts \
+            --tag "${{ needs.resolve-tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --output vibe/memory_runtime_manifest.json
+          cp vibe/memory_runtime_manifest.json runtime-artifacts/memory-runtime-manifest.json
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -213,7 +274,7 @@ jobs:
             echo "Skipping legacy vibe-remote shim for $TAG"
           fi
 
-      - name: Verify package Show Runtime manifest
+      - name: Verify package runtime manifests
         run: |
           python - <<'PY'
           import zipfile
@@ -238,6 +299,10 @@ jobs:
               raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
           if "vibe/show_runtime_manifest.json" not in names:
               raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
+          if any(name.startswith("vibe/memory_runtime/") for name in names):
+              raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
+          if "vibe/memory_runtime_manifest.json" not in names:
+              raise SystemExit("Wheel is missing vibe/memory_runtime_manifest.json")
           PY
 
       - name: Run release install and upgrade regressions
@@ -272,13 +337,10 @@ jobs:
             gh "${ARGS[@]}" || gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null
           fi
 
-          # Show Runtime archives + manifest are IMMUTABLE per tag and must NOT be
-          # re-clobbered. The runtime tarball is not byte-reproducible, so a re-run of
-          # this workflow rebuilds different bytes, while the manifest baked into the wheel
-          # is published to PyPI immutably (skip-existing). Clobbering the release archive
-          # with a fresh build would desync the published wheel's manifest from the hosted
-          # archive, and every Show Runtime install would fail its integrity check
-          # (runtime_archive_size_mismatch).
+          # Runtime archives + manifests are IMMUTABLE per tag and must NOT be
+          # re-clobbered. Builds are normalized and pinned, but the wheel published
+          # to PyPI is itself immutable. Replacing any hosted runtime byte after that
+          # point would desync the wheel's manifest and break integrity checks.
           #
           # Verify immutability BEFORE mutating ANY release asset (including dist/*), so a
           # mismatch fails the job without having already replaced the wheel/sdist. Upload
@@ -286,7 +348,11 @@ jobs:
           existing="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           tmp="$(mktemp -d)"
           runtime_to_upload=()
-          for path in runtime-artifacts/vibe-show-runtime-node-*.tgz runtime-artifacts/show-runtime-manifest.json; do
+          for path in \
+            runtime-artifacts/vibe-show-runtime-node-*.tgz \
+            runtime-artifacts/show-runtime-manifest.json \
+            runtime-artifacts/memory-runtime-*.tar.gz \
+            runtime-artifacts/memory-runtime-manifest.json; do
             name="$(basename "$path")"
             if grep -qxF "$name" <<<"$existing"; then
               rm -f "$tmp/$name"
@@ -295,7 +361,7 @@ jobs:
                 echo "Release asset '$name' already present and byte-identical; skipping (immutable per tag)."
               else
                 echo "::error::Release asset '$name' already exists for $TAG but differs from this run's build." >&2
-                echo "::error::The Show Runtime tarball is not byte-reproducible and this run rebuilt it; overwriting would desync the release from the PyPI wheel's manifest. Cut a NEW version instead of re-running the release." >&2
+                echo "::error::Overwriting it would desync the release from the PyPI wheel's manifest. Cut a NEW version instead of re-running the release." >&2
                 exit 1
               fi
             else
