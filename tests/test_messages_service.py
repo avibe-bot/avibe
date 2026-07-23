@@ -133,6 +133,27 @@ def test_agent_run_message_provenance_enrichment(isolated_state):
     assert "source_session_id" not in by_id["msg_task"]
 
 
+def test_agent_run_provenance_skips_missing_source_session(isolated_state):
+    # Dead-link guard: if the resolved source session no longer has an
+    # agent_sessions row (stale/imported/deleted), the enrichment must NOT attach
+    # source_session_id — a /chat/<missing id> link would only show the fallback.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        # source_actor points at a session that was never seeded (deleted/stale).
+        _insert_agent_run(conn, "execGhost", session_id="ses_target",
+                          source_kind="agent", source_actor="ses_ghost")
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="agent_run",
+                            native_message_id="agent_run:execGhost", msg_id="msg_ghost",
+                            created_at="2026-05-30T10:00:00Z")
+
+    with engine.connect() as conn:
+        result = messages_service.list_session_messages(conn, session_id="ses_target")
+    by_id = {m["id"]: m for m in result["messages"]}
+    assert "source_session_id" not in by_id["msg_ghost"]
+
+
 def test_mark_session_read_ties_break_on_id(isolated_state):
     """When ``until_message_id`` points at a message whose ``created_at``
     is shared by newer messages (second precision), only rows at-or-before

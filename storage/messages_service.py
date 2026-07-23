@@ -156,8 +156,11 @@ def _attach_agent_run_provenance(
 
     for payload in payloads:
         source_id = source_by_exec.get(exec_by_msg.get(payload["id"], ""))
-        if source_id:
-            meta = meta_by_session.get(source_id) or {}
+        # Only attach when the source session still exists (is in meta_by_session);
+        # a stale/imported/deleted source would otherwise write source_session_id
+        # and produce a dead /chat/<missing id> link with only the fallback label.
+        if source_id in meta_by_session:
+            meta = meta_by_session[source_id]
             payload["source_session_id"] = source_id
             payload["source_session_title"] = meta.get("title")
             payload["source_session_agent_name"] = meta.get("agent_name")
