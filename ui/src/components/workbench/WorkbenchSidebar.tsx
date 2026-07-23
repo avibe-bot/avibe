@@ -707,7 +707,15 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const { t } = useTranslation();
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
-  const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
+  const {
+    totalUnread,
+    unreadSessions,
+    inboxSessions,
+    markRead,
+    unreadBySession,
+    dropSession: dropInboxSession,
+    reconcileSession: reconcileInboxSession,
+  } = useWorkbenchInbox();
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
   // sidebar owns only its inbox popover + the New Project dialog trigger.
@@ -728,6 +736,23 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     setSessionVisibility,
     upsertProjectToTop,
   } = useWorkbenchProjectsTree();
+
+  // Flip a session's visibility, then reconcile BOTH visibility-keyed caches on
+  // the PATCH response — not only via the SSE session.activity event, which never
+  // lands on a degraded/mobile stream. setSessionVisibility handles the projects
+  // tree; the Inbox is reconciled here the same way its own SSE listener does:
+  // drop the card on hide, re-fetch it on undo (no-op when the session isn't in
+  // the Inbox, e.g. it was already read).
+  const handleSetSessionVisibility = async (
+    projectId: string,
+    sessionId: string,
+    visibility: 'foreground' | 'background',
+  ) => {
+    await setSessionVisibility(projectId, sessionId, visibility);
+    if (visibility === 'background') dropInboxSession(sessionId);
+    else void reconcileInboxSession(sessionId);
+  };
+
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -969,7 +994,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   onRenameSession={(sessionId, title) => renameSession(project.id, sessionId, title)}
                   onArchiveSession={(sessionId) => archiveSession(project.id, sessionId)}
                   onSetSessionVisibility={(sessionId, visibility) =>
-                    setSessionVisibility(project.id, sessionId, visibility)
+                    handleSetSessionVisibility(project.id, sessionId, visibility)
                   }
                 />
               );

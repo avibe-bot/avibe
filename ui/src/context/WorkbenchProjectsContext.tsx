@@ -620,17 +620,24 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // archive path does — do NOT trust only the A6 session.activity SSE event,
       // which never arrives on a dropped/degraded stream (remote/mobile). Without
       // this, a hidden row stays visible and clickable until reconnect/reload, so
-      // "Hide to background" appears to do nothing. Reuses the same
-      // removeSessionRow / reconcileSessions the live listener uses, so the
-      // API-response and SSE paths converge and a duplicate live event is a no-op.
-      // Undo (-> foreground) refetches the project rather than guessing the row's
-      // original position; listSessions is foreground-only, so it drops/restores
-      // the row authoritatively.
+      // "Hide to background" appears to do nothing.
       await api.setSessionVisibility(sessionId, visibility);
       if (visibility === 'background') {
+        // Instant feedback: drop the row now (like the archive path). But if a
+        // fetch for this project is already in flight, its pre-PATCH response
+        // still lists the foreground row and could land after this drop and
+        // reinsert it — so when that's the case, reconcile through the
+        // inFlightRef-serialised path: it queues behind that fetch and, because
+        // the PATCH is already committed, its refetch re-drops the hidden row.
         setSessions((prev) => removeSessionRow(prev, sessionId));
+        if (inFlightRef.current.has(projectId)) void reconcileSessions(projectId);
       } else {
-        void reconcileSessions(projectId);
+        // Undo (-> foreground): refetch rather than guessing the row's original
+        // position; listSessions is foreground-only so it restores the row
+        // authoritatively. minCount 1 forces a fetch even when the hidden row was
+        // the only loaded one (reconcile treats a 0-length window as nothing to
+        // do) — mirrors the SSE 'created' placement reconcile.
+        void reconcileSessions(projectId, { minCount: 1 });
       }
     },
     [api, reconcileSessions],
