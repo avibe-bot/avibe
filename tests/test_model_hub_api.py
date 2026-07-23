@@ -179,6 +179,8 @@ def _assert_envelope(payload: dict, *, ok: bool = True):
 
 
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
+    """Scenarios: MH-PRI-001, MH-OAUTH-A-001, MH-OAUTH-ERR-001."""
+
     service, store, adapter = _service(tmp_path)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
@@ -536,11 +538,127 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
                 "display_name": "Claude native",
                 "supply_channel": "native_cli",
                 "oauth_flow_ref": flow["flow_id"],
-                "models": [{"id": "claude-opus-4-6", "provenance": "manual"}],
             }
         )
     )
 
     _assert_valid("source.schema.json", source)
     assert source["supply_channel"] == "native_cli"
+    assert any(model["id"] == "claude-opus-4-6" for model in source["models"])
+    assert {model["provenance"] for model in source["models"]} == {"discovered"}
     assert store.config.priority_order == [source["id"]]
+    resolved = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+    assert resolved.source_id == source["id"]
+    assert resolved.supply_channel == "native_cli"
+
+
+def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
+    async def run_creates():
+        class ConcurrentAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.discover_started = 0
+                self.all_discovering = asyncio.Event()
+
+            async def provision_credential(self, vendor, protocol, secret, base_url):
+                credential_ref = f"cred_concurrent_{len(self.secret_lengths)}"
+                self.secret_lengths.append(len(secret))
+                return credential_ref
+
+            async def discover_models(self, vendor, protocol, base_url, credential_ref):
+                self.discover_started += 1
+                if self.discover_started == 2:
+                    self.all_discovering.set()
+                await self.all_discovering.wait()
+                return ("claude-opus-4-6",)
+
+        store = MemoryStore()
+        adapter = ConcurrentAdapter()
+        service = ModelHubService(
+            store=store,
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        )
+        created = await asyncio.gather(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Concurrent A",
+                    "key": "sk-test-concurrent-a",
+                }
+            ),
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Concurrent B",
+                    "key": "sk-test-concurrent-b",
+                }
+            ),
+        )
+        return created, store.config
+
+    created, config = asyncio.run(run_creates())
+
+    assert {source["display_name"] for source in created} == {"Concurrent A", "Concurrent B"}
+    assert {source.display_name for source in config.sources} == {"Concurrent A", "Concurrent B"}
+    assert set(config.priority_order) == {source.id for source in config.sources}
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://user:password@relay.example/v1",
+        "https://relay.example/v1?api_key=sk-test-never-persist-this",
+        "https://relay.example/v1?target=sk-test-never-persist-this",
+    ],
+)
+def test_source_base_url_rejects_embedded_credentials(tmp_path, base_url):
+    service, store, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "custom",
+                    "display_name": "Unsafe relay",
+                    "base_url": base_url,
+                    "key": "sk-test-transient-only",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources == []
+    assert adapter.secret_lengths == []
+
+
+def test_source_patch_rejects_credential_bearing_base_url(tmp_path):
+    service, store, _ = _service(tmp_path)
+    source = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "display_name": "Safe relay",
+                "base_url": "https://relay.example/v1?api-version=2026-07-23",
+                "key": "sk-test-transient-only",
+            }
+        )
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.patch_source(
+                source["id"],
+                {"base_url": "https://relay.example/v1?access_token=do-not-store"},
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources[0].base_url == "https://relay.example/v1?api-version=2026-07-23"

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
+from urllib.parse import parse_qsl, urlsplit
 
 from config import paths
 from config.v2_config import (
@@ -21,6 +23,7 @@ from config.v2_config import (
     V2Config,
 )
 from core.services.settings import default_config
+from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
 from .adapter import (
     EngineAdapter,
@@ -33,7 +36,13 @@ from .adapter import (
     SourceBinding,
 )
 from .classification import ResolutionDecision, classify_outcome
-from .events import BoundedEventLog, EventAgent, EventReason, build_resolution_event
+from .events import (
+    BoundedEventLog,
+    EventAgent,
+    EventReason,
+    build_resolution_event,
+    contains_credential_material,
+)
 from .identifiers import opencode_model_id, opencode_provider_id, parse_opencode_model_id
 from .oauth import (
     NativeOAuthUnavailableError,
@@ -44,6 +53,24 @@ from .oauth import (
 )
 
 CONTRACT_VERSION = 1
+
+_NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
+_CREDENTIAL_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "key",
+    "password",
+    "passwd",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+}
 
 _RUNTIME_MANIFEST = {
     "name": "cliproxyapi",
@@ -192,6 +219,43 @@ def _mask_credential(value: str) -> str:
     return f"{normalized[:prefix_length]}…{normalized[-4:]}"
 
 
+def _validated_base_url(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ModelHubError("discovery_failed")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError:
+        raise ModelHubError("discovery_failed") from None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or contains_credential_material(value)
+    ):
+        raise ModelHubError("discovery_failed")
+    for key, _ in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized = key.strip().lower().replace("-", "_").replace(".", "_")
+        if normalized in _CREDENTIAL_QUERY_KEYS or any(
+            marker in normalized
+            for marker in ("api_key", "access_token", "auth_token", "client_secret")
+        ):
+            raise ModelHubError("discovery_failed")
+    return value
+
+
+def _native_model_ids(vendor: str) -> tuple[str, ...]:
+    backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
+    if backend is None:
+        return ()
+    catalog = load_bundled_catalog()
+    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+
+
 def _default_protocol(vendor: str) -> str:
     if vendor == "anthropic":
         return "anthropic"
@@ -279,6 +343,7 @@ class ModelHubService:
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json")
         self.now = now
+        self._mutation_lock = asyncio.Lock()
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -409,6 +474,8 @@ class ModelHubService:
         channel = payload.get("supply_channel") or ("native_cli" if kind == "subscription" else "hub")
         if channel not in {"native_cli", "hub"} or (kind == "api_key" and channel != "hub"):
             raise ModelHubError("discovery_failed")
+        if channel == "native_cli" and vendor not in _NATIVE_VENDOR_BACKENDS:
+            raise ModelHubError("discovery_failed")
         consented = payload.get("experimental_consent") is True
         if "experimental_consent" in payload and not isinstance(payload.get("experimental_consent"), bool):
             raise ModelHubError("consent_required")
@@ -420,6 +487,9 @@ class ModelHubService:
         protocol = payload.get("protocol") or _default_protocol(vendor)
         billing = payload.get("billing") or ("monthly" if kind == "subscription" else "metered")
         models_payload = payload.get("models") or []
+        base_url = _validated_base_url(payload.get("base_url"))
+        if kind == "subscription" and base_url is not None:
+            raise ModelHubError("discovery_failed")
         try:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
             if any(model.provenance != "manual" for model in manual_models):
@@ -430,7 +500,7 @@ class ModelHubService:
                 vendor=vendor,
                 display_name=display_name,
                 protocol=protocol,
-                base_url=payload.get("base_url"),
+                base_url=base_url,
                 supply_channel=channel,
                 experimental_consent_at=self.now().isoformat() if consented else None,
                 billing=billing,
@@ -485,22 +555,31 @@ class ModelHubService:
             elif kind == "subscription":
                 raise ModelHubError("flow_not_found", status=404)
 
-            discovered = await self._discover(source) if channel == "hub" else []
+            discovered = (
+                await self._discover(source)
+                if channel == "hub"
+                else list(_native_model_ids(vendor))
+            )
+            if channel == "native_cli" and not discovered:
+                raise ModelHubError("discovery_failed")
             discovered_at = self.now().isoformat()
+            manual_model_ids = {model.id for model in manual_models}
             source.models = [
                 ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=discovered_at)
                 for model_id in discovered
+                if model_id not in manual_model_ids
             ] + manual_models
-            previous = self.store.load()
-            config = self._clone_config(previous)
-            if any(item.id == source.id for item in config.sources):
-                raise ModelHubError("migration_item_conflict", status=409)
-            config.sources.append(source)
-            config.priority_order.append(source.id)
-            if consented:
-                config.subscription_hub_experimental = True
-            await self._commit_synced(previous, config)
-            persisted = True
+            async with self._mutation_lock:
+                previous = self.store.load()
+                config = self._clone_config(previous)
+                if any(item.id == source.id for item in config.sources):
+                    raise ModelHubError("migration_item_conflict", status=409)
+                config.sources.append(source)
+                config.priority_order.append(source.id)
+                if consented:
+                    config.subscription_hub_experimental = True
+                await self._commit_synced(previous, config)
+                persisted = True
             if oauth_ref:
                 try:
                     self.oauth_flows.forget(oauth_ref)
@@ -524,27 +603,34 @@ class ModelHubService:
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         if not isinstance(payload, dict) or set(payload) - {"display_name", "base_url"}:
             raise ModelHubError("discovery_failed")
-        previous = self.store.load()
-        config = self._clone_config(previous)
-        source = self._source(config, source_id)
-        if "display_name" in payload:
-            display_name = payload["display_name"]
-            if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
-                raise ModelHubError("discovery_failed")
-            source.display_name = display_name
-        if "base_url" in payload:
-            base_url = payload["base_url"]
-            if base_url is not None and not isinstance(base_url, str):
-                raise ModelHubError("discovery_failed")
-            source.base_url = base_url
-            discovered = await self._discover(source)
-            manual = [model for model in source.models if model.provenance == "manual"]
-            source.models = [
-                ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=self.now().isoformat())
-                for model_id in discovered
-            ] + manual
-        await self._commit_synced(previous, config)
-        return source.to_payload()
+        base_url = _validated_base_url(payload.get("base_url")) if "base_url" in payload else None
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            source = self._source(config, source_id)
+            if "display_name" in payload:
+                display_name = payload["display_name"]
+                if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
+                    raise ModelHubError("discovery_failed")
+                source.display_name = display_name
+            if "base_url" in payload:
+                if source.kind != "api_key":
+                    raise ModelHubError("discovery_failed")
+                source.base_url = base_url
+                discovered = await self._discover(source)
+                manual = [model for model in source.models if model.provenance == "manual"]
+                manual_ids = {model.id for model in manual}
+                source.models = [
+                    ModelHubModelConfig(
+                        id=model_id,
+                        provenance="discovered",
+                        discovered_at=self.now().isoformat(),
+                    )
+                    for model_id in discovered
+                    if model_id not in manual_ids
+                ] + manual
+            await self._commit_synced(previous, config)
+            return source.to_payload()
 
     @staticmethod
     def _selected_targets(agent: ModelHubAgentSupplyConfig) -> list[tuple[Optional[str], str]]:
@@ -587,52 +673,61 @@ class ModelHubService:
         return any(self._only_selected_model_supplier(config, source, model.id) for model in source.models)
 
     async def delete_source(self, source_id: str, *, force: bool = False) -> None:
-        previous = self.store.load()
-        config = self._clone_config(previous)
-        source = self._source(config, source_id)
-        if not force and self._only_selected_supplier(config, source):
-            raise ModelHubError("mode_switch_blocked", status=409)
-        config.sources = [item for item in config.sources if item.id != source_id]
-        config.priority_order = [item for item in config.priority_order if item != source_id]
-        await self._commit_synced(previous, config)
-        try:
-            if source.credential_ref:
-                await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
-        except ModelHubError:
-            self.store.save(previous)
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            source = self._source(config, source_id)
+            if not force and self._only_selected_supplier(config, source):
+                raise ModelHubError("mode_switch_blocked", status=409)
+            config.sources = [item for item in config.sources if item.id != source_id]
+            config.priority_order = [item for item in config.priority_order if item != source_id]
+            await self._commit_synced(previous, config)
             try:
-                await self._sync_sources(previous)
+                if source.credential_ref:
+                    await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
             except ModelHubError:
-                pass
-            raise
+                self.store.save(previous)
+                try:
+                    await self._sync_sources(previous)
+                except ModelHubError:
+                    pass
+                raise
 
     async def test_source(self, source_id: str) -> tuple[dict, int]:
-        previous = self.store.load()
-        config = self._clone_config(previous)
-        source = self._source(config, source_id)
-        model_ids = await self._discover(source)
-        manual = [model for model in source.models if model.provenance == "manual"]
-        source.models = [
-            ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=self.now().isoformat())
-            for model_id in model_ids
-        ] + manual
-        source.state = ModelHubSourceStateConfig(status="standby")
-        await self._commit_synced(previous, config)
-        return source.to_payload(), len(model_ids)
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            source = self._source(config, source_id)
+            model_ids = await self._discover(source)
+            manual = [model for model in source.models if model.provenance == "manual"]
+            manual_ids = {model.id for model in manual}
+            source.models = [
+                ModelHubModelConfig(
+                    id=model_id,
+                    provenance="discovered",
+                    discovered_at=self.now().isoformat(),
+                )
+                for model_id in model_ids
+                if model_id not in manual_ids
+            ] + manual
+            source.state = ModelHubSourceStateConfig(status="standby")
+            await self._commit_synced(previous, config)
+            return source.to_payload(), len(model_ids)
 
-    def set_priority(self, order: object) -> dict:
-        config = self.store.load()
-        source_ids = [source.id for source in config.sources]
-        if (
-            not isinstance(order, list)
-            or not all(isinstance(item, str) for item in order)
-            or len(set(order)) != len(order)
-            or set(order) != set(source_ids)
-        ):
-            raise ModelHubError("invalid_priority_order")
-        config.priority_order = list(order)
-        self.store.save(config)
-        return {"contract_version": CONTRACT_VERSION, "order": list(order)}
+    async def set_priority(self, order: object) -> dict:
+        async with self._mutation_lock:
+            config = self.store.load()
+            source_ids = [source.id for source in config.sources]
+            if (
+                not isinstance(order, list)
+                or not all(isinstance(item, str) for item in order)
+                or len(set(order)) != len(order)
+                or set(order) != set(source_ids)
+            ):
+                raise ModelHubError("invalid_priority_order")
+            config.priority_order = list(order)
+            self.store.save(config)
+            return {"contract_version": CONTRACT_VERSION, "order": list(order)}
 
     def priority(self) -> dict:
         return {"contract_version": CONTRACT_VERSION, "order": list(self.store.load().priority_order)}
@@ -682,94 +777,106 @@ class ModelHubService:
         config = self.store.load()
         return [self._agent_payload(config, config.agents[backend]) for backend in ("claude", "codex", "opencode")]
 
-    def set_agent_mode(self, backend: str, mode: object) -> dict:
+    async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"}:
             raise ModelHubError("mode_switch_blocked")
-        config = self.store.load()
-        agent = self._agent(config, backend)
-        agent.mode = mode
-        self.store.save(config)
-        return self._agent_payload(config, agent)
+        async with self._mutation_lock:
+            config = self.store.load()
+            agent = self._agent(config, backend)
+            agent.mode = mode
+            self.store.save(config)
+            return self._agent_payload(config, agent)
 
-    def set_mappings(self, backend: str, mappings: object) -> dict:
-        config = self.store.load()
-        agent = self._agent(config, backend)
-        if agent.menu_kind != "fixed" or not isinstance(mappings, list):
-            raise ModelHubError("mapping_target_unavailable")
-        try:
-            parsed = [ModelHubMappingConfig.from_payload(mapping) for mapping in mappings]
-        except ValueError as exc:
-            raise ModelHubError("mapping_target_unavailable") from exc
-        available = {
-            model.id
-            for source in config.sources
-            if self._eligible_for_agent(source, backend)
-            for model in source.models
-        }
-        if any(mapping.enabled and mapping.target_model_id not in available for mapping in parsed):
-            raise ModelHubError("mapping_target_unavailable")
-        agent.mappings = parsed
-        self.store.save(config)
-        return self._agent_payload(config, agent)
+    async def set_mappings(self, backend: str, mappings: object) -> dict:
+        async with self._mutation_lock:
+            config = self.store.load()
+            agent = self._agent(config, backend)
+            if agent.menu_kind != "fixed" or not isinstance(mappings, list):
+                raise ModelHubError("mapping_target_unavailable")
+            try:
+                parsed = [ModelHubMappingConfig.from_payload(mapping) for mapping in mappings]
+            except ValueError as exc:
+                raise ModelHubError("mapping_target_unavailable") from exc
+            available = {
+                model.id
+                for source in config.sources
+                if self._eligible_for_agent(source, backend)
+                for model in source.models
+            }
+            if any(mapping.enabled and mapping.target_model_id not in available for mapping in parsed):
+                raise ModelHubError("mapping_target_unavailable")
+            agent.mappings = parsed
+            self.store.save(config)
+            return self._agent_payload(config, agent)
 
-    def set_opencode_menu(self, menu: object) -> dict:
-        config = self.store.load()
-        agent = config.agents["opencode"]
-        try:
-            parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
-        except (TypeError, ValueError) as exc:
-            raise ModelHubError("mapping_target_unavailable") from exc
-        available = {
-            opencode_model_id(source.vendor, model.id)
-            for source in config.sources
-            if self._eligible_for_agent(source, "opencode")
-            for model in source.models
-        }
-        if any(identifier not in available for identifier in parsed.checked):
-            raise ModelHubError("mapping_target_unavailable")
-        agent.menu = parsed
-        self.store.save(config)
-        return self._agent_payload(config, agent)
+    async def set_opencode_menu(self, menu: object) -> dict:
+        async with self._mutation_lock:
+            config = self.store.load()
+            agent = config.agents["opencode"]
+            try:
+                parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
+            except (TypeError, ValueError) as exc:
+                raise ModelHubError("mapping_target_unavailable") from exc
+            available = {
+                opencode_model_id(source.vendor, model.id)
+                for source in config.sources
+                if self._eligible_for_agent(source, "opencode")
+                for model in source.models
+            }
+            if any(identifier not in available for identifier in parsed.checked):
+                raise ModelHubError("mapping_target_unavailable")
+            agent.menu = parsed
+            self.store.save(config)
+            return self._agent_payload(config, agent)
 
     async def add_custom_model(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("source_not_found", status=404)
-        previous = self.store.load()
-        config = self._clone_config(previous)
-        source = self._source(config, str(payload.get("source_id") or ""))
         model_id = payload.get("model_id")
         display_name = payload.get("display_name")
         if not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable")
         if display_name is not None and not isinstance(display_name, str):
             raise ModelHubError("mapping_target_unavailable")
-        existing = next((model for model in source.models if model.id == model_id), None)
-        if existing is None:
-            source.models.append(
-                ModelHubModelConfig(id=model_id, display_name=display_name, provenance="manual", discovered_at=None)
-            )
-        elif existing.provenance == "manual":
-            existing.display_name = display_name
-        await self._commit_synced(previous, config)
-        return source.to_payload()
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            source = self._source(config, str(payload.get("source_id") or ""))
+            existing = next((model for model in source.models if model.id == model_id), None)
+            if existing is None:
+                source.models.append(
+                    ModelHubModelConfig(
+                        id=model_id,
+                        display_name=display_name,
+                        provenance="manual",
+                        discovered_at=None,
+                    )
+                )
+            elif existing.provenance == "manual":
+                existing.display_name = display_name
+            await self._commit_synced(previous, config)
+            return source.to_payload()
 
     async def delete_custom_model(self, source_id: object, model_id: object) -> dict:
         if not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable")
-        previous = self.store.load()
-        config = self._clone_config(previous)
-        source = self._source(config, str(source_id or ""))
-        manual = next(
-            (model for model in source.models if model.id == model_id and model.provenance == "manual"),
-            None,
-        )
-        if manual is not None and self._only_selected_model_supplier(config, source, model_id):
-            raise ModelHubError("mode_switch_blocked", status=409)
-        source.models = [
-            model for model in source.models if not (model.id == model_id and model.provenance == "manual")
-        ]
-        await self._commit_synced(previous, config)
-        return source.to_payload()
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            source = self._source(config, str(source_id or ""))
+            manual = next(
+                (model for model in source.models if model.id == model_id and model.provenance == "manual"),
+                None,
+            )
+            if manual is not None and self._only_selected_model_supplier(config, source, model_id):
+                raise ModelHubError("mode_switch_blocked", status=409)
+            source.models = [
+                model
+                for model in source.models
+                if not (model.id == model_id and model.provenance == "manual")
+            ]
+            await self._commit_synced(previous, config)
+            return source.to_payload()
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         return self.events.list(limit=limit, before=before)
@@ -791,9 +898,10 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=502)
         self.oauth_flows.remember(flow.flow_id, oauth_channel)
         if consented:
-            config = self.store.load()
-            config.subscription_hub_experimental = True
-            self.store.save(config)
+            async with self._mutation_lock:
+                config = self.store.load()
+                config.subscription_hub_experimental = True
+                self.store.save(config)
         return _oauth_payload(flow, channel=channel)
 
     async def oauth_status(self, flow_id: str) -> dict:
@@ -845,76 +953,82 @@ class ModelHubService:
             raise ModelHubError("migration_item_conflict", status=409)
         return {"applied": 0, "sources": self.list_sources()}
 
-    def _resolution_candidates(
+    async def _resolution_candidates(
         self,
-        config: ModelHubConfig,
         backend: str,
         model_id: str,
         *,
         provider: Optional[str] = None,
     ) -> list[ModelHubSourceConfig]:
-        by_id = {source.id: source for source in config.sources}
-        candidates: list[ModelHubSourceConfig] = []
-        config_changed = False
-        for source_id in config.priority_order:
-            source = by_id[source_id]
-            if source.state.status == "cooldown":
-                try:
-                    retry_at = _parse_datetime(source.state.retry_at or "")
-                except ValueError:
-                    retry_at = self.now() + timedelta(days=1)
-                if retry_at > self.now():
-                    continue
-                source.state = ModelHubSourceStateConfig(status="standby")
-                config_changed = True
-                self.events.append(
-                    build_resolution_event(
-                        agent=cast(EventAgent, backend),
-                        kind="recover",
-                        model_id=model_id,
-                        reason="recovery",
-                        to_source=source.id,
-                        to_label=source.display_name,
-                        now=self.now(),
+        async with self._mutation_lock:
+            config = self.store.load()
+            by_id = {source.id: source for source in config.sources}
+            candidates: list[ModelHubSourceConfig] = []
+            config_changed = False
+            for source_id in config.priority_order:
+                source = by_id[source_id]
+                if source.state.status == "cooldown":
+                    try:
+                        retry_at = _parse_datetime(source.state.retry_at or "")
+                    except ValueError:
+                        retry_at = self.now() + timedelta(days=1)
+                    if retry_at > self.now():
+                        continue
+                    source.state = ModelHubSourceStateConfig(status="standby")
+                    config_changed = True
+                    self.events.append(
+                        build_resolution_event(
+                            agent=cast(EventAgent, backend),
+                            kind="recover",
+                            model_id=model_id,
+                            reason="recovery",
+                            to_source=source.id,
+                            to_label=source.display_name,
+                            now=self.now(),
+                        )
                     )
-                )
-            if (
-                self._eligible_for_agent(source, backend)
-                and (provider is None or opencode_provider_id(source.vendor) == provider)
-                and any(model.id == model_id for model in source.models)
-                and source.state.status != "error"
-            ):
-                candidates.append(source)
-        if config_changed:
-            self.store.save(config)
-        return candidates
+                if (
+                    self._eligible_for_agent(source, backend)
+                    and (provider is None or opencode_provider_id(source.vendor) == provider)
+                    and any(model.id == model_id for model in source.models)
+                    and source.state.status != "error"
+                ):
+                    candidates.append(source)
+            if config_changed:
+                self.store.save(config)
+            return candidates
 
-    def _cooldown(
+    async def _cooldown(
         self,
-        config: ModelHubConfig,
         source: ModelHubSourceConfig,
         decision: ResolutionDecision,
         *,
         agent: EventAgent,
         model_id: str,
     ) -> None:
-        source.state = ModelHubSourceStateConfig(
-            status="cooldown",
-            retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
-            detail_key=f"models.source.cooldown.{decision.reason}",
-        )
-        self.store.save(config)
-        self.events.append(
-            build_resolution_event(
-                agent=agent,
-                kind="cooldown",
-                model_id=model_id,
-                reason=cast(EventReason, decision.reason),
-                from_source=source.id,
-                from_label=source.display_name,
-                now=self.now(),
+        async with self._mutation_lock:
+            config = self.store.load()
+            try:
+                current = self._source(config, source.id)
+            except ModelHubError:
+                return
+            current.state = ModelHubSourceStateConfig(
+                status="cooldown",
+                retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
+                detail_key=f"models.source.cooldown.{decision.reason}",
             )
-        )
+            self.store.save(config)
+            self.events.append(
+                build_resolution_event(
+                    agent=agent,
+                    kind="cooldown",
+                    model_id=model_id,
+                    reason=cast(EventReason, decision.reason),
+                    from_source=current.id,
+                    from_label=current.display_name,
+                    now=self.now(),
+                )
+            )
 
     def _emit_switch(
         self,
@@ -1002,7 +1116,7 @@ class ModelHubService:
                     now=self.now(),
                 )
             )
-        candidates = self._resolution_candidates(config, backend, target_model, provider=provider)
+        candidates = await self._resolution_candidates(backend, target_model, provider=provider)
         if not candidates:
             raise ModelHubError("mapping_target_unavailable", status=409)
 
@@ -1071,7 +1185,7 @@ class ModelHubService:
                 )
                 return ResolvedInvocation(source.id, target_model, handle, outcome)
             if decision.action == "fallback":
-                self._cooldown(config, source, decision, agent=event_agent, model_id=target_model)
+                await self._cooldown(source, decision, agent=event_agent, model_id=target_model)
                 failed_source = source
                 failed_reason = cast(EventReason, decision.reason)
                 continue

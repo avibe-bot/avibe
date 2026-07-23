@@ -198,6 +198,8 @@ def test_error_classification_table(outcome, refresh_attempted, action, reason):
 
 
 def test_quota_failure_cools_source_switches_and_emits_redacted_events(tmp_path):
+    """Scenario: MH-RES-001."""
+
     fake_key = "sk-live-super-secret-material"
     clock = [datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)]
     adapter = FakeAdapter(
@@ -300,6 +302,8 @@ def test_parameter_error_and_started_stream_never_fallback(tmp_path):
 
 
 def test_mapping_is_scoped_to_the_requesting_backend(tmp_path):
+    """Scenario: MH-MAP-001."""
+
     agents = {
         backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
         for backend in ("claude", "codex", "opencode")
@@ -346,7 +350,7 @@ def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
     config.sources[0].vendor = "relaycorp"
     config.agents["opencode"].menu.checked = ["custom/claude-opus-4-6"]
 
-    menu = service.set_opencode_menu(config.agents["opencode"].menu.to_payload())
+    menu = asyncio.run(service.set_opencode_menu(config.agents["opencode"].menu.to_payload()))
     current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
     resolved = asyncio.run(
         service.resolve(
@@ -527,8 +531,10 @@ def test_custom_model_preserves_slash_qualified_upstream_id(tmp_path):
             }
         )
     )
-    menu = service.set_opencode_menu(
-        {"view": "featured", "checked": ["openrouter/anthropic/claude-sonnet-4"]}
+    menu = asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openrouter/anthropic/claude-sonnet-4"]}
+        )
     )
 
     assert updated["models"][-1]["id"] == "anthropic/claude-sonnet-4"
@@ -572,9 +578,17 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
     config.sources[1].models = [ModelHubModelConfig(id="gpt-5", provenance="discovered")]
 
     with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
-        service.set_mappings(
-            "codex",
-            [{"builtin_id": "gpt-5", "target_model_id": "claude-opus-4-6", "enabled": True}],
+        asyncio.run(
+            service.set_mappings(
+                "codex",
+                [
+                    {
+                        "builtin_id": "gpt-5",
+                        "target_model_id": "claude-opus-4-6",
+                        "enabled": True,
+                    }
+                ],
+            )
         )
 
     config.agents["claude"].mappings = [

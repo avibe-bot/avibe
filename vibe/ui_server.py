@@ -3104,11 +3104,11 @@ def model_hub_priority_get():
 
 
 @app.route("/api/models/priority", methods=["PUT"])
-def model_hub_priority_put():
+async def model_hub_priority_put():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        priority = _model_hub_service().set_priority((request.json or {}).get("order"))
+        priority = await _model_hub_service().set_priority((request.json or {}).get("order"))
         return _model_hub_success(order=priority["order"])
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3120,33 +3120,36 @@ def model_hub_agents_get():
 
 
 @app.route("/api/models/agents/<backend>/mode", methods=["PATCH"])
-def model_hub_agent_mode_patch(backend):
+async def model_hub_agent_mode_patch(backend):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        agent = _model_hub_service().set_agent_mode(backend, (request.json or {}).get("mode"))
+        agent = await _model_hub_service().set_agent_mode(backend, (request.json or {}).get("mode"))
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
 @app.route("/api/models/agents/<backend>/mappings", methods=["PUT"])
-def model_hub_agent_mappings_put(backend):
+async def model_hub_agent_mappings_put(backend):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        agent = _model_hub_service().set_mappings(backend, (request.json or {}).get("mappings"))
+        agent = await _model_hub_service().set_mappings(
+            backend,
+            (request.json or {}).get("mappings"),
+        )
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
 @app.route("/api/models/agents/opencode/menu", methods=["PUT"])
-def model_hub_opencode_menu_put():
+async def model_hub_opencode_menu_put():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        agent = _model_hub_service().set_opencode_menu((request.json or {}).get("menu"))
+        agent = await _model_hub_service().set_opencode_menu((request.json or {}).get("menu"))
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
