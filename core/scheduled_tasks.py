@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
-from core.message_context import resolve_context_platform
+from core.message_context import build_thread_session_anchor, resolve_context_platform
 from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
@@ -2941,8 +2941,21 @@ class ScheduledTaskService:
         clear_provisional_source = session_target.thread_id is None and self._supports_threaded_delivery(session_target)
 
         if delivery_target.thread_id:
-            alias_base = f"{delivery_target.platform}_{delivery_target.thread_id}"
-            if same_scope and alias_base == f"{session_target.platform}_{session_target.thread_id}":
+            alias_base = build_thread_session_anchor(
+                delivery_target.platform,
+                delivery_target.scope_id,
+                delivery_target.thread_id,
+            )
+            source_alias_base = (
+                build_thread_session_anchor(
+                    session_target.platform,
+                    session_target.scope_id,
+                    session_target.thread_id,
+                )
+                if session_target.thread_id
+                else None
+            )
+            if same_scope and alias_base == source_alias_base:
                 return {"mode": "none"}
             return {
                 "mode": "fixed_base",

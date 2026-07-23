@@ -640,6 +640,25 @@ def test_build_context_separates_delivery_target_from_session_target() -> None:
     assert context.platform_specific["scheduled_delivery_alias"]["clear_source"] is False
 
 
+def test_telegram_delivery_alias_includes_chat_id() -> None:
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")),
+    )
+    session_target = parse_session_key("telegram::channel::-100123::thread::42")
+    delivery_target = parse_session_key("telegram::channel::-100456::thread::42")
+
+    strategy = service._build_delivery_alias_strategy(
+        session_target=session_target,
+        delivery_target=delivery_target,
+        session_context={"channel_id": "-100123"},
+        delivery_context={"channel_id": "-100456"},
+    )
+
+    assert strategy["mode"] == "fixed_base"
+    assert strategy["base_session_id"] == "telegram_-100456_42"
+
+
 def test_build_context_avibe_keys_on_session_id_not_project() -> None:
     # An avibe project holds many independent sessions. The scheduled context's
     # identity (channel_id) must be the concrete session, not the project scope,

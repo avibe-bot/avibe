@@ -19,6 +19,7 @@ from sqlalchemy import Engine, select
 
 from core.message_context import (
     build_context_session_key,
+    build_thread_session_anchor,
     resolve_context_settings_key,
     resolve_context_thread_id,
 )
@@ -367,7 +368,7 @@ def _fallback_anchor(context: MessageContext, platform: str) -> str:
         return str(target["session_anchor"])
     thread_id = resolve_context_thread_id(context) or context.thread_id
     if platform == "telegram" and thread_id:
-        return f"{platform}_{context.channel_id}_{thread_id}"
+        return build_thread_session_anchor(platform, context.channel_id, thread_id)
     return f"{platform}_{thread_id or context.message_id or context.channel_id or context.user_id}"
 
 

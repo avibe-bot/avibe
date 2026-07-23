@@ -455,7 +455,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             settings.set_calls,
-            [("telegram::-100123", "codex", "telegram_99", "sess_telegram_topic")],
+            [("telegram::-100123", "codex", "telegram_-100123_99", "sess_telegram_topic")],
         )
         self.assertEqual(settings.mark_calls, [("U777", "-100123", "99")])
         self.assertEqual(len(im_client.messages), 2)

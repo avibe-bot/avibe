@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from modules.im import MessageContext
 from config.v2_settings import make_thread_settings_key
+from modules.im import MessageContext
 
 
 def resolve_context_platform(
@@ -39,6 +39,13 @@ def resolve_context_thread_id(context: MessageContext) -> Optional[str]:
     if payload.get("is_forum") or payload.get("is_topic_message"):
         return "1"
     return None
+
+
+def build_thread_session_anchor(platform: str, channel_id: str, thread_id: str) -> str:
+    """Build a backend session anchor unique at the platform's thread scope."""
+    if platform == "telegram":
+        return f"{platform}_{channel_id}_{thread_id}"
+    return f"{platform}_{thread_id}"
 
 
 def resolve_context_scope_settings_key(context: MessageContext) -> str:

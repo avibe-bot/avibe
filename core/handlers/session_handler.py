@@ -32,7 +32,7 @@ from config.v2_config import (
 from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
-from core.message_context import resolve_context_thread_id
+from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
@@ -325,10 +325,9 @@ class SessionHandler(BaseHandler):
                 base_id = context.channel_id or context.user_id
         else:
             resolved_thread_id = resolve_context_thread_id(context)
-            if platform == "telegram" and resolved_thread_id:
-                base_id = f"{context.channel_id}_{resolved_thread_id}"
-            else:
-                base_id = resolved_thread_id or context.thread_id
+            base_id = resolved_thread_id or context.thread_id
+            if platform == "telegram" and base_id:
+                return build_thread_session_anchor(platform, context.channel_id, base_id)
             if not base_id:
                 use_message_id = True
                 getter = getattr(self.controller, "get_im_client_for_context", None)
