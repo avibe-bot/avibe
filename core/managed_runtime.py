@@ -487,7 +487,10 @@ class ManagedRuntimeManager:
     ) -> ManagedRuntimeArchive | None:
         platform_tag = runtime_platform_tag()
         platform_aliases = dict(self.spec.platform_aliases)
-        archive = manifest.archives.get(platform_aliases.get(platform_tag, platform_tag))
+        archive = manifest.archives.get(platform_tag)
+        if archive is None:
+            alias = platform_aliases.get(platform_tag)
+            archive = manifest.archives.get(alias) if alias else None
         if archive is None:
             self._install_reason = self._reason("platform_unsupported")
         return archive

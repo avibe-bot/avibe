@@ -101,11 +101,14 @@ class CLIProxyEngineAdapter:
         self._oauth_lock = threading.RLock()
 
     async def ensure_installed(self) -> EngineStatus:
-        install = await asyncio.to_thread(self.supervisor.installer.ensure)
-        if not install.get("ok"):
-            reason = str(install.get("reason") or "engine_install_failed")
-            raise EngineUnavailableError("models.engine.install_failed", reason=reason)
-        return await self.status()
+        async with self._routing_lock:
+            install = await asyncio.to_thread(self.supervisor.installer.ensure)
+            if not install.get("ok"):
+                reason = str(install.get("reason") or "engine_install_failed")
+                raise EngineUnavailableError("models.engine.install_failed", reason=reason)
+            if install.get("changed"):
+                await asyncio.to_thread(self.supervisor.restart_if_running)
+            return await self.status()
 
     async def start(self) -> EngineStatus:
         await asyncio.to_thread(self.supervisor.ensure_running)

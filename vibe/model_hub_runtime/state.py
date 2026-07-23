@@ -204,6 +204,8 @@ class EngineStateStore:
                     raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
                 model_ids = tuple(dict.fromkeys(str(model).strip() for model in binding.model_ids))
+                if not model_ids:
+                    raise EngineStateError("source requires at least one model id")
                 if any(not model for model in model_ids):
                     raise EngineStateError("model id cannot be empty")
                 records.append(
@@ -239,6 +241,8 @@ class EngineStateStore:
             if current is None:
                 raise EngineStateError("source is not registered")
             models = tuple(dict.fromkeys(str(model).strip() for model in model_ids))
+            if not models:
+                raise EngineStateError("source requires at least one model id")
             if any(not model for model in models):
                 raise EngineStateError("model id cannot be empty")
             updated_record = SourceRecord(**{**asdict(current), "model_ids": models})
@@ -505,6 +509,8 @@ def _validated_base_url(value: str | None) -> str | None:
 
 
 def _validate_source_target(vendor: str, protocol: str, base_url: str | None) -> None:
+    if protocol == "anthropic" and base_url is None and vendor != "anthropic":
+        raise EngineStateError("Anthropic-compatible source requires a base URL")
     if protocol == "openai_responses" and base_url is None and vendor not in {"openai", "codex"}:
         raise EngineStateError("Responses API source requires a base URL")
     if protocol in {"openai_chat", "openai_compatible"} and base_url is None and vendor != "openai":

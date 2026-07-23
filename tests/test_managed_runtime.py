@@ -6,6 +6,8 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from core import managed_runtime
 from core.managed_runtime import ManagedRuntimeManager, ManagedRuntimeSpec
 
@@ -17,9 +19,15 @@ class FixtureRuntimeManager(ManagedRuntimeManager):
         return binary.read_text(encoding="utf-8").strip()
 
 
-def test_list_asset_manifest_supports_platform_alias_and_url_derived_name(
+@pytest.mark.parametrize(
+    ("include_direct_platform", "expected_platform"),
+    [(False, "linux-amd64"), (True, "linux-x64")],
+)
+def test_list_asset_manifest_prefers_direct_platform_then_falls_back_to_alias(
     tmp_path: Path,
     monkeypatch,
+    include_direct_platform: bool,
+    expected_platform: str,
 ) -> None:
     archive = tmp_path / "fixture-linux_amd64.tar.gz"
     binary_payload = b"v1\n"
@@ -29,6 +37,17 @@ def test_list_asset_manifest_supports_platform_alias_and_url_derived_name(
         member.size = len(binary_payload)
         tar.addfile(member, io.BytesIO(binary_payload))
 
+    assets = [
+        {
+            "platform": "linux-amd64",
+            "url": archive.as_uri(),
+            "size_bytes": archive.stat().st_size,
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
+        }
+    ]
+    if include_direct_platform:
+        assets.append({**assets[0], "platform": "linux-x64"})
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -36,15 +55,7 @@ def test_list_asset_manifest_supports_platform_alias_and_url_derived_name(
                 "schema_version": 1,
                 "version": "v1",
                 "source": "example/fixture",
-                "assets": [
-                    {
-                        "platform": "linux-amd64",
-                        "url": archive.as_uri(),
-                        "size_bytes": archive.stat().st_size,
-                        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-                        "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
-                    }
-                ],
+                "assets": assets,
             }
         ),
         encoding="utf-8",
@@ -68,6 +79,7 @@ def test_list_asset_manifest_supports_platform_alias_and_url_derived_name(
 
     assert result["ok"] is True
     assert result["changed"] is True
+    assert result["platform"] == expected_platform
     assert Path(result["path"]).read_bytes() == binary_payload
     assert manager.ensure()["changed"] is False
     assert manager.status()["installed"] is True

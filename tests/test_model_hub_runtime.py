@@ -271,6 +271,45 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     with pytest.raises(EngineStateError, match="requires a base URL"):
         store.sync_sources([_binding(incomplete_ref, base_url=None)])
 
+    custom_anthropic_ref = store.store_api_key(
+        "secret",
+        vendor="custom",
+        protocol="anthropic",
+        base_url=None,
+    )
+    with pytest.raises(EngineStateError, match="requires a base URL"):
+        store.sync_sources(
+            [
+                _binding(
+                    custom_anthropic_ref,
+                    vendor="custom",
+                    protocol="anthropic",
+                    base_url=None,
+                )
+            ]
+        )
+
+    with pytest.raises(EngineStateError, match="at least one model"):
+        store.sync_sources([_binding(credential_ref, model_ids=())])
+
+    official_anthropic_ref = store.store_api_key(
+        "secret",
+        vendor="anthropic",
+        protocol="anthropic",
+        base_url=None,
+    )
+    official = store.sync_sources(
+        [
+            _binding(
+                official_anthropic_ref,
+                vendor="anthropic",
+                protocol="anthropic",
+                base_url=None,
+            )
+        ]
+    )
+    assert official[0].base_url is None
+
     auth_file = store.auth_dir / "oauth.json"
     auth_file.write_text("{}", encoding="utf-8")
     auth_file.chmod(0o644)
@@ -323,7 +362,17 @@ def test_oauth_source_bindings_are_scoped_and_follow_reauthentication(tmp_path: 
     with pytest.raises(EngineStateError, match="does not match"):
         store.sync_sources([SourceBinding(**{**binding.__dict__, "source_id": "src_other1234"})])
     with pytest.raises(EngineStateError, match="does not match"):
-        store.sync_sources([SourceBinding(**{**binding.__dict__, "vendor": "openai"})])
+        store.sync_sources(
+            [
+                SourceBinding(
+                    **{
+                        **binding.__dict__,
+                        "vendor": "openai",
+                        "base_url": "https://api.openai.com/v1",
+                    }
+                )
+            ]
+        )
 
     first = store.sync_sources([binding])[0]
     assert first.prefix == store.credential_metadata(first_ref)["prefix"]
@@ -822,6 +871,51 @@ def test_adapter_engine_unavailable_outcome_contains_only_a_stable_code(tmp_path
         assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
         assert outcome.error_code == "engine_unavailable"
         assert outcome.redacted_message is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("changed", "expected_restarts"), [(False, 0), (True, 1)])
+def test_adapter_applies_changed_install_to_running_engine(
+    tmp_path: Path,
+    changed: bool,
+    expected_restarts: int,
+) -> None:
+    class Installer:
+        def ensure(self):
+            return {"ok": True, "changed": changed}
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.installer = Installer()
+            self.restarts = 0
+
+        def restart_if_running(self) -> None:
+            self.restarts += 1
+
+        def status(self):
+            return {
+                "status": {
+                    "health": "down",
+                    "installed_version": "v7.2.95",
+                    "verified": True,
+                    "listening": None,
+                    "last_check": None,
+                }
+            }
+
+    async def run() -> None:
+        supervisor = Supervisor()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=supervisor,  # type: ignore[arg-type]
+            state_store=EngineStateStore(tmp_path / "state"),
+        )
+
+        status = await adapter.ensure_installed()
+
+        assert status.installed_version == "v7.2.95"
+        assert status.verified is True
+        assert supervisor.restarts == expected_restarts
 
     asyncio.run(run())
 
