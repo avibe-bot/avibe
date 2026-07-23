@@ -2993,7 +2993,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         Transport = transport_module.CodexTransport
 
         writes = []
-        created_cmd = {}
+        created_cmds = []
 
         class _FakeStdin:
             def __init__(self):
@@ -3038,7 +3038,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
                 return 0
 
         async def fake_create_subprocess_exec(*cmd, **kwargs):
-            created_cmd["cmd"] = list(cmd)
+            created_cmds.append(list(cmd))
             return _FakeProcess()
 
         with patch.object(
@@ -3049,10 +3049,26 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
             transport = Transport(binary="codex", cwd="/tmp/work")
             await transport.start()
             await transport.stop()
+            transport = Transport(
+                binary="codex",
+                cwd="/tmp/work",
+                runtime_args=["-c", 'model_provider="avibe_model_hub"'],
+            )
+            await transport.start()
+            await transport.stop()
 
         self.assertEqual(
-            created_cmd["cmd"],
-            ["codex", "--dangerously-bypass-approvals-and-sandbox", "app-server"],
+            created_cmds,
+            [
+                ["codex", "--dangerously-bypass-approvals-and-sandbox", "app-server"],
+                [
+                    "codex",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "app-server",
+                    "-c",
+                    'model_provider="avibe_model_hub"',
+                ],
+            ],
         )
 
 

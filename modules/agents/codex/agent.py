@@ -8,7 +8,7 @@ import os
 import shlex
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from config import paths
 from config.v2_config import (
@@ -37,7 +37,12 @@ from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from modules.agents.model_hub import ModelHubLaunch
+
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
+_CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
+_CODEX_DEFAULT_PROVIDER_ID = "openai"
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 
 
@@ -143,6 +148,17 @@ class CodexAgent(BaseAgent):
             return lambda: None
         return lambda: self._transport_alive(transport)
 
+    async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
+        router = getattr(self.controller, "model_hub_runtime", None)
+        recorder = getattr(router, "record_native_failure", None)
+        if not callable(recorder):
+            return False
+        try:
+            return bool(await recorder(context, diagnostic))
+        except Exception:
+            logger.warning("Failed to record Model Hub native cooldown", exc_info=True)
+            return False
+
     async def handle_message(self, request: AgentRequest) -> None:
         """Process a user message by routing it through app-server.
 
@@ -152,46 +168,60 @@ class CodexAgent(BaseAgent):
         3. If a turn is active → interrupt it first
         4. Start a new turn with the user's message
         """
-        try:
-            transport = await self._get_or_create_transport(request.working_path)
-        except FileNotFoundError:
-            await emit_backend_failure(
-                self.controller,
-                request.context,
-                self.name,
-                "Codex CLI not found",
-                display_text="❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
-                request=request,
-            )
-            await self._remove_ack_reaction(request)
-            self._event_handler._release_stream_turn(request.context)
-            return
-        except Exception as e:
-            logger.error("Failed to start Codex transport: %s", e, exc_info=True)
-            await emit_backend_failure(
-                self.controller,
-                request.context,
-                self.name,
-                str(e),
-                display_text=f"❌ Failed to start Codex CLI: {e}",
-                request=request,
-            )
-            await self._remove_ack_reaction(request)
-            self._event_handler._release_stream_turn(request.context)
-            return
-
-        # Track session_key and cwd for scoped invalidation
-        self._session_mgr.set_session_key(request.base_session_id, request.session_key)
-        self._session_mgr.set_cwd(request.base_session_id, request.working_path)
-        self._touch_transport_activity(request.working_path)
-
-        await self._delete_ack(request)
-
         # Serialize turn lifecycle per session
         if request.base_session_id not in self._session_locks:
             self._session_locks[request.base_session_id] = asyncio.Lock()
 
         async with self._session_locks[request.base_session_id]:
+            launch = None
+            try:
+                if getattr(self.controller, "model_hub_runtime", None) is not None:
+                    from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
+
+                    _, requested_model, _, _ = self._resolve_codex_agent_settings(request)
+                    launch = await resolve_model_hub_launch(
+                        self.controller,
+                        "codex",
+                        requested_model or "",
+                    )
+                    bind_launch(request.context, launch)
+                    await self._interrupt_active_turn_before_runtime_change(request, launch)
+                    transport = await self._get_or_create_transport(request.working_path, launch)
+                else:
+                    transport = await self._get_or_create_transport(request.working_path)
+            except FileNotFoundError:
+                await emit_backend_failure(
+                    self.controller,
+                    request.context,
+                    self.name,
+                    "Codex CLI not found",
+                    display_text="❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
+                    request=request,
+                )
+                await self._remove_ack_reaction(request)
+                self._event_handler._release_stream_turn(request.context)
+                return
+            except Exception as e:
+                logger.error("Failed to start Codex transport: %s", e, exc_info=True)
+                await self._record_model_hub_native_failure(request.context, str(e))
+                await emit_backend_failure(
+                    self.controller,
+                    request.context,
+                    self.name,
+                    str(e),
+                    display_text=f"❌ Failed to start Codex CLI: {e}",
+                    request=request,
+                )
+                await self._remove_ack_reaction(request)
+                self._event_handler._release_stream_turn(request.context)
+                return
+
+            # Resolve after queued turns, then bind this session to the runtime.
+            self._session_mgr.set_session_key(request.base_session_id, request.session_key)
+            self._session_mgr.set_cwd(request.base_session_id, request.working_path)
+            self._touch_transport_activity(request.working_path)
+            await self._delete_ack(request)
+
             self._turn_registry.remember_request(request)
             try:
                 # Get or create thread (with resume support)
@@ -242,7 +272,10 @@ class CodexAgent(BaseAgent):
                     )
                     await self._drop_transport_after_failure(request.working_path, transport, request)
                     try:
-                        transport = await self._get_or_create_transport(request.working_path)
+                        if launch is None:
+                            transport = await self._get_or_create_transport(request.working_path)
+                        else:
+                            transport = await self._get_or_create_transport(request.working_path, launch)
                         self._touch_transport_activity(request.working_path)
                         thread_id = await self._start_or_resume_thread(transport, request)
                         await self._start_turn(transport, request, thread_id)
@@ -258,6 +291,7 @@ class CodexAgent(BaseAgent):
                 # fallbacks).
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
+                await self._record_model_hub_native_failure(request.context, str(e))
                 error_text = f"❌ Codex error: {e}"
                 await emit_backend_failure(
                     self.controller,
@@ -694,72 +728,144 @@ class CodexAgent(BaseAgent):
         self._clear_thread_developer_instructions(request.base_session_id)
         self._turn_registry.clear_session(request.base_session_id)
 
-    async def _get_or_create_transport(self, cwd: str) -> CodexTransport:
+    async def _get_or_create_transport(
+        self,
+        cwd: str,
+        launch: "ModelHubLaunch | None" = None,
+    ) -> CodexTransport:
         """Return an initialized transport for the given working directory."""
         # Serialize creation per cwd
         if cwd not in self._transport_locks:
             self._transport_locks[cwd] = asyncio.Lock()
 
-        async with self._transport_locks[cwd]:
-            # Double-check after acquiring lock
-            existing = self._transports.get(cwd)
-            if existing and existing.is_initialized:
-                # Reuse only while the directory the app-server was spawned in
-                # is still the SAME directory (#561): after a delete (+ possible
-                # re-create) the cached process sits in a dead inode and every
-                # thread/start fails. Untracked legacy entries reuse as before.
-                spawned_ino = self._cwd_inodes().get(cwd)
-                stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
-                if not stale_cwd:
-                    self._touch_transport_activity(cwd)
-                    return existing
-                logger.warning(
-                    "Codex transport cwd was replaced under the cached app-server; restarting transport for cwd=%s",
-                    cwd,
-                )
+        while True:
+            wait_for_active_turns = False
+            async with self._transport_locks[cwd]:
+                # Double-check after acquiring lock
+                existing = self._transports.get(cwd)
+                if existing and existing.is_initialized:
+                    # Reuse only while the directory the app-server was spawned in
+                    # is still the SAME directory (#561): after a delete (+ possible
+                    # re-create) the cached process sits in a dead inode and every
+                    # thread/start fails. Untracked legacy entries reuse as before.
+                    spawned_ino = self._cwd_inodes().get(cwd)
+                    stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
+                    desired_fingerprint = launch.fingerprint if launch is not None else "direct"
+                    runtime_changed = getattr(existing, "runtime_fingerprint", "direct") != desired_fingerprint
+                    if not stale_cwd and not runtime_changed:
+                        self._touch_transport_activity(cwd)
+                        return existing
+                    if runtime_changed and self._has_active_turns_for_cwd(cwd):
+                        wait_for_active_turns = True
+                    elif stale_cwd:
+                        logger.warning(
+                            "Codex transport cwd was replaced under the cached app-server; "
+                            "restarting transport for cwd=%s",
+                            cwd,
+                        )
+                    else:
+                        logger.info("Restarting Codex transport after Model Hub channel change for cwd=%s", cwd)
 
-            # Stop stale transport if any
-            if existing:
-                await existing.stop()
-                # The new app-server process won't know about threads/turns
-                # from the old process.  Invalidate only sessions bound to
-                # this cwd so healthy sessions on other cwds are unaffected.
-                affected = self._session_mgr.sessions_for_cwd(cwd)
-                for bid in affected:
-                    self._session_mgr.invalidate_thread(bid)
-                    self._clear_thread_developer_instructions(bid)
-                    self._turn_registry.clear_session(bid)
-                if affected:
-                    logger.info(
-                        "Invalidated %d stale Codex session(s) after transport restart for cwd=%s",
-                        len(affected),
-                        cwd,
+                if wait_for_active_turns:
+                    pass
+                else:
+                    # Stop stale transport if any
+                    if existing:
+                        await existing.stop()
+                        # The new app-server process won't know about threads/turns
+                        # from the old process. Invalidate only sessions bound to
+                        # this cwd so healthy sessions on other cwds are unaffected.
+                        affected = self._session_mgr.sessions_for_cwd(cwd)
+                        for bid in affected:
+                            self._session_mgr.invalidate_thread(bid)
+                            self._clear_thread_developer_instructions(bid)
+                            self._turn_registry.clear_session(bid)
+                        if affected:
+                            logger.info(
+                                "Invalidated %d stale Codex session(s) after transport restart for cwd=%s",
+                                len(affected),
+                                cwd,
+                            )
+
+                    runtime_args: list[str] = []
+                    runtime_env: dict[str, str] | None = None
+                    runtime_fingerprint = "direct"
+                    if launch is not None:
+                        from modules.agents.model_hub import build_codex_hub_launch
+
+                        runtime_args, runtime_env = build_codex_hub_launch([], os.environ.copy(), launch)
+                        runtime_fingerprint = launch.fingerprint
+                    transport = CodexTransport(
+                        binary=self.codex_config.binary,
+                        cwd=cwd,
+                        extra_args=list(self.codex_config.extra_args),
+                        runtime_args=runtime_args,
+                        runtime_env=runtime_env,
+                        runtime_fingerprint=runtime_fingerprint,
                     )
 
-            transport = CodexTransport(
-                binary=self.codex_config.binary,
-                cwd=cwd,
-                extra_args=list(self.codex_config.extra_args),
-            )
+                    # Wire up callbacks
+                    transport.on_notification(self._on_notification)
+                    # Bind the cwd so any server request (e.g. an auto-approval)
+                    # refreshes this transport's activity even without a turn id.
+                    transport.on_server_request(
+                        lambda req_id, method, params, _cwd=cwd: self._on_server_request(
+                            _cwd, req_id, method, params
+                        )
+                    )
 
-            # Wire up callbacks
-            transport.on_notification(self._on_notification)
-            # Bind the cwd so any server request (e.g. an auto-approval) refreshes
-            # this transport's activity: a server request IS app-server liveness,
-            # and unlike notifications it isn't always tied to a resolvable
-            # turn/thread in params. Without this a turn that thinks silently and
-            # then asks for approval near the stuck-active cap could be wrongly
-            # force-evicted by the next sweep.
-            transport.on_server_request(
-                lambda req_id, method, params, _cwd=cwd: self._on_server_request(_cwd, req_id, method, params)
-            )
+                    await transport.start()
+                    governor_from_controller(self.controller).apply_to_pid(
+                        getattr(transport, "pid", None),
+                        label="codex app-server",
+                    )
+                    self._transports[cwd] = transport
+                    self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
+                    self._touch_transport_activity(cwd)
+                    return transport
+            if wait_for_active_turns:
+                await asyncio.sleep(0.05)
 
-            await transport.start()
-            governor_from_controller(self.controller).apply_to_pid(getattr(transport, "pid", None), label="codex app-server")
-            self._transports[cwd] = transport
-            self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
-            self._touch_transport_activity(cwd)
-            return transport
+    async def _interrupt_active_turn_before_runtime_change(
+        self,
+        request: AgentRequest,
+        launch: "ModelHubLaunch",
+    ) -> None:
+        """Let a replacement prompt interrupt its own stale-runtime turn."""
+
+        transport = self._transports.get(request.working_path)
+        if transport is None or not transport.is_initialized:
+            return
+        if getattr(transport, "runtime_fingerprint", "direct") == launch.fingerprint:
+            return
+        thread_id = self._session_mgr.get_thread_id(request.base_session_id)
+        active_turn = self._turn_registry.get_active_turn(request.base_session_id)
+        if not thread_id or not active_turn:
+            return
+        try:
+            await transport.send_request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": active_turn},
+            )
+        except Exception:
+            # A dead/wedged transport cannot acknowledge the interrupt. Hide
+            # and release the old turn anyway so the runtime-change path can
+            # replace that transport instead of waiting on it forever.
+            logger.warning(
+                "Codex turn interrupt failed before Model Hub runtime change; "
+                "replacing stale transport for cwd=%s",
+                request.working_path,
+                exc_info=True,
+            )
+        interrupted_request = self._event_handler.clear_pending(active_turn)
+        if interrupted_request:
+            await self._remove_ack_reaction(interrupted_request)
+            # The app-server may be replaced before its interrupted completion
+            # notification arrives. Settle the old request now; release is
+            # token-guarded, so it cannot close the replacement turn.
+            release = getattr(self._event_handler, "_release_stream_turn", None)
+            if callable(release):
+                release(interrupted_request.context)
 
     # ------------------------------------------------------------------
     # Thread management
@@ -1021,6 +1127,12 @@ class CodexAgent(BaseAgent):
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
         effective_model = explicit_model or (agent_definition.model if agent_definition else None) or self.codex_config.default_model
+        if getattr(self.controller, "model_hub_runtime", None) is not None:
+            from modules.agents.model_hub import launch_for_context
+
+            launch = launch_for_context(getattr(request, "context", None))
+            if launch is not None and launch.backend == "codex":
+                effective_model = launch.runtime_model or effective_model
         effective_effort = explicit_effort or (agent_definition.reasoning_effort if agent_definition else None)
         developer_instructions = vibe_instructions or (agent_definition.developer_instructions if agent_definition else None)
 
@@ -1183,6 +1295,8 @@ class CodexAgent(BaseAgent):
 
     @staticmethod
     def _is_managed_provider_transition(stored_provider: str, current_provider: str) -> bool:
+        if _CODEX_MODEL_HUB_PROVIDER_ID in {stored_provider, current_provider}:
+            return True
         return {stored_provider, current_provider}.issubset(_CODEX_MANAGED_PROVIDER_IDS)
 
     async def _read_effective_model_provider(
@@ -1208,7 +1322,10 @@ class CodexAgent(BaseAgent):
         model_provider = config_obj.get("model_provider")
         if isinstance(model_provider, str) and model_provider.strip():
             return model_provider.strip()
-        return None
+        # Codex omits the built-in provider from config/read when no explicit
+        # model_provider is configured. Make that default concrete so a thread
+        # created under the ephemeral Hub provider can resume in Direct mode.
+        return _CODEX_DEFAULT_PROVIDER_ID
 
     def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
         """Build Codex thread-level developer instructions for start/resume.

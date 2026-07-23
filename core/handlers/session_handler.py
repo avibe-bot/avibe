@@ -6,7 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
 from modules.claude_sdk_compat import (
@@ -41,6 +41,9 @@ from vibe import backend_model_catalog
 from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from modules.agents.model_hub import ModelHubLaunch
 
 CLAUDE_NO_CONVERSATION_RE = re.compile(r"No conversation found with session ID:\s*(\S+)")
 CLAUDE_REMOTE_DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
@@ -81,6 +84,15 @@ class SessionHandler(BaseHandler):
         controller.claude_system_prompts = self.claude_system_prompts
         controller.claude_session_creates = self.claude_session_creates
 
+    @staticmethod
+    def _cached_claude_subagent_model(
+        explicit_model: Optional[str],
+        model_hub_launch: "ModelHubLaunch",
+    ) -> Optional[str]:
+        if model_hub_launch.channel in {"native_cli", "hub"}:
+            return model_hub_launch.runtime_model
+        return explicit_model
+
     def touch_session_activity(self, composite_key: str) -> None:
         if composite_key:
             self.session_last_activity[composite_key] = time.monotonic()
@@ -111,6 +123,10 @@ class SessionHandler(BaseHandler):
         self.session_last_activity.pop(composite_key, None)
         self.session_turn_started.pop(composite_key, None)
         self.claude_system_prompts.pop(composite_key, None)
+
+    async def _wait_for_claude_session_idle(self, composite_key: str) -> None:
+        while composite_key in self.active_sessions:
+            await asyncio.sleep(0.05)
 
     def bind_claude_runtime_session(
         self,
@@ -171,9 +187,15 @@ class SessionHandler(BaseHandler):
         stored_claude_session_id: Optional[str],
         current_model: Optional[str],
         agent_system_prompt: Optional[str],
+        model_hub_launch: "ModelHubLaunch",
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
+            logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
+            await self._wait_for_claude_session_idle(composite_key)
+            await self.cleanup_session(composite_key)
             return None
 
         next_system_prompt = self._build_claude_system_prompt(
@@ -234,10 +256,16 @@ class SessionHandler(BaseHandler):
         context: MessageContext,
         session_key: str,
         native_session_id: Optional[str],
-        explicit_model: Optional[str],
+        desired_model: Optional[str],
+        model_hub_launch: "ModelHubLaunch",
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
+            logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")
+            await self._wait_for_claude_session_idle(composite_key)
+            await self.cleanup_session(composite_key)
             return None
         self.ensure_agent_session_id(
             context,
@@ -261,16 +289,16 @@ class SessionHandler(BaseHandler):
             )
             await self.cleanup_session(composite_key)
             return None
-        if explicit_model:
+        if desired_model:
             try:
-                await self._set_claude_model_if_needed(client, explicit_model)
+                await self._set_claude_model_if_needed(client, desired_model)
             except Exception as e:
                 logger.warning(f"Failed to update model on cached Claude subagent session: {e}")
         logger.info(
             "Using Claude subagent session for %s at %s (model_override=%s)",
             base_session_id,
             working_path,
-            explicit_model,
+            desired_model,
         )
         self.bind_claude_runtime_session(
             client,
@@ -686,10 +714,28 @@ class SessionHandler(BaseHandler):
             explicit_model = subagent_model or session_target.get("model") or explicit_model
             explicit_effort = subagent_reasoning_effort or session_target.get("reasoning_effort") or explicit_effort
 
+        launch_model = explicit_model
+        if not launch_model and effective_agent:
+            launch_agent_data = self._load_agent_file(effective_agent, working_path)
+            configured_agent_model = launch_agent_data.get("model") if launch_agent_data else None
+            if configured_agent_model and configured_agent_model.lower() not in ("inherit", ""):
+                launch_model = configured_agent_model
+        launch_model = launch_model or self.config.claude.default_model
+        from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
+
+        model_hub_launch = await resolve_model_hub_launch(
+            self.controller,
+            "claude",
+            launch_model or "",
+        )
+        bind_launch(context, model_hub_launch)
+        runtime_model = model_hub_launch.runtime_model or launch_model
+        cached_subagent_model = self._cached_claude_subagent_model(explicit_model, model_hub_launch)
+
         if not effective_agent:
             # Claude SDK model changes are control requests; only send one when
             # the effective model actually changes.
-            current_model = explicit_model or self.config.claude.default_model
+            current_model = runtime_model
             client = await self._reuse_cached_claude_session_if_available(
                 composite_key=composite_key,
                 base_session_id=base_session_id,
@@ -699,6 +745,7 @@ class SessionHandler(BaseHandler):
                 stored_claude_session_id=stored_claude_session_id,
                 current_model=current_model,
                 agent_system_prompt=None,
+                model_hub_launch=model_hub_launch,
             )
             if client is not None:
                 return client
@@ -718,7 +765,8 @@ class SessionHandler(BaseHandler):
                 context=context,
                 session_key=session_key,
                 native_session_id=cached_session_id,
-                explicit_model=explicit_model,
+                desired_model=cached_subagent_model,
+                model_hub_launch=model_hub_launch,
             )
             if client is not None:
                 return client
@@ -741,7 +789,8 @@ class SessionHandler(BaseHandler):
                     context=context,
                     session_key=session_key,
                     native_session_id=stored_claude_session_id,
-                    explicit_model=explicit_model,
+                    desired_model=cached_subagent_model,
+                    model_hub_launch=model_hub_launch,
                 )
             else:
                 client = await self._reuse_cached_claude_session_if_available(
@@ -751,8 +800,9 @@ class SessionHandler(BaseHandler):
                     context=context,
                     session_key=session_key,
                     stored_claude_session_id=stored_claude_session_id,
-                    current_model=explicit_model or self.config.claude.default_model,
+                    current_model=runtime_model,
                     agent_system_prompt=None,
+                    model_hub_launch=model_hub_launch,
                 )
             if client is not None:
                 return client
@@ -837,6 +887,18 @@ class SessionHandler(BaseHandler):
 
         # Determine final model: explicit override > agent frontmatter > global default
         effective_model = explicit_model or agent_model or self.config.claude.default_model
+        from modules.agents.model_hub import (
+            build_claude_hub_env,
+            claude_setting_sources_for_launch,
+            launch_for_context,
+        )
+
+        model_hub_launch = launch_for_context(context)
+        runtime_model = (
+            model_hub_launch.runtime_model
+            if model_hub_launch is not None and model_hub_launch.backend == "claude"
+            else effective_model
+        )
         from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
         effective_effort = normalize_claude_reasoning_effort(
@@ -859,8 +921,8 @@ class SessionHandler(BaseHandler):
 
         # Create extra_args for CLI passthrough (fallback for model)
         extra_args: Dict[str, str | None] = {}
-        if effective_model:
-            extra_args["model"] = effective_model
+        if runtime_model:
+            extra_args["model"] = runtime_model
 
         claude_stderr_lines: list[str] = []
 
@@ -879,6 +941,8 @@ class SessionHandler(BaseHandler):
         from core.git_runtime import prepend_vendored_git_to_path
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        if model_hub_launch is not None:
+            claude_env = build_claude_hub_env(claude_env, model_hub_launch)
         claude_env.update(caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
         prepend_vendored_git_to_path(
             claude_env,
@@ -898,7 +962,7 @@ class SessionHandler(BaseHandler):
             "resume": stored_claude_session_id if stored_claude_session_id else None,
             "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
-            "setting_sources": ["user", "project", "local"],  # Load all setting sources (user, project CLAUDE.md, local overrides)
+            "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
             # cannot answer programmatically.
@@ -943,6 +1007,11 @@ class SessionHandler(BaseHandler):
         client = ClaudeSDKClient(options=options)
         setattr(client, "_vibe_caller_env", caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
         setattr(client, "_vibe_git_path_state", git_path_state)
+        setattr(
+            client,
+            "_vibe_model_hub_fingerprint",
+            model_hub_launch.fingerprint if model_hub_launch is not None else "direct",
+        )
 
         # Log the actual options being used
         logger.info("ClaudeAgentOptions details:")

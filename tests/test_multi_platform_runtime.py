@@ -16,6 +16,7 @@ from config.v2_sessions import ActivePollInfo
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
+from modules.agents.model_hub import launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
@@ -1438,6 +1439,7 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     # failed settlement, then suppresses the idle "(No response from OpenCode)"
     # result that would overwrite the terminal state.
     emitted = []
+    model_hub_failures = []
 
     class _AuthSvc:
         async def maybe_emit_auth_recovery_message(
@@ -1483,6 +1485,10 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
         def _extract_response_text(self, message):
             return ""
 
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            model_hub_failures.append((context, diagnostic))
+            return True
+
     class _Server:
         async def list_messages(self, session_id, directory):
             return [
@@ -1526,6 +1532,7 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     assert [item[0] for item in emitted] == ["notify", "result"]
     assert emitted[0][1] == "OpenCode error: ProviderError - rate limited"
     assert emitted[1][1:] == ("", True, "silent", "ProviderError - rate limited")
+    assert model_hub_failures == [(request.context, "ProviderError - rate limited")]
 
 
 def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
@@ -1780,6 +1787,116 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
     assert results[0][0] == "(No response from OpenCode)"
     assert results[0][1]["subtype"] == "warning"
     assert isinstance(results[0][1]["started_at"], float)
+
+
+def test_mh_chan_001_opencode_restored_poll_records_source_failure():
+    emitted = []
+    removed = []
+    model_hub_failures = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def __init__(self):
+            self.config = type(
+                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"}
+            )()
+            self.processing_indicator = ProcessingIndicatorService(self)
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+            terminal_error=None,
+        ):
+            emitted.append((message_type, text, is_error, level, terminal_error))
+
+    class _Sessions:
+        def remove_active_poll(self, session_id):
+            removed.append(session_id)
+
+        def update_active_poll_state(self, *args, **kwargs):
+            return None
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            return [
+                {
+                    "info": {
+                        "id": "msg-restored-error",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": {"name": "ProviderError", "data": {"message": "quota exceeded"}},
+                    },
+                    "parts": [],
+                }
+            ]
+
+    server = _Server()
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+        sessions = _Sessions()
+
+        async def _get_server(self):
+            return server
+
+        def _extract_response_text(self, message):
+            return ""
+
+        def _to_relative_path(self, path, working_path):
+            return path
+
+        async def _remove_ack_reaction(self, request):
+            return None
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            launch = launch_for_context(context)
+            model_hub_failures.append(
+                (launch.channel if launch else None, launch.source_id if launch else None, diagnostic)
+            )
+            return True
+
+    poll = ActivePollInfo(
+        opencode_session_id="oc-restored-error",
+        base_session_id="base",
+        channel_id="c",
+        thread_id="t",
+        settings_key="c",
+        working_path="/tmp/work",
+        baseline_message_ids=[],
+        platform="slack",
+        processing_indicator={
+            "platform": "slack",
+            "user_id": "u",
+            "channel_id": "c",
+            "model_hub_launch": {
+                "backend": "opencode",
+                "channel": "hub",
+                "source_id": "src_hub_restore",
+                "target_model": "gpt-5",
+            },
+        },
+    )
+
+    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+
+    assert model_hub_failures == [("hub", "src_hub_restore", "ProviderError - quota exceeded")]
+    assert removed == ["oc-restored-error"]
+    assert [item[0] for item in emitted] == ["notify", "notify", "result"]
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

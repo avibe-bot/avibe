@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+import hashlib
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
+MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
 
@@ -99,6 +101,10 @@ class OpenCodeServerManager:
         self._caller_context_plugin_refresh_pending = False
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
         self._last_prompt_started_at: dict[str, float] = {}
+        self._model_hub_overlay_path: Optional[str] = None
+        self._model_hub_overlay_hash: Optional[str] = None
+        self._model_hub_overlay_content: Optional[str] = None
+        self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
 
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
@@ -369,6 +375,57 @@ class OpenCodeServerManager:
         active = info.get("active_run_sessions") if isinstance(info, dict) else None
         return isinstance(active, list) and bool(active)
 
+    async def configure_model_hub_overlay(self, overlay: Any | None) -> None:
+        """Apply a runtime-only overlay after all active OpenCode work drains."""
+
+        desired_path = str(overlay.path) if overlay is not None else None
+        desired_hash = str(overlay.content_hash) if overlay is not None else None
+        desired_content = None
+        if overlay is not None:
+            content = getattr(overlay, "content", None)
+            if isinstance(content, bytes):
+                desired_content = content.decode("utf-8")
+            elif isinstance(content, str):
+                desired_content = content
+        drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
+        while True:
+            should_wait = False
+            async with self._get_lock():
+                if self._active_requests > 0 or self._has_active_run_sessions():
+                    should_wait = True
+                else:
+                    info = self._read_pid_file() or {}
+                    current_server = self._pid_file_references_current_server(info)
+                    persisted_active = current_server and bool(info.get("active_run_sessions"))
+                    if persisted_active and time.monotonic() < drain_deadline:
+                        should_wait = True
+                    else:
+                        if persisted_active:
+                            logger.warning(
+                                "Ignoring stale OpenCode active-run metadata after %.1fs overlay drain timeout",
+                                self._model_hub_overlay_drain_timeout_seconds,
+                            )
+                        effective_path = info.get("model_hub_overlay_path") if current_server else None
+                        effective_hash = info.get("model_hub_overlay_hash") if current_server else None
+                        if effective_path is None and effective_hash is None:
+                            effective_path = self._model_hub_overlay_path
+                            effective_hash = self._model_hub_overlay_hash
+
+                        # Cache the desired state even when adopted pid metadata
+                        # already matches. A later crash must restart with the
+                        # same OPENCODE_CONFIG without relying on the old pid file.
+                        self._model_hub_overlay_path = desired_path
+                        self._model_hub_overlay_hash = desired_hash
+                        self._model_hub_overlay_content = desired_content
+                        if (effective_path, effective_hash) == (desired_path, desired_hash):
+                            return
+                        if await self._is_healthy():
+                            logger.info("Restarting OpenCode server after Model Hub overlay change")
+                            await self._restart_for_auth_refresh_locked()
+                        return
+            if should_wait:
+                await asyncio.sleep(0.05)
+
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():
             self._active_run_sessions.add(session_id)
@@ -430,6 +487,9 @@ class OpenCodeServerManager:
                 caller_context_path = self._caller_context_path()
             if isinstance(caller_context_path, str) and caller_context_path:
                 payload["caller_context_path"] = caller_context_path
+            if self._model_hub_overlay_path and self._model_hub_overlay_hash:
+                payload["model_hub_overlay_path"] = self._model_hub_overlay_path
+                payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
@@ -1197,6 +1257,21 @@ class OpenCodeServerManager:
         env = os.environ.copy()
         env["OPENCODE_ENABLE_EXA"] = "1"
         env.update(server_environment())
+        if self._model_hub_overlay_path:
+            env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
+            content = self._model_hub_overlay_content
+            if content is None:
+                try:
+                    raw_content = Path(self._model_hub_overlay_path).read_bytes()
+                except OSError as exc:
+                    raise RuntimeError("Model Hub OpenCode overlay is unavailable") from exc
+                if hashlib.sha256(raw_content).hexdigest() != self._model_hub_overlay_hash:
+                    raise RuntimeError("Model Hub OpenCode overlay content hash changed")
+                content = raw_content.decode("utf-8")
+            # Inline config is OpenCode's runtime-override tier, loaded after
+            # project config. Reasserting the exact overlay here prevents a
+            # checked-in opencode.json from replacing Hub provider transport.
+            env["OPENCODE_CONFIG_CONTENT"] = content
 
         try:
             self._process = await asyncio.create_subprocess_exec(
