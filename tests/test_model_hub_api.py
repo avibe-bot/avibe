@@ -355,6 +355,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert adapter.secret_lengths[-1] == len("secret-auth-code")
     assert "secret-auth-code" not in (tmp_path / "events.json").read_text(encoding="utf-8")
 
+
     response = client.post(
         "/api/models/oauth/cancel",
         json={"flow_id": flow["flow_id"]},
@@ -468,6 +469,40 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     _assert_envelope(response.get_json())
     assert adapter.revoked == ["cred_test123"]
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "error"),
+    [
+        ("/api/models/priority", "put", "invalid_priority_order"),
+        ("/api/models/agents/claude/mode", "patch", "mode_switch_blocked"),
+        ("/api/models/agents/claude/mappings", "put", "mapping_target_unavailable"),
+        ("/api/models/agents/opencode/menu", "put", "mapping_target_unavailable"),
+    ],
+)
+def test_model_hub_routes_reject_non_object_json_with_error_envelope(
+    monkeypatch,
+    tmp_path,
+    path,
+    method,
+    error,
+):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = getattr(client, method)(
+        path,
+        json=[],
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    body = response.get_json()
+    _assert_envelope(body, ok=False)
+    assert body["error"] == error
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):

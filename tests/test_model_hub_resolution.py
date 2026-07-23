@@ -356,6 +356,10 @@ def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tm
     service = _service(tmp_path, adapter)
     config = service.store.load()
     config.sources[0].vendor = "custom"
+    config.sources[0].state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2026-07-23T02:59:00Z",
+    )
     config.sources[1].vendor = "anthropic"
     config.agents["opencode"].menu.checked = ["anthropic/claude-opus-4-6"]
 
@@ -372,6 +376,7 @@ def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tm
     assert resolved.source_id == "src_backup001"
     assert adapter.invocations == [("src_backup001", "claude-opus-4-6", "opencode")]
     assert service.list_events(limit=10) == []
+    assert config.sources[0].state.status == "cooldown"
 
 
 def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
@@ -527,6 +532,40 @@ def test_source_creation_is_not_persisted_when_engine_sync_fails(tmp_path):
     assert exc_info.value.__suppress_context__ is True
     assert [source.id for source in service.store.load().sources] == original_ids
     assert adapter.revoked == ["cred_test"]
+
+
+def test_failed_create_rollback_is_journaled_until_revoke_recovers(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    adapter.fail_sync = True
+    adapter.fail_revoke = True
+    service = _service(tmp_path, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Rollback source",
+                    "key": "sk-test-transaction-only",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    pending = service.revocations.list()
+    assert len(pending) == 1
+    assert pending[0].credential_ref == "cred_test"
+
+    adapter.fail_sync = False
+    adapter.fail_revoke = False
+    resolved = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert adapter.revoked == ["cred_test", "cred_test"]
+    assert service.revocations.list() == []
 
 
 def test_subscription_source_rejects_api_key_credentials(tmp_path):

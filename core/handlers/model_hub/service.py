@@ -481,6 +481,18 @@ class ModelHubService:
             # Resolution telemetry is best effort and must never affect routing.
             logger.warning("Failed to persist Model Hub resolution event")
 
+    async def _rollback_credential(self, source_id: str, credential_ref: str) -> None:
+        self.revocations.add(source_id, credential_ref)
+        try:
+            await self.adapter.revoke_credential(credential_ref)
+        except Exception:
+            return
+        try:
+            self.revocations.remove(source_id)
+        except OSError:
+            # A replayed revoke is safer than losing the only durable ref.
+            pass
+
     def _raise_if_flow_expired(self, flow_id: str, flow: OAuthFlowState) -> None:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
             return
@@ -585,15 +597,11 @@ class ModelHubService:
                 return source.to_payload()
             except Exception:
                 if rollback_credential_ref is not None and not persisted:
+                    await self._rollback_credential(source.id, rollback_credential_ref)
                     try:
-                        await self.adapter.revoke_credential(rollback_credential_ref)
-                    except Exception:
+                        self.oauth_flows.forget(oauth_ref)
+                    except OSError:
                         pass
-                    else:
-                        try:
-                            self.oauth_flows.forget(oauth_ref)
-                        except OSError:
-                            pass
                 raise
 
     def list_sources(self) -> list[dict]:
@@ -718,10 +726,7 @@ class ModelHubService:
             return source.to_payload()
         except Exception:
             if not persisted:
-                try:
-                    await self.adapter.revoke_credential(rollback_credential_ref)
-                except Exception:
-                    pass
+                await self._rollback_credential(source.id, rollback_credential_ref)
             raise
 
     async def patch_source(self, source_id: str, payload: dict) -> dict:
@@ -1107,6 +1112,13 @@ class ModelHubService:
             config_changed = False
             for source_id in config.priority_order:
                 source = by_id[source_id]
+                matches_request = (
+                    self._eligible_for_agent(source, backend)
+                    and (provider is None or opencode_provider_id(source.vendor) == provider)
+                    and any(model.id == model_id for model in source.models)
+                )
+                if not matches_request:
+                    continue
                 if source.state.status == "cooldown":
                     try:
                         retry_at = _parse_datetime(source.state.retry_at or "")
@@ -1125,12 +1137,7 @@ class ModelHubService:
                         to_label=source.display_name,
                         now=self.now(),
                     )
-                if (
-                    self._eligible_for_agent(source, backend)
-                    and (provider is None or opencode_provider_id(source.vendor) == provider)
-                    and any(model.id == model_id for model in source.models)
-                    and source.state.status != "error"
-                ):
+                if source.state.status != "error":
                     candidates.append(source)
             if config_changed:
                 self.store.save(config)

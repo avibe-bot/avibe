@@ -3047,6 +3047,11 @@ def _model_hub_error(exc):
     return jsonify(body), exc.status
 
 
+def _model_hub_json_object():
+    payload = request.json
+    return payload if isinstance(payload, dict) else {}
+
+
 @app.route("/api/models/sources", methods=["GET"])
 def model_hub_sources_get():
     return _model_hub_success(sources=_model_hub_service().list_sources())
@@ -3057,7 +3062,7 @@ async def model_hub_sources_post():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().create_source(request.json or {})
+        source = await _model_hub_service().create_source(_model_hub_json_object())
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3068,7 +3073,7 @@ async def model_hub_sources_patch(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().patch_source(source_id, request.json or {})
+        source = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
         return _model_hub_success(source=source)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3108,7 +3113,7 @@ async def model_hub_priority_put():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        priority = await _model_hub_service().set_priority((request.json or {}).get("order"))
+        priority = await _model_hub_service().set_priority(_model_hub_json_object().get("order"))
         return _model_hub_success(order=priority["order"])
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3124,7 +3129,7 @@ async def model_hub_agent_mode_patch(backend):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        agent = await _model_hub_service().set_agent_mode(backend, (request.json or {}).get("mode"))
+        agent = await _model_hub_service().set_agent_mode(backend, _model_hub_json_object().get("mode"))
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3137,7 +3142,7 @@ async def model_hub_agent_mappings_put(backend):
     try:
         agent = await _model_hub_service().set_mappings(
             backend,
-            (request.json or {}).get("mappings"),
+            _model_hub_json_object().get("mappings"),
         )
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
@@ -3149,7 +3154,7 @@ async def model_hub_opencode_menu_put():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        agent = await _model_hub_service().set_opencode_menu((request.json or {}).get("menu"))
+        agent = await _model_hub_service().set_opencode_menu(_model_hub_json_object().get("menu"))
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3160,7 +3165,7 @@ async def model_hub_custom_models_post():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().add_custom_model(request.json or {})
+        source = await _model_hub_service().add_custom_model(_model_hub_json_object())
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3171,7 +3176,7 @@ async def model_hub_custom_models_delete():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        payload = request.json or {}
+        payload = _model_hub_json_object()
         source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
         return _model_hub_success(source=source)
     except ModelHubError as exc:
@@ -3193,7 +3198,7 @@ async def model_hub_oauth_start():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        return _model_hub_success(flow=await _model_hub_service().oauth_start(request.json or {}))
+        return _model_hub_success(flow=await _model_hub_service().oauth_start(_model_hub_json_object()))
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3213,7 +3218,7 @@ async def model_hub_oauth_submit():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        return _model_hub_success(flow=await _model_hub_service().oauth_submit(request.json or {}))
+        return _model_hub_success(flow=await _model_hub_service().oauth_submit(_model_hub_json_object()))
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3223,7 +3228,7 @@ async def model_hub_oauth_cancel():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        await _model_hub_service().oauth_cancel((request.json or {}).get("flow_id"))
+        await _model_hub_service().oauth_cancel(_model_hub_json_object().get("flow_id"))
         return _model_hub_success()
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3239,7 +3244,7 @@ def model_hub_migration_apply():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        result = _model_hub_service().migration_apply((request.json or {}).get("item_ids"))
+        result = _model_hub_service().migration_apply(_model_hub_json_object().get("item_ids"))
         return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
