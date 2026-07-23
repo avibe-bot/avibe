@@ -42,6 +42,7 @@ DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
+MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
 
@@ -101,6 +102,7 @@ class OpenCodeServerManager:
         self._last_prompt_started_at: dict[str, float] = {}
         self._model_hub_overlay_path: Optional[str] = None
         self._model_hub_overlay_hash: Optional[str] = None
+        self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
 
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
@@ -376,27 +378,43 @@ class OpenCodeServerManager:
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
+        drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
         while True:
-            if self.runtime_has_active_turns():
-                await asyncio.sleep(0.05)
-                continue
+            should_wait = False
             async with self._get_lock():
                 if self._active_requests > 0 or self._has_active_run_sessions():
-                    continue
-                info = self._read_pid_file() or {}
-                effective_path = info.get("model_hub_overlay_path")
-                effective_hash = info.get("model_hub_overlay_hash")
-                if effective_path is None and effective_hash is None:
-                    effective_path = self._model_hub_overlay_path
-                    effective_hash = self._model_hub_overlay_hash
-                if (effective_path, effective_hash) == (desired_path, desired_hash):
-                    return
-                self._model_hub_overlay_path = desired_path
-                self._model_hub_overlay_hash = desired_hash
-                if await self._is_healthy():
-                    logger.info("Restarting OpenCode server after Model Hub overlay change")
-                    await self._restart_for_auth_refresh_locked()
-                return
+                    should_wait = True
+                else:
+                    info = self._read_pid_file() or {}
+                    current_server = self._pid_file_references_current_server(info)
+                    persisted_active = current_server and bool(info.get("active_run_sessions"))
+                    if persisted_active and time.monotonic() < drain_deadline:
+                        should_wait = True
+                    else:
+                        if persisted_active:
+                            logger.warning(
+                                "Ignoring stale OpenCode active-run metadata after %.1fs overlay drain timeout",
+                                self._model_hub_overlay_drain_timeout_seconds,
+                            )
+                        effective_path = info.get("model_hub_overlay_path") if current_server else None
+                        effective_hash = info.get("model_hub_overlay_hash") if current_server else None
+                        if effective_path is None and effective_hash is None:
+                            effective_path = self._model_hub_overlay_path
+                            effective_hash = self._model_hub_overlay_hash
+
+                        # Cache the desired state even when adopted pid metadata
+                        # already matches. A later crash must restart with the
+                        # same OPENCODE_CONFIG without relying on the old pid file.
+                        self._model_hub_overlay_path = desired_path
+                        self._model_hub_overlay_hash = desired_hash
+                        if (effective_path, effective_hash) == (desired_path, desired_hash):
+                            return
+                        if await self._is_healthy():
+                            logger.info("Restarting OpenCode server after Model Hub overlay change")
+                            await self._restart_for_auth_refresh_locked()
+                        return
+            if should_wait:
+                await asyncio.sleep(0.05)
 
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():

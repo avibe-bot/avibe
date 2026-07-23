@@ -113,6 +113,10 @@ class SessionHandler(BaseHandler):
         self.session_turn_started.pop(composite_key, None)
         self.claude_system_prompts.pop(composite_key, None)
 
+    async def _wait_for_claude_session_idle(self, composite_key: str) -> None:
+        while composite_key in self.active_sessions:
+            await asyncio.sleep(0.05)
+
     def bind_claude_runtime_session(
         self,
         client: ClaudeSDKClient,
@@ -179,6 +183,7 @@ class SessionHandler(BaseHandler):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
+            await self._wait_for_claude_session_idle(composite_key)
             await self.cleanup_session(composite_key)
             return None
 
@@ -248,6 +253,7 @@ class SessionHandler(BaseHandler):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")
+            await self._wait_for_claude_session_idle(composite_key)
             await self.cleanup_session(composite_key)
             return None
         self.ensure_agent_session_id(

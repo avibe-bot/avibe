@@ -163,7 +163,7 @@ class BaseAgent(ABC):
             mark_started(context)
 
     async def record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
-        """Persist native subscription cooldown state when a turn proves quota loss."""
+        """Persist source cooldown state when a terminal turn proves source loss."""
 
         router = getattr(self.controller, "model_hub_runtime", None)
         recorder = getattr(router, "record_native_failure", None)

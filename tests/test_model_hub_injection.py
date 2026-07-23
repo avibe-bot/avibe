@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from config.v2_config import (
     ModelHubAgentSupplyConfig,
@@ -20,7 +23,8 @@ from config.v2_config import (
 from core.handlers.model_hub.adapter import EngineHealth, EngineStatus
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubService
+from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from core.handlers.session_handler import SessionHandler
 from modules.agents.model_hub import (
     ModelHubLaunch,
     ModelHubRuntimeRouter,
@@ -51,6 +55,7 @@ class LaunchAdapter:
         self.token = token
         self.starts = 0
         self.syncs = 0
+        self.revoked: list[str] = []
 
     async def start(self):
         self.starts += 1
@@ -61,6 +66,9 @@ class LaunchAdapter:
 
     async def sync_sources(self, bindings):
         self.syncs += 1
+
+    async def revoke_credential(self, credential_ref: str):
+        self.revoked.append(credential_ref)
 
     def source_prefix(self, source_id: str) -> str:
         return self.prefixes[source_id]
@@ -167,11 +175,87 @@ def test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn(tmp_path: P
     recovered = asyncio.run(router.resolve("codex", "gpt-5"))
     assert (recovered.channel, recovered.source_id) == ("native_cli", native.id)
     kinds = [event["kind"] for event in reversed(service.events.list(limit=20))]
-    assert kinds == ["cooldown", "channel_switch", "recover", "channel_switch"]
+    assert kinds == ["cooldown", "switch", "channel_switch", "recover", "channel_switch"]
     assert [event["reason"] for event in service.events.list(limit=20) if event["kind"] == "channel_switch"] == [
         "recovery",
         "quota_exhausted",
     ]
+
+
+def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path) -> None:
+    first = _source(
+        "src_hub1001",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    backup = _source(
+        "src_hub1002",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    config = ModelHubConfig(
+        sources=[first, backup],
+        priority_order=[first.id, backup.id],
+        agents=_agents(),
+    )
+    adapter = LaunchAdapter({first.id: "route-first", backup.id: "route-backup"})
+    service = _service(
+        tmp_path,
+        config,
+        adapter,
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = ModelHubRuntimeRouter(service=service)
+
+    initial = asyncio.run(router.resolve("codex", "gpt-5"))
+    context = SimpleNamespace()
+    bind_launch(context, initial)
+    assert asyncio.run(router.record_native_failure(context, "Provider API returned HTTP 503")) is True
+    fallback = asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert (fallback.channel, fallback.source_id, fallback.runtime_model) == (
+        "hub",
+        backup.id,
+        "route-backup/gpt-5",
+    )
+    assert first.state.status == "cooldown"
+    assert [event["kind"] for event in reversed(service.events.list(limit=10))] == ["cooldown", "switch"]
+
+
+def test_mh_chan_001_native_launch_replays_pending_revocations(tmp_path: Path) -> None:
+    native = _source(
+        "src_native11",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    config = ModelHubConfig(
+        sources=[native],
+        priority_order=[native.id],
+        agents=_agents(),
+    )
+    adapter = LaunchAdapter({})
+    service = _service(
+        tmp_path,
+        config,
+        adapter,
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    service.revocations.add("src_removed", "cred_removed")
+
+    launch = asyncio.run(ModelHubRuntimeRouter(service=service).resolve("codex", "gpt-5"))
+
+    assert launch.channel == "native_cli"
+    assert adapter.revoked == ["cred_removed"]
+    assert service.revocations.list() == []
 
 
 def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path: Path) -> None:
@@ -205,6 +289,20 @@ def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path:
     )
     launch = asyncio.run(ModelHubRuntimeRouter(service=service).resolve("codex", "shared-model"))
     assert (launch.channel, launch.source_id) == ("hub", hub_openai.id)
+
+
+def test_mh_chan_001_hub_mode_without_sources_fails_closed(tmp_path: Path) -> None:
+    service = _service(
+        tmp_path,
+        ModelHubConfig(sources=[], priority_order=[], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(ModelHubRuntimeRouter(service=service).resolve("codex", "gpt-5"))
+
+    assert exc_info.value.code == "mapping_target_unavailable"
 
 
 def test_mh_inj_runtime_injection_never_writes_native_configs(tmp_path: Path, monkeypatch) -> None:
@@ -388,6 +486,53 @@ def test_mh_inj_opencode_overlay_change_drains_then_restarts_and_records_hash(tm
     assert metadata["model_hub_overlay_path"] == str(overlay.path)
 
 
+def test_mh_inj_opencode_matching_pid_overlay_is_cached_for_crash_recovery(tmp_path: Path) -> None:
+    manager = OpenCodeServerManager()
+    manager._pid_file = tmp_path / "opencode_server.json"
+    overlay = SimpleNamespace(path=tmp_path / "overlay.json", content_hash="same-hash")
+    manager._read_pid_file = Mock(
+        return_value={
+            "pid": 12345,
+            "port": manager.port,
+            "active_run_sessions": [],
+            "model_hub_overlay_path": str(overlay.path),
+            "model_hub_overlay_hash": overlay.content_hash,
+        }
+    )
+    manager._pid_file_references_current_server = Mock(return_value=True)
+    manager._is_healthy = AsyncMock(return_value=True)
+
+    asyncio.run(manager.configure_model_hub_overlay(overlay))
+
+    assert manager._model_hub_overlay_path == str(overlay.path)
+    assert manager._model_hub_overlay_hash == overlay.content_hash
+    manager._is_healthy.assert_not_awaited()
+
+
+def test_mh_inj_opencode_stale_persisted_active_run_is_bounded(tmp_path: Path) -> None:
+    manager = OpenCodeServerManager()
+    manager._pid_file = tmp_path / "opencode_server.json"
+    manager._model_hub_overlay_drain_timeout_seconds = 0
+    manager._read_pid_file = Mock(
+        return_value={
+            "pid": 12345,
+            "port": manager.port,
+            "active_run_sessions": ["stale-run"],
+            "model_hub_overlay_path": "/old-overlay.json",
+            "model_hub_overlay_hash": "old-hash",
+        }
+    )
+    manager._pid_file_references_current_server = Mock(return_value=True)
+    manager._is_healthy = AsyncMock(return_value=True)
+    manager._restart_for_auth_refresh_locked = AsyncMock()
+    overlay = SimpleNamespace(path=tmp_path / "overlay.json", content_hash="new-hash")
+
+    asyncio.run(manager.configure_model_hub_overlay(overlay))
+
+    manager._restart_for_auth_refresh_locked.assert_awaited_once()
+    assert manager._model_hub_overlay_hash == "new-hash"
+
+
 def test_mh_inj_direct_opencode_overlay_is_a_noop(tmp_path: Path) -> None:
     """MH-INJ-DIRECT-001: unchanged direct mode does not inspect the live CLI."""
 
@@ -423,3 +568,127 @@ def test_mh_inj_opencode_config_env_is_hub_only(tmp_path: Path, monkeypatch) -> 
     hub_env = asyncio.run(capture(str(tmp_path / "overlay.json")))
     assert "OPENCODE_CONFIG" not in direct_env
     assert hub_env["OPENCODE_CONFIG"] == str(tmp_path / "overlay.json")
+
+
+def test_mh_chan_001_codex_resolves_only_after_session_queue_lock() -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        lock = asyncio.Lock()
+        await lock.acquire()
+        resolver = AsyncMock()
+        agent._session_locks = {"session": lock}
+        agent.controller = SimpleNamespace(model_hub_runtime=SimpleNamespace(resolve=resolver))
+        request = SimpleNamespace(base_session_id="session")
+
+        task = asyncio.create_task(agent.handle_message(request))
+        await asyncio.sleep(0.02)
+        resolver.assert_not_awaited()
+        task.cancel()
+        lock.release()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+
+def test_mh_inj_codex_runtime_change_waits_for_shared_active_turn(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        active = {"value": True}
+        old_transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="direct",
+            stop=AsyncMock(),
+        )
+        new_transport = SimpleNamespace(
+            start=AsyncMock(),
+            on_notification=Mock(),
+            on_server_request=Mock(),
+            pid=12345,
+        )
+        agent._transport_locks = {}
+        agent._transports = {str(tmp_path): old_transport}
+        agent._transport_last_activity = {}
+        agent._transport_cwd_inodes = {}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=Mock(return_value={"other-session"}),
+            invalidate_thread=Mock(),
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda _session_id: "turn" if active["value"] else None,
+            clear_session=Mock(),
+        )
+        agent._clear_thread_developer_instructions = Mock()
+        agent._on_notification = Mock()
+        agent._on_server_request = AsyncMock()
+        agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
+        agent.controller = SimpleNamespace(resource_governor=None)
+        launch = ModelHubLaunch(
+            "codex",
+            "hub",
+            "gpt-5",
+            "gpt-5",
+            "route/gpt-5",
+            "src_hub",
+            "http://127.0.0.1:18443",
+            "token",
+        )
+
+        with (
+            patch("modules.agents.codex.agent.CodexTransport", return_value=new_transport),
+            patch(
+                "modules.agents.codex.agent.governor_from_controller",
+                return_value=SimpleNamespace(apply_to_pid=Mock()),
+            ),
+        ):
+            task = asyncio.create_task(agent._get_or_create_transport(str(tmp_path), launch))
+            await asyncio.sleep(0.02)
+            old_transport.stop.assert_not_awaited()
+            active["value"] = False
+            assert await task is new_transport
+
+        old_transport.stop.assert_awaited_once()
+        new_transport.start.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
+    async def exercise() -> None:
+        handler = object.__new__(SessionHandler)
+        key = "session:/work"
+        client = SimpleNamespace(_vibe_model_hub_fingerprint="native_cli:src_native")
+        handler.claude_sessions = {key: client}
+        handler.active_sessions = {key}
+        handler.cleanup_session = AsyncMock()
+        launch = ModelHubLaunch(
+            "claude",
+            "hub",
+            "claude-opus",
+            "claude-opus",
+            "route/claude-opus",
+            "src_hub",
+            "http://127.0.0.1:18443",
+            "token",
+        )
+
+        task = asyncio.create_task(
+            handler._reuse_cached_claude_session_if_available(
+                composite_key=key,
+                base_session_id="session",
+                working_path="/work",
+                context=SimpleNamespace(),
+                session_key="settings",
+                stored_claude_session_id=None,
+                current_model="claude-opus",
+                agent_system_prompt=None,
+                model_hub_launch=launch,
+            )
+        )
+        await asyncio.sleep(0.02)
+        handler.cleanup_session.assert_not_awaited()
+        handler.active_sessions.clear()
+        assert await task is None
+        handler.cleanup_session.assert_awaited_once_with(key)
+
+    asyncio.run(exercise())

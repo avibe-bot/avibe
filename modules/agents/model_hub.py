@@ -32,6 +32,11 @@ _NATIVE_QUOTA_RE = re.compile(
     re.IGNORECASE,
 )
 _NATIVE_RATE_RE = re.compile(r"(?:\b429\b|rate[_ -]?limit|too many requests)", re.IGNORECASE)
+_SERVER_ERROR_RE = re.compile(r"(?:\b5\d\d\b|server[_ -]?error|internal server error)", re.IGNORECASE)
+_NETWORK_ERROR_RE = re.compile(
+    r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -195,6 +200,7 @@ class ModelHubRuntimeRouter:
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
         self._last_launch: dict[BackendName, ModelHubLaunch] = {}
         self._pending_switch_reason: dict[BackendName, EventReason] = {}
+        self._pending_source_failure: dict[BackendName, tuple[str, EventReason]] = {}
 
     @staticmethod
     def _target_model(config: ModelHubConfig, backend: BackendName, requested_model: str) -> str:
@@ -254,6 +260,28 @@ class ModelHubRuntimeRouter:
             now=self.service.now(),
         )
 
+    def _emit_source_switch(self, current: ModelHubLaunch, config: ModelHubConfig) -> None:
+        pending = self._pending_source_failure.get(current.backend)
+        if pending is None or not current.source_id:
+            return
+        failed_source_id, reason = pending
+        if failed_source_id == current.source_id:
+            self._pending_source_failure.pop(current.backend, None)
+            return
+        failed_source = next((source for source in config.sources if source.id == failed_source_id), None)
+        current_source = next((source for source in config.sources if source.id == current.source_id), None)
+        if failed_source is None or current_source is None:
+            self._pending_source_failure.pop(current.backend, None)
+            return
+        self.service._emit_switch(
+            agent=cast(EventAgent, current.backend),
+            model_id=current.target_model,
+            failed_source=failed_source,
+            failed_reason=reason,
+            source=current_source,
+        )
+        self._pending_source_failure.pop(current.backend, None)
+
     async def resolve(self, backend: BackendName, requested_model: str) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = self.service.store.load()
@@ -294,6 +322,12 @@ class ModelHubRuntimeRouter:
             raise ModelHubError("mapping_target_unavailable", status=409)
         source = candidates[0]
         if source.supply_channel == "native_cli":
+            if self.service.revocations.list():
+                try:
+                    await self.service._ensure_engine_synced()
+                except ModelHubError:
+                    # Native launch is independent; the durable journal retries later.
+                    pass
             launch = ModelHubLaunch(
                 backend=backend,
                 channel="native_cli",
@@ -315,12 +349,19 @@ class ModelHubRuntimeRouter:
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
             )
+        self._emit_source_switch(launch, config)
         self._emit_channel_switch(launch)
         return launch
 
     async def record_native_failure(self, context: Any, diagnostic: str) -> bool:
+        """Record a terminal source failure for the next per-turn resolution.
+
+        The method name is retained for existing backend call sites; Hub launches
+        use the same cooldown state so the next turn can select a backup source.
+        """
+
         launch = launch_for_context(context)
-        if launch is None or launch.channel != "native_cli" or not launch.source_id:
+        if launch is None or launch.channel not in {"native_cli", "hub"} or not launch.source_id:
             return False
         if getattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False):
             return False
@@ -328,6 +369,10 @@ class ModelHubRuntimeRouter:
             decision = ResolutionDecision("fallback", reason="quota_exhausted", cooldown_seconds=300)
         elif _NATIVE_RATE_RE.search(diagnostic):
             decision = ResolutionDecision("fallback", reason="rate_limited", cooldown_seconds=60)
+        elif _SERVER_ERROR_RE.search(diagnostic):
+            decision = ResolutionDecision("fallback", reason="server_error", cooldown_seconds=30)
+        elif _NETWORK_ERROR_RE.search(diagnostic):
+            decision = ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
         else:
             return False
         config = self.service.store.load()
@@ -341,7 +386,10 @@ class ModelHubRuntimeRouter:
             model_id=launch.target_model,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
-        self._pending_switch_reason[launch.backend] = cast(EventReason, decision.reason)
+        reason = cast(EventReason, decision.reason)
+        self._pending_source_failure[launch.backend] = (launch.source_id, reason)
+        if launch.channel == "native_cli":
+            self._pending_switch_reason[launch.backend] = reason
         return True
 
     async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:

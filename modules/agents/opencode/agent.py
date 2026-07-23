@@ -20,7 +20,12 @@ from core.message_output import terminal_output_for
 from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
-from modules.agents.model_hub import OpenCodeOverlay, opencode_model_for_overlay
+from modules.agents.model_hub import (
+    OpenCodeOverlay,
+    bind_launch,
+    opencode_model_for_overlay,
+    resolve_model_hub_launch,
+)
 
 from .caller_context import bind_session as bind_caller_context_session
 from .client_manager import OpenCodeClientManager
@@ -304,6 +309,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if not model_str:
                 model_str = getattr(opencode_cfg, "default_model", None)
             model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
+            if model_hub_runtime is not None and model_str:
+                launch = await resolve_model_hub_launch(
+                    self.controller,
+                    "opencode",
+                    model_str,
+                )
+                bind_launch(request.context, launch)
             # Bare model id (no ``provider/`` prefix): only inject ``providerID``
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
@@ -475,6 +487,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             error_text = f"{error_name}: {error_details}" if error_details else error_name
 
             logger.error(f"OpenCode request failed: {error_text}", exc_info=True)
+            await self.record_model_hub_native_failure(request.context, error_text)
             try:
                 await server.abort_session(session_id, request.working_path)
             except Exception as abort_err:
