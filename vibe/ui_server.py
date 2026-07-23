@@ -6984,6 +6984,15 @@ def media_get(token: str):
     ``inline`` (so images render in ``<img>`` and PDFs preview); ``?download=1``
     forces an attachment download.
     """
+    return _registered_media_response(token)
+
+
+def _registered_media_response(
+    token: str,
+    *,
+    expected_session_id: str | None = None,
+    expected_source: str | None = None,
+):
     from urllib.parse import quote
 
     from storage import media_service
@@ -6992,6 +7001,10 @@ def media_get(token: str):
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
     if not row or row.get("revoked_at"):
+        return jsonify({"error": "not_found"}), 404
+    if expected_session_id is not None and row.get("session_id") != expected_session_id:
+        return jsonify({"error": "not_found"}), 404
+    if expected_source is not None and row.get("source") != expected_source:
         return jsonify({"error": "not_found"}), 404
     stored = row["local_path"]
     try:
@@ -8616,6 +8629,7 @@ def _show_event_response_from_payload(
     *,
     author: dict[str, str] | None = None,
     public: bool = False,
+    public_share_id: str | None = None,
     allow_dispatch: bool = True,
 ):
     if show_event_payload_session_mismatch(session_id, payload):
@@ -8640,7 +8654,19 @@ def _show_event_response_from_payload(
     _publish_show_session_event(event_payload)
     if allow_dispatch:
         _dispatch_show_event_if_requested(event_payload)
-    return jsonify({"ok": True, "event": _show_event_response_payload(event_payload, public=public)}), 201
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "event": _show_event_response_payload(
+                    event_payload,
+                    public=public,
+                    public_share_id=public_share_id,
+                ),
+            }
+        ),
+        201,
+    )
 
 
 def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
@@ -8775,7 +8801,12 @@ def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str,
     )
 
 
-def _show_event_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
+def _show_event_response_payload(
+    event_payload: dict[str, Any],
+    *,
+    public: bool = False,
+    public_share_id: str | None = None,
+) -> dict[str, Any]:
     if not public:
         return event_payload
     public_event = {
@@ -8789,6 +8820,26 @@ def _show_event_response_payload(event_payload: dict[str, Any], *, public: bool 
         author = public_payload.get("author")
         if isinstance(author, dict) and "email" in author:
             public_payload["author"] = {key: value for key, value in author.items() if key != "email"}
+        screenshot = public_payload.get("screenshot")
+        if isinstance(screenshot, dict):
+            local_path = screenshot.get("path")
+            public_screenshot = {key: value for key, value in screenshot.items() if key != "path"}
+            attachment_id = public_screenshot.get("attachmentId")
+            if (
+                public_share_id
+                and isinstance(local_path, str)
+                and local_path
+                and isinstance(attachment_id, str)
+                and attachment_id
+            ):
+                public_screenshot["url"] = (
+                    f"/p/{quote(public_share_id, safe='')}/__show/media/{quote(attachment_id, safe='')}"
+                )
+            public_payload["screenshot"] = public_screenshot
+            transcript_text = public_event.get("transcript_text")
+            if isinstance(local_path, str) and local_path and isinstance(transcript_text, str):
+                public_ref = str(public_screenshot.get("attachmentId") or "screenshot attachment")
+                public_event["transcript_text"] = transcript_text.replace(local_path, public_ref)
         public_event["payload"] = public_payload
     return public_event
 
@@ -8815,20 +8866,35 @@ def _redact_public_dispatch_value(value: Any) -> Any:
     return value
 
 
-def _show_events_list_payload(payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
+def _show_events_list_payload(
+    payload: dict[str, Any],
+    *,
+    public: bool = False,
+    public_share_id: str | None = None,
+) -> dict[str, Any]:
     if not public:
         return payload
     return {
         **payload,
         "events": [
-            _show_event_response_payload(event_payload, public=True)
+            _show_event_response_payload(
+                event_payload,
+                public=True,
+                public_share_id=public_share_id,
+            )
             for event_payload in payload.get("events", [])
             if isinstance(event_payload, dict)
         ],
     }
 
 
-async def _show_events_stream(session_id: str, *, after_id: str | None = None, public: bool = False):
+async def _show_events_stream(
+    session_id: str,
+    *,
+    after_id: str | None = None,
+    public: bool = False,
+    public_share_id: str | None = None,
+):
     import asyncio
 
     from fastapi.responses import StreamingResponse
@@ -8854,7 +8920,14 @@ async def _show_events_stream(session_id: str, *, after_id: str | None = None, p
                     for event_payload in events:
                         if isinstance(event_payload.get("id"), str):
                             replayed_ids.add(event_payload["id"])
-                        yield _sse_frame("show.event", _show_event_response_payload(event_payload, public=public))
+                        yield _sse_frame(
+                            "show.event",
+                            _show_event_response_payload(
+                                event_payload,
+                                public=public,
+                                public_share_id=public_share_id,
+                            ),
+                        )
                     cursor = batch.get("next_after_id")
                     if not cursor:
                         break
@@ -8872,7 +8945,14 @@ async def _show_events_stream(session_id: str, *, after_id: str | None = None, p
                             continue
                         if isinstance(event_id, str):
                             replayed_ids.add(event_id)
-                        yield _sse_frame("show.event", _show_event_response_payload(event_payload, public=public))
+                        yield _sse_frame(
+                            "show.event",
+                            _show_event_response_payload(
+                                event_payload,
+                                public=public,
+                                public_share_id=public_share_id,
+                            ),
+                        )
                     elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
@@ -8894,13 +8974,19 @@ async def _show_events_stream(session_id: str, *, after_id: str | None = None, p
     )
 
 
-async def _show_events_response(session_id: str, *, public: bool = False):
+async def _show_events_response(
+    session_id: str,
+    *,
+    public: bool = False,
+    public_share_id: str | None = None,
+):
     if request.method == "GET":
         if request.args.get("stream") == "1":
             return await _show_events_stream(
                 session_id,
                 after_id=request.args.get("after_id") or _last_event_id_from_request(),
                 public=public,
+                public_share_id=public_share_id,
             )
         store = _show_session_event_store()
         try:
@@ -8909,7 +8995,13 @@ async def _show_events_response(session_id: str, *, public: bool = False):
             except (TypeError, ValueError):
                 limit = 100
             payload = store.list(session_id, after_id=request.args.get("after_id") or None, limit=limit)
-            return jsonify(_show_events_list_payload(payload, public=public))
+            return jsonify(
+                _show_events_list_payload(
+                    payload,
+                    public=public,
+                    public_share_id=public_share_id,
+                )
+            )
         finally:
             store.close()
 
@@ -9722,9 +9814,24 @@ async def serve_public_show_page(share_id, asset_path):
                     show_public_event_write_token(share_id, page.session_id) if author is not None else None
                 ),
             )
+        if asset_path.strip("/").startswith("__show/media/"):
+            if request.method not in {"GET", "HEAD"}:
+                return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            token = asset_path.strip("/").removeprefix("__show/media/")
+            if not token or "/" in token:
+                return _show_page_file_not_found_response()
+            return _registered_media_response(
+                token,
+                expected_session_id=page.session_id,
+                expected_source="show_annotation",
+            )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method == "GET":
-                return await _show_events_response(page.session_id, public=True)
+                return await _show_events_response(
+                    page.session_id,
+                    public=True,
+                    public_share_id=share_id,
+                )
             if request.method != "POST":
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
             author = _show_request_author(public=True)
@@ -9752,6 +9859,7 @@ async def serve_public_show_page(share_id, asset_path):
                 payload,
                 author=author,
                 public=True,
+                public_share_id=share_id,
                 allow_dispatch=False,
             )
         if request.method in {"GET", "HEAD"}:

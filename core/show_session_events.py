@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,74 +93,87 @@ class ShowSessionEventStore:
         event_id = _event_id(payload, {})
         created_at = _utc_now_iso()
 
-        with self.engine.begin() as conn:
-            session = conn.execute(
-                select(agent_sessions.c.id, agent_sessions.c.scope_id, agent_sessions.c.status)
-                .where(agent_sessions.c.id == session_id)
-                .limit(1)
-            ).mappings().first()
-            if session is None:
-                raise ShowSessionEventError("Agent session not found.", code="session_not_found")
-            # Archive is terminal: a still-open Show Page must not keep writing
-            # events (which dispatch as new agent work) into an archived session.
-            if session["status"] == "archived":
-                raise ShowSessionEventError("Agent session is archived.", code="session_archived")
+        with ExitStack() as cleanup:
+            with self.engine.begin() as conn:
+                session = conn.execute(
+                    select(agent_sessions.c.id, agent_sessions.c.scope_id, agent_sessions.c.status)
+                    .where(agent_sessions.c.id == session_id)
+                    .limit(1)
+                ).mappings().first()
+                if session is None:
+                    raise ShowSessionEventError("Agent session not found.", code="session_not_found")
+                # Archive is terminal: a still-open Show Page must not keep writing
+                # events (which dispatch as new agent work) into an archived session.
+                if session["status"] == "archived":
+                    raise ShowSessionEventError("Agent session is archived.", code="session_archived")
 
-            stored_payload = payload
-            if event_type == "assistant.mark.resolved":
-                stored_payload = _prepare_mark_resolution(conn, session_id, payload)
-            event_payload = _normalize_event_payload(event_type, stored_payload)
-            if records_author:
-                event_payload.pop("author", None)
-            anchor = _event_anchor(event_type, stored_payload, event_payload)
-            scope = _event_scope(event_type, event_payload)
-            transcript_text = (
-                ""
-                if event_type == "assistant.mark.resolved" and author is not None
-                else _format_transcript_text(event_type, event_payload, anchor)
-            )
-            if records_author:
-                event_payload["author"] = _normalize_human_author(author)
-
-            conn.execute(
-                show_session_events.insert().values(
-                    id=event_id,
-                    session_id=session_id,
-                    event_type=event_type,
-                    actor=actor,
-                    scope=scope,
-                    anchor_json=_json_dumps(anchor),
-                    payload_json=_json_dumps(event_payload),
-                    transcript_text=transcript_text,
-                    message_id=None,
-                    created_at=created_at,
-                )
-            )
-            message: dict[str, Any] | None = None
-            message_id: str | None = None
-            if transcript_text:
-                message = messages_service.append(
+                stored_payload = payload
+                if event_type == "assistant.mark.resolved":
+                    stored_payload = _prepare_mark_resolution(conn, session_id, payload)
+                event_payload = _normalize_event_payload(event_type, stored_payload)
+                event_payload, screenshot_path = _materialize_annotation_screenshot(
                     conn,
-                    scope_id=session["scope_id"],
+                    event_type=event_type,
+                    event_payload=event_payload,
                     session_id=session_id,
-                    platform="avibe",
-                    author="agent" if actor in {"assistant", "system"} else "user",
-                    text=transcript_text,
-                    content={"text": transcript_text, "show_event_type": event_type},
-                    metadata={
-                        "source": "show_page",
-                        "show_event_id": event_id,
-                        "show_event_type": event_type,
-                        "show_event_scope": scope,
-                        **({"author": event_payload["author"]} if "author" in event_payload else {}),
-                    },
-                    native_message_id=f"show:{event_id}",
+                    scope_id=session["scope_id"],
                 )
-                message_id = message["id"]
+                if screenshot_path is not None:
+                    cleanup.callback(Path(screenshot_path).unlink, missing_ok=True)
+                if records_author:
+                    event_payload.pop("author", None)
+                anchor = _event_anchor(event_type, stored_payload, event_payload)
+                scope = _event_scope(event_type, event_payload)
+                transcript_text = (
+                    ""
+                    if event_type == "assistant.mark.resolved" and author is not None
+                    else _format_transcript_text(event_type, event_payload, anchor)
+                )
+                if records_author:
+                    event_payload["author"] = _normalize_human_author(author)
+
                 conn.execute(
-                    update(show_session_events).where(show_session_events.c.id == event_id).values(message_id=message_id)
+                    show_session_events.insert().values(
+                        id=event_id,
+                        session_id=session_id,
+                        event_type=event_type,
+                        actor=actor,
+                        scope=scope,
+                        anchor_json=_json_dumps(anchor),
+                        payload_json=_json_dumps(event_payload),
+                        transcript_text=transcript_text,
+                        message_id=None,
+                        created_at=created_at,
+                    )
                 )
-                workbench_sessions_service.touch_session(conn, session_id)
+                message: dict[str, Any] | None = None
+                message_id: str | None = None
+                if transcript_text:
+                    message = messages_service.append(
+                        conn,
+                        scope_id=session["scope_id"],
+                        session_id=session_id,
+                        platform="avibe",
+                        author="agent" if actor in {"assistant", "system"} else "user",
+                        text=transcript_text,
+                        content={"text": transcript_text, "show_event_type": event_type},
+                        metadata={
+                            "source": "show_page",
+                            "show_event_id": event_id,
+                            "show_event_type": event_type,
+                            "show_event_scope": scope,
+                            **({"author": event_payload["author"]} if "author" in event_payload else {}),
+                        },
+                        native_message_id=f"show:{event_id}",
+                    )
+                    message_id = message["id"]
+                    conn.execute(
+                        update(show_session_events)
+                        .where(show_session_events.c.id == event_id)
+                        .values(message_id=message_id)
+                    )
+                    workbench_sessions_service.touch_session(conn, session_id)
+            cleanup.pop_all()
 
         event = {
             "id": event_id,
@@ -451,6 +465,65 @@ def _normalize_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
     return normalized
 
 
+def _materialize_annotation_screenshot(
+    conn: Any,
+    *,
+    event_type: str,
+    event_payload: dict[str, Any],
+    session_id: str,
+    scope_id: str,
+) -> tuple[dict[str, Any], str | None]:
+    if event_type not in ANNOTATION_EVENT_TYPES:
+        return event_payload, None
+    screenshot = _normalize_json_object(event_payload.get("screenshot"))
+    if "dataUrl" not in screenshot:
+        return event_payload, None
+
+    from core.workbench_media import InvalidShowScreenshot, materialize_show_screenshot
+
+    try:
+        materialized = materialize_show_screenshot(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            data_url=screenshot.get("dataUrl"),
+        )
+    except InvalidShowScreenshot as exc:
+        raise ShowSessionEventError(str(exc), code="invalid_payload") from exc
+
+    declared_content_type = _text_or_none(screenshot.get("mimeType"))
+    if declared_content_type is not None and declared_content_type.lower() != materialized.content_type:
+        Path(materialized.path).unlink(missing_ok=True)
+        raise ShowSessionEventError(
+            "screenshot.mimeType does not match the encoded image.",
+            code="invalid_payload",
+        )
+
+    for field, actual in (("width", materialized.width), ("height", materialized.height)):
+        declared = screenshot.get(field)
+        if declared is None:
+            continue
+        if isinstance(declared, bool) or not isinstance(declared, (int, float)) or declared != actual:
+            Path(materialized.path).unlink(missing_ok=True)
+            raise ShowSessionEventError(
+                f"screenshot.{field} does not match the encoded image.",
+                code="invalid_payload",
+            )
+
+    normalized_screenshot = dict(screenshot)
+    normalized_screenshot.pop("dataUrl", None)
+    normalized_screenshot.update(
+        {
+            "attachmentId": materialized.attachment_id,
+            "path": materialized.path,
+            "mimeType": materialized.content_type,
+            "width": materialized.width,
+            "height": materialized.height,
+        }
+    )
+    return {**event_payload, "screenshot": normalized_screenshot}, materialized.path
+
+
 def _normalize_json_object(raw: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
@@ -561,14 +634,19 @@ def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: di
         screenshot = _normalize_json_object(payload.get("screenshot"))
         if screenshot:
             screenshot_ref = _text_or_none(
-                screenshot.get("attachmentId")
+                screenshot.get("path")
+                or screenshot.get("attachmentId")
                 or screenshot.get("assetId")
                 or screenshot.get("id")
                 or screenshot.get("url")
                 or screenshot.get("src")
             )
-            lines.append(f"Screenshot: {screenshot_ref or 'captured region'}")
-            screenshot_region = _format_rect(screenshot.get("region") or screenshot.get("rect"))
+            screenshot_dimensions = _format_dimensions(screenshot.get("width"), screenshot.get("height"))
+            dimensions_suffix = f" ({screenshot_dimensions})" if screenshot_dimensions else ""
+            lines.append(f"Screenshot: {screenshot_ref or 'captured region'}{dimensions_suffix}")
+            screenshot_region = _format_rect(
+                screenshot.get("capturedRegion") or screenshot.get("region") or screenshot.get("rect")
+            )
             if screenshot_region:
                 lines.append(f"Screenshot region: {screenshot_region}")
             screenshot_items = _json_object_list(screenshot.get("items"))
@@ -734,6 +812,14 @@ def _format_point(raw: Any) -> str | None:
     if x is None or y is None:
         return None
     return f"x:{_format_scalar(x)}, y:{_format_scalar(y)}"
+
+
+def _format_dimensions(width: Any, height: Any) -> str | None:
+    formatted_width = _format_scalar(width)
+    formatted_height = _format_scalar(height)
+    if formatted_width is None or formatted_height is None:
+        return None
+    return f"{formatted_width}x{formatted_height}"
 
 
 def _format_classification(raw: Any) -> str | None:

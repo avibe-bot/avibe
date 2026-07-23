@@ -1,12 +1,15 @@
 import asyncio
+import base64
 import hashlib
 import io
 import json
 import os
 import socket
 import ssl
+import struct
 import tarfile
 import urllib.error
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -111,6 +114,22 @@ def _create_show_page(session_id: str, visibility: str) -> str | None:
         return page.share_id
     finally:
         store.close()
+
+
+def _screenshot_png(width: int, height: int) -> tuple[bytes, str]:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    scanlines = (b"\x00" + b"\x00\x00\x00" * width) * height
+    raw = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(scanlines))
+        + chunk(b"IEND", b"")
+    )
+    return raw, f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def _create_show_page_record(session_id: str, visibility: str) -> str | None:
@@ -1879,6 +1898,7 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
     _create_show_page("ses123", "private")
     token = "session-write-token"
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    raw, data_url = _screenshot_png(4, 3)
     dispatches = []
     dispatch_done = asyncio.Event()
 
@@ -1905,7 +1925,11 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
                     "dispatch": True,
                     "screenshot": {
                         "attachmentId": "show_asset_screenshot_1",
-                        "region": {"x": 24, "y": 32, "width": 640, "height": 360},
+                        "mimeType": "image/png",
+                        "width": 4,
+                        "height": 3,
+                        "capturedRegion": {"x": 24, "y": 32, "width": 640, "height": 360},
+                        "dataUrl": data_url,
                         "items": [
                             {
                                 "label": "1",
@@ -1915,7 +1939,7 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
                             {
                                 "label": "2",
                                 "comment": "Crop this empty area.",
-                                "region": {"x": 420, "y": 240, "width": 160, "height": 72},
+                                "rect": {"x": 420, "y": 240, "width": 160, "height": 72},
                             },
                         ],
                     },
@@ -1925,15 +1949,28 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
 
     assert response.status_code == 201
     payload = response.get_json()
-    assert payload["event"]["payload"]["primaryAnchor"] == "screenshot"
+    event = payload["event"]
+    screenshot = event["payload"]["screenshot"]
+    assert event["payload"]["primaryAnchor"] == "screenshot"
+    assert "dataUrl" not in screenshot
+    assert screenshot["attachmentId"] != "show_asset_screenshot_1"
+    assert Path(screenshot["path"]).read_bytes() == raw
     asyncio.run(asyncio.wait_for(dispatch_done.wait(), timeout=1))
     assert dispatches
     transcript = dispatches[0]["text"]
     assert "Anchor kind: screenshot" in transcript
-    assert "Screenshot: show_asset_screenshot_1" in transcript
+    assert f"Screenshot: {screenshot['path']} (4x3)" in transcript
     assert "Screenshot region: x:24, y:32, 640x360" in transcript
     assert "1. This counter looks stale. (x:120, y:80)" in transcript
     assert "2. Crop this empty area. (x:420, y:240, 160x72)" in transcript
+
+    media_response = app.test_client().get(
+        f"/api/media/{screenshot['attachmentId']}",
+        base_url="http://127.0.0.1:5123",
+    )
+    assert media_response.status_code == 200
+    assert media_response.content == raw
+    assert media_response.headers["content-type"] == "image/png"
 
 
 def test_private_show_page_rejects_show_event_without_write_token(monkeypatch, tmp_path):
@@ -2217,10 +2254,14 @@ def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
-    _create_show_page("ses123", "public")
+    share_id = _create_show_page("ses123", "public")
 
     async def _collect_live_dispatch() -> str:
-        response = await _show_events_stream("ses123", public=True)
+        response = await _show_events_stream(
+            "ses123",
+            public=True,
+            public_share_id=share_id,
+        )
         iterator = response.body_iterator.__aiter__()
         chunks = []
         try:
@@ -2334,6 +2375,58 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
     assert '"scope_id"' not in body
     assert '"message_id"' not in body
     assert '"message"' not in body
+
+
+def test_public_show_events_stream_redacts_screenshot_path(monkeypatch, tmp_path):
+    from core.show_session_events import ShowSessionEventStore
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    _, data_url = _screenshot_png(4, 3)
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses123",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Review this screenshot.",
+                    "screenshot": {
+                        "mimeType": "image/png",
+                        "width": 4,
+                        "height": 3,
+                        "capturedRegion": {"x": 0, "y": 0, "width": 40, "height": 30},
+                        "dataUrl": data_url,
+                        "items": [],
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    async def collect_replay() -> str:
+        response = await _show_events_stream(
+            "ses123",
+            public=True,
+            public_share_id=share_id,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__(), await iterator.__anext__()]
+        finally:
+            await iterator.aclose()
+        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    body = asyncio.run(collect_replay())
+    screenshot = event["payload"]["screenshot"]
+    assert screenshot["path"] not in body
+    assert '"path"' not in body
+    assert screenshot["attachmentId"] in body
+    assert f"/p/{share_id}/__show/media/{screenshot['attachmentId']}" in body
 
 
 def test_cli_show_event_ingress_records_and_publishes(monkeypatch, tmp_path):
@@ -2681,6 +2774,86 @@ def test_public_show_page_events_accept_oauth_user_and_record_author(monkeypatch
     ).get_json()["events"][0]
     assert listed["payload"]["author"] == {"kind": "user"}
     assert "member@example.com" not in json.dumps(listed)
+
+
+def test_public_show_page_redacts_materialized_screenshot_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    raw, data_url = _screenshot_png(4, 3)
+    published = []
+    monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers=_public_show_write_headers(share_id),
+        json={
+            "type": "human.annotation.created",
+            "annotation": {
+                "comment": "Review this screenshot.",
+                "screenshot": {
+                    "attachmentId": "screenshot_client_only",
+                    "mimeType": "image/png",
+                    "width": 4,
+                    "height": 3,
+                    "capturedRegion": {"x": 0, "y": 0, "width": 40, "height": 30},
+                    "dataUrl": data_url,
+                    "items": [],
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    internal_event = published[0]
+    internal_screenshot = internal_event["payload"]["screenshot"]
+    assert Path(internal_screenshot["path"]).is_file()
+    assert internal_screenshot["path"] in internal_event["transcript_text"]
+
+    public_event = response.get_json()["event"]
+    public_screenshot = public_event["payload"]["screenshot"]
+    assert "path" not in public_screenshot
+    assert public_screenshot["attachmentId"] == internal_screenshot["attachmentId"]
+    assert internal_screenshot["path"] not in public_event["transcript_text"]
+    assert f"Screenshot: {internal_screenshot['attachmentId']} (4x3)" in public_event["transcript_text"]
+    assert public_screenshot["url"] == (
+        f"/p/{share_id}/__show/media/{internal_screenshot['attachmentId']}"
+    )
+
+    anonymous_media = app.test_client().get(
+        public_screenshot["url"],
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert anonymous_media.status_code == 200
+    assert anonymous_media.content == raw
+    assert anonymous_media.headers["content-type"] == "image/png"
+
+    _create_agent_session("ses456")
+    other_share_id = _create_show_page("ses456", "public")
+    cross_share_media = app.test_client().get(
+        f"/p/{other_share_id}/__show/media/{internal_screenshot['attachmentId']}",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert cross_share_media.status_code == 404
+
+    listed = client.get(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    ).get_json()["events"][0]
+    assert "path" not in listed["payload"]["screenshot"]
+    assert internal_screenshot["path"] not in json.dumps(listed)
 
 
 def test_public_show_page_accepts_mark_read_receipt_and_records_reader(monkeypatch, tmp_path):

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
+import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -9,7 +12,7 @@ from sqlalchemy import select
 from core.show_session_events import ShowSessionEventError, ShowSessionEventStore, _format_transcript_text
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages, show_session_events
+from storage.models import agent_sessions, media_objects, messages, show_session_events
 from storage.settings_service import upsert_scope
 
 
@@ -50,6 +53,25 @@ def _seed_session(session_id: str = "ses_mark") -> str:
             )
         )
     return scope_id
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    scanlines = (b"\x00" + b"\x00\x00\x00" * width) * height
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(scanlines))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _image_data_url(content_type: str, raw: bytes) -> str:
+    return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def test_show_event_store_records_assistant_mark_and_transcript_message(isolated_state):
@@ -341,6 +363,140 @@ def test_show_event_store_records_element_group_annotation_context(isolated_stat
     assert "Region: x:10, y:20, 300x120" in event["transcript_text"]
     assert "Selection: element-group" in event["transcript_text"]
     assert "Matched elements: 2" in event["transcript_text"]
+
+
+def test_show_event_store_materializes_screenshot_attachment(isolated_state):
+    scope_id = _seed_session()
+    raw = _png_bytes(4, 3)
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "review",
+                    "comment": "Review the captured area.",
+                    "screenshot": {
+                        "attachmentId": "screenshot_client_only",
+                        "mimeType": "image/png",
+                        "width": 4,
+                        "height": 3,
+                        "capturedRegion": {"x": 24, "y": 32, "width": 640, "height": 360},
+                        "dataUrl": _image_data_url("image/png", raw),
+                        "items": [{"label": "1", "comment": "This counter looks stale."}],
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    screenshot = event["payload"]["screenshot"]
+    local_path = Path(screenshot["path"])
+    assert screenshot["attachmentId"] != "screenshot_client_only"
+    assert screenshot["mimeType"] == "image/png"
+    assert screenshot["width"] == 4
+    assert screenshot["height"] == 3
+    assert screenshot["capturedRegion"] == {"x": 24, "y": 32, "width": 640, "height": 360}
+    assert screenshot["items"] == [{"label": "1", "comment": "This counter looks stale."}]
+    assert "dataUrl" not in screenshot
+    assert local_path.is_absolute()
+    assert local_path.parent == isolated_state / "attachments" / "avibe" / "ses_mark"
+    assert local_path.read_bytes() == raw
+    assert f"Screenshot: {local_path} (4x3)" in event["transcript_text"]
+    assert "Screenshot region: x:24, y:32, 640x360" in event["transcript_text"]
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        media_row = conn.execute(select(media_objects)).mappings().one()
+        stored_payload = json.loads(conn.execute(select(show_session_events.c.payload_json)).scalar_one())
+    assert media_row["token"] == screenshot["attachmentId"]
+    assert media_row["scope_id"] == scope_id
+    assert media_row["session_id"] == "ses_mark"
+    assert media_row["source"] == "show_annotation"
+    assert media_row["local_path"] == str(local_path)
+    assert "dataUrl" not in stored_payload["screenshot"]
+
+
+def test_show_event_store_materializes_webp_without_conversion(isolated_state):
+    _seed_session()
+    raw = base64.b64decode("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Review this image.",
+                    "screenshot": {
+                        "mimeType": "image/webp",
+                        "width": 1,
+                        "height": 1,
+                        "capturedRegion": {"x": 0, "y": 0, "width": 1, "height": 1},
+                        "dataUrl": _image_data_url("image/webp", raw),
+                        "items": [],
+                    },
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    screenshot = event["payload"]["screenshot"]
+    local_path = Path(screenshot["path"])
+    assert screenshot["mimeType"] == "image/webp"
+    assert local_path.suffix == ".webp"
+    assert local_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "data_url,mime_type,width,height",
+    [
+        ("not-a-data-url", "image/png", 1, 1),
+        ("data:image/png;base64,%%%%", "image/png", 1, 1),
+        (_image_data_url("image/webp", _png_bytes(1, 1)), "image/webp", 1, 1),
+        (_image_data_url("image/png", _png_bytes(1, 1)), "image/webp", 1, 1),
+        (_image_data_url("image/png", _png_bytes(2049, 1)), "image/png", 2049, 1),
+    ],
+)
+def test_show_event_store_rejects_invalid_screenshot_data_url(
+    isolated_state, data_url, mime_type, width, height
+):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_mark",
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {
+                        "comment": "Invalid screenshot.",
+                        "screenshot": {
+                            "mimeType": mime_type,
+                            "width": width,
+                            "height": height,
+                            "capturedRegion": {"x": 0, "y": 0, "width": width, "height": height},
+                            "dataUrl": data_url,
+                            "items": [],
+                        },
+                    },
+                },
+            )
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "invalid_payload"
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events)).first() is None
+        assert conn.execute(select(media_objects)).first() is None
+    attachment_root = isolated_state / "attachments"
+    assert not attachment_root.exists() or not any(path.is_file() for path in attachment_root.rglob("*"))
 
 
 def test_show_event_store_records_screenshot_annotation_batch(isolated_state):
