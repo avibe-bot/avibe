@@ -99,6 +99,8 @@ class OpenCodeServerManager:
         self._caller_context_plugin_refresh_pending = False
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
         self._last_prompt_started_at: dict[str, float] = {}
+        self._model_hub_overlay_path: Optional[str] = None
+        self._model_hub_overlay_hash: Optional[str] = None
 
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
@@ -369,6 +371,33 @@ class OpenCodeServerManager:
         active = info.get("active_run_sessions") if isinstance(info, dict) else None
         return isinstance(active, list) and bool(active)
 
+    async def configure_model_hub_overlay(self, overlay: Any | None) -> None:
+        """Apply a runtime-only overlay after all active OpenCode work drains."""
+
+        desired_path = str(overlay.path) if overlay is not None else None
+        desired_hash = str(overlay.content_hash) if overlay is not None else None
+        while True:
+            if self.runtime_has_active_turns():
+                await asyncio.sleep(0.05)
+                continue
+            async with self._get_lock():
+                if self._active_requests > 0 or self._has_active_run_sessions():
+                    continue
+                info = self._read_pid_file() or {}
+                effective_path = info.get("model_hub_overlay_path")
+                effective_hash = info.get("model_hub_overlay_hash")
+                if effective_path is None and effective_hash is None:
+                    effective_path = self._model_hub_overlay_path
+                    effective_hash = self._model_hub_overlay_hash
+                if (effective_path, effective_hash) == (desired_path, desired_hash):
+                    return
+                self._model_hub_overlay_path = desired_path
+                self._model_hub_overlay_hash = desired_hash
+                if await self._is_healthy():
+                    logger.info("Restarting OpenCode server after Model Hub overlay change")
+                    await self._restart_for_auth_refresh_locked()
+                return
+
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():
             self._active_run_sessions.add(session_id)
@@ -430,6 +459,9 @@ class OpenCodeServerManager:
                 caller_context_path = self._caller_context_path()
             if isinstance(caller_context_path, str) and caller_context_path:
                 payload["caller_context_path"] = caller_context_path
+            if self._model_hub_overlay_path and self._model_hub_overlay_hash:
+                payload["model_hub_overlay_path"] = self._model_hub_overlay_path
+                payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
@@ -1197,6 +1229,8 @@ class OpenCodeServerManager:
         env = os.environ.copy()
         env["OPENCODE_ENABLE_EXA"] = "1"
         env.update(server_environment())
+        if self._model_hub_overlay_path:
+            env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
 
         try:
             self._process = await asyncio.create_subprocess_exec(

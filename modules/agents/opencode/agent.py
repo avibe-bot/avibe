@@ -20,6 +20,7 @@ from core.message_output import terminal_output_for
 from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.model_hub import OpenCodeOverlay, opencode_model_for_overlay
 
 from .caller_context import bind_session as bind_caller_context_session
 from .client_manager import OpenCodeClientManager
@@ -189,13 +190,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
     async def _process_message(self, request: AgentRequest) -> None:
         run_registered = False
+        model_hub_overlay: OpenCodeOverlay | None = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
         # session_id (a transient server error now that get_session raises on
         # non-404), and the error-cleanup paths reference session_id — keep it
         # defined so they can't trip UnboundLocalError (Codex P2).
         session_id = None
         try:
+            model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
+            prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
+            if callable(prepare_overlay):
+                model_hub_overlay = await prepare_overlay()
             server = await self._get_server()
+            configure_overlay = getattr(server, "configure_model_hub_overlay", None)
+            if callable(configure_overlay):
+                await configure_overlay(model_hub_overlay)
             await server.ensure_running()
         except Exception as e:
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
@@ -294,6 +303,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             opencode_cfg = getattr(self.controller.config, "opencode", None)
             if not model_str:
                 model_str = getattr(opencode_cfg, "default_model", None)
+            model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
             # Bare model id (no ``provider/`` prefix): only inject ``providerID``
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own

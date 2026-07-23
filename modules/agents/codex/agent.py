@@ -8,7 +8,7 @@ import os
 import shlex
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from config import paths
 from config.v2_config import (
@@ -37,7 +37,11 @@ from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from modules.agents.model_hub import ModelHubLaunch
+
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
+_CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 
 
@@ -143,6 +147,17 @@ class CodexAgent(BaseAgent):
             return lambda: None
         return lambda: self._transport_alive(transport)
 
+    async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
+        router = getattr(self.controller, "model_hub_runtime", None)
+        recorder = getattr(router, "record_native_failure", None)
+        if not callable(recorder):
+            return False
+        try:
+            return bool(await recorder(context, diagnostic))
+        except Exception:
+            logger.warning("Failed to record Model Hub native cooldown", exc_info=True)
+            return False
+
     async def handle_message(self, request: AgentRequest) -> None:
         """Process a user message by routing it through app-server.
 
@@ -152,8 +167,21 @@ class CodexAgent(BaseAgent):
         3. If a turn is active → interrupt it first
         4. Start a new turn with the user's message
         """
+        launch = None
         try:
-            transport = await self._get_or_create_transport(request.working_path)
+            if getattr(self.controller, "model_hub_runtime", None) is not None:
+                from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
+
+                _, requested_model, _, _ = self._resolve_codex_agent_settings(request)
+                launch = await resolve_model_hub_launch(
+                    self.controller,
+                    "codex",
+                    requested_model or "",
+                )
+                bind_launch(request.context, launch)
+                transport = await self._get_or_create_transport(request.working_path, launch)
+            else:
+                transport = await self._get_or_create_transport(request.working_path)
         except FileNotFoundError:
             await emit_backend_failure(
                 self.controller,
@@ -168,6 +196,7 @@ class CodexAgent(BaseAgent):
             return
         except Exception as e:
             logger.error("Failed to start Codex transport: %s", e, exc_info=True)
+            await self._record_model_hub_native_failure(request.context, str(e))
             await emit_backend_failure(
                 self.controller,
                 request.context,
@@ -242,7 +271,10 @@ class CodexAgent(BaseAgent):
                     )
                     await self._drop_transport_after_failure(request.working_path, transport, request)
                     try:
-                        transport = await self._get_or_create_transport(request.working_path)
+                        if launch is None:
+                            transport = await self._get_or_create_transport(request.working_path)
+                        else:
+                            transport = await self._get_or_create_transport(request.working_path, launch)
                         self._touch_transport_activity(request.working_path)
                         thread_id = await self._start_or_resume_thread(transport, request)
                         await self._start_turn(transport, request, thread_id)
@@ -258,6 +290,7 @@ class CodexAgent(BaseAgent):
                 # fallbacks).
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
+                await self._record_model_hub_native_failure(request.context, str(e))
                 error_text = f"❌ Codex error: {e}"
                 await emit_backend_failure(
                     self.controller,
@@ -694,7 +727,11 @@ class CodexAgent(BaseAgent):
         self._clear_thread_developer_instructions(request.base_session_id)
         self._turn_registry.clear_session(request.base_session_id)
 
-    async def _get_or_create_transport(self, cwd: str) -> CodexTransport:
+    async def _get_or_create_transport(
+        self,
+        cwd: str,
+        launch: "ModelHubLaunch | None" = None,
+    ) -> CodexTransport:
         """Return an initialized transport for the given working directory."""
         # Serialize creation per cwd
         if cwd not in self._transport_locks:
@@ -710,13 +747,18 @@ class CodexAgent(BaseAgent):
                 # thread/start fails. Untracked legacy entries reuse as before.
                 spawned_ino = self._cwd_inodes().get(cwd)
                 stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
-                if not stale_cwd:
+                desired_fingerprint = launch.fingerprint if launch is not None else "direct"
+                runtime_changed = getattr(existing, "runtime_fingerprint", "direct") != desired_fingerprint
+                if not stale_cwd and not runtime_changed:
                     self._touch_transport_activity(cwd)
                     return existing
-                logger.warning(
-                    "Codex transport cwd was replaced under the cached app-server; restarting transport for cwd=%s",
-                    cwd,
-                )
+                if stale_cwd:
+                    logger.warning(
+                        "Codex transport cwd was replaced under the cached app-server; restarting transport for cwd=%s",
+                        cwd,
+                    )
+                else:
+                    logger.info("Restarting Codex transport after Model Hub channel change for cwd=%s", cwd)
 
             # Stop stale transport if any
             if existing:
@@ -736,10 +778,21 @@ class CodexAgent(BaseAgent):
                         cwd,
                     )
 
+            runtime_args: list[str] = []
+            runtime_env: dict[str, str] | None = None
+            runtime_fingerprint = "direct"
+            if launch is not None:
+                from modules.agents.model_hub import build_codex_hub_launch
+
+                runtime_args, runtime_env = build_codex_hub_launch([], os.environ.copy(), launch)
+                runtime_fingerprint = launch.fingerprint
             transport = CodexTransport(
                 binary=self.codex_config.binary,
                 cwd=cwd,
                 extra_args=list(self.codex_config.extra_args),
+                runtime_args=runtime_args,
+                runtime_env=runtime_env,
+                runtime_fingerprint=runtime_fingerprint,
             )
 
             # Wire up callbacks
@@ -1021,6 +1074,12 @@ class CodexAgent(BaseAgent):
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
         effective_model = explicit_model or (agent_definition.model if agent_definition else None) or self.codex_config.default_model
+        if getattr(self.controller, "model_hub_runtime", None) is not None:
+            from modules.agents.model_hub import launch_for_context
+
+            launch = launch_for_context(getattr(request, "context", None))
+            if launch is not None and launch.backend == "codex":
+                effective_model = launch.runtime_model or effective_model
         effective_effort = explicit_effort or (agent_definition.reasoning_effort if agent_definition else None)
         developer_instructions = vibe_instructions or (agent_definition.developer_instructions if agent_definition else None)
 
@@ -1183,6 +1242,8 @@ class CodexAgent(BaseAgent):
 
     @staticmethod
     def _is_managed_provider_transition(stored_provider: str, current_provider: str) -> bool:
+        if _CODEX_MODEL_HUB_PROVIDER_ID in {stored_provider, current_provider}:
+            return True
         return {stored_provider, current_provider}.issubset(_CODEX_MANAGED_PROVIDER_IDS)
 
     async def _read_effective_model_provider(

@@ -157,6 +157,10 @@ class CodexEventHandler:
             if not error_msg:
                 error_obj = turn_obj.get("error", {}) if isinstance(turn_obj, dict) else {}
                 error_msg = self._extract_error_message(error_obj)
+            await self._record_model_hub_native_failure(
+                tracked_request.context,
+                error_msg or "Unknown error",
+            )
 
             if should_emit_terminal_error and not already_notified:
                 message = f"❌ Codex turn failed: {error_msg}"
@@ -311,6 +315,11 @@ class CodexEventHandler:
                     parse_mode="markdown",
                 )
 
+    async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> None:
+        recorder = getattr(self._agent, "_record_model_hub_native_failure", None)
+        if recorder is not None:
+            await recorder(context, diagnostic)
+
     async def _on_error(self, params: dict[str, Any], request: AgentRequest) -> None:
         error = params.get("error", {})
         message = self._extract_error_message(error)
@@ -320,6 +329,8 @@ class CodexEventHandler:
         if will_retry:
             logger.info("Suppressing transient Codex error for turn %s: %s", turn_id or "<unknown>", message)
             return
+
+        await self._record_model_hub_native_failure(request.context, message)
 
         if turn_id:
             turn_state = self._agent._turn_registry.get_turn(turn_id)

@@ -30,10 +30,16 @@ class CodexTransport:
         binary: str,
         cwd: str,
         extra_args: list[str] | None = None,
+        runtime_args: list[str] | None = None,
+        runtime_env: dict[str, str] | None = None,
+        runtime_fingerprint: str = "direct",
     ) -> None:
         self._binary = binary
         self._cwd = cwd
         self._extra_args = extra_args or []
+        self._runtime_args = runtime_args or []
+        self._runtime_env = runtime_env
+        self.runtime_fingerprint = runtime_fingerprint
         self._process: Optional[Process] = None
         self._request_id: int = 0
         self._pending: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
@@ -61,21 +67,28 @@ class CodexTransport:
             logger.warning("CodexTransport.start() called but process is already running")
             return
 
-        cmd = [self._binary, "--dangerously-bypass-approvals-and-sandbox", "app-server"] + self._extra_args
+        cmd = (
+            [self._binary, "--dangerously-bypass-approvals-and-sandbox"]
+            + self._runtime_args
+            + ["app-server"]
+            + self._extra_args
+        )
         logger.info("Launching Codex app-server: %s (cwd=%s)", " ".join(cmd), self._cwd)
 
         if not os.path.exists(self._cwd):
             os.makedirs(self._cwd, exist_ok=True)
 
-        self._process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self._cwd,
-            limit=STREAM_BUFFER_LIMIT,
+        subprocess_kwargs: dict[str, Any] = {
+            "stdin": asyncio.subprocess.PIPE,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "cwd": self._cwd,
+            "limit": STREAM_BUFFER_LIMIT,
             **isolated_subprocess_kwargs(),
-        )
+        }
+        if self._runtime_env is not None:
+            subprocess_kwargs["env"] = self._runtime_env
+        self._process = await asyncio.create_subprocess_exec(*cmd, **subprocess_kwargs)
         identity = process_identity(self._process.pid)
         logger.info(
             "Codex app-server started (pid=%s pgid=%s sid=%s service_pgid=%s)",

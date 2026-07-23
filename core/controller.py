@@ -225,6 +225,12 @@ class Controller:
 
         self.session_turns = SessionTurnManager(self)
 
+        # Model Hub owns per-turn supply selection. Backend adapters consume
+        # the resulting launch plan without persisting native CLI config.
+        from modules.agents.model_hub import ModelHubRuntimeRouter
+
+        self.model_hub_runtime = ModelHubRuntimeRouter()
+
         # Initialize core modules
         self._init_modules()
 
