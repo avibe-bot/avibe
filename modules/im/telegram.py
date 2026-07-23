@@ -84,6 +84,7 @@ class _TelegramSettingsState:
     global_require_mention: bool
     current_language: str
     is_dm: bool
+    thread_id: Optional[str]
 
 
 @dataclass
@@ -609,6 +610,7 @@ class TelegramBot(BaseIMClient):
                 "is_dm": chat.get("type") == "private",
                 "chat_type": chat.get("type"),
                 "chat_title": chat.get("title") or chat.get("username"),
+                "is_forum": bool(chat.get("is_forum")) or bool(message.get("is_topic_message")),
                 "is_topic_message": bool(message.get("is_topic_message")),
                 "raw_message": message,
             },
@@ -861,7 +863,9 @@ class TelegramBot(BaseIMClient):
         payload = context.platform_specific or {}
         is_dm = bool(payload.get("is_dm"))
         scope = context.user_id if is_dm else context.channel_id
-        return f"{scope}:{context.user_id}"
+        thread_id = resolve_context_thread_id(context)
+        thread_suffix = f":{thread_id}" if not is_dm and thread_id is not None else ""
+        return f"{scope}:{context.user_id}{thread_suffix}"
 
     async def _consume_cwd_prompt(self, context: MessageContext, text: str) -> bool:
         prompt = self._cwd_prompts.get(self._interaction_scope_key(context))
@@ -2193,6 +2197,7 @@ class TelegramBot(BaseIMClient):
             global_require_mention=global_require_mention,
             current_language=current_language or self._get_lang(),
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
+            thread_id=resolve_context_thread_id(context),
         )
         text, keyboard = self._render_settings_state(state, list(message_types or []))
         message_id = await self.send_message_with_buttons(context, text, keyboard)
@@ -2319,9 +2324,9 @@ class TelegramBot(BaseIMClient):
                 "is_dm": state.is_dm,
                 "platform": "telegram",
             }
-            thread_id = resolve_context_thread_id(context)
-            if thread_id is not None:
-                settings_update["thread_id"] = thread_id
+            state_thread_id = getattr(state, "thread_id", None)
+            if state_thread_id is not None:
+                settings_update["thread_id"] = state_thread_id
             await self._controller.settings_handler.handle_settings_update(**settings_update)
             return
 

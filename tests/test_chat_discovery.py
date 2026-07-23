@@ -817,6 +817,118 @@ def test_delete_scope_removes_scope_and_settings(tmp_path: Path) -> None:
     }
 
 
+def test_delete_scope_cascades_child_thread_settings(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "-1001", name="Forum", db_path=db_path)
+    chat_discovery.remember_thread(
+        "telegram",
+        "-1001",
+        "42",
+        name="Releases",
+        native_type="forum_topic",
+        db_path=db_path,
+    )
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                channels={"telegram::-1001": ChannelSettings(enabled=True)},
+                threads={
+                    "telegram::-1001/42": ChannelSettings(
+                        enabled=True,
+                        require_mention=False,
+                    )
+                },
+            )
+        )
+    finally:
+        service.close()
+
+    outcome = chat_discovery.delete_scope("telegram", "-1001", db_path=db_path)
+
+    assert outcome == {"removed": True, "dismissed": False}
+    assert chat_discovery.list_chats("telegram", db_path=db_path) == []
+    assert chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path) == []
+    reloaded = SQLiteSettingsService(db_path)
+    try:
+        state = reloaded.load_state()
+        assert "telegram::-1001" not in state.channels
+        assert "telegram::-1001/42" not in state.threads
+    finally:
+        reloaded.close()
+
+
+def test_delete_scope_preserves_child_thread_history(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from storage.models import messages
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "-1001", name="Forum", db_path=db_path)
+    chat_discovery.remember_thread(
+        "telegram",
+        "-1001",
+        "42",
+        name="Releases",
+        native_type="forum_topic",
+        db_path=db_path,
+    )
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                threads={
+                    "telegram::-1001/42": ChannelSettings(enabled=True),
+                }
+            )
+        )
+    finally:
+        service.close()
+
+    thread_scope_id = chat_discovery.make_scope_id(
+        "telegram",
+        chat_discovery.THREAD_SCOPE_TYPE,
+        "-1001/42",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                messages.insert().values(
+                    id="topic-message",
+                    scope_id=thread_scope_id,
+                    platform="telegram",
+                    author="user",
+                    type="user",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    outcome = chat_discovery.delete_scope("telegram", "-1001", db_path=db_path)
+
+    assert outcome == {"removed": True, "dismissed": False}
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.connect() as conn:
+            kept = conn.execute(messages.select().where(messages.c.id == "topic-message")).first()
+    finally:
+        engine.dispose()
+    assert kept is not None
+    reloaded = SQLiteSettingsService(db_path)
+    try:
+        assert "telegram::-1001/42" not in reloaded.load_state().threads
+    finally:
+        reloaded.close()
+
+
 def test_delete_scope_with_history_dismisses_instead_of_deleting(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from core import chat_discovery
+from core.message_context import resolve_context_thread_id
 from modules.agents.native_sessions import NativeResumeSession
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from modules.im.multi import MultiIMClient
@@ -678,6 +679,34 @@ def test_pending_cwd_prompt_consumes_next_plain_message() -> None:
     assert bot._interaction_scope_key(context) not in bot._cwd_prompts
 
 
+def test_interaction_scope_key_separates_forum_topics() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    topic_42 = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_dm": False},
+    )
+    topic_43 = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="43",
+        platform="telegram",
+        platform_specific={"is_dm": False},
+    )
+    general = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        platform="telegram",
+        platform_specific={"is_dm": False, "is_forum": True},
+    )
+
+    assert bot._interaction_scope_key(topic_42) == "-100123:42:42"
+    assert bot._interaction_scope_key(topic_43) == "-100123:42:43"
+    assert bot._interaction_scope_key(general) == "-100123:42:1"
+
+
 def test_pending_cwd_prompt_bypasses_slash_command_with_args() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(
@@ -1307,6 +1336,7 @@ def test_settings_callback_save_updates_language_and_deletes_menu() -> None:
         global_require_mention=True,
         current_language="zh",
         is_dm=False,
+        thread_id="1",
     )
     bot._controller = SimpleNamespace(
         settings_handler=SimpleNamespace(handle_settings_update=AsyncMock()),
@@ -1325,7 +1355,45 @@ def test_settings_callback_save_updates_language_and_deletes_menu() -> None:
         notify_user=True,
         is_dm=False,
         platform="telegram",
+        thread_id="1",
     )
+
+
+def test_callback_context_preserves_general_forum_identity() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    bot.check_authorization = lambda **kwargs: SimpleNamespace(allowed=True, denial=None)
+    captured_contexts: list[MessageContext] = []
+
+    async def handle_internal(context: MessageContext, callback_data: str) -> bool:
+        captured_contexts.append(context)
+        return True
+
+    bot._handle_internal_callback = handle_internal
+
+    with patch.object(bot, "answer_callback", new=AsyncMock(return_value=True)):
+        asyncio.run(
+            bot._handle_callback_query(
+                {
+                    "id": "cb-general",
+                    "data": "tg_settings:save",
+                    "from": {"id": 42},
+                    "message": {
+                        "message_id": 66,
+                        "is_topic_message": True,
+                        "chat": {
+                            "id": -100123,
+                            "type": "supergroup",
+                            "title": "Core Forum",
+                            "is_forum": True,
+                        },
+                    },
+                }
+            )
+        )
+
+    assert len(captured_contexts) == 1
+    assert resolve_context_thread_id(captured_contexts[0]) == "1"
+    assert bot._interaction_scope_key(captured_contexts[0]) == "-100123:42:1"
 
 
 def test_open_question_modal_edits_message_with_telegram_buttons() -> None:

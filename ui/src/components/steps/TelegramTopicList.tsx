@@ -82,7 +82,9 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
                   <span className="block truncate text-[13px] font-medium text-foreground">
                     {topic.name || t('channelList.topicFallbackName', { id: topic.id })}
                   </span>
-                  <span className="block truncate font-mono text-[10px] text-muted">Topic ID: {topic.id}</span>
+                  <span className="block truncate font-mono text-[10px] text-muted">
+                    {t('channelList.topicIdLabel', { id: topic.id })}
+                  </span>
                 </span>
                 <span
                   className={clsx(

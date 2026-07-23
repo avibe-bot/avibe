@@ -1560,6 +1560,7 @@
     "topicEmptyTitle": "还没有发现 Topic",
     "topicEmptyDesc": "先在 forum topic 中发送一条消息，然后刷新群组列表。",
     "topicFallbackName": "Topic {{id}}",
+    "topicIdLabel": "话题 ID：{{id}}",
     "topicCustomBadge": "单独设置",
     "topicInheritedBadge": "继承群组",
     "topicCustomize": "单独配置",

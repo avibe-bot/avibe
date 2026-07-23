@@ -1560,6 +1560,7 @@
     "topicEmptyTitle": "No topics discovered yet",
     "topicEmptyDesc": "Send a message in a forum topic, then refresh the group list.",
     "topicFallbackName": "Topic {{id}}",
+    "topicIdLabel": "Topic ID: {{id}}",
     "topicCustomBadge": "Custom",
     "topicInheritedBadge": "Inherits group",
     "topicCustomize": "Customize",

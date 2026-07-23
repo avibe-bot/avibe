@@ -955,6 +955,46 @@ def _scope_has_history(conn: Connection, scope_id: str) -> bool:
     return False
 
 
+def _descendant_scope_rows(conn: Connection, scope_id: str) -> list[dict[str, Any]]:
+    """Return descendant scope rows in parent-before-child order."""
+    descendants: list[dict[str, Any]] = []
+    pending = [scope_id]
+    visited = {scope_id}
+    while pending:
+        rows = (
+            conn.execute(select(scopes).where(scopes.c.parent_scope_id.in_(pending)))
+            .mappings()
+            .all()
+        )
+        pending = []
+        for row in rows:
+            child_id = str(row["id"])
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            descendants.append(dict(row))
+            pending.append(child_id)
+    return descendants
+
+
+def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) -> dict[str, bool]:
+    """Delete one scope's settings, then delete or dismiss its scope row."""
+    scope_id = str(row["id"])
+    conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
+    if _scope_has_history(conn, scope_id):
+        now = _utc_now_iso()
+        metadata = _json_loads(row["metadata_json"], {})
+        metadata[METADATA_DISMISSED_AT] = now
+        conn.execute(
+            scopes.update()
+            .where(scopes.c.id == scope_id)
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        return {"removed": False, "dismissed": True}
+    result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
+    return {"removed": bool(result.rowcount), "dismissed": False}
+
+
 def delete_scope(
     platform: str,
     native_id: str,
@@ -969,6 +1009,8 @@ def delete_scope(
     scope with ON DELETE CASCADE, a hard delete would wipe that history. So:
 
     - the ``scope_settings`` row is always deleted (the user's config);
+    - descendant scopes and settings are removed by the same history-preserving
+      rules so a deleted parent cannot leave active child overrides behind;
     - if the scope owns no cascading history, the ``scopes`` row is physically
       deleted (clean removal);
     - otherwise the ``scopes`` row is kept and stamped ``dismissed_at`` so it is
@@ -983,20 +1025,10 @@ def delete_scope(
             row = conn.execute(select(scopes).where(scopes.c.id == scope_id)).mappings().one_or_none()
             if row is None:
                 return {"removed": False, "dismissed": False}
-            conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
-            if _scope_has_history(conn, scope_id):
-                metadata = _json_loads(row["metadata_json"], {})
-                metadata[METADATA_DISMISSED_AT] = _utc_now_iso()
-                conn.execute(
-                    scopes.update()
-                    .where(scopes.c.id == scope_id)
-                    .values(metadata_json=_json_dumps(metadata), updated_at=_utc_now_iso())
-                )
-                return {"removed": False, "dismissed": True}
-            # No cascading history — safe to physically delete. Child scopes keep
-            # their rows (parent_scope_id is ON DELETE SET NULL).
-            result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
-            return {"removed": bool(result.rowcount), "dismissed": False}
+            descendants = _descendant_scope_rows(conn, scope_id)
+            for descendant in reversed(descendants):
+                _remove_scope_row_preserving_history(conn, descendant)
+            return _remove_scope_row_preserving_history(conn, dict(row))
     finally:
         engine.dispose()
 
