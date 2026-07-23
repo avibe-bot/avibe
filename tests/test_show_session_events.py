@@ -711,9 +711,15 @@ def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeyp
 
 @pytest.mark.parametrize(
     ("intent", "expects_guidance"),
-    [("question", True), ("change", False)],
+    [
+        ("question", True),
+        ("comment", True),
+        ("fix", False),
+        ("change", False),
+        ("approve", False),
+    ],
 )
-def test_annotation_dispatch_text_adds_event_id_and_question_guidance_only(monkeypatch, intent, expects_guidance):
+def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monkeypatch, intent, expects_guidance):
     import asyncio
 
     from vibe import internal_client, ui_server
@@ -732,16 +738,19 @@ def test_annotation_dispatch_text_adds_event_id_and_question_guidance_only(monke
         "session_id": "ses_show",
         "scope_id": "scope1",
         "payload": {"intent": intent},
-        "transcript_text": "[show-annotation:default:created] question\n\nWhy?",
+        "transcript_text": f"[show-annotation:default:created] {intent}\n\nReview this.",
         "message_id": "m1",
     }
 
     asyncio.run(ui_server._run_show_event_dispatch(event))
 
-    assert event["transcript_text"] == "[show-annotation:default:created] question\n\nWhy?"
+    assert event["transcript_text"] == f"[show-annotation:default:created] {intent}\n\nReview this."
     assert "Show event id: show_evt_1a2b3c4d" in captured[0]["text"]
     guidance = (
-        "用户在页面上提出了疑问。请优先把回答放回页面上用户指的位置（chat 里保留一句简短结论即可）：\n"
-        "  vibe show reply show_evt_1a2b3c4d --message '<你的回答>'"
+        "如需在页面上原位回应，可执行：\n"
+        "  vibe show reply show_evt_1a2b3c4d --message '<你的回答>'\n"
+        "（也可以直接修改页面内容来响应，按场景选择。）"
     )
     assert (guidance in captured[0]["text"]) is expects_guidance
+    if expects_guidance:
+        assert captured[0]["text"].endswith(guidance)

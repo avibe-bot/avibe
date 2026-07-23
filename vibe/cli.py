@@ -10074,7 +10074,14 @@ def cmd_remote_stop(args):
     return 0 if result.get("ok") else 1
 
 
-def _show_page_result(page, *, message: str, previous_payload: dict | None = None, extra: dict | None = None) -> dict:
+def _show_page_result(
+    page,
+    *,
+    message: str,
+    previous_payload: dict | None = None,
+    extra: dict | None = None,
+    include_annotation_guidance: bool = False,
+) -> dict:
     from core.show_pages import show_page_payload
 
     payload = {
@@ -10086,11 +10093,14 @@ def _show_page_result(page, *, message: str, previous_payload: dict | None = Non
         payload.update(previous_payload)
     if extra:
         payload.update(extra)
-    payload["next_actions"] = _show_page_next_actions(payload)
+    payload["next_actions"] = _show_page_next_actions(
+        payload,
+        include_annotation_guidance=include_annotation_guidance,
+    )
     return payload
 
 
-def _show_page_next_actions(payload: dict) -> list[str]:
+def _show_page_next_actions(payload: dict, *, include_annotation_guidance: bool = False) -> list[str]:
     session_id = payload.get("session_id") or "<session-id>"
     visibility = payload.get("visibility")
     actions = [
@@ -10107,6 +10117,8 @@ def _show_page_next_actions(payload: dict) -> list[str]:
     actions.append("Treat the Show Page as the primary collaboration surface; put meaningful updates there first.")
     actions.append("Use visual thinking: diagrams, timelines, maps, comparisons, dashboards, or small prototypes when they help.")
     actions.append("To update the page later, edit src/App.tsx or api/*.ts; the private page hot-reloads when open.")
+    if include_annotation_guidance:
+        actions.append("Annotations: users can mark up this page; see vibe show marks / reply / annotate.")
     actions.append("For more options, run: vibe show --help")
     return actions
 
@@ -10269,6 +10281,7 @@ def cmd_show_path(args):
             page,
             message=f"Show Page workspace is ready at {page_dir}.",
             extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+            include_annotation_guidance=True,
         )
         if getattr(args, "json", False):
             _print_json(payload)

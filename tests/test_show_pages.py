@@ -1726,6 +1726,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert payload["url_guidance"] is None
     assert "Do not send implementation details such as local paths to the user unless they ask for them." in payload["next_actions"]
     assert "Treat the Show Page as the primary collaboration surface; put meaningful updates there first." in payload["next_actions"]
+    assert "Annotations: users can mark up this page; see vibe show marks / reply / annotate." in payload["next_actions"]
     assert (
         "Use visual thinking: diagrams, timelines, maps, comparisons, dashboards, or small prototypes when they help."
         in payload["next_actions"]
@@ -1734,6 +1735,20 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm"
     assert captured["payload"] == {}
     assert captured["timeout"] == 3
+
+
+def test_show_path_cli_prints_annotation_capabilities(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123"])
+    assert cli.cmd_show_path(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Use it:" in output
+    assert "- Annotations: users can mark up this page; see vibe show marks / reply / annotate." in output
 
 
 def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, capsys):

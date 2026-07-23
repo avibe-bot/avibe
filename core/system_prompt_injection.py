@@ -88,6 +88,11 @@ Change visibility:
 `vibe show update --visibility offline`
 
 For more usage details, run `vibe show --help` or a subcommand help such as `vibe show update --help`.
+
+### Show Page annotations & reverse marks
+- Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
+- After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
+- Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`.
 $avibe_cloud_guidance_section
 History contract:
 $show_git_agent_contract

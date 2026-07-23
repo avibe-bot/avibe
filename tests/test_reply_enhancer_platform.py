@@ -592,6 +592,27 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("`vibe show path --session-id sesk8m4q2p7x`", prompt)
         self.assertIn("export async function GET(request) { return Response.json({ ok: true }) }", prompt)
 
+    def test_show_pages_prompt_includes_annotation_capability_guidance(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+            )
+
+        guidance = """### Show Page annotations & reverse marks
+- Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
+- After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
+- Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`."""
+        self.assertIn(guidance, prompt)
+        self.assertNotIn("prefer replying on the page", prompt)
+
     def test_prompt_uses_fallback_platform_for_unannotated_context(self):
         context = MessageContext(
             user_id="U1",

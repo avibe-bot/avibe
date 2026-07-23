@@ -8691,12 +8691,13 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
         return transcript_text
     lines = [transcript_text, "", f"Show event id: {event_id}"]
     payload = event_payload.get("payload")
-    if isinstance(payload, dict) and payload.get("intent") == "question":
+    if isinstance(payload, dict) and payload.get("intent") in {"question", "comment"}:
         lines.extend(
             [
                 "",
-                "用户在页面上提出了疑问。请优先把回答放回页面上用户指的位置（chat 里保留一句简短结论即可）：",
+                "如需在页面上原位回应，可执行：",
                 f"  vibe show reply {event_id} --message '<你的回答>'",
+                "（也可以直接修改页面内容来响应，按场景选择。）",
             ]
         )
     return "\n".join(lines)
