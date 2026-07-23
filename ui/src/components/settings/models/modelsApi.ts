@@ -134,6 +134,9 @@ class MockStore {
       billing: 'metered',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: null, month_spend_cents: 0, currency: 'CNY' },
+      account_label: null,
+      // Simulates L2 computing the display mask once at provisioning.
+      masked_credential: maskKey(draft.key),
       models: Array.from({ length: count }, (_, i) => ({
         id: `${draft.vendor}-model-${i + 1}`,
         display_name: null,
@@ -265,6 +268,10 @@ class MockStore {
       billing: 'monthly',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 0, month_spend_cents: null, currency: null },
+      // native_cli subscriptions surface the sanctioned CLI account; hub-held
+      // experimental sources may stay null until a later adapter rev (schema).
+      account_label: entry.flow.channel === 'native_cli' ? 'me@gmail.com' : null,
+      masked_credential: null,
       models: isOpenai
         ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: new Date().toISOString() }]
         : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: new Date().toISOString() }],
@@ -284,6 +291,14 @@ function vendorLabel(vendor: string): string {
     xai: 'xAI API Key',
   };
   return table[vendor] ?? `${vendor} API Key`;
+}
+
+// Non-reversible display mask (contract rule: ≤7-char prefix + "…" + last 4).
+function maskKey(key: string): string {
+  const k = key.trim();
+  if (k.length <= 5) return `${k}…`;
+  const prefix = k.slice(0, Math.min(7, k.length - 4));
+  return `${prefix}…${k.slice(-4)}`;
 }
 
 function hostLabel(baseUrl: string | null | undefined): string {

@@ -12,28 +12,24 @@ import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import { cooldownEtaMinutes, formatSpend } from './format';
 import type { Source } from './types';
 
-// The mono sub-line surfaces WHERE tokens come from (原生供给 / 官方地址 /
-// 自定义地址) plus a cooldown ETA — derived from the frozen Source fields.
-// NOTE (contract gap, reported to orchestrator): frame 01r calls for an
-// "account / key id" here, but source.schema.json exposes only an opaque
-// credential_ref (no account email or masked-key tail), so we show the supply
-// channel / endpoint instead. Recommend L2 add an optional display hint.
+// The mono sub-line shows the source identity: account_label (subscriptions)
+// or masked_credential (api keys) — both server-provided display data (contract
+// v1.1, 07-23, from the L4 finding). Falls back to the supply channel / endpoint
+// (原生供给 / 中枢托管 / 官方地址 / 自定义地址) when neither is set, e.g. hub-held
+// experimental sources before a later adapter rev. Cooldown ETA is appended.
 function useSubline(source: Source): string {
   const { t } = useTranslation();
-  const parts: string[] = [];
 
-  if (source.kind === 'subscription') {
-    parts.push(
-      source.supply_channel === 'native_cli'
+  const fallback =
+    source.kind === 'subscription'
+      ? source.supply_channel === 'native_cli'
         ? (t('settings.models.source.nativeSupply') as string)
-        : (t('settings.models.source.hubHosted') as string),
-    );
-  } else if (source.base_url && source.vendor === 'custom') {
-    parts.push(t('settings.models.source.customEndpoint') as string);
-  } else {
-    parts.push(t('settings.models.source.officialEndpoint') as string);
-  }
+        : (t('settings.models.source.hubHosted') as string)
+      : source.base_url && source.vendor === 'custom'
+        ? (t('settings.models.source.customEndpoint') as string)
+        : (t('settings.models.source.officialEndpoint') as string);
 
+  const parts = [source.account_label ?? source.masked_credential ?? fallback];
   if (source.state.status === 'cooldown') {
     parts.push(t('settings.models.source.retryIn', { minutes: cooldownEtaMinutes(source.state.retry_at) }) as string);
   }

@@ -56,6 +56,13 @@ export type Source = {
   billing: 'monthly' | 'metered';
   state: SourceState;
   usage?: SourceUsage;
+  /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
+   *  Never secret material; may be null. */
+  account_label?: string | null;
+  /** api_key display mask, computed server-side once at provisioning
+   *  (≤7-char prefix + "…" + last 4, e.g. "sk-ant-…8f2A"). Non-reversible;
+   *  never secret material; may be null. */
+  masked_credential?: string | null;
   models: SuppliedModel[];
   /** Opaque handle. Secret material NEVER appears here. */
   credential_ref?: string | null;

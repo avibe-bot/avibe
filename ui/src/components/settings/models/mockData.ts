@@ -28,6 +28,8 @@ export function buildMockSources(): Source[] {
       billing: 'monthly',
       state: { status: 'active', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 62, month_spend_cents: null, currency: null },
+      account_label: 'me@gmail.com',
+      masked_credential: null,
       models: [
         { id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
         { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
@@ -46,6 +48,8 @@ export function buildMockSources(): Source[] {
       billing: 'monthly',
       state: { status: 'active', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 31, month_spend_cents: null, currency: null },
+      account_label: 'me@gmail.com',
+      masked_credential: null,
       models: [
         { id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
         { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
@@ -63,6 +67,8 @@ export function buildMockSources(): Source[] {
       billing: 'metered',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: null, month_spend_cents: 1240, currency: 'CNY' },
+      account_label: null,
+      masked_credential: 'sk-ant-…8f2A',
       models: [
         { id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
         { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
@@ -81,6 +87,8 @@ export function buildMockSources(): Source[] {
       billing: 'metered',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: null, month_spend_cents: 210, currency: 'CNY' },
+      account_label: null,
+      masked_credential: 'glm-…c31b',
       models: [
         { id: 'glm-5.2', display_name: 'GLM 5.2', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
         { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
@@ -100,6 +108,8 @@ export function buildMockSources(): Source[] {
       billing: 'metered',
       state: { status: 'cooldown', retry_at: iso(47 * MIN), detail_key: 'settings.models.source.cooldown.timeout' },
       usage: { cycle_used_pct: null, month_spend_cents: 320, currency: 'CNY' },
+      account_label: null,
+      masked_credential: 'key …9c1',
       models: [
         { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', provenance: 'manual', discovered_at: null },
       ],
