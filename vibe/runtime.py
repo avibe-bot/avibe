@@ -1273,7 +1273,7 @@ def maybe_systemd_scope_prefix() -> list[str]:
     return list(SYSTEMD_SCOPE_PREFIX)
 
 
-def _adopt_scoped_service_owner(prev_pid: int, process) -> int | None:
+def _adopt_scoped_service_owner(prev_pid: int) -> int | None:
     """Reconcile the tracked service pid after a ``systemd-run --user --scope`` launch.
 
     ``--scope`` exec()s into the target, so ``process.pid`` is normally already the
@@ -1286,8 +1286,12 @@ def _adopt_scoped_service_owner(prev_pid: int, process) -> int | None:
     """
     owner = resolve_service_owner_pid(include_starting=False)
     if owner and owner != prev_pid and pid_alive(owner):
+        # Stop tracking the shim's Popen: it is a handle on the shim, not on
+        # `owner`, so its exit code must never be attributed to the adopted
+        # service. Owner liveness is instead governed by pid_alive() /
+        # service_pid_recorded() inside wait_for_service_pid (an untracked pid
+        # yields exit_code=None from _service_start_exit_code).
         _SERVICE_START_PROCESSES.pop(prev_pid, None)
-        _SERVICE_START_PROCESSES[owner] = process
         _record_service_pid_reservation(owner)
         logger.info(
             "cgroup scope bootstrap: adopting lock-holder pid=%s as the service owner (shim pid=%s)",
@@ -1376,7 +1380,7 @@ def start_service(
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
         if scope_prefix:
-            adopted_pid = _adopt_scoped_service_owner(pid, process)
+            adopted_pid = _adopt_scoped_service_owner(pid)
             if adopted_pid is not None:
                 pid = adopted_pid
                 if wait_for_service_pid(

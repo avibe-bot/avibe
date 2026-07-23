@@ -135,29 +135,31 @@ class AdoptScopedServiceOwnerTests(unittest.TestCase):
             stack.enter_context(patch("vibe.runtime.pid_alive", return_value=True))
             rec = stack.enter_context(patch("vibe.runtime._record_service_pid_reservation"))
             stack.enter_context(patch.dict("vibe.runtime._SERVICE_START_PROCESSES", {1234: proc}, clear=True))
-            self.assertEqual(runtime._adopt_scoped_service_owner(1234, proc), 4321)
+            self.assertEqual(runtime._adopt_scoped_service_owner(1234), 4321)
             rec.assert_called_once_with(4321)
+            # Shim handle dropped; adopted owner is NOT tracked via the shim's Popen,
+            # so its exit code can never be misattributed from process.poll().
             self.assertNotIn(1234, runtime._SERVICE_START_PROCESSES)
-            self.assertIs(runtime._SERVICE_START_PROCESSES[4321], proc)
+            self.assertNotIn(4321, runtime._SERVICE_START_PROCESSES)
 
     def test_no_adoption_when_owner_matches_shim_pid(self):
         # The normal exec() case: Popen.pid already IS the lock holder.
         with patch("vibe.runtime.resolve_service_owner_pid", return_value=1234):
             with patch("vibe.runtime.pid_alive", return_value=True):
                 with patch("vibe.runtime._record_service_pid_reservation") as rec:
-                    self.assertIsNone(runtime._adopt_scoped_service_owner(1234, object()))
+                    self.assertIsNone(runtime._adopt_scoped_service_owner(1234))
                     rec.assert_not_called()
 
     def test_no_adoption_when_no_live_owner_yet(self):
         with patch("vibe.runtime.resolve_service_owner_pid", return_value=None):
             with patch("vibe.runtime._record_service_pid_reservation") as rec:
-                self.assertIsNone(runtime._adopt_scoped_service_owner(1234, object()))
+                self.assertIsNone(runtime._adopt_scoped_service_owner(1234))
                 rec.assert_not_called()
 
     def test_no_adoption_when_owner_not_alive(self):
         with patch("vibe.runtime.resolve_service_owner_pid", return_value=4321):
             with patch("vibe.runtime.pid_alive", return_value=False):
-                self.assertIsNone(runtime._adopt_scoped_service_owner(1234, object()))
+                self.assertIsNone(runtime._adopt_scoped_service_owner(1234))
 
 
 class _StopSpawn(Exception):
