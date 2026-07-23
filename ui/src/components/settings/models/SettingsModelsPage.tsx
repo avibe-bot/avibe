@@ -56,6 +56,12 @@ export const SettingsModelsPage: React.FC = () => {
   // Bumped per reorder-commit so an out-of-order PUT /priority response from a
   // superseded drag can't overwrite the newest order.
   const reorderSeq = React.useRef(0);
+  // Guards event-handler async writes (refresh / connect) from landing after
+  // the page unmounts — the whole class of stale-async writes the review flagged.
+  const aliveRef = React.useRef(true);
+  React.useEffect(() => () => {
+    aliveRef.current = false;
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -82,6 +88,7 @@ export const SettingsModelsPage: React.FC = () => {
   const refreshSourcesAgents = React.useCallback(async () => {
     try {
       const [s, a] = await Promise.all([modelsApi.listSources(), modelsApi.listAgents()]);
+      if (!aliveRef.current) return;
       setSources(s);
       setAgents(a);
     } catch {
@@ -123,11 +130,11 @@ export const SettingsModelsPage: React.FC = () => {
     try {
       await modelsApi.setAgentMode(agent.backend, 'hub');
       await refreshSourcesAgents();
-      showToast(t('settings.models.toast.connected') as string, 'success');
+      if (aliveRef.current) showToast(t('settings.models.toast.connected') as string, 'success');
     } catch {
-      showToast(t('settings.models.toast.connectFailed') as string, 'error');
+      if (aliveRef.current) showToast(t('settings.models.toast.connectFailed') as string, 'error');
     } finally {
-      setConnecting(null);
+      if (aliveRef.current) setConnecting(null);
     }
   };
 
