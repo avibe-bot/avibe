@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowUpRight,
+  Brain,
   Download,
   Hexagon,
   KeyRound,
@@ -21,7 +22,7 @@ import { Badge } from '../ui/badge';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
-import type { DependencyItem } from '@/context/ApiContext';
+import type { DependencyItem, InstallResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
@@ -37,6 +38,7 @@ const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan' },
+  'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
 };
@@ -62,6 +64,18 @@ export const SettingsDependenciesPage: React.FC = () => {
     void refresh();
   }, [refresh]);
 
+  // A closed backend reason/message is often a snake_case token (e.g.
+  // `memory_runtime_unpublished`) rather than human copy. Localize any
+  // token-shaped string through the shared errors namespace so the user never
+  // sees a raw identifier; fall back to a human message or the generic failure.
+  const localizedFailure = (res: InstallResult): string => {
+    const token = res.reason || res.message;
+    if (typeof token === 'string' && /^[a-z][a-z0-9_]*$/.test(token)) {
+      return t(`errors.${token}`, { defaultValue: t('settings.dependencies.installFailed') });
+    }
+    return res.message || t('settings.dependencies.installFailed');
+  };
+
   const install = async (dep: DependencyItem) => {
     setBusy(dep.id);
     try {
@@ -69,22 +83,32 @@ export const SettingsDependenciesPage: React.FC = () => {
       showToast(
         res.ok
           ? t('settings.dependencies.installed', { name: t(`settings.dependencies.items.${dep.id}.label`) })
-          : res.message || t('settings.dependencies.installFailed'),
+          : localizedFailure(res),
         res.ok ? 'success' : 'error'
       );
       await refresh();
-    } catch (e: any) {
-      showToast(e?.message || t('settings.dependencies.installFailed'), 'error');
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : t('settings.dependencies.installFailed'), 'error');
     } finally {
       setBusy(null);
     }
   };
 
   const statusText = (d: DependencyItem) => {
+    // Closed non-installed failure states (phase1 §2.2) render distinctly, ahead
+    // of the generic "not installed" fallback.
+    if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
+    if (d.status === 'error') return t('settings.dependencies.statusError');
     if (!d.installed) return t('settings.dependencies.statusMissing');
     if (d.status === 'upgrade_required') return t('settings.dependencies.statusUpgradeRequired');
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
     return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
+  };
+
+  const statusVariant = (d: DependencyItem): 'success' | 'warning' | 'destructive' => {
+    if (d.status === 'error') return 'destructive';
+    if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
+    return d.installed ? 'success' : 'destructive';
   };
 
   return (
@@ -112,7 +136,11 @@ export const SettingsDependenciesPage: React.FC = () => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
             const showAction =
-              d.id === 'askill' || d.id === 'avault' || d.id === 'show-runtime' || d.id === 'tmux';
+              d.id === 'askill' ||
+              d.id === 'avault' ||
+              d.id === 'show-runtime' ||
+              d.id === 'memory-runtime' ||
+              d.id === 'tmux';
             return (
               <SettingsResourceRow
                 key={d.id}
@@ -130,7 +158,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 detail={t(`settings.dependencies.items.${d.id}.detail`)}
                 actions={
                   <>
-                    <Badge variant={d.status === 'upgrade_required' ? 'warning' : d.installed ? 'success' : 'destructive'} className="font-mono">
+                    <Badge variant={statusVariant(d)} className="font-mono">
                       {statusText(d)}
                     </Badge>
                     {showAction && (
@@ -145,7 +173,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                         {installing
                           ? t('settings.dependencies.installing')
                           : d.installed
-                            ? d.id === 'show-runtime'
+                            ? d.id === 'show-runtime' || d.id === 'memory-runtime'
                               ? t('settings.dependencies.repair')
                               : t('settings.dependencies.reinstall')
                             : t('settings.dependencies.install')}

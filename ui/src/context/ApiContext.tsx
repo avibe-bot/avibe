@@ -439,6 +439,12 @@ export type ApiContextType = {
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: () => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
+  getMemorySettings: () => Promise<MemorySettingsResult>;
+  saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
+  getMemoryStatus: () => Promise<MemoryStatusResult>;
+  getMemoryProfile: () => Promise<MemoryItemsResult>;
+  searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
+  clearMemory: () => Promise<MemoryClearResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -1413,12 +1419,98 @@ export type DependencyItem = {
   required: boolean;
   installed: boolean;
   version: string | null;
-  status: 'ready' | 'missing' | 'upgrade_required';
+  status: 'ready' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
   reason?: string | null;
+  release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
+
+// Memory MVP (docs/plans/memory-mvp/memory-plugin-everos-phase1-tech.md §7, §14.1, §15).
+// Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
+export type MemoryEndpointConfig = {
+  base_url: string | null;
+  model: string | null;
+  // Write-only: the settings GET never returns a usable key, only `has_api_key`.
+  // Typed as `null` so no caller can read a saved key back off the response.
+  api_key: null;
+  has_api_key: boolean;
+};
+
+export type MemoryProcessingConfig = {
+  llm: MemoryEndpointConfig;
+  embedding: MemoryEndpointConfig;
+};
+
+export type MemorySettings = {
+  enabled: boolean;
+  processing: MemoryProcessingConfig;
+};
+
+// Omitting a field keeps its current value; an explicit `api_key: null` clears it
+// (only accepted while Memory is disabled/clearing per the backend contract).
+export type MemoryEndpointPatch = {
+  base_url?: string | null;
+  model?: string | null;
+  api_key?: string | null;
+};
+
+export type MemorySettingsPatch = {
+  enabled?: boolean;
+  processing?: {
+    llm?: MemoryEndpointPatch;
+    embedding?: MemoryEndpointPatch;
+  };
+};
+
+export type MemoryFailure = { status: 'failed'; error: string };
+
+export type MemorySettingsResult =
+  | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
+  | MemoryFailure;
+
+export type MemoryStatusState =
+  | 'disabled'
+  | 'starting'
+  | 'ready'
+  | 'indexing'
+  | 'degraded'
+  | 'down'
+  | 'clearing'
+  | 'error';
+
+export type MemoryStatus = {
+  state: MemoryStatusState;
+  pending: number;
+  processing: number;
+  dead: number;
+  missed: number;
+  queue_plaintext_bytes: number;
+  provider_disk_bytes: number;
+  last_success_at: string | null;
+  error: string | null;
+  profile_warning: 'empty' | null;
+  data_exists: boolean;
+};
+
+// A dependency-missing failure from the internal handler omits `status` and
+// only carries `error`; normalize both shapes at the call site.
+export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
+
+export type MemoryItemKind = 'profile' | 'episode' | 'fact';
+
+export type MemoryItem = {
+  kind: MemoryItemKind;
+  text: string;
+  date: string | null;
+};
+
+export type MemoryItemsResult =
+  | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
+  | MemoryFailure;
+
+export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
 
 export type BackendRuntimeInfo = {
   ok: boolean;
@@ -2268,6 +2360,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     installAgent: (name) => startAndPollAgentInstall(name),
     listDependencies: () => getJson('/api/dependencies'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
+    // handleError: false — every route returns closed `{status:'failed',error}` bodies (never a
+    // thrown ApiError/toast) so the Memory page can render its own inline state per code.
+    getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
+    saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
+    getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
+    getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
+    searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
+    clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

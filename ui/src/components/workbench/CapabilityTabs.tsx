@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Activity, Bot, KeyRound, WandSparkles } from 'lucide-react';
+import { Activity, Bot, Brain, KeyRound, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 const TABS = [
@@ -9,6 +9,7 @@ const TABS = [
   { to: '/skills', icon: WandSparkles, key: 'workbench.modules.skills.title' },
   { to: '/harness', icon: Activity, key: 'workbench.modules.harness.title' },
   { to: '/vaults', icon: KeyRound, key: 'workbench.modules.vaults.title' },
+  { to: '/memory', icon: Brain, key: 'workbench.modules.memory.title' },
 ] as const;
 
 // Mobile-only capability sub-tab strip. On desktop these capabilities live in
