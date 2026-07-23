@@ -94,6 +94,48 @@ def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> Non
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def failures():
+        return {
+            "status_code": 200,
+            "body": {
+                "items": [
+                    {
+                        "kind": "delivery_abandoned",
+                        "occurred_at": "2026-01-01T00:00:00.000Z",
+                        "error_code": "memory_provider_timeout",
+                        "request_id": None,
+                        "attempts": 3,
+                    }
+                ],
+                "retention_days": 90,
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_failures", failures)
+    client = app.test_client()
+    response = client.get(
+        "/api/memory/failures",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    forwarded = client.get(
+        "/api/memory/failures",
+        headers={**_local_headers(), "X-Forwarded-Host": "127.0.0.1:15131"},
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["items"][0]["kind"] == "delivery_abandoned"
+    assert response.headers["cache-control"] == "no-store"
+    assert forwarded.status_code == 403
+
+
 def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

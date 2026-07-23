@@ -375,6 +375,14 @@ async def memory_status(
     return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
 
 
+async def memory_failures(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
+
+
 async def memory_profile(
     *,
     socket_path: Optional[Path] = None,

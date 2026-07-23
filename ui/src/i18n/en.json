@@ -2770,7 +2770,20 @@
       "storageUsed": "Local storage used",
       "lastSuccess": "Last successful distillation",
       "lastSuccessNever": "Never",
-      "lastError": "Last error"
+      "lastError": "Last error",
+      "failureLog": {
+        "title": "Failure log",
+        "subtitle": "Sanitized delivery and distillation failures retained for {{days}} days.",
+        "empty": "No retained failures.",
+        "loadFailed": "Couldn't load the Memory failure log.",
+        "errorCode": "Error code",
+        "attempts": "Attempts",
+        "kind": {
+          "delivery_abandoned": "Delivery abandoned",
+          "distillation_rejected": "Distillation rejected",
+          "result_unknown": "Result unknown"
+        }
+      }
     },
     "profile": {
       "description": "The provider's current distilled profile of you, built from captured messages.",

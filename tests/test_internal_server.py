@@ -190,6 +190,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/reconcile-memory", ("POST",)) in routes
     assert ("/internal/memory/install-runtime", ("POST",)) in routes
     assert ("/internal/memory/status", ("GET",)) in routes
+    assert ("/internal/memory/failures", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
     assert ("/internal/memory/capture", ("POST",)) in routes
@@ -214,6 +215,10 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         async def status_payload(self):
             calls.append(("status", None))
             return {"state": "ready", "data_exists": True}
+
+        async def failure_log_payload(self):
+            calls.append(("failures", None))
+            return {"items": [], "retention_days": 90}
 
         async def profile_payload(self):
             calls.append(("profile", None))
@@ -245,6 +250,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             responses = (
                 await client.get("/internal/memory/status"),
+                await client.get("/internal/memory/failures"),
                 await client.get("/internal/memory/profile"),
                 await client.post("/internal/memory/search", json={"query": "safe query", "limit": 3}),
                 await client.post(
@@ -265,9 +271,10 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
             await asyncio.wait_for(capture_finished.wait(), timeout=1)
             return responses
 
-    status, profile, search, capture, clear, install, reconcile, invalid, invalid_capture = asyncio.run(_go())
+    status, failures, profile, search, capture, clear, install, reconcile, invalid, invalid_capture = asyncio.run(_go())
 
     assert status.json() == {"state": "ready", "data_exists": True}
+    assert failures.json() == {"items": [], "retention_days": 90}
     assert profile.json() == {"status": "ok", "items": []}
     assert search.json() == {"status": "ok", "items": []}
     assert capture.json() == {"status": "accepted"}
@@ -278,6 +285,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     assert invalid_capture.status_code == 400
     assert [name for name, _value in calls if name != "capture"] == [
         "status",
+        "failures",
         "profile",
         "search",
         "clear",

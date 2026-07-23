@@ -442,6 +442,7 @@ export type ApiContextType = {
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
   getMemoryStatus: () => Promise<MemoryStatusResult>;
+  getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
   searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
   clearMemory: () => Promise<MemoryClearResult>;
@@ -1510,6 +1511,19 @@ export type MemoryStatus = {
 // only carries `error`; normalize both shapes at the call site.
 export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
 
+export type MemoryFailureLogEntry = {
+  kind: 'delivery_abandoned' | 'distillation_rejected' | 'result_unknown';
+  occurred_at: string;
+  error_code: string | null;
+  request_id: string | null;
+  attempts: number;
+};
+
+export type MemoryFailureLogResult =
+  | { items: MemoryFailureLogEntry[]; retention_days: number }
+  | MemoryFailure
+  | { error: string };
+
 export type MemoryItemKind = 'profile' | 'episode' | 'fact';
 
 export type MemoryItem = {
@@ -2377,6 +2391,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
     saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
+    getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
     searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),

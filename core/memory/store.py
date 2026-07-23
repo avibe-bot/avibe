@@ -18,7 +18,7 @@ from typing import Literal
 
 from config import paths
 from core.memory.observations import FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
-from core.memory.types import MemoryErrorCode, is_memory_error_code
+from core.memory.types import MemoryErrorCode, MemoryFailureLogEntry, is_memory_error_code
 
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
@@ -78,6 +78,7 @@ class MemoryMeta:
     missed_count: int
     last_success_at: str | None
     last_error: MemoryErrorCode | None
+    last_error_at: str | None
     processing_fault_kind: Literal["credential", "engine"] | None
     processing_fault_since: str | None
     processing_alert_active: bool
@@ -239,6 +240,10 @@ class MemoryStore:
                     last_error = CASE
                         WHEN last_error IN ('memory_queue_full', 'memory_low_disk_space') THEN NULL
                         ELSE last_error
+                    END,
+                    last_error_at = CASE
+                        WHEN last_error IN ('memory_queue_full', 'memory_low_disk_space') THEN NULL
+                        ELSE last_error_at
                     END,
                     updated_at = ?
                 WHERE singleton = 1
@@ -505,14 +510,34 @@ class MemoryStore:
                     session_id,
                 ),
             )
-            if updated.rowcount and observation == "succeeded":
+            if updated.rowcount:
                 conn.execute(
                     """
                     UPDATE memory_meta
-                    SET last_success_at = ?, updated_at = ?
+                    SET last_success_at = CASE
+                            WHEN ? = 'succeeded' THEN ?
+                            ELSE last_success_at
+                        END,
+                        last_error = CASE
+                            WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                                THEN NULL
+                            WHEN last_error = 'memory_processing_failed'
+                                 AND processing_fault_since IS NULL
+                                THEN NULL
+                            ELSE last_error
+                        END,
+                        last_error_at = CASE
+                            WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                                THEN NULL
+                            WHEN last_error = 'memory_processing_failed'
+                                 AND processing_fault_since IS NULL
+                                THEN NULL
+                            ELSE last_error_at
+                        END,
+                        updated_at = ?
                     WHERE singleton = 1
                     """,
-                    (now, now),
+                    (observation, now, now),
                 )
             return int(updated.rowcount)
 
@@ -753,6 +778,69 @@ class MemoryStore:
             ),
         )
 
+    def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
+        """Return sanitized terminal delivery and provider observations."""
+
+        bounded_limit = max(1, min(int(limit), 100))
+        with self._transaction() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return ()
+            self._compact_terminal_tombstones_in_connection(conn, datetime.now(UTC))
+            rows = conn.execute(
+                """
+                SELECT kind, occurred_at, error_code, request_id, attempts
+                FROM (
+                    SELECT
+                        'delivery_abandoned' AS kind,
+                        COALESCE(completed_at, created_at) AS occurred_at,
+                        last_error AS error_code,
+                        add_request_id AS request_id,
+                        attempts,
+                        source_message_digest AS sort_key
+                    FROM memory_capture_queue
+                    WHERE epoch = ? AND state = 'dead'
+
+                    UNION ALL
+
+                    SELECT
+                        CASE
+                            WHEN flush_observation = 'rejected' THEN 'distillation_rejected'
+                            ELSE 'result_unknown'
+                        END AS kind,
+                        COALESCE(flush_observed_at, completed_at, created_at) AS occurred_at,
+                        flush_error_code AS error_code,
+                        flush_request_id AS request_id,
+                        MAX(attempts) AS attempts,
+                        MIN(source_message_digest) AS sort_key
+                    FROM memory_capture_queue
+                    WHERE epoch = ? AND state = 'delivered' AND (
+                        flush_observation IN ('rejected', 'unknown')
+                        OR flush_observation IS NULL
+                    )
+                    GROUP BY session_id, flush_observation, occurred_at,
+                             flush_error_code, flush_request_id
+                )
+                ORDER BY occurred_at DESC, sort_key DESC
+                LIMIT ?
+                """,
+                (meta.epoch, meta.epoch, bounded_limit),
+            ).fetchall()
+        return tuple(
+            MemoryFailureLogEntry(
+                kind=str(row["kind"]),
+                occurred_at=str(row["occurred_at"]),
+                error_code=(str(row["error_code"]) if row["error_code"] is not None else None),
+                request_id=(
+                    str(row["request_id"])
+                    if row["request_id"] is not None
+                    else None
+                ),
+                attempts=int(row["attempts"]),
+            )
+            for row in rows
+        )
+
     def has_provider_data_history(self) -> bool:
         """Whether the active epoch contains any queued or terminal Memory history."""
 
@@ -802,7 +890,7 @@ class MemoryStore:
                 """
                 UPDATE memory_meta
                 SET epoch = ?, clear_in_progress = 1, missed_count = 0,
-                    last_success_at = NULL, last_error = NULL,
+                    last_success_at = NULL, last_error = NULL, last_error_at = NULL,
                     processing_fault_kind = NULL, processing_fault_since = NULL,
                     processing_alert_active = 0, updated_at = ?
                 WHERE singleton = 1
@@ -819,6 +907,7 @@ class MemoryStore:
                 missed_count=0,
                 last_success_at=None,
                 last_error=None,
+                last_error_at=None,
                 processing_fault_kind=None,
                 processing_fault_since=None,
                 processing_alert_active=False,
@@ -835,7 +924,8 @@ class MemoryStore:
             conn.execute(
                 """
                 UPDATE memory_meta
-                SET clear_in_progress = 0, last_error = NULL, updated_at = ?
+                SET clear_in_progress = 0, last_error = NULL,
+                    last_error_at = NULL, updated_at = ?
                 WHERE singleton = 1
                 """,
                 (now,),
@@ -850,6 +940,7 @@ class MemoryStore:
                 missed_count=meta.missed_count,
                 last_success_at=meta.last_success_at,
                 last_error=None,
+                last_error_at=None,
                 processing_fault_kind=meta.processing_fault_kind,
                 processing_fault_since=meta.processing_fault_since,
                 processing_alert_active=meta.processing_alert_active,
@@ -882,10 +973,11 @@ class MemoryStore:
                         ELSE processing_fault_kind
                     END,
                     processing_fault_since = ?,
-                    last_error = 'memory_processing_failed', updated_at = ?
+                    last_error = 'memory_processing_failed', last_error_at = ?,
+                    updated_at = ?
                 WHERE singleton = 1
                 """,
-                (now, now),
+                (now, now, now),
             )
             return newly_open
 
@@ -942,6 +1034,10 @@ class MemoryStore:
                         WHEN last_error = 'memory_processing_failed' THEN NULL
                         ELSE last_error
                     END,
+                    last_error_at = CASE
+                        WHEN last_error = 'memory_processing_failed' THEN NULL
+                        ELSE last_error_at
+                    END,
                     updated_at = ?
                 WHERE singleton = 1
                 """,
@@ -957,7 +1053,7 @@ class MemoryStore:
             conn.execute(
                 """
                 UPDATE memory_meta
-                SET last_error = NULL, updated_at = ?
+                SET last_error = NULL, last_error_at = NULL, updated_at = ?
                 WHERE singleton = 1
                   AND (
                     last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
@@ -966,6 +1062,31 @@ class MemoryStore:
                 """,
                 (now,),
             )
+
+    def clear_superseded_error(
+        self,
+        *,
+        expected_error: MemoryErrorCode,
+        expected_error_at: str,
+    ) -> bool:
+        """Atomically retire a legacy error superseded by a newer flush observation."""
+
+        now = utc_now_iso()
+        with self._transaction() as conn:
+            result = conn.execute(
+                """
+                UPDATE memory_meta
+                SET last_error = NULL, last_error_at = NULL, updated_at = ?
+                WHERE singleton = 1
+                  AND last_error = ? AND last_error_at = ?
+                  AND (
+                    last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                    OR (last_error = 'memory_processing_failed' AND processing_fault_since IS NULL)
+                  )
+                """,
+                (now, expected_error, expected_error_at),
+            )
+            return bool(result.rowcount)
 
     def compact_terminal_tombstones(self, *, now: datetime | None = None) -> int:
         """Bound terminal digest retention by age and count without exposing payloads."""
@@ -985,6 +1106,10 @@ class MemoryStore:
             if user_version == 1:
                 conn.executescript((migrations / "0002_delivery_observation.sql").read_text(encoding="utf-8"))
                 conn.execute("PRAGMA user_version = 2")
+                user_version = 2
+            if user_version == 2:
+                conn.executescript((migrations / "0003_error_timestamp.sql").read_text(encoding="utf-8"))
+                conn.execute("PRAGMA user_version = 3")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -1025,8 +1150,8 @@ class MemoryStore:
             INSERT INTO memory_meta (
                 singleton, epoch, clear_in_progress, principal_id, scope_key,
                 provider_root_id, last_provider_timestamp_ms, missed_count,
-                last_success_at, last_error, updated_at
-            ) VALUES (1, 0, 0, ?, ?, ?, 0, 0, NULL, NULL, ?)
+                last_success_at, last_error, last_error_at, updated_at
+            ) VALUES (1, 0, 0, ?, ?, ?, 0, 0, NULL, NULL, NULL, ?)
             """,
             (principal_id, scope_key, provider_root_id, now),
         )
@@ -1040,6 +1165,7 @@ class MemoryStore:
             missed_count=0,
             last_success_at=None,
             last_error=None,
+            last_error_at=None,
             processing_fault_kind=None,
             processing_fault_since=None,
             processing_alert_active=False,
@@ -1059,10 +1185,10 @@ class MemoryStore:
         conn.execute(
             """
             UPDATE memory_meta
-            SET last_error = ?, updated_at = ?
+            SET last_error = ?, last_error_at = ?, updated_at = ?
             WHERE singleton = 1
             """,
-            (error, now),
+            (error, now if error is not None else None, now),
         )
 
     def _record_capture_skip_in_connection(
@@ -1079,10 +1205,11 @@ class MemoryStore:
             UPDATE memory_meta
             SET missed_count = missed_count + 1,
                 last_error = COALESCE(?, last_error),
+                last_error_at = CASE WHEN ? IS NOT NULL THEN ? ELSE last_error_at END,
                 updated_at = ?
             WHERE singleton = 1
             """,
-            (safe_error, now),
+            (safe_error, safe_error, now, now),
         )
 
     def _prepare_private_directory(self) -> None:
@@ -1135,7 +1262,8 @@ class MemoryStore:
             """
             DELETE FROM memory_capture_queue
             WHERE state IN ('delivered', 'dead')
-              AND completed_at IS NOT NULL AND completed_at < ?
+              AND COALESCE(flush_observed_at, completed_at) IS NOT NULL
+              AND COALESCE(flush_observed_at, completed_at) < ?
             """,
             (cutoff,),
         ).rowcount
@@ -1152,7 +1280,7 @@ class MemoryStore:
                 WHERE source_message_digest IN (
                     SELECT source_message_digest FROM memory_capture_queue
                     WHERE state IN ('delivered', 'dead')
-                    ORDER BY completed_at, source_message_digest
+                    ORDER BY COALESCE(flush_observed_at, completed_at), source_message_digest
                     LIMIT ?
                 )
                 """,
@@ -1173,6 +1301,11 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
         missed_count=int(row["missed_count"]),
         last_success_at=str(row["last_success_at"]) if row["last_success_at"] is not None else None,
         last_error=error,
+        last_error_at=(
+            str(row["last_error_at"])
+            if row["last_error_at"] is not None
+            else None
+        ),
         processing_fault_kind=(
             str(row["processing_fault_kind"])
             if row["processing_fault_kind"] in {"credential", "engine"}

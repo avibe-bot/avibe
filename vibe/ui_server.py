@@ -6738,6 +6738,18 @@ async def memory_status_get(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/memory/failures", include_in_schema=False)
+async def memory_failures_get(starlette_request: FastAPIRequest):
+    async def handler():
+        if not is_direct_loopback_memory_request():
+            return _memory_forbidden_response()
+        from vibe import internal_client
+
+        return await _memory_internal_response(internal_client.memory_failures)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/memory/profile", include_in_schema=False)
 async def memory_profile_get(starlette_request: FastAPIRequest):
     async def handler():

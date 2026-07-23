@@ -2770,7 +2770,20 @@
       "storageUsed": "本地已用存储",
       "lastSuccess": "最近提炼成功时间",
       "lastSuccessNever": "从未",
-      "lastError": "上次错误"
+      "lastError": "上次错误",
+      "failureLog": {
+        "title": "失败日志",
+        "subtitle": "保留最近 {{days}} 天的脱敏投递与提炼失败记录。",
+        "empty": "暂无失败记录。",
+        "loadFailed": "无法加载记忆失败日志。",
+        "errorCode": "错误代码",
+        "attempts": "尝试次数",
+        "kind": {
+          "delivery_abandoned": "投递已放弃",
+          "distillation_rejected": "提炼被拒绝",
+          "result_unknown": "处理结果未知"
+        }
+      }
     },
     "profile": {
       "description": "由已捕获的消息提炼出的、你当前的画像。",

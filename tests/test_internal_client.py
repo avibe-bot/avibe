@@ -242,6 +242,24 @@ def test_memory_capture_round_trip(socket_path):
     assert result == {"status_code": 200, "body": {"status": "accepted"}}
 
 
+def test_memory_failures_round_trip(socket_path):
+    app = FastAPI()
+
+    @app.get("/internal/memory/failures")
+    async def _failures():
+        return {"items": [], "retention_days": 90}
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.memory_failures(socket_path=socket_path)
+
+    assert asyncio.run(_go()) == {
+        "status_code": 200,
+        "body": {"items": [], "retention_days": 90},
+    }
+
+
 def test_memory_sync_read_helpers_use_verified_uds(socket_path):
     captured: list[tuple[str, dict | None]] = []
 

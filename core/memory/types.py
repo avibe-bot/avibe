@@ -7,6 +7,11 @@ from typing import Literal, TypeAlias
 
 
 MemoryKind = Literal["profile", "episode", "fact"]
+MemoryFailureKind = Literal[
+    "delivery_abandoned",
+    "distillation_rejected",
+    "result_unknown",
+]
 MemoryErrorCode = Literal[
     "memory_disabled",
     "memory_invalid_input",
@@ -132,6 +137,17 @@ class MemoryStatus:
     processing_fault_since: str | None = None
     processing_alert_active: bool = False
     error: MemoryErrorCode | None = None
+
+
+@dataclass(frozen=True)
+class MemoryFailureLogEntry:
+    """One sanitized terminal failure observation retained by Avibe."""
+
+    kind: MemoryFailureKind
+    occurred_at: str
+    error_code: str | None = None
+    request_id: str | None = None
+    attempts: int = 0
 
 
 @dataclass(frozen=True)

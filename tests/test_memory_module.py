@@ -29,7 +29,7 @@ from core.memory.module import (
     MIN_FREE_DISK_BYTES,
     MemoryModule,
 )
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import (
     CaptureAccepted,
     CaptureDuplicate,
@@ -37,6 +37,7 @@ from core.memory.types import (
     ClearCompleted,
     CLOSED_MEMORY_ERROR_CODES,
     MemoryItem,
+    MemoryFailureLogEntry,
     MemoryItems,
     OperationFailed,
 )
@@ -719,6 +720,313 @@ async def test_status_precedence(tmp_path: Path) -> None:
     clearing, clearing_store, _provider = _module(tmp_path / "clearing")
     clearing_store.begin_clear()
     assert (await clearing.status()).state == "clearing"
+
+
+async def test_latest_flush_success_closes_stale_timeout_but_keeps_dead_history(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="failed", text="failed delivery")) == CaptureAccepted()
+    provider.ingest_failures.extend(
+        [
+            MemoryProviderMessageFailure("memory_provider_timeout"),
+            MemoryProviderMessageFailure("memory_provider_timeout"),
+            MemoryProviderMessageFailure("memory_provider_timeout"),
+        ]
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="latest-status-worker",
+        now=lambda: current,
+    )
+
+    await worker.drain_once()
+    current += timedelta(seconds=31)
+    await worker.drain_once()
+    current += timedelta(minutes=2, seconds=1)
+    await worker.drain_once()
+    assert store.list_queue_rows()[0].state == "dead"
+
+    assert await module.capture(_request(source="succeeded", text="successful delivery")) == CaptureAccepted()
+    assert await worker.drain_once() == 1
+
+    status = await module.status()
+    assert status.state == "ready"
+    assert status.error is None
+    assert status.dead == 1
+    assert status.succeeded == 1
+    assert status.last_flush_observation == "succeeded"
+
+
+async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    row = store.claim_due(lease_owner="upgrade", now="2026-07-01T00:00:00.000Z")
+    assert row is not None
+    assert store.mark_delivered(
+        row,
+        lease_owner="upgrade",
+        now="2026-07-01T00:00:01.000Z",
+        add_request_id="add",
+    )
+    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.record_flush_verdict(
+        row.session_id,
+        FlushSucceeded("flush", "extracted"),
+        now="2026-07-01T00:00:03.000Z",
+    ) == 1
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+                UPDATE memory_meta
+                SET last_error = 'memory_provider_timeout',
+                    last_error_at = '2026-07-01T00:00:02.000Z',
+                    updated_at = '2026-07-01T00:00:02.000Z'
+            WHERE singleton = 1
+            """
+        )
+
+    status = await module.status()
+    assert status.state == "ready"
+    assert status.error is None
+    assert status.last_flush_observation == "succeeded"
+    assert store.ensure_meta().last_error is None
+
+    assert await module.capture(_request(source="after-upgrade")) == CaptureAccepted()
+    syncing = await module.status()
+    assert syncing.state == "syncing"
+    assert syncing.error is None
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected_observation"),
+    [
+        (FlushRejected("rejected", "INVALID_INPUT", server_fault=False), "rejected"),
+        (FlushUnknown("timeout"), "unknown"),
+    ],
+)
+async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
+    tmp_path: Path,
+    verdict,
+    expected_observation: str,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="failed")) == CaptureAccepted()
+    provider.ingest_failures.extend(
+        [MemoryProviderMessageFailure("memory_provider_timeout")] * 3
+    )
+    current = datetime.now(UTC).replace(microsecond=0)
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
+    await worker.drain_once()
+    current += timedelta(seconds=31)
+    await worker.drain_once()
+    current += timedelta(minutes=2, seconds=1)
+    await worker.drain_once()
+
+    assert await module.capture(_request(source="latest")) == CaptureAccepted()
+    row = store.claim_due(lease_owner="latest", now=current.isoformat())
+    assert row is not None
+    assert store.mark_delivered(
+        row,
+        lease_owner="latest",
+        now=current.isoformat(),
+        add_request_id="latest-add",
+    )
+    delivered_status = await module.status()
+    assert delivered_status.state == "degraded"
+    assert delivered_status.error == "memory_provider_timeout"
+
+    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.record_flush_verdict(
+        row.session_id,
+        verdict,
+        now=(current + timedelta(seconds=1)).isoformat(),
+    ) == 1
+    status = await module.status()
+    assert status.state == "ready"
+    assert status.error is None
+    assert status.last_flush_observation == expected_observation
+
+
+async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="failed", session="private-session", text="private text")) == CaptureAccepted()
+    provider.ingest_failures.extend(
+        [
+            MemoryProviderMessageFailure("memory_provider_timeout"),
+            MemoryProviderMessageFailure("memory_provider_timeout"),
+            MemoryProviderMessageFailure("memory_provider_timeout"),
+        ]
+    )
+    current = datetime.now(UTC).replace(microsecond=0)
+    expected_at = (current + timedelta(minutes=2, seconds=32)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="failure-log-worker",
+        now=lambda: current,
+    )
+
+    await worker.drain_once()
+    current += timedelta(seconds=31)
+    await worker.drain_once()
+    current += timedelta(minutes=2, seconds=1)
+    await worker.drain_once()
+
+    assert await module.failure_log() == (
+        MemoryFailureLogEntry(
+            kind="delivery_abandoned",
+            occurred_at=expected_at,
+            error_code="memory_provider_timeout",
+            request_id=None,
+            attempts=3,
+        ),
+    )
+
+
+async def test_failure_log_includes_provider_rejections_and_unknown_results_newest_first(
+    tmp_path: Path,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    base = datetime.now(UTC).replace(microsecond=0)
+    base_iso = base.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    delivered_iso = (base + timedelta(seconds=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    async def deliver(source: str, session: str, request_id: str) -> None:
+        assert await module.capture(_request(source=source, session=session)) == CaptureAccepted()
+        row = store.claim_due(lease_owner=source, now=base_iso)
+        assert row is not None
+        assert store.mark_delivered(
+            row,
+            lease_owner=source,
+            now=delivered_iso,
+            add_request_id=request_id,
+        )
+        assert store.mark_flush_in_flight(row.session_id) == 1
+
+    await deliver("rejected", "rejected-session", "add-rejected")
+    rejected_session = store.list_queue_rows()[0].session_id
+    assert store.record_flush_verdict(
+        rejected_session,
+        FlushRejected("flush-rejected", "INVALID_INPUT", server_fault=False),
+        now=(base + timedelta(seconds=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    ) == 1
+
+    await deliver("unknown", "unknown-session", "add-unknown")
+    unknown_session = store.list_queue_rows()[1].session_id
+    assert store.record_flush_verdict(
+        unknown_session,
+        FlushUnknown("timeout"),
+        now=(base + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    ) == 1
+
+    assert await module.failure_log() == (
+        MemoryFailureLogEntry(
+            kind="result_unknown",
+            occurred_at=(base + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            attempts=0,
+        ),
+        MemoryFailureLogEntry(
+            kind="distillation_rejected",
+            occurred_at=(base + timedelta(seconds=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            error_code="INVALID_INPUT",
+            request_id="flush-rejected",
+            attempts=0,
+        ),
+    )
+
+
+async def test_failure_log_collapses_one_session_flush_into_one_entry(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    for source in ("one", "two"):
+        assert await module.capture(
+            _request(source=source, session="shared-session")
+        ) == CaptureAccepted()
+        row = store.claim_due(lease_owner=source, now="2026-07-01T00:00:00.000Z")
+        assert row is not None
+        assert store.mark_delivered(
+            row,
+            lease_owner=source,
+            now="2026-07-01T00:00:01.000Z",
+            add_request_id=f"add-{source}",
+        )
+
+    session_id = store.list_queue_rows()[0].session_id
+    assert store.mark_flush_in_flight(session_id) == 2
+    assert store.record_flush_verdict(
+        session_id,
+        FlushRejected("shared-flush", "INVALID_INPUT", server_fault=False),
+        now="2026-07-01T00:00:03.000Z",
+    ) == 2
+
+    assert await module.failure_log() == (
+        MemoryFailureLogEntry(
+            kind="distillation_rejected",
+            occurred_at="2026-07-01T00:00:03.000Z",
+            error_code="INVALID_INPUT",
+            request_id="shared-flush",
+            attempts=0,
+        ),
+    )
+
+
+async def test_failure_log_excludes_entries_older_than_retention(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    assert await module.capture(_request(source="expired")) == CaptureAccepted()
+    old = datetime.now(UTC) - TERMINAL_TOMBSTONE_RETENTION - timedelta(days=1)
+    old_iso = old.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    row = store.claim_due(lease_owner="expired", now=old_iso)
+    assert row is not None
+    assert store.mark_delivered(
+        row,
+        lease_owner="expired",
+        now=old_iso,
+        add_request_id="old-add",
+    )
+    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.record_flush_verdict(
+        row.session_id,
+        FlushUnknown("timeout"),
+        now=old_iso,
+    ) == 1
+
+    assert await module.failure_log() == ()
+
+
+async def test_failure_log_retention_uses_latest_flush_observation_time(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    assert await module.capture(_request(source="late-flush")) == CaptureAccepted()
+    old = datetime.now(UTC) - TERMINAL_TOMBSTONE_RETENTION - timedelta(days=1)
+    old_iso = old.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    observed = datetime.now(UTC).replace(microsecond=0)
+    observed_iso = observed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    row = store.claim_due(lease_owner="late-flush", now=old_iso)
+    assert row is not None
+    assert store.mark_delivered(
+        row,
+        lease_owner="late-flush",
+        now=old_iso,
+        add_request_id="old-add",
+    )
+    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.record_flush_verdict(
+        row.session_id,
+        FlushRejected("fresh-rejection", "INVALID_INPUT", server_fault=False),
+        now=observed_iso,
+    ) == 1
+
+    assert await module.failure_log() == (
+        MemoryFailureLogEntry(
+            kind="distillation_rejected",
+            occurred_at=observed_iso,
+            error_code="INVALID_INPUT",
+            request_id="fresh-rejection",
+            attempts=0,
+        ),
+    )
 
 
 async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(

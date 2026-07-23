@@ -25,7 +25,7 @@ from core.memory.artifact import (
 from core.memory.everos import EverOSPort
 from core.memory.module import MemoryModule
 from core.memory.process import EverOSProcess, EverOSProcessSettings
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
 from core.memory.worker import ProcessingEvent
 
@@ -250,6 +250,13 @@ class MemoryRuntime:
             **asdict(status),
             "profile_warning": "empty" if self._provider.profile_empty_warning else None,
             "data_exists": await asyncio.to_thread(self._data_exists),
+        }
+
+    async def failure_log_payload(self) -> dict[str, Any]:
+        entries = await self.module.failure_log()
+        return {
+            "items": [asdict(entry) for entry in entries],
+            "retention_days": TERMINAL_TOMBSTONE_RETENTION.days,
         }
 
     async def profile_payload(self) -> dict[str, Any]:

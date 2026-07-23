@@ -81,7 +81,7 @@ def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: 
     with sqlite3.connect(store.path) as conn:
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 3
     assert {
         "add_request_id",
         "flush_observation",
@@ -90,7 +90,12 @@ def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: 
         "flush_request_id",
         "flush_observed_at",
     }.issubset(queue_columns)
-    assert {"processing_fault_kind", "processing_fault_since", "processing_alert_active"}.issubset(meta_columns)
+    assert {
+        "processing_fault_kind",
+        "processing_fault_since",
+        "processing_alert_active",
+        "last_error_at",
+    }.issubset(meta_columns)
 
     _enqueue(store, "observed")
     row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
@@ -122,7 +127,10 @@ def test_v1_store_migrates_once_and_projects_legacy_delivery_as_unknown(tmp_path
                 singleton, epoch, clear_in_progress, principal_id, scope_key,
                 provider_root_id, last_provider_timestamp_ms, missed_count,
                 last_success_at, last_error, updated_at
-            ) VALUES (1, 0, 0, 'principal', X'00', 'root', 1, 0, NULL, NULL, ?)
+            ) VALUES (
+                1, 0, 0, 'principal', X'00', 'root', 1, 0,
+                NULL, 'memory_provider_timeout', ?
+            )
             """,
             ("2026-01-01T00:00:00.000Z",),
         )
@@ -148,8 +156,9 @@ def test_v1_store_migrates_once_and_projects_legacy_delivery_as_unknown(tmp_path
     assert stats.receipt_unknown == 1
     assert stats.last_flush_observation == "unknown"
     assert stats.last_flush_at is None
+    assert reopened.ensure_meta().last_error_at == "2026-01-01T00:00:00.000Z"
     with sqlite3.connect(store.path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 3
 
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
@@ -375,12 +384,12 @@ def test_opening_a_higher_version_database_never_downgrades_user_version(tmp_pat
     database = _store_path(tmp_path / "future-version", "future-version.sqlite")
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
-        conn.execute("PRAGMA user_version = 3")
+        conn.execute("PRAGMA user_version = 4")
 
     MemoryStore(database)
 
     with sqlite3.connect(database) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 3
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 4
 
 
 def test_store_rejects_a_symlinked_state_component_before_creating_external_files(

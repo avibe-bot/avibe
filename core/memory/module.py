@@ -27,6 +27,7 @@ from core.memory.types import (
     ClearCompleted,
     ClearReceipt,
     MemoryErrorCode,
+    MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
     MemoryResult,
@@ -311,11 +312,37 @@ class MemoryModule:
             return await self._status("clearing", meta=meta, stats=stats)
         if not self._is_enabled():
             return await self._status("disabled", meta=meta, stats=stats)
-        # Compute the active persisted error ONCE: a historical memory_low_disk_space
-        # is treated as resolved (disk pressure is re-checked below) and must not be
-        # echoed as the current condition by any downstream state (tech §15).
+        # Compute the active persisted error once. A newer terminal flush
+        # observation supersedes delivery-era errors from older builds, while a
+        # later add failure (meta.updated_at > last_flush_at) remains current.
         historical = meta.last_error if meta is not None else None
-        active_error = None if historical == "memory_low_disk_space" else historical
+        flush_supersedes_error = bool(
+            meta is not None
+            and stats.last_flush_at is not None
+            and meta.last_error_at is not None
+            and stats.last_flush_at >= meta.last_error_at
+            and (
+                historical in {"memory_sidecar_unavailable", "memory_provider_timeout"}
+                or (
+                    historical == "memory_processing_failed"
+                    and meta.processing_fault_since is None
+                )
+            )
+        )
+        active_error = (
+            None
+            if historical == "memory_low_disk_space" or flush_supersedes_error
+            else historical
+        )
+        if flush_supersedes_error and historical is not None and meta is not None:
+            try:
+                await self._store_call(
+                    self._store.clear_superseded_error,
+                    expected_error=historical,
+                    expected_error_at=meta.last_error_at,
+                )
+            except Exception:
+                pass
         runtime_error = self._runtime_error()
         if runtime_error is not None:
             return await self._status("error", meta=meta, stats=stats, error=runtime_error)
@@ -338,11 +365,16 @@ class MemoryModule:
                 stats=stats,
                 error="memory_low_disk_space",
             )
-        if active_error is not None or stats.dead:
+        if active_error is not None:
             return await self._status("degraded", meta=meta, stats=stats, error=active_error)
         if stats.pending or stats.processing or stats.awaiting_receipt:
             return await self._status("syncing", meta=meta, stats=stats, error=None)
         return await self._status("ready", meta=meta, stats=stats, error=None)
+
+    async def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
+        """Return bounded, sanitized terminal failure history."""
+
+        return await self._store_call(self._store.failure_log, limit=limit)
 
     async def clear(self) -> ClearReceipt:
         """Run one idempotent, bounded clear lifecycle operation."""

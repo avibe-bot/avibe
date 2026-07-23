@@ -33,6 +33,7 @@ import { useApi } from '../../context/ApiContext';
 import type {
   MemoryEndpointConfig,
   MemoryEndpointPatch,
+  MemoryFailureLogEntry,
   MemoryItem,
   MemorySettings,
   MemorySettingsPatch,
@@ -229,13 +230,27 @@ const EndpointFields: React.FC<{
 
 const StatusPanel: React.FC<{
   status: MemoryStatus | null;
+  failures: MemoryFailureLogEntry[];
+  failureRetentionDays: number;
+  failuresError: string | null;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
   onOpenSettings: () => void;
   onRepair: () => void;
   repairing: boolean;
-}> = ({ status, loading, error, onRefresh, onOpenSettings, onRepair, repairing }) => {
+}> = ({
+  status,
+  failures,
+  failureRetentionDays,
+  failuresError,
+  loading,
+  error,
+  onRefresh,
+  onOpenSettings,
+  onRepair,
+  repairing,
+}) => {
   const { t } = useTranslation();
   const faultKey = status?.processing_fault_kind
     ? `${status.processing_fault_kind}:${status.processing_fault_since ?? ''}`
@@ -408,6 +423,67 @@ const StatusPanel: React.FC<{
                 ) : null}
               </div>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-3 py-4 text-[12.5px]">
+          <div>
+            <div className="text-[13px] font-semibold text-foreground">{t('memory.status.failureLog.title')}</div>
+            <div className="text-[11px] text-muted">
+              {t('memory.status.failureLog.subtitle', { days: failureRetentionDays })}
+            </div>
+          </div>
+          <div className="border-t border-border pt-1">
+            {failuresError ? (
+              <div className="py-3 text-destructive">{failuresError}</div>
+            ) : failures.length === 0 ? (
+              <div className="py-3 text-muted">{t('memory.status.failureLog.empty')}</div>
+            ) : (
+              failures.map((entry, index) => (
+                <div
+                  key={`${entry.kind}:${entry.occurred_at}:${entry.request_id ?? index}`}
+                  className="flex flex-col gap-2 border-b border-border py-3 last:border-b-0 sm:flex-row sm:items-start sm:justify-between"
+                >
+                  <div className="flex min-w-0 items-start gap-2.5">
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+                    <div className="min-w-0">
+                      <div className="font-medium text-foreground">
+                        {t(`memory.status.failureLog.kind.${entry.kind}`)}
+                      </div>
+                      <div className="mt-0.5 font-mono text-[11px] text-muted">
+                        {new Date(entry.occurred_at).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid min-w-0 gap-1 text-[11px] sm:min-w-[280px]">
+                    <ObservationValue label={t('memory.status.failureLog.errorCode')} value={entry.error_code} />
+                    <ObservationValue
+                      label={t('memory.status.failureLog.attempts')}
+                      value={String(entry.attempts)}
+                    />
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                      <span className="text-muted">{t('memory.status.requestId')}</span>
+                      <div className="flex min-w-0 items-center gap-1">
+                        <span className="truncate font-mono text-foreground">{entry.request_id ?? '—'}</span>
+                        {entry.request_id ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-7"
+                            aria-label={t('memory.status.copyRequestId')}
+                            onClick={() => void navigator.clipboard.writeText(entry.request_id ?? '')}
+                          >
+                            <Copy className="size-3.5" />
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </CardContent>
       </Card>
@@ -775,6 +851,9 @@ export const MemoryPage: React.FC = () => {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [status, setStatus] = useState<MemoryStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [failures, setFailures] = useState<MemoryFailureLogEntry[]>([]);
+  const [failureRetentionDays, setFailureRetentionDays] = useState(90);
+  const [failuresError, setFailuresError] = useState<string | null>(null);
   const [loadingSettings, setLoadingSettings] = useState(true);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [clearOpen, setClearOpen] = useState(false);
@@ -819,6 +898,24 @@ export const MemoryPage: React.FC = () => {
     }
   }, [api, t]);
 
+  const loadFailures = useCallback(async () => {
+    try {
+      const res = await api.getMemoryFailures();
+      if (isForbiddenResult(res)) {
+        setRemoteUnavailable(true);
+      } else if (res && typeof res === 'object' && Array.isArray((res as { items?: unknown }).items)) {
+        const payload = res as { items: MemoryFailureLogEntry[]; retention_days?: number };
+        setFailures(payload.items);
+        if (typeof payload.retention_days === 'number') setFailureRetentionDays(payload.retention_days);
+        setFailuresError(null);
+      } else {
+        setFailuresError(errorMessage(t, (res as { error?: string })?.error));
+      }
+    } catch {
+      setFailuresError(t('memory.status.failureLog.loadFailed'));
+    }
+  }, [api, t]);
+
   // Dependency readiness comes from the authoritative Dependencies source (plan §5), NOT the
   // memory status: after a failed enable the backend rolls the setting back to disabled and a
   // disabled status omits the runtime error, so status alone would falsely read "ready".
@@ -836,8 +933,9 @@ export const MemoryPage: React.FC = () => {
   useEffect(() => {
     void loadSettings();
     void loadStatus();
+    void loadFailures();
     void loadDependency();
-  }, [loadSettings, loadStatus, loadDependency]);
+  }, [loadSettings, loadStatus, loadFailures, loadDependency]);
 
   // Poll status while the page is open so queue/state transitions (starting → ready, clearing →
   // enabled, etc.) show up without a manual refresh. Settings/profile/search stay explicit-refresh.
@@ -846,9 +944,10 @@ export const MemoryPage: React.FC = () => {
   useEffect(() => {
     const id = window.setInterval(() => {
       if (!remoteUnavailableRef.current) void loadStatus();
+      if (!remoteUnavailableRef.current) void loadFailures();
     }, POLL_MS);
     return () => window.clearInterval(id);
-  }, [loadStatus]);
+  }, [loadStatus, loadFailures]);
 
   const confirmClear = async () => {
     setClearing(true);
@@ -919,9 +1018,15 @@ export const MemoryPage: React.FC = () => {
           {tab === 'status' && (
             <StatusPanel
               status={status}
+              failures={failures}
+              failureRetentionDays={failureRetentionDays}
+              failuresError={failuresError}
               loading={loadingStatus}
               error={statusError}
-              onRefresh={() => void loadStatus()}
+              onRefresh={() => {
+                void loadStatus();
+                void loadFailures();
+              }}
               onOpenSettings={() => setTab('settings')}
               onRepair={() => void repairRuntime()}
               repairing={repairing}

@@ -469,6 +469,17 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
+    @app.get("/internal/memory/failures")
+    async def _memory_failures() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.failure_log_payload()
+        except Exception:
+            logger.warning("internal memory failure log failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
     @app.get("/internal/memory/profile")
     async def _memory_profile() -> Any:
         runtime = _memory_runtime()
