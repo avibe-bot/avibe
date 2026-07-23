@@ -1273,6 +1273,31 @@ def maybe_systemd_scope_prefix() -> list[str]:
     return list(SYSTEMD_SCOPE_PREFIX)
 
 
+def _adopt_scoped_service_owner(prev_pid: int, process) -> int | None:
+    """Reconcile the tracked service pid after a ``systemd-run --user --scope`` launch.
+
+    ``--scope`` exec()s into the target, so ``process.pid`` is normally already the
+    real service pid and this fallback is never reached (the first
+    ``wait_for_service_pid`` succeeds). It exists purely to be robust on any host
+    where the shim survives as a distinct parent: the flock in ``service.lock`` is
+    the authoritative owner signal (see ``resolve_service_owner_pid``), so if a
+    *different* live process now holds it, adopt that pid instead of the shim's.
+    Returns the adopted pid, or ``None`` to leave ``prev_pid`` in place.
+    """
+    owner = resolve_service_owner_pid(include_starting=False)
+    if owner and owner != prev_pid and pid_alive(owner):
+        _SERVICE_START_PROCESSES.pop(prev_pid, None)
+        _SERVICE_START_PROCESSES[owner] = process
+        _record_service_pid_reservation(owner)
+        logger.info(
+            "cgroup scope bootstrap: adopting lock-holder pid=%s as the service owner (shim pid=%s)",
+            owner,
+            prev_pid,
+        )
+        return owner
+    return None
+
+
 def start_service(
     *,
     wait_for_ready: bool = True,
@@ -1350,6 +1375,14 @@ def start_service(
         _record_service_pid_reservation(pid)
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
+        if scope_prefix:
+            adopted_pid = _adopt_scoped_service_owner(pid, process)
+            if adopted_pid is not None:
+                pid = adopted_pid
+                if wait_for_service_pid(
+                    pid, timeout=initial_ready_timeout or SERVICE_LOCK_READY_TIMEOUT_SECONDS
+                ):
+                    return pid
         exit_code = _service_start_exit_code(pid)
         if exit_code is not None:
             raise RuntimeError(
