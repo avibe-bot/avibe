@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -15,6 +16,7 @@ import psutil
 import pytest
 
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest
+import core.memory.artifact as memory_artifact
 from core.memory.artifact import (
     MemoryArtifactCandidate,
     MemoryArtifactManager,
@@ -65,6 +67,90 @@ def test_memory_artifact_uses_shared_manager_status_shape(tmp_path: Path) -> Non
     assert status["reason"] == "memory_runtime_unpublished"
     assert manager.provider_root_format() is None
     assert manager.artifact_fingerprint() is None
+
+
+def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
+    monkeypatch, caplog, tmp_path: Path
+) -> None:
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+    calls: list[list[str]] = []
+
+    def smoke_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="1.1.3\n", stderr="")
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    def unexpected_manifest_load(*_args, **_kwargs) -> None:
+        raise AssertionError("development runtime must not load the managed manifest")
+
+    monkeypatch.setattr(manager, "_load_manifest", unexpected_manifest_load)
+
+    status = manager.status()
+    ensured = manager.ensure(force=True)
+
+    assert manager.resolve_binary() == dev_python
+    assert manager.resolve_python() == dev_python
+    assert status["installed"] is True
+    assert status["status"] == "ready"
+    assert status["path"] == str(dev_python)
+    assert status["reason"] is None
+    assert ensured["ok"] is True
+    assert ensured["changed"] is False
+    assert manager.provider_root_format() == "everos-1.1.3"
+    assert manager.compatible_provider_root_formats() == frozenset({"everos-1.1.3"})
+    assert manager.artifact_fingerprint() == "dev-everos-1.1.3"
+    assert len(calls) == 1
+    assert "DEV RUNTIME bypass active - not for production" in caplog.text
+
+
+def test_memory_artifact_refuses_dev_runtime_without_importable_everos(monkeypatch, caplog, tmp_path: Path) -> None:
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+
+    def smoke_fails(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="ModuleNotFoundError")
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_fails)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    status = manager.status()
+    ensured = manager.ensure(force=True)
+
+    assert manager.resolve_binary() is None
+    assert manager.resolve_python() is None
+    assert status["installed"] is False
+    assert status["status"] == "error"
+    assert status["reason"] == "memory_runtime_install_failed"
+    assert ensured == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
+    assert "refusing DEV RUNTIME bypass" in caplog.text
+
+
+def test_memory_artifact_dev_runtime_bypass_is_off_by_default(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    status = manager.status()
+    ensured = manager.ensure(force=True)
+
+    assert manager.resolve_python() is None
+    assert status["installed"] is False
+    assert status["status"] == "missing"
+    assert status["reason"] == "memory_runtime_unpublished"
+    assert ensured["ok"] is False
+    assert ensured["reason"] == "memory_runtime_unpublished"
 
 
 @pytest.mark.parametrize("pointer_contents", [b"not-json", b"[]"])

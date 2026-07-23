@@ -8,6 +8,7 @@ identity and EverOS smoke checks needed by the Memory sidecar.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -25,12 +26,17 @@ from core.managed_runtime import (
     archive_path_is_unsafe,
     env_flag_enabled,
     file_sha256,
+    runtime_platform_tag,
     write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
 
 
 EVEROS_VERSION = "1.1.3"
+_DEV_RUNTIME_ENV = "AVIBE_MEMORY_DEV_RUNTIME"
+_DEV_RUNTIME_FAILURE_REASON = "memory_runtime_install_failed"
+_DEV_PROVIDER_ROOT_FORMAT = f"everos-{EVEROS_VERSION}"
+_DEV_ARTIFACT_FINGERPRINT = f"dev-everos-{EVEROS_VERSION}"
 _MANIFEST_RESOURCE = "memory_runtime_manifest.json"
 _MAX_CURRENT_POINTER_BYTES = 16 * 1024
 _SPEC = ManagedRuntimeSpec(
@@ -47,6 +53,9 @@ _SMOKE_SCRIPT = (
     "assert everos is not None and uvicorn is not None\n"
     "print(version('everos'))\n"
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,11 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         )
         self._provider_root = Path(provider_root) if provider_root is not None else paths.get_vibe_remote_dir() / "memory" / "everos-root"
         self._activation_coordinator: MemoryArtifactActivationCoordinator | None = None
+        self._dev_runtime_checked = False
+        self._dev_runtime_checked_value: str | None = None
+        self._dev_runtime_cached_python: Path | None = None
+        self._dev_runtime_warning_logged = False
+        self._dev_runtime_failure_logged: str | None = None
 
     def set_activation_coordinator(self, coordinator: MemoryArtifactActivationCoordinator | None) -> None:
         """Register the controller-owned lifecycle bridge for active cutovers."""
@@ -118,6 +132,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def resolve_binary(self) -> Path | None:
         """Resolve only the executable selected by the active pointer."""
 
+        if self._dev_runtime_configured():
+            return self._dev_runtime_python()
         pointer = self._active_pointer()
         if pointer is None:
             return None
@@ -129,6 +145,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def status(self) -> dict[str, Any]:
         """Keep the manifest's release-state reason visible to Dependencies."""
 
+        if self._dev_runtime_configured():
+            return self._dev_runtime_status(self._dev_runtime_python())
         pointer, pointer_invalid = self._read_active_pointer()
         if pointer is not None and self._verified_active_pointer_binary(pointer) is None:
             pointer_invalid = True
@@ -154,6 +172,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         return status_payload
 
     def provider_root_format(self) -> str | None:
+        if self._dev_runtime_configured():
+            return _DEV_PROVIDER_ROOT_FORMAT if self._dev_runtime_python() is not None else None
         pointer = self._active_pointer()
         value = pointer.get("provider_root_format") if pointer is not None else None
         return value if _safe_metadata_value(value) else None
@@ -161,6 +181,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def compatible_provider_root_formats(self) -> frozenset[str]:
         """Return the active artifact's declared root formats, including itself."""
 
+        if self._dev_runtime_configured():
+            return frozenset({_DEV_PROVIDER_ROOT_FORMAT}) if self._dev_runtime_python() is not None else frozenset()
         pointer = self._active_pointer()
         if pointer is None:
             return frozenset()
@@ -173,9 +195,108 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         return frozenset(compatible)
 
     def artifact_fingerprint(self) -> str | None:
+        if self._dev_runtime_configured():
+            return _DEV_ARTIFACT_FINGERPRINT if self._dev_runtime_python() is not None else None
         pointer = self._active_pointer()
         value = pointer.get("artifact_fingerprint") if pointer is not None else None
         return value if _safe_metadata_value(value) else None
+
+    def ensure(self, *, force: bool = False) -> dict[str, Any]:
+        """Use an explicitly configured development runtime without installing archives."""
+
+        if not self._dev_runtime_configured():
+            return super().ensure(force=force)
+        python = self._dev_runtime_python()
+        if python is None:
+            return {
+                "ok": False,
+                "reason": _DEV_RUNTIME_FAILURE_REASON,
+                "download_error": None,
+            }
+        return {
+            "ok": True,
+            "changed": False,
+            "path": str(python),
+            "version": EVEROS_VERSION,
+            "reason": None,
+            "download_error": None,
+        }
+
+    def _dev_runtime_configured(self) -> bool:
+        return _DEV_RUNTIME_ENV in os.environ
+
+    def _dev_runtime_python(self) -> Path | None:
+        """Validate the opt-in development interpreter without touching managed state."""
+
+        configured = os.environ.get(_DEV_RUNTIME_ENV)
+        if configured is None:
+            self._dev_runtime_checked = False
+            self._dev_runtime_checked_value = None
+            self._dev_runtime_cached_python = None
+            return None
+        if self._dev_runtime_checked and configured == self._dev_runtime_checked_value:
+            return self._dev_runtime_cached_python
+        self._dev_runtime_checked = True
+        self._dev_runtime_checked_value = configured
+        self._dev_runtime_cached_python = None
+        self._dev_runtime_warning_logged = False
+        self._dev_runtime_failure_logged = None
+        if not configured.strip():
+            self._log_dev_runtime_failure("it must name a Python executable")
+            return None
+        try:
+            # Do not resolve symlinks: a venv's ``bin/python`` often needs its
+            # own path to discover ``pyvenv.cfg`` and its site-packages.
+            python = Path(os.path.abspath(Path(configured).expanduser()))
+            if not python.is_file() or not os.access(python, os.X_OK):
+                self._log_dev_runtime_failure("the configured Python is not an executable file")
+                return None
+        except (OSError, RuntimeError, ValueError):
+            self._log_dev_runtime_failure("the configured Python path is invalid")
+            return None
+        if not self._prepare_binary(python).get("ok"):
+            self._log_dev_runtime_failure(
+                f"the configured Python cannot import compatible everos {EVEROS_VERSION} and uvicorn"
+            )
+            return None
+        self._dev_runtime_cached_python = python
+        if not self._dev_runtime_warning_logged:
+            logger.warning(
+                "DEV RUNTIME bypass active - not for production; using %s from %s",
+                python,
+                _DEV_RUNTIME_ENV,
+            )
+            self._dev_runtime_warning_logged = True
+        return python
+
+    def _dev_runtime_status(self, python: Path | None) -> dict[str, Any]:
+        return {
+            "id": self.spec.runtime_id,
+            "provider": "development",
+            "platform": runtime_platform_tag(),
+            "installed": python is not None,
+            "version": EVEROS_VERSION,
+            "status": "ready" if python is not None else "error",
+            "path": str(python) if python is not None else None,
+            "install_dir": None,
+            "manifest": {
+                "everos_version": EVEROS_VERSION,
+                "source": "development",
+            },
+            "archive": None,
+            "reason": None if python is not None else _DEV_RUNTIME_FAILURE_REASON,
+            "download_error": None,
+        }
+
+    def _log_dev_runtime_failure(self, detail: str) -> None:
+        if self._dev_runtime_failure_logged == detail:
+            return
+        logger.error(
+            "%s is configured but unusable; refusing DEV RUNTIME bypass: %s",
+            _DEV_RUNTIME_ENV,
+            detail,
+        )
+        self._dev_runtime_failure_logged = detail
 
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
         if str(manifest.payload.get("release_state") or "published") != "published":
