@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/oauth-flow.schema.json",
+  "title": "OAuthFlow",
+  "description": "Subscription-connect flow state. RUNTIME-DECLARED presentation (S1 gap ③): the server declares what to show and what it expects back; the UI renders declaratively and never keys off a vendor→form table. UI shell semantics mirror the existing BackendOAuthPanel (2s poll, 15-min timeout, cancel). Forms A/B/C from spec §5 frame 09 are presentation patterns the declaration composes: A = auth_url + expects paste_code; B = auth_url + device_code + expects none; C = auth_url + expects paste_callback_url. Under Option 1, native_cli subscription connect drives the CLI's own login through this same shape.",
+  "type": "object",
+  "required": ["flow_id", "vendor", "channel", "state", "presentation"],
+  "additionalProperties": false,
+  "properties": {
+    "flow_id": { "type": "string" },
+    "source_id": { "type": ["string", "null"], "description": "v1.1: pending Source this flow binds to (deterministic association; hub-channel flows always set it)" },
+    "vendor": { "type": "string" },
+    "channel": { "enum": ["native_cli", "hub"], "description": "where the resulting credential will live; hub-held subscriptions only behind the consent-gated experimental flag (S2)" },
+    "state": { "enum": ["starting", "awaiting_action", "verifying", "success", "failed", "cancelled"] },
+    "presentation": {
+      "type": "object",
+      "required": ["expects"],
+      "additionalProperties": false,
+      "properties": {
+        "auth_url": { "type": ["string", "null"] },
+        "device_code": { "type": ["string", "null"] },
+        "expects": { "enum": ["none", "paste_code", "paste_callback_url"] },
+        "instructions_key": { "type": ["string", "null"], "description": "i18n key for the step-2 helper line" }
+      }
+    },
+    "error_key": { "type": ["string", "null"], "description": "i18n key; raw upstream errors never surface" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "examples": [
+    {
+      "flow_id": "oaf_claude01",
+      "vendor": "anthropic",
+      "channel": "native_cli",
+      "state": "awaiting_action",
+      "presentation": {
+        "auth_url": "https://claude.ai/oauth/authorize?code=true&...",
+        "device_code": null,
+        "expects": "paste_code",
+        "instructions_key": "models.oauth.claude.paste_code"
+      },
+      "error_key": null,
+      "expires_at": "2026-07-23T04:15:00+08:00"
+    }
+  ]
+}

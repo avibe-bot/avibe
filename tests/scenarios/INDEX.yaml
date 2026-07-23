@@ -8,6 +8,16 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: model_hub
+    name: Model Hub source resolution and supply configuration
+    status: active
+    catalog: tests/scenarios/model_hub/catalog.yaml
+    observations: tests/scenarios/model_hub/observations.yaml
+    scenario_tests: []
+    unit_or_contract_tests:
+      - tests/test_model_hub_api.py
+      - tests/test_model_hub_config.py
+      - tests/test_model_hub_resolution.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active

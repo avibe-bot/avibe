@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 from dataclasses import dataclass, field, fields
@@ -305,6 +306,368 @@ class AgentsConfig:
 
 
 @dataclass
+class ModelHubModelConfig:
+    id: str
+    provenance: Literal["discovered", "manual"]
+    display_name: Optional[str] = None
+    discovered_at: Optional[str] = None
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubModelConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.sources.models' entries must be objects")
+        model_id = payload.get("id")
+        provenance = payload.get("provenance")
+        if not isinstance(model_id, str) or not model_id:
+            raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
+        if provenance not in {"discovered", "manual"}:
+            raise ValueError("Config 'model_hub.sources.models.provenance' is invalid")
+        return cls(
+            id=model_id,
+            provenance=provenance,
+            display_name=payload.get("display_name"),
+            discovered_at=payload.get("discovered_at"),
+        )
+
+    def to_payload(self) -> dict:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "provenance": self.provenance,
+            "discovered_at": self.discovered_at,
+        }
+
+
+@dataclass
+class ModelHubSourceStateConfig:
+    status: Literal["active", "standby", "cooldown", "error"] = "standby"
+    retry_at: Optional[str] = None
+    detail_key: Optional[str] = None
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubSourceStateConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.sources.state' must be an object")
+        status = payload.get("status")
+        if status not in {"active", "standby", "cooldown", "error"}:
+            raise ValueError("Config 'model_hub.sources.state.status' is invalid")
+        return cls(status=status, retry_at=payload.get("retry_at"), detail_key=payload.get("detail_key"))
+
+    def to_payload(self) -> dict:
+        return {"status": self.status, "retry_at": self.retry_at, "detail_key": self.detail_key}
+
+
+@dataclass
+class ModelHubSourceUsageConfig:
+    cycle_used_pct: Optional[float] = None
+    month_spend_cents: Optional[int] = None
+    currency: Optional[str] = None
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubSourceUsageConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.sources.usage' must be an object")
+        cycle_used_pct = payload.get("cycle_used_pct")
+        if cycle_used_pct is not None and (
+            isinstance(cycle_used_pct, bool)
+            or not isinstance(cycle_used_pct, (int, float))
+            or not 0 <= cycle_used_pct <= 100
+        ):
+            raise ValueError("Config 'model_hub.sources.usage.cycle_used_pct' must be between 0 and 100")
+        month_spend_cents = payload.get("month_spend_cents")
+        if month_spend_cents is not None and (
+            isinstance(month_spend_cents, bool) or not isinstance(month_spend_cents, int) or month_spend_cents < 0
+        ):
+            raise ValueError("Config 'model_hub.sources.usage.month_spend_cents' must be a non-negative integer")
+        return cls(
+            cycle_used_pct=cycle_used_pct,
+            month_spend_cents=month_spend_cents,
+            currency=payload.get("currency"),
+        )
+
+    def to_payload(self) -> dict:
+        return {
+            "cycle_used_pct": self.cycle_used_pct,
+            "month_spend_cents": self.month_spend_cents,
+            "currency": self.currency,
+        }
+
+
+@dataclass
+class ModelHubSourceConfig:
+    id: str
+    kind: Literal["subscription", "api_key"]
+    vendor: str
+    display_name: str
+    protocol: Literal["anthropic", "openai_responses", "openai_chat", "openai_compatible"]
+    supply_channel: Literal["native_cli", "hub"]
+    billing: Literal["monthly", "metered"]
+    state: ModelHubSourceStateConfig
+    models: list[ModelHubModelConfig]
+    base_url: Optional[str] = None
+    experimental_consent_at: Optional[str] = None
+    usage: Optional[ModelHubSourceUsageConfig] = None
+    credential_ref: Optional[str] = None
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.sources' entries must be objects")
+        source_id = payload.get("id")
+        kind = payload.get("kind")
+        vendor = payload.get("vendor")
+        display_name = payload.get("display_name")
+        protocol = payload.get("protocol")
+        supply_channel = payload.get("supply_channel")
+        billing = payload.get("billing")
+        if not isinstance(source_id, str) or re.fullmatch(r"src_[a-z0-9]{8,}", source_id) is None:
+            raise ValueError("Config 'model_hub.sources.id' is invalid")
+        if kind not in {"subscription", "api_key"}:
+            raise ValueError("Config 'model_hub.sources.kind' is invalid")
+        if not isinstance(vendor, str) or not vendor:
+            raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+        if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
+            raise ValueError("Config 'model_hub.sources.display_name' is invalid")
+        if protocol not in {"anthropic", "openai_responses", "openai_chat", "openai_compatible"}:
+            raise ValueError("Config 'model_hub.sources.protocol' is invalid")
+        if supply_channel not in {"native_cli", "hub"}:
+            raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
+        if billing not in {"monthly", "metered"}:
+            raise ValueError("Config 'model_hub.sources.billing' is invalid")
+        models_payload = payload.get("models")
+        if not isinstance(models_payload, list):
+            raise ValueError("Config 'model_hub.sources.models' must be an array")
+        usage_payload = payload.get("usage")
+        base_url = payload.get("base_url")
+        consent_at = payload.get("experimental_consent_at")
+        credential_ref = payload.get("credential_ref")
+        if base_url is not None and not isinstance(base_url, str):
+            raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+        if consent_at is not None and not isinstance(consent_at, str):
+            raise ValueError("Config 'model_hub.sources.experimental_consent_at' is invalid")
+        if credential_ref is not None and not isinstance(credential_ref, str):
+            raise ValueError("Config 'model_hub.sources.credential_ref' is invalid")
+        return cls(
+            id=source_id,
+            kind=kind,
+            vendor=vendor,
+            display_name=display_name,
+            protocol=protocol,
+            supply_channel=supply_channel,
+            billing=billing,
+            state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
+            models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            base_url=base_url,
+            experimental_consent_at=consent_at,
+            usage=ModelHubSourceUsageConfig.from_payload(usage_payload) if usage_payload is not None else None,
+            credential_ref=credential_ref,
+        )
+
+    def to_payload(self) -> dict:
+        payload = {
+            "id": self.id,
+            "kind": self.kind,
+            "vendor": self.vendor,
+            "display_name": self.display_name,
+            "protocol": self.protocol,
+            "base_url": self.base_url,
+            "supply_channel": self.supply_channel,
+            "billing": self.billing,
+            "state": self.state.to_payload(),
+            "models": [model.to_payload() for model in self.models],
+            "credential_ref": self.credential_ref,
+        }
+        if self.usage is not None:
+            payload["usage"] = self.usage.to_payload()
+        if self.experimental_consent_at is not None:
+            payload["experimental_consent_at"] = self.experimental_consent_at
+        return payload
+
+
+@dataclass
+class ModelHubMappingConfig:
+    builtin_id: str
+    target_model_id: str
+    enabled: bool
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubMappingConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.agents.mappings' entries must be objects")
+        builtin_id = payload.get("builtin_id")
+        target_model_id = payload.get("target_model_id")
+        enabled = payload.get("enabled")
+        if not isinstance(builtin_id, str) or not builtin_id:
+            raise ValueError("Config 'model_hub.agents.mappings.builtin_id' is invalid")
+        if not isinstance(target_model_id, str) or not target_model_id:
+            raise ValueError("Config 'model_hub.agents.mappings.target_model_id' is invalid")
+        if not isinstance(enabled, bool):
+            raise ValueError("Config 'model_hub.agents.mappings.enabled' must be a boolean")
+        return cls(builtin_id=builtin_id, target_model_id=target_model_id, enabled=enabled)
+
+    def to_payload(self) -> dict:
+        return {
+            "builtin_id": self.builtin_id,
+            "target_model_id": self.target_model_id,
+            "enabled": self.enabled,
+        }
+
+
+@dataclass
+class ModelHubMenuConfig:
+    view: Literal["featured", "full"] = "featured"
+    checked: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubMenuConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.agents.menu' must be an object")
+        view = payload.get("view")
+        checked = payload.get("checked")
+        if view not in {"featured", "full"}:
+            raise ValueError("Config 'model_hub.agents.menu.view' is invalid")
+        if not isinstance(checked, list) or not all(isinstance(item, str) for item in checked):
+            raise ValueError("Config 'model_hub.agents.menu.checked' must be an array of strings")
+        if len(set(checked)) != len(checked):
+            raise ValueError("Config 'model_hub.agents.menu.checked' must be unique")
+        return cls(view=view, checked=list(checked))
+
+    def to_payload(self) -> dict:
+        return {"view": self.view, "checked": list(self.checked)}
+
+
+@dataclass
+class ModelHubAgentSupplyConfig:
+    backend: Literal["claude", "codex", "opencode"]
+    mode: Literal["hub", "direct"]
+    menu_kind: Literal["fixed", "open"]
+    mappings: list[ModelHubMappingConfig] = field(default_factory=list)
+    menu: Optional[ModelHubMenuConfig] = None
+
+    @classmethod
+    def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
+        if backend == "opencode":
+            return cls(backend="opencode", mode=mode, menu_kind="open", menu=ModelHubMenuConfig())
+        if backend not in {"claude", "codex"}:
+            raise ValueError(f"Unsupported Model Hub backend: {backend}")
+        return cls(backend=backend, mode=mode, menu_kind="fixed")
+
+    @classmethod
+    def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.agents' entries must be objects")
+        backend = payload.get("backend") or expected_backend
+        mode = payload.get("mode")
+        menu_kind = payload.get("menu_kind")
+        if backend not in {"claude", "codex", "opencode"} or (
+            expected_backend is not None and backend != expected_backend
+        ):
+            raise ValueError("Config 'model_hub.agents.backend' is invalid")
+        if mode not in {"hub", "direct"}:
+            raise ValueError("Config 'model_hub.agents.mode' is invalid")
+        expected_menu_kind = "open" if backend == "opencode" else "fixed"
+        if menu_kind != expected_menu_kind:
+            raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
+        mappings_payload = payload.get("mappings") or []
+        if not isinstance(mappings_payload, list):
+            raise ValueError("Config 'model_hub.agents.mappings' must be an array")
+        menu_payload = payload.get("menu")
+        if backend == "opencode" and menu_payload is None:
+            menu_payload = {"view": "featured", "checked": []}
+        if backend != "opencode" and menu_payload is not None:
+            raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
+        return cls(
+            backend=backend,
+            mode=mode,
+            menu_kind=menu_kind,
+            mappings=[ModelHubMappingConfig.from_payload(mapping) for mapping in mappings_payload],
+            menu=ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None,
+        )
+
+    def to_payload(self) -> dict:
+        return {
+            "backend": self.backend,
+            "mode": self.mode,
+            "menu_kind": self.menu_kind,
+            "mappings": [mapping.to_payload() for mapping in self.mappings],
+            "menu": self.menu.to_payload() if self.menu else None,
+        }
+
+
+@dataclass
+class ModelHubConfig:
+    sources: list[ModelHubSourceConfig] = field(default_factory=list)
+    priority_order: list[str] = field(default_factory=list)
+    agents: dict[str, ModelHubAgentSupplyConfig] = field(
+        default_factory=lambda: {
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct")
+            for backend in ("claude", "codex", "opencode")
+        }
+    )
+    subscription_hub_experimental: bool = False
+
+    @classmethod
+    def fresh(cls) -> "ModelHubConfig":
+        return cls(
+            agents={
+                backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
+                for backend in ("claude", "codex", "opencode")
+            }
+        )
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub' must be an object")
+        sources_payload = payload.get("sources") or []
+        priority_order = payload.get("priority_order") or []
+        agents_payload = payload.get("agents") or {}
+        experimental = payload.get("subscription_hub_experimental", False)
+        if not isinstance(sources_payload, list):
+            raise ValueError("Config 'model_hub.sources' must be an array")
+        if not isinstance(priority_order, list) or not all(isinstance(item, str) for item in priority_order):
+            raise ValueError("Config 'model_hub.priority_order' must be an array of strings")
+        if not isinstance(agents_payload, dict):
+            raise ValueError("Config 'model_hub.agents' must be an object")
+        if not isinstance(experimental, bool):
+            raise ValueError("Config 'model_hub.subscription_hub_experimental' must be a boolean")
+        sources = [ModelHubSourceConfig.from_payload(source) for source in sources_payload]
+        source_ids = [source.id for source in sources]
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("Config 'model_hub.sources' contains duplicate ids")
+        if len(set(priority_order)) != len(priority_order) or set(priority_order) != set(source_ids):
+            raise ValueError("Config 'model_hub.priority_order' must be a permutation of source ids")
+        agents = {
+            backend: ModelHubAgentSupplyConfig.from_payload(
+                agents_payload.get(backend)
+                or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
+                expected_backend=backend,
+            )
+            for backend in ("claude", "codex", "opencode")
+        }
+        for source in sources:
+            if source.kind == "subscription" and source.supply_channel == "hub":
+                if not experimental or not source.experimental_consent_at:
+                    raise ValueError("Config hub-held subscription source requires recorded experimental consent")
+            elif source.experimental_consent_at is not None:
+                raise ValueError("Config experimental consent is only valid for hub-held subscription sources")
+        return cls(
+            sources=sources,
+            priority_order=list(priority_order),
+            agents=agents,
+            subscription_hub_experimental=experimental,
+        )
+
+    def to_payload(self) -> dict:
+        return {
+            "sources": [source.to_payload() for source in self.sources],
+            "priority_order": list(self.priority_order),
+            "agents": {backend: self.agents[backend].to_payload() for backend in ("claude", "codex", "opencode")},
+            "subscription_hub_experimental": self.subscription_hub_experimental,
+        }
+
+
+@dataclass
 class UiConfig:
     setup_host: str = "127.0.0.1"
     setup_port: int = 5123
@@ -423,6 +786,7 @@ class V2Config:
     slack: SlackConfig
     runtime: RuntimeConfig
     agents: AgentsConfig
+    model_hub: ModelHubConfig = field(default_factory=ModelHubConfig)
     platform: str = "slack"
     platforms: PlatformsConfig = field(default_factory=PlatformsConfig)
     discord: Optional[DiscordConfig] = None
@@ -574,6 +938,14 @@ class V2Config:
             avault=avault,
         )
 
+        model_hub_payload = payload.get("model_hub")
+        if model_hub_payload is None:
+            # Existing installs predate Model Hub and must remain in Direct mode
+            # until the user explicitly migrates. Fresh defaults seed Hub mode.
+            model_hub = ModelHubConfig()
+        else:
+            model_hub = ModelHubConfig.from_payload(model_hub_payload)
+
         ui_payload = payload.get("ui") or {}
         if not isinstance(ui_payload, dict):
             raise ValueError("Config 'ui' must be an object")
@@ -709,6 +1081,7 @@ class V2Config:
             platform_configs={key: value for key, value in platform_configs.items() if value is not None},
             runtime=runtime,
             agents=agents,
+            model_hub=model_hub,
             gateway=gateway,
             ui=ui,
             remote_access=remote_access,
@@ -770,6 +1143,7 @@ class V2Config:
                 "codex": self.agents.codex.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
+            "model_hub": self.model_hub.to_payload(),
             "gateway": self.gateway.__dict__ if self.gateway else None,
             "ui": self.ui.__dict__,
             "remote_access": {

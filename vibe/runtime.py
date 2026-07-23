@@ -121,6 +121,8 @@ def ensure_dirs():
 
 
 def default_config():
+    from config.v2_config import ModelHubConfig
+
     work_dir = Path.home() / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     return V2Config(
@@ -133,6 +135,7 @@ def default_config():
             claude=ClaudeConfig(enabled=True, cli_path="claude"),
             codex=CodexConfig(enabled=False, cli_path="codex"),
         ),
+        model_hub=ModelHubConfig.fresh(),
     )
 
 

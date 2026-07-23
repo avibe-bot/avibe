@@ -1015,6 +1015,7 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             # resets ``agents.avault.cli_path`` to the dataclass default.
             "avault": config.agents.avault.__dict__,
         },
+        "model_hub": config.model_hub.to_payload(),
         "gateway": _project_secret_fields(
             config.gateway.__dict__ if config.gateway else None,
             _GATEWAY_SECRET_FIELDS,
