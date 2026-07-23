@@ -51,6 +51,7 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
+from vibe.i18n import normalize_language, t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -207,7 +208,16 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _print_memory_cli_error(operation: str, code: str, *, as_json: bool) -> int:
+def _memory_cli_language() -> str:
+    """Read the configured CLI language without making Memory availability depend on config I/O."""
+
+    try:
+        return normalize_language(getattr(V2Config.load(), "language", "en"))
+    except (FileNotFoundError, OSError, ValueError):
+        return "en"
+
+
+def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
     payload = {
         "schema_version": 1,
         "ok": False,
@@ -218,7 +228,7 @@ def _print_memory_cli_error(operation: str, code: str, *, as_json: bool) -> int:
     if as_json:
         print(json.dumps(payload, indent=2))
     else:
-        print(f"Memory {operation} failed: {code}", file=sys.stderr)
+        print(i18n_t("memory.cli.error", language, operation=operation, code=code), file=sys.stderr)
     return 1
 
 
@@ -238,11 +248,13 @@ def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, s
     return body, None
 
 
-def _print_memory_cli_human(operation: str, result: dict) -> None:
+def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> None:
     if operation == "status":
-        print(f"Memory status: {result.get('state', 'error')}")
+        print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
         print(
-            "Pending: {pending}; processing: {processing}; missed: {missed}".format(
+            i18n_t(
+                "memory.cli.counts",
+                language,
                 pending=result.get("pending", 0),
                 processing=result.get("processing", 0),
                 missed=result.get("missed", 0),
@@ -250,12 +262,12 @@ def _print_memory_cli_human(operation: str, result: dict) -> None:
         )
         warning = result.get("profile_warning")
         if isinstance(warning, str) and warning:
-            print(f"Profile warning: {warning}")
+            print(i18n_t("memory.cli.profileWarning", language, warning=warning))
         return
 
     items = result.get("items")
     if not isinstance(items, list) or not items:
-        print("No memory items found.")
+        print(i18n_t("memory.cli.empty", language))
         return
     for item in items:
         if not isinstance(item, dict):
@@ -275,9 +287,10 @@ def cmd_memory(args) -> int:
 
     operation = args.memory_command
     as_json = bool(getattr(args, "json", False))
+    language = _memory_cli_language()
     query = ""
     if operation not in {"status", "profile", "search"}:
-        return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json)
+        return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
     if operation == "search":
         query = args.query.strip() if isinstance(args.query, str) else ""
         if (
@@ -287,7 +300,7 @@ def cmd_memory(args) -> int:
             or isinstance(args.limit, bool)
             or not 1 <= args.limit <= 20
         ):
-            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json)
+            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
         if operation == "status":
             response = internal_client.memory_status_sync()
@@ -296,11 +309,11 @@ def cmd_memory(args) -> int:
         else:
             response = internal_client.memory_search_sync(query, args.limit)
     except internal_client.InternalServerUnavailable:
-        return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json)
+        return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
 
     result, error = _memory_cli_body(response, fallback="memory_sidecar_unavailable")
     if error is not None:
-        return _print_memory_cli_error(operation, error, as_json=as_json)
+        return _print_memory_cli_error(operation, error, as_json=as_json, language=language)
     assert result is not None
     if as_json:
         print(
@@ -315,7 +328,7 @@ def cmd_memory(args) -> int:
             )
         )
     else:
-        _print_memory_cli_human(operation, result)
+        _print_memory_cli_human(operation, result, language=language)
     return 0
 
 

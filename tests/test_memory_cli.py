@@ -55,3 +55,16 @@ def test_memory_cli_rejects_out_of_range_search_without_transport(monkeypatch, c
 
     assert cli.cmd_memory(args) == 1
     assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+
+
+def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> None:
+    args = cli.build_parser().parse_args(["memory", "status"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: "zh")
+    monkeypatch.setattr(
+        internal_client,
+        "memory_status_sync",
+        lambda: {"status_code": 200, "body": {"state": "ready", "pending": 1, "processing": 0, "missed": 0}},
+    )
+
+    assert cli.cmd_memory(args) == 0
+    assert capsys.readouterr().out.splitlines() == ["记忆状态：ready", "待处理：1；处理中：0；遗漏：0"]

@@ -12,6 +12,7 @@ import pytest
 from core.controller import Controller
 from core.memory import CaptureAccepted, CaptureDuplicate
 from core.memory.commands import MAX_INERT_MEMORY_REPLY_BYTES, bounded_inert_text, parse_memory_command
+from modules.im.discord import _escape_inert_discord_text
 from modules.im.base import MessageContext
 
 
@@ -169,6 +170,36 @@ def test_private_memory_capture_uses_platform_native_dedup_key_once() -> None:
     assert request.session_id == "stable-session"
 
 
+@pytest.mark.parametrize(
+    "payload,files",
+    [
+        ({}, [object()]),
+        ({"is_forwarded": True}, []),
+        ({"edited": True}, []),
+        ({"is_rich": True}, []),
+    ],
+)
+def test_private_memory_command_rejects_nonordinary_human_input(payload, files) -> None:
+    controller = _controller()
+    context = _context("discord", **payload)
+    context.files = files
+
+    asyncio.run(controller.handle_memory_command(context, "profile"))
+
+    assert controller.memory_runtime.calls == []
+    assert controller.client.replies == ["memory.command.unavailable"]
+
+
+def test_private_memory_command_hides_disabled_memory_as_unavailable() -> None:
+    controller = _controller()
+    controller.config.memory.enabled = False
+
+    asyncio.run(controller.handle_memory_command(_context("slack"), "status"))
+
+    assert controller.memory_runtime.calls == []
+    assert controller.client.replies == ["memory.command.unavailable"]
+
+
 def test_private_memory_capture_keeps_equal_native_ids_distinct_per_platform() -> None:
     controller = _controller()
     slack_context = _context("slack")
@@ -197,6 +228,13 @@ def test_memory_command_grammar_is_closed_and_inert_text_is_byte_bounded() -> No
     assert len(inert.encode("utf-8")) <= MAX_INERT_MEMORY_REPLY_BYTES
     assert "\x1b" not in inert
     assert "@" not in inert
+
+
+def test_discord_memory_reply_escapes_markdown_and_spoilers() -> None:
+    escaped = _escape_inert_discord_text("**formatting** ||spoiler|| `code`")
+
+    assert escaped == r"\*\*formatting\*\* \|\|spoiler\|\| \`code\`"
+    assert len(_escape_inert_discord_text("*" * 5000).encode("utf-8")) <= MAX_INERT_MEMORY_REPLY_BYTES
 
 
 def test_private_memory_command_claims_a_stable_native_event_before_read() -> None:

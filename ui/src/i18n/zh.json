@@ -2386,6 +2386,17 @@
       "sendNow": "立即发送",
       "recall": "撤回到输入框",
       "remove": "移出队列"
+    },
+    "memory": {
+      "title": "记忆",
+      "help": "记忆命令：/memory status、/memory profile、/memory search <查询>",
+      "unavailable": "记忆功能不可用。",
+      "status": "记忆状态：{{state}}",
+      "counts": "待处理：{{pending}}；处理中：{{processing}}；遗漏：{{missed}}",
+      "profileWarning": "档案警告：{{warning}}",
+      "profile": "记忆档案",
+      "search": "记忆搜索",
+      "empty": "未找到记忆条目。"
     }
   },
   "vaults": {

@@ -1230,10 +1230,17 @@ class Controller:
         return bool(getattr(memory_config, "enabled", False))
 
     @staticmethod
-    def _memory_inbound_is_ordinary_text(context: MessageContext, text: object) -> bool:
+    def _memory_inbound_is_ordinary_text(
+        context: MessageContext,
+        text: object,
+        *,
+        allow_memory_command: bool = False,
+    ) -> bool:
         """Reject non-human, rich, mutated, or attachment-bearing input facts."""
 
-        if not isinstance(text, str) or not text.strip() or is_memory_command_candidate(text):
+        if not isinstance(text, str) or not text.strip():
+            return False
+        if not allow_memory_command and is_memory_command_candidate(text):
             return False
         if getattr(context, "files", None):
             return False
@@ -1408,13 +1415,22 @@ class Controller:
     async def handle_memory_command(self, context: MessageContext, args: str = "") -> None:
         """Serve the closed read-only private-IM ``/memory`` command surface."""
 
-        if not self.memory_im_admitted(context):
+        command_text = f"/memory {args}".rstrip()
+        if (
+            not self._memory_feature_enabled()
+            or not self.memory_im_admitted(context)
+            or not self._memory_inbound_is_ordinary_text(
+                context,
+                command_text,
+                allow_memory_command=True,
+            )
+        ):
             await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
             return
         if not self._claim_memory_command(context):
             return
 
-        command = parse_memory_command(f"/memory {args}".rstrip())
+        command = parse_memory_command(command_text)
         if command is None or command.action == "invalid":
             await self._send_memory_inert_reply(context, self._t("memory.command.usage"))
             return

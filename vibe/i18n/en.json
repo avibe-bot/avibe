@@ -453,6 +453,13 @@
       "profile": "Memory profile:",
       "search": "Memory search:",
       "empty": "No memory items found."
+    },
+    "cli": {
+      "error": "Memory {operation} failed: {code}",
+      "status": "Memory status: {state}",
+      "counts": "Pending: {pending}; processing: {processing}; missed: {missed}",
+      "profileWarning": "Profile warning: {warning}",
+      "empty": "No memory items found."
     }
   },
   "language": {

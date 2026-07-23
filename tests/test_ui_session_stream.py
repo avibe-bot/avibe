@@ -199,13 +199,13 @@ def test_workbench_memory_intercept_returns_only_closed_errors(isolated_state, t
     }
 
 
-def test_workbench_capture_is_scheduled_after_commit_before_dispatch(isolated_state, tmp_path):
+def test_workbench_capture_is_accepted_after_commit_before_dispatch(isolated_state, tmp_path):
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
     events: list[str] = []
 
-    def schedule_capture(row, observed_session_id):
+    async def schedule_capture(row, observed_session_id):
         assert row["id"]
         assert row["text"] == "capture this"
         assert observed_session_id == session_id

@@ -42,6 +42,14 @@ _RUNTIME_RETRY_INITIAL_SECONDS = 1.0
 _RUNTIME_RETRY_MAX_SECONDS = 30.0
 
 
+def _escape_inert_discord_text(text: str) -> str:
+    """Escape all Discord Markdown tokens before sending a Memory read response."""
+
+    from core.memory.commands import bounded_inert_text
+
+    return bounded_inert_text(discord.utils.escape_markdown(text, as_needed=False, ignore_links=False))
+
+
 def _prioritize_claude_model_choices(models: List[str], current_model: Optional[str]) -> List[str]:
     """Order Claude model ids so the active selection and the canonical bare
     aliases (opus/sonnet/haiku) survive Discord's 25-option select-menu cap.
@@ -588,7 +596,7 @@ class DiscordBot(BaseIMClient):
             if target is None:
                 raise RuntimeError("Discord channel not found")
             message = await target.send(
-                content=text,
+                content=_escape_inert_discord_text(text),
                 suppress_embeds=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )

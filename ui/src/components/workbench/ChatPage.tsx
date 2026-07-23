@@ -21,6 +21,7 @@ import { activityItemKind, harnessNavPath, resolveActivityLabel, sortBackgroundA
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
+import { memoryCommandResultFromResponse, type MemoryCommandResult } from '../../lib/memoryCommandResult';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
@@ -72,6 +73,10 @@ const WORKING_RECONCILE_INTERVAL_MS = 60 * 1000;
 // working far longer ago than this, so it still clears (Codex P2).
 const WORKING_SETTLE_GRACE_MS = 4000;
 const ACTIVITY_RECONCILE_INTERVAL_MS = 10 * 1000;
+
+type SyncTurnStateOptions = {
+  allowImmediateIdleClear?: boolean;
+};
 
 const emptyRuntimeState = (): SessionRuntimeState => ({
   in_flight: false,
@@ -306,6 +311,13 @@ export const ChatPage: React.FC = () => {
   const [messageFontSize, setMessageFontSize] = useState(() => normalizeChatMessageFontSize(undefined));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Direct `/memory` reads deliberately stay outside the durable transcript.
+  // This state is reset with the session and replaced by the next command result.
+  const [memoryCommandResult, setMemoryCommandResult] = useState<MemoryCommandResult | null>(null);
+
+  useEffect(() => {
+    setMemoryCommandResult(null);
+  }, [sessionId]);
 
   // ``working`` = a turn is in flight for this session (from our send, or any
   // other origin we observe). Drives the thinking bubble + the Send→Stop swap.
@@ -385,7 +397,7 @@ export const ChatPage: React.FC = () => {
   // passes — otherwise a quick turn whose turn.end was missed leaves Stop stuck
   // until the next reconcile poll (Codex P2).
   const graceResyncRef = useRef<number | null>(null);
-  const syncTurnStateRef = useRef<(() => void) | null>(null);
+  const syncTurnStateRef = useRef<((options?: SyncTurnStateOptions) => void) | null>(null);
   // Mark a turn as live: bump the epoch + stamp the time, then show Stop. Used by
   // every "a turn is starting now" path so clear-on-idle stays race-safe. Also sets
   // ``workingRef`` synchronously so a settle refresh in the same tick reads it.
@@ -763,7 +775,7 @@ export const ChatPage: React.FC = () => {
   // directions: sets Stop when a turn is live, and clears a stale Stop (a
   // ``turn.end`` we missed while the socket was down) when the controller reports
   // idle — guarded so it can't drop a turn that's genuinely starting.
-  const syncTurnState = useCallback(async () => {
+  const syncTurnState = useCallback(async (options: SyncTurnStateOptions = {}) => {
     if (!sessionId) return;
     const epochAtRequest = turnEpochRef.current;
     try {
@@ -786,7 +798,7 @@ export const ChatPage: React.FC = () => {
       //      false negative.
       if (turnEpochRef.current !== epochAtRequest) return;
       const sinceSet = Date.now() - workingSetAtRef.current;
-      if (sinceSet > WORKING_SETTLE_GRACE_MS) {
+      if (options.allowImmediateIdleClear || sinceSet > WORKING_SETTLE_GRACE_MS) {
         workingRef.current = false;
         setWorking(false);
         // Agent Activity: the idle poll recovering a dropped terminal/turn.end is a
@@ -1127,6 +1139,7 @@ export const ChatPage: React.FC = () => {
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
       markWorking();
       setError(null);
+      setMemoryCommandResult(null);
       try {
         // Plain (non-streaming) POST: the turn runs fire-and-forget on the
         // controller and its reply arrives over the persistent ``message.new``
@@ -1181,6 +1194,14 @@ export const ChatPage: React.FC = () => {
         if (!response.ok) {
           setWorking(false);
           throw new Error(body?.detail ? String(body.detail) : `HTTP ${response.status}`);
+        }
+        const memoryCommandResult = memoryCommandResultFromResponse(body);
+        if (memoryCommandResult) {
+          // `/memory` never starts a turn. Ask the controller whether a different
+          // turn is live instead of clearing the Stop state optimistically.
+          setMemoryCommandResult(memoryCommandResult);
+          void syncTurnStateRef.current?.({ allowImmediateIdleClear: true });
+          return;
         }
         if (body?.already_answered) {
           // A duplicate quick-reply the backend already had (stale tab / missed
@@ -1824,6 +1845,7 @@ export const ChatPage: React.FC = () => {
             {error}
           </div>
         )}
+        {memoryCommandResult && <MemoryCommandResultPanel result={memoryCommandResult} />}
 
         <Transcript
           messages={messages}
@@ -1890,6 +1912,49 @@ export const ChatPage: React.FC = () => {
       </div>
       </FileViewerProvider>
     </ImageViewerProvider>
+  );
+};
+
+const MemoryCommandResultPanel: React.FC<{ result: MemoryCommandResult }> = ({ result }) => {
+  const { t } = useTranslation();
+  const payload = result.result;
+  const status = typeof payload.status === 'string' ? payload.status : '';
+  const warning = typeof payload.profile_warning === 'string' ? payload.profile_warning : null;
+  const state = typeof payload.state === 'string' ? payload.state : t('common.unknown');
+  const count = (name: string) => (typeof payload[name] === 'number' ? payload[name] : 0);
+  const items = Array.isArray(payload.items)
+    ? payload.items
+        .map((item) => (typeof item === 'object' && item !== null && typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : null))
+        .filter((item): item is string => item !== null)
+    : [];
+
+  let content: React.ReactNode;
+  if (status === 'failed') {
+    content = <div>{t('chat.memory.unavailable')}</div>;
+  } else if (result.command === 'status') {
+    content = (
+      <>
+        <div>{t('chat.memory.status', { state })}</div>
+        <div>{t('chat.memory.counts', { pending: count('pending'), processing: count('processing'), missed: count('missed') })}</div>
+        {warning && <div>{t('chat.memory.profileWarning', { warning })}</div>}
+      </>
+    );
+  } else if (result.command === 'profile' || result.command === 'search') {
+    content = (
+      <>
+        <div className="font-medium">{t(result.command === 'profile' ? 'chat.memory.profile' : 'chat.memory.search')}</div>
+        {items.length > 0 ? items.map((item, index) => <div key={`${index}-${item}`}>{item}</div>) : <div>{t('chat.memory.empty')}</div>}
+      </>
+    );
+  } else {
+    content = <div>{t('chat.memory.help')}</div>;
+  }
+
+  return (
+    <div role="status" className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-cyan/35 bg-cyan/[0.06] px-3 py-2 text-[12px] text-foreground">
+      <div className="mb-1 font-medium text-cyan">{t('chat.memory.title')}</div>
+      <div className="whitespace-pre-wrap break-words">{content}</div>
+    </div>
   );
 };
 

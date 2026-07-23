@@ -2386,6 +2386,17 @@
       "sendNow": "Send now",
       "recall": "Recall to input",
       "remove": "Remove from queue"
+    },
+    "memory": {
+      "title": "Memory",
+      "help": "Memory commands: /memory status, /memory profile, /memory search <query>",
+      "unavailable": "Memory is unavailable.",
+      "status": "Memory status: {{state}}",
+      "counts": "Pending: {{pending}}; processing: {{processing}}; missed: {{missed}}",
+      "profileWarning": "Profile warning: {{warning}}",
+      "profile": "Memory profile",
+      "search": "Memory search",
+      "empty": "No memory items found."
     }
   },
   "vaults": {

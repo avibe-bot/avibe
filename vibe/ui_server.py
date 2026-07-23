@@ -6548,8 +6548,8 @@ def _workbench_message_occurred_at_ms(message: dict[str, Any]) -> int:
     return int(time.time() * 1000)
 
 
-def _schedule_workbench_memory_capture(message: dict[str, Any], session_id: str) -> None:
-    """Best-effort post-commit capture; dispatch must never wait for it."""
+async def _schedule_workbench_memory_capture(message: dict[str, Any], session_id: str) -> None:
+    """Submit post-commit capture before dispatch without affecting its outcome."""
 
     from vibe import internal_client
 
@@ -6558,23 +6558,22 @@ def _schedule_workbench_memory_capture(message: dict[str, Any], session_id: str)
     if not isinstance(message_id, str) or not message_id or not isinstance(text, str) or not text.strip():
         return
 
-    task = asyncio.create_task(
-        internal_client.memory_capture(
+    started_at = time.monotonic()
+    try:
+        await internal_client.memory_capture(
             message_id,
             session_id,
             text,
             _workbench_message_occurred_at_ms(message),
-        ),
-        name="memory-workbench-capture",
-    )
-
-    def _log_capture_result(done_task: asyncio.Task) -> None:
-        try:
-            done_task.result()
-        except Exception:
-            logger.warning("Memory Workbench capture task failed")
-
-    task.add_done_callback(_log_capture_result)
+        )
+    except Exception:
+        # Capture is best effort: a rejected/unavailable local sidecar must never
+        # prevent the already-committed user row from reaching the agent.
+        logger.warning(
+            "Memory Workbench capture failed message_id=%s latency_ms=%d",
+            message_id,
+            int((time.monotonic() - started_at) * 1000),
+        )
 
 
 def _memory_settings_payload() -> dict:
@@ -7619,7 +7618,7 @@ async def sessions_messages_create(session_id: str):
         and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
         and not is_memory_command_candidate(dispatch_text)
     ):
-        _schedule_workbench_memory_capture(message, session_id)
+        await _schedule_workbench_memory_capture(message, session_id)
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.
