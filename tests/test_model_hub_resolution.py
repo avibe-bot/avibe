@@ -377,6 +377,35 @@ def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
     assert claude["current"] is None
 
 
+def test_native_source_is_dispatched_before_hub_and_cooldown_falls_through(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    native = service.store.load().sources[0]
+    native.kind = "subscription"
+    native.supply_channel = "native_cli"
+
+    resolved = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert resolved.supply_channel == "native_cli"
+    assert resolved.handle is None
+    assert adapter.invocations == []
+
+    native.state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2026-07-23T03:05:00Z",
+    )
+    fallback = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert fallback.source_id == "src_backup001"
+    assert fallback.supply_channel == "hub"
+    assert adapter.invocations == [("src_backup001", "claude-opus-4-6", "claude")]
+
+
 def test_direct_mode_never_enters_hub_resolution(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
@@ -480,6 +509,30 @@ def test_selected_custom_model_cannot_be_deleted(tmp_path):
 
     assert exc_info.value.code == "mode_switch_blocked"
     assert any(model.id == "manual-model" for model in service.store.load().sources[0].models)
+
+
+def test_custom_model_preserves_slash_qualified_upstream_id(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    source = service.store.load().sources[0]
+    source.vendor = "openrouter"
+    for configured_source in service.store.load().sources:
+        configured_source.credential_ref = f"cred_{configured_source.id}"
+
+    updated = asyncio.run(
+        service.add_custom_model(
+            {
+                "source_id": source.id,
+                "model_id": "anthropic/claude-sonnet-4",
+                "display_name": "Claude Sonnet 4",
+            }
+        )
+    )
+    menu = service.set_opencode_menu(
+        {"view": "featured", "checked": ["openrouter/anthropic/claude-sonnet-4"]}
+    )
+
+    assert updated["models"][-1]["id"] == "anthropic/claude-sonnet-4"
+    assert menu["menu"]["checked"] == ["openrouter/anthropic/claude-sonnet-4"]
 
 
 def test_resolution_event_copy_comes_from_backend_i18n(tmp_path):

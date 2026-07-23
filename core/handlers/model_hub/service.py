@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping, Optional, Protocol, cast
+from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
 
 from config import paths
 from config.v2_config import (
@@ -166,8 +166,9 @@ class UnavailableEngineAdapter:
 class ResolvedInvocation:
     source_id: str
     model_id: str
-    handle: InvokeHandle
+    handle: Optional[InvokeHandle]
     outcome: Optional[RawCallOutcome]
+    supply_channel: Literal["native_cli", "hub"] = "hub"
 
 
 def _utc_now() -> datetime:
@@ -738,7 +739,7 @@ class ModelHubService:
         source = self._source(config, str(payload.get("source_id") or ""))
         model_id = payload.get("model_id")
         display_name = payload.get("display_name")
-        if not isinstance(model_id, str) or not model_id or "/" in model_id:
+        if not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable")
         if display_name is not None and not isinstance(display_name, str):
             raise ModelHubError("mapping_target_unavailable")
@@ -878,8 +879,7 @@ class ModelHubService:
                     )
                 )
             if (
-                source.supply_channel == "hub"
-                and self._eligible_for_agent(source, backend)
+                self._eligible_for_agent(source, backend)
                 and (provider is None or opencode_provider_id(source.vendor) == provider)
                 and any(model.id == model_id for model in source.models)
                 and source.state.status != "error"
@@ -1009,6 +1009,21 @@ class ModelHubService:
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
         for source in candidates:
+            if source.supply_channel == "native_cli":
+                self._emit_switch(
+                    agent=event_agent,
+                    model_id=target_model,
+                    failed_source=failed_source,
+                    failed_reason=failed_reason,
+                    source=source,
+                )
+                return ResolvedInvocation(
+                    source.id,
+                    target_model,
+                    None,
+                    None,
+                    supply_channel="native_cli",
+                )
             handle, outcome = await self._invoke(
                 source=source,
                 model_id=target_model,

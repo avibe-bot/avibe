@@ -831,6 +831,12 @@ def save_config(payload: dict) -> V2Config:
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
+    # Model Hub mutations must pass through ModelHubService so runtime source
+    # bindings and credential lifecycle stay in sync with the persisted config.
+    # Generic settings pages round-trip GET /api/config, so treat this section
+    # as a read-only projection here rather than accepting a potentially stale
+    # client snapshot.
+    payload = {key: value for key, value in payload.items() if key != "model_hub"}
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)

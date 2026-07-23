@@ -115,7 +115,9 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         ), label
         assert menu_fields == set(serialized_hub["agents"]["opencode"]["menu"]), label
 
-    updated = api.save_config({"show_duration": True})
+    stale_hub_payload = json.loads(json.dumps(api_payload["model_hub"]))
+    stale_hub_payload["priority_order"] = []
+    updated = api.save_config({"show_duration": True, "model_hub": stale_hub_payload})
     assert updated.model_hub.to_payload() == loaded.model_hub.to_payload()
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
 
