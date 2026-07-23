@@ -14,6 +14,25 @@ export type ChatTriggerLink =
   | { kind: 'source'; to: string; label: string }
   | { kind: 'harness'; to: string };
 
+const AGENT_RUN_NATIVE_PREFIX = 'agent_run:';
+
+// True for a live agent-callback ("自动触发") harness message that has NOT yet
+// been enriched with its source session (A9a). The live ``message.new`` payload
+// is published raw (before ``list_session_messages`` resolves the source), so
+// ChatPage triggers a targeted reconcile on these to pull the enriched REST row
+// (``mergeById`` then fills ``source_session_*`` in place) — otherwise the source
+// chip would only appear after a manual reload/refocus.
+export function isUnresolvedAgentCallback(
+  message: Pick<WorkbenchMessage, 'source' | 'native_message_id' | 'source_session_id'>,
+): boolean {
+  return (
+    message.source === 'harness' &&
+    typeof message.native_message_id === 'string' &&
+    message.native_message_id.startsWith(AGENT_RUN_NATIVE_PREFIX) &&
+    message.source_session_id == null
+  );
+}
+
 // author_name values that map to the Harness "tasks" tab (watch → "watches").
 // Includes the legacy/queued-restore `task` trigger kind alongside scheduled/task_run.
 const TASK_KINDS = new Set(['scheduled', 'task_run', 'task']);

@@ -24,7 +24,7 @@ import {
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
-import { chatTriggerLink } from '../../lib/chatTrigger';
+import { chatTriggerLink, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -1004,6 +1004,10 @@ export const ChatPage: React.FC = () => {
           return;
         }
         appendMessage(msg);
+        // A9a: a live agent-callback prompt is published before its source
+        // session is resolved, so pull the enriched REST row (mergeById fills
+        // source_session_* in place) — the chip appears without a reload/refocus.
+        if (isUnresolvedAgentCallback(msg)) void reconcile();
         // Agent Activity: a terminal reply settles the turn → mark the generation
         // settled and rebuild groups from storage (chip, rows, status, duration all
         // come from the endpoint, never the lossy live buffer).

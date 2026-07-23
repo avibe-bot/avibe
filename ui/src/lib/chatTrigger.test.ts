@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { chatTriggerLink } from './chatTrigger';
+import { chatTriggerLink, isUnresolvedAgentCallback } from './chatTrigger';
 
 type Msg = Parameters<typeof chatTriggerLink>[0];
 const msg = (over: Partial<Msg>): Msg => ({
@@ -71,5 +71,24 @@ describe('chatTriggerLink', () => {
 
   it('prefers the source link over the kind link when both could apply', () => {
     expect(link({ author_name: 'watch', source_session_id: 'ses_src' })?.kind).toBe('source');
+  });
+});
+
+describe('isUnresolvedAgentCallback', () => {
+  const m = (over: Partial<Parameters<typeof isUnresolvedAgentCallback>[0]>) =>
+    isUnresolvedAgentCallback({ source: 'harness', native_message_id: 'agent_run:exec1', source_session_id: null, ...over });
+
+  it('is true for a live agent_run harness message without a resolved source', () => {
+    expect(m({})).toBe(true);
+  });
+
+  it('is false once the source session is resolved', () => {
+    expect(m({ source_session_id: 'ses_src' })).toBe(false);
+  });
+
+  it('is false for non-agent_run harness messages and non-harness messages', () => {
+    expect(m({ native_message_id: 'scheduled:def:exec' })).toBe(false);
+    expect(m({ native_message_id: null })).toBe(false);
+    expect(m({ source: 'agent' })).toBe(false);
   });
 });
