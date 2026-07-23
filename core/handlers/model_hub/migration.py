@@ -31,6 +31,7 @@ from vibe.opencode_config import (
 
 MigrationAction = Literal["import", "controlled_import", "keep_native", "reauth"]
 MigrationKind = Literal["api_key", "oauth_native", "opencode_provider"]
+_CUSTOM_BASE_URL_NOTE = "models.migration.import.custom_base_url"
 
 
 class MigrationConflictError(ValueError):
@@ -161,8 +162,6 @@ def _claude_items(
             _stable_suffix(api_key, base_url or ""),
         )
         detail = mask_credential(api_key)
-        if base_url:
-            detail += " + ANTHROPIC_BASE_URL"
         items.append(
             NativeMigrationItem(
                 id=item_id,
@@ -172,7 +171,7 @@ def _claude_items(
                 masked_detail=detail,
                 proposed_action=action,
                 selected=True,
-                notes_key=None,
+                notes_key=_CUSTOM_BASE_URL_NOTE if base_url else None,
                 vendor="anthropic",
                 protocol="anthropic",
                 display_name="Anthropic",
@@ -191,8 +190,6 @@ def _claude_items(
             _stable_suffix(auth_token, base_url or ""),
         )
         detail = mask_credential(auth_token)
-        if base_url:
-            detail += " + ANTHROPIC_BASE_URL"
         items.append(
             NativeMigrationItem(
                 id=item_id,
@@ -202,7 +199,11 @@ def _claude_items(
                 masked_detail=detail,
                 proposed_action=action,
                 selected=False,
-                notes_key="models.migration.reauth.auth_token",
+                notes_key=(
+                    "models.migration.reauth.auth_token_custom_base_url"
+                    if base_url
+                    else "models.migration.reauth.auth_token"
+                ),
                 vendor="anthropic",
                 protocol="anthropic",
                 display_name="Anthropic",
@@ -263,11 +264,9 @@ def _codex_items(
             "api_key",
             "auth-json-api-key",
             "import",
-            _stable_suffix(api_key, base_url or ""),
+            _stable_suffix(api_key, base_url or "", protocol),
         )
         detail = mask_credential(api_key)
-        if base_url:
-            detail += " + base_url"
         items.append(
             NativeMigrationItem(
                 id=item_id,
@@ -277,7 +276,7 @@ def _codex_items(
                 masked_detail=detail,
                 proposed_action="import",
                 selected=True,
-                notes_key=None,
+                notes_key=_CUSTOM_BASE_URL_NOTE if base_url else None,
                 vendor="openai",
                 protocol=protocol,
                 display_name="OpenAI",
@@ -435,9 +434,7 @@ def _opencode_items(
                 base_url = catalog_api.strip()
         protocol = _opencode_protocol(provider_id, provider_config, catalog_provider)
         if protocol is None:
-            if base_url is None:
-                continue
-            protocol = "openai_compatible"
+            continue
         if base_url is None and provider_id not in {"anthropic", "openai"}:
             continue
         manual_models = _opencode_manual_models(provider_config)
@@ -450,8 +447,6 @@ def _opencode_items(
             _stable_suffix(secret, base_url or "", protocol, *manual_models),
         )
         detail = f"{provider_id} · {mask_credential(secret)}"
-        if base_url:
-            detail += " + baseURL"
         items.append(
             NativeMigrationItem(
                 id=item_id,
@@ -461,7 +456,7 @@ def _opencode_items(
                 masked_detail=detail,
                 proposed_action=action,
                 selected=True,
-                notes_key=None,
+                notes_key=_CUSTOM_BASE_URL_NOTE if base_url else None,
                 vendor=provider_id,
                 protocol=protocol,
                 display_name=provider_id,

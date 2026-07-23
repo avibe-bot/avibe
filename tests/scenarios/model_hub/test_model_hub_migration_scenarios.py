@@ -200,7 +200,12 @@ def _write_opencode(home: Path, *, malformed: bool = False) -> None:
                     "id": "openrouter",
                     "npm": "@openrouter/ai-sdk-provider",
                     "api": "https://openrouter.ai/api/v1",
-                }
+                },
+                "zhipuai": {
+                    "id": "zhipuai",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://zhipu.example/v1",
+                },
             }
         ),
     )
@@ -239,6 +244,7 @@ def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) 
         assert {item.backend for item in valid} == {backend}
         payload = {"items": [item.to_payload() for item in valid]}
         _validate_scan(payload)
+        assert all(" + " not in item.masked_detail for item in valid)
         serialized = json.dumps(payload)
         assert "Claude OAuth" not in serialized
         assert "Codex auth.json" not in serialized
@@ -443,7 +449,7 @@ def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
     [item] = service.migration_scan()["items"]
     assert item["proposed_action"] == "reauth"
     assert item["selected"] is False
-    assert item["notes_key"] == "models.migration.reauth.auth_token"
+    assert item["notes_key"] == "models.migration.reauth.auth_token_custom_base_url"
     assert "bearer-test-123456" not in json.dumps(item)
 
     with pytest.raises(ModelHubError) as error:
@@ -456,6 +462,67 @@ def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
 def test_codex_empty_token_bag_does_not_create_native_subscription(tmp_path: Path) -> None:
     native_home = tmp_path / "native-home"
     _write(native_home / ".codex" / "auth.json", json.dumps({"tokens": {}}))
+
+    assert (
+        scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
+
+
+def test_codex_wire_protocol_change_invalidates_scanned_item(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write_codex(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    item_id = next(
+        item["id"]
+        for item in service.migration_scan()["items"]
+        if item["kind"] == "api_key"
+    )
+    config_path = native_home / ".codex" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'wire_api = "chat"',
+            'wire_api = "responses"',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.migration_apply([item_id]))
+    assert error.value.code == "migration_item_conflict"
+    assert adapter.provisioned == []
+    assert store.config.sources == []
+
+
+def test_opencode_unsupported_native_sdk_is_not_guessed_as_compatible(tmp_path: Path) -> None:
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".config" / "opencode" / "opencode.json",
+        json.dumps(
+            {
+                "provider": {
+                    "google": {
+                        "options": {
+                            "apiKey": "google-test-123456",
+                            "baseURL": "https://google.example/v1",
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    _write(
+        native_home / ".cache" / "opencode" / "models.json",
+        json.dumps({"google": {"id": "google", "npm": "@ai-sdk/google"}}),
+    )
 
     assert (
         scan_native_configs(
