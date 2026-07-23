@@ -478,6 +478,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("path", "method", "error"),
     [
+        ("/api/models/sources/src_test0001", "patch", "discovery_failed"),
         ("/api/models/priority", "put", "invalid_priority_order"),
         ("/api/models/agents/claude/mode", "patch", "mode_switch_blocked"),
         ("/api/models/agents/claude/mappings", "put", "mapping_target_unavailable"),
@@ -496,17 +497,18 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
 
-    response = getattr(client, method)(
-        path,
-        json=[],
-        headers=csrf_headers(client, base_url),
-        base_url=base_url,
-    )
+    for payload in ([], None):
+        response = getattr(client, method)(
+            path,
+            json=payload,
+            headers=csrf_headers(client, base_url),
+            base_url=base_url,
+        )
 
-    assert response.status_code == 400
-    body = response.get_json()
-    _assert_envelope(body, ok=False)
-    assert body["error"] == error
+        assert response.status_code == 400
+        body = response.get_json()
+        _assert_envelope(body, ok=False)
+        assert body["error"] == error
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
@@ -627,6 +629,48 @@ def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
 
     assert service.oauth_flows.channel(flow_id) is None
     assert adapter.cancelled == [flow_id, flow_id]
+
+
+def test_oauth_completion_requires_the_persisted_pending_source_identity(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+    binding = service.oauth_flows.binding(flow["flow_id"])
+
+    assert binding is not None
+    assert binding.source_id == flow["source_id"]
+    assert binding.vendor == "anthropic"
+
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "source_id": "src_wrong0001",
+            "state": "success",
+        }
+    )
+    restarted = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        native_oauth_adapter=adapter,
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            restarted.create_source(
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Wrong pending source",
+                    "supply_channel": "native_cli",
+                    "oauth_flow_ref": flow["flow_id"],
+                }
+            )
+        )
+
+    assert exc_info.value.code == "flow_not_found"
+    assert store.config.sources == []
 
 
 def test_native_oauth_cannot_record_experimental_hub_consent(tmp_path):
@@ -882,6 +926,41 @@ def test_source_display_names_reject_credential_material(tmp_path):
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].display_name == "Safe source"
     assert pasted_key not in json.dumps(store.config.to_payload())
+
+
+def test_api_key_is_trimmed_once_and_empty_normalized_values_are_rejected(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    normalized = "sk-test-trim-me"
+
+    source = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Trimmed source",
+                "key": f" \n{normalized}\t ",
+            }
+        )
+    )
+
+    assert adapter.secret_lengths == [len(normalized)]
+    assert source["masked_credential"] == "sk-test…m-me"
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Empty source",
+                    "key": " \n\t ",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert adapter.secret_lengths == [len(normalized)]
+    assert [source.display_name for source in store.config.sources] == ["Trimmed source"]
 
 
 def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path):

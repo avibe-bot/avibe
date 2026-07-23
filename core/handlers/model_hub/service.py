@@ -49,6 +49,7 @@ from .oauth import (
     NativeOAuthUnavailableError,
     OAuthAdapter,
     OAuthChannel,
+    OAuthFlowBinding,
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
@@ -464,10 +465,13 @@ class ModelHubService:
         return self.native_oauth_adapter
 
     def _oauth_channel(self, flow_id: str) -> OAuthChannel:
-        channel = self.oauth_flows.channel(flow_id)
-        if channel is None:
+        return self._oauth_binding(flow_id).channel
+
+    def _oauth_binding(self, flow_id: str) -> OAuthFlowBinding:
+        binding = self.oauth_flows.binding(flow_id)
+        if binding is None:
             raise ModelHubError("flow_not_found", status=404)
-        return channel
+        return binding
 
     async def _oauth_status(self, flow_id: str, channel: OAuthChannel) -> OAuthFlowState:
         return await self._oauth_call(
@@ -574,13 +578,17 @@ class ModelHubService:
             rollback_credential_ref: Optional[str] = None
             persisted = False
             try:
-                flow_channel = self._oauth_channel(oauth_ref)
-                if flow_channel != channel:
+                binding = self._oauth_binding(oauth_ref)
+                if binding.channel != channel:
                     raise ModelHubError("flow_not_found", status=404)
-                flow = await self._oauth_status(oauth_ref, flow_channel)
+                flow = await self._oauth_status(oauth_ref, binding.channel)
                 if flow.state != "success" or (channel == "hub" and not flow.credential_ref):
                     raise ModelHubError("flow_not_found", status=404)
-                if flow.vendor != vendor or not flow.source_id.startswith("src_"):
+                if (
+                    flow.vendor != vendor
+                    or flow.vendor != binding.vendor
+                    or flow.source_id != binding.source_id
+                ):
                     raise ModelHubError("flow_not_found", status=404)
 
                 source.id = flow.source_id
@@ -705,8 +713,10 @@ class ModelHubService:
 
         credential_value = payload.get("key")
         oauth_ref = payload.get("oauth_flow_ref")
-        if credential_value is not None and not isinstance(credential_value, str):
-            raise ModelHubError("discovery_failed")
+        if credential_value is not None:
+            if not isinstance(credential_value, str):
+                raise ModelHubError("discovery_failed")
+            credential_value = credential_value.strip()
         if oauth_ref is not None and not isinstance(oauth_ref, str):
             raise ModelHubError("flow_not_found", status=404)
         if kind == "subscription" and credential_value is not None:
@@ -1060,7 +1070,7 @@ class ModelHubService:
         )
         if flow.source_id != pending_source_id or flow.vendor != vendor:
             raise ModelHubError("flow_not_found", status=502)
-        self.oauth_flows.remember(flow.flow_id, oauth_channel)
+        self.oauth_flows.remember(flow.flow_id, oauth_channel, pending_source_id, vendor)
         if channel == "hub" and consented:
             async with self._mutation_lock:
                 config = self.store.load()
