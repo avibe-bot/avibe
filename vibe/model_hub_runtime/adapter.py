@@ -36,7 +36,6 @@ _OAUTH_ENDPOINTS = {
     "anthropic": ("/anthropic-auth-url", "anthropic", "claude"),
     "openai": ("/codex-auth-url", "codex", "codex"),
     "codex": ("/codex-auth-url", "codex", "codex"),
-    "gemini": ("/antigravity-auth-url", "antigravity", "antigravity"),
     "antigravity": ("/antigravity-auth-url", "antigravity", "antigravity"),
     "kimi": ("/kimi-auth-url", "kimi", "kimi"),
     "xai": ("/xai-auth-url", "xai", "xai"),
@@ -175,8 +174,8 @@ class CLIProxyEngineAdapter:
                     pass
             await asyncio.to_thread(self.state_store.delete_oauth_auth_file, str(auth_name))
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
-        await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
         await asyncio.to_thread(self.supervisor.invalidate_configs)
+        await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
 
     async def discover_models(
         self,
@@ -422,10 +421,13 @@ class CLIProxyEngineAdapter:
                 )
             except EngineClientError:
                 pass
-            await asyncio.to_thread(
-                self.state_store.revoke_credential,
-                credential_ref,
-            )
+            try:
+                await asyncio.to_thread(
+                    self.state_store.revoke_credential,
+                    credential_ref,
+                )
+            except EngineStateError:
+                pass
             self._fail_flow(flow, "models.oauth.binding_failed")
             return
         flow.credential_ref = credential_ref

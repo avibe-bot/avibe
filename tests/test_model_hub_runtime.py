@@ -24,7 +24,7 @@ from core.handlers.model_hub.adapter import (
     SourceBinding,
 )
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.client import EngineClient
+from vibe.model_hub_runtime.client import EngineClient, EngineClientError
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
@@ -386,6 +386,13 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
                 "https://different.example/v1",
                 credential_ref,
             )
+        unsafe_instance = store.root / "instances" / "unsafe-entry"
+        unsafe_instance.parent.mkdir(parents=True, exist_ok=True)
+        unsafe_instance.write_text("not a directory", encoding="utf-8")
+        with pytest.raises(EngineStateError, match="instance directory is unsafe"):
+            await adapter.revoke_credential(credential_ref)
+        assert store.credential_metadata(credential_ref)["value"] == "probe-secret"
+        unsafe_instance.unlink()
         await adapter.revoke_credential(credential_ref)
         with pytest.raises(EngineStateError, match="unavailable"):
             store.credential_metadata(credential_ref)
@@ -634,7 +641,10 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("oauth_record_case", ["new", "refresh", "conflict"])
+@pytest.mark.parametrize(
+    "oauth_record_case",
+    ["new", "refresh", "conflict", "patch_failure"],
+)
 def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
     tmp_path: Path,
     oauth_record_case: str,
@@ -675,6 +685,8 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             if path == "/get-auth-status":
                 return {"status": "ok"}
             if path == "/auth-files/fields":
+                if oauth_record_case == "patch_failure":
+                    raise EngineClientError("patch failed")
                 self.patches.append(dict(payload or {}))
                 return {"status": "ok"}
             raise AssertionError((method, path, query, payload, timeout))
@@ -707,6 +719,18 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                 "claude-account.json",
             )
             existing_prefix = store.credential_metadata(existing_ref)["prefix"]
+            if oauth_record_case == "patch_failure":
+                store.sync_sources(
+                    [
+                        _binding(
+                            existing_ref,
+                            vendor="anthropic",
+                            protocol="anthropic",
+                            base_url=None,
+                            allowed_origins=("claude",),
+                        )
+                    ]
+                )
         client = Client()
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store, client),  # type: ignore[arg-type]
@@ -728,6 +752,15 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             retry = await adapter.start_oauth("src_fixture123", "anthropic")
             assert retry.state == "awaiting_action"
             assert not client.patches
+            return
+
+        if oauth_record_case == "patch_failure":
+            assert completed.state == "failed"
+            assert completed.error_key == "models.oauth.binding_failed"
+            assert concurrent.state == "failed"
+            assert store.credential_metadata(existing_ref)["prefix"] == existing_prefix
+            retry = await adapter.start_oauth("src_fixture123", "anthropic")
+            assert retry.state == "awaiting_action"
             return
 
         assert completed.state == "success"
@@ -789,6 +822,9 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
             supervisor=supervisor,  # type: ignore[arg-type]
             state_store=store,
         )
+
+        with pytest.raises(EngineStateError, match="unsupported OAuth vendor"):
+            await adapter.start_oauth("src_fixture123", "gemini")
 
         failed_flow = await adapter.start_oauth("src_fixture123", "anthropic")
         supervisor.unavailable = True
