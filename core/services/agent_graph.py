@@ -37,7 +37,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from storage.background import normalize_run_status
+from storage.background import _status_query_values, normalize_run_status
 from storage.db import create_sqlite_engine
 from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
 
@@ -224,34 +224,31 @@ def build_graph(
     engine = engine or create_sqlite_engine()
     try:
         with engine.connect() as conn:
-            candidate_ids = _resolve_candidates(conn, live_ids, cutoff_iso)
+            # The candidate source differs by view. History (include_ended) uses
+            # the window scan. Active (contract A5 = live + queued) uses the live
+            # set plus every session with a non-terminal run, independent of the
+            # window and of the raw status alias — so a stuck-queued job older
+            # than the cutoff, or a controller-down stale ``running`` row, can't
+            # disappear from the active view.
+            if include_ended:
+                candidate_ids = _resolve_candidates(conn, live_ids, cutoff_iso)
+            else:
+                candidate_ids = set(live_ids) | _active_run_session_ids(conn)
             if not candidate_ids:
                 return _empty_payload(now, window, live_unreachable)
 
             # Bound the expensive run-history load by choosing which candidate
-            # SESSIONS to load runs for (cheap — no runs) before ``_load_runs``. A
-            # busy install can have far more candidates than survive the response,
-            # and the graph refetches on SSE/poll, so loading every run for every
-            # candidate is wasted work.
+            # SESSIONS to load runs for (cheap — no runs) before ``_load_runs``,
+            # after the session-level visibility filters (project, background,
+            # archived/disabled) so hidden rows can't consume the cap and starve
+            # visible ones. A busy install can have far more candidates than
+            # survive the response, and the graph refetches on SSE/poll.
             candidate_rows = _load_sessions(conn, candidate_ids)
             eligible = _prefilter_candidate_rows(
-                candidate_rows, project=project, include_background=include_background,
+                candidate_rows, project=project,
+                include_background=include_background, live_ids=live_ids,
             )
-            eligible_ids = {r["id"] for r in eligible}
-            if include_ended:
-                # History view: no run-derived filter applies, so a session-level
-                # recency rank is exact. Keep the most-recent ``node_cap``.
-                ranked = sorted(eligible, key=lambda r: _session_sort_key(r, live_ids))
-            else:
-                # Active view keeps only live/queued nodes, so load runs for
-                # exactly those candidates (naturally bounded by in-flight work)
-                # rather than a recency slice — otherwise a queued session whose
-                # last activity sorts past the cap would be dropped before
-                # ``_filter_nodes`` ever classifies it.
-                active_ids = (live_ids | _queued_candidate_ids(conn, eligible_ids)) & eligible_ids
-                by_id = {r["id"]: r for r in eligible}
-                ranked = sorted((by_id[i] for i in active_ids),
-                                key=lambda r: _session_sort_key(r, live_ids))
+            ranked = sorted(eligible, key=lambda r: _session_sort_key(r, live_ids))
             candidate_truncated = len(ranked) > node_cap
             session_by_id = {r["id"]: r for r in ranked[:node_cap]}
             loaded_ids = set(session_by_id)
@@ -317,16 +314,17 @@ def _empty_payload(now: datetime, window: str, live_unreachable: bool) -> dict[s
     }
 
 
-def _queued_candidate_ids(conn, candidate_ids: set[str]) -> set[str]:
-    """Candidate sessions that have a queued run — the non-live half of the
-    active view. Queued runs are few (upcoming work drains quickly), so this is a
-    cheap status lookup intersected in Python; it lets the active view load runs
-    for only the sessions that can survive its filter, without a recency pre-cap
-    dropping a queued session whose own last activity is old."""
-    if not candidate_ids:
-        return set()
-    stmt = select(agent_runs.c.session_id).where(agent_runs.c.status == "queued").distinct()
-    return {row[0] for row in conn.execute(stmt) if row[0] in candidate_ids}
+def _active_run_session_ids(conn) -> set[str]:
+    """Sessions with a non-terminal run — the non-live half of the active view
+    (contract A5). Uses the run store's own normalized status family
+    (``queued``/``running`` → raw ``pending``/``queued``/``processing``/
+    ``running``) so aliases and a controller-down stale ``running`` row still
+    count, and is NOT window-limited so a stuck-queued job older than the
+    history cutoff can't disappear from the active view. Non-terminal runs are
+    few (in-flight work drains), so the set stays small."""
+    raw_statuses = _status_query_values("queued") + _status_query_values("running")
+    stmt = select(agent_runs.c.session_id).where(agent_runs.c.status.in_(raw_statuses)).distinct()
+    return {row[0] for row in conn.execute(stmt) if row[0]}
 
 
 def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
@@ -354,13 +352,16 @@ def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
         agent_runs.c.source_kind,
         agent_runs.c.source_actor,
         agent_runs.c.callback_session_id,
+        agent_runs.c.callback_status,
     ).where(agent_runs.c.updated_at >= cutoff_iso)
     for row in conn.execute(stmt).mappings():
         if row["session_id"]:
             candidates.add(row["session_id"])
         if row["source_kind"] == "agent" and row["source_actor"]:
             candidates.add(row["source_actor"])
-        if row["callback_session_id"]:
+        # Only a callback target that will draw an edge (A4: non-null status) —
+        # a bare return route must not promote an unconnected root node.
+        if row["callback_session_id"] and row["callback_status"]:
             candidates.add(row["callback_session_id"])
     return candidates
 
@@ -437,7 +438,11 @@ def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:
         for run in runs:
             if run.get("source_kind") == "agent" and run.get("source_actor"):
                 refs.add(run["source_actor"])
-            if run.get("callback_session_id"):
+            # Only follow a callback target that will actually draw an edge
+            # (A4: callback edges need a non-null status). A run that merely
+            # recorded a return route otherwise promotes an unconnected root that
+            # consumes cap/count with no report edge.
+            if run.get("callback_session_id") and run.get("callback_status"):
                 refs.add(run["callback_session_id"])
     return refs
 
@@ -453,7 +458,14 @@ def _build_edges(
     trigger_ids: set[str] = set()
 
     def _newer(existing: Optional[str], candidate: Optional[str]) -> bool:
-        return (existing or "") < (candidate or "")
+        # Compare parsed instants, not raw strings: stored run times mix `...Z`
+        # (second precision) and `.isoformat()` (microseconds/`+00:00`), which
+        # sort wrong lexicographically within the same second.
+        cand = _parse_iso(candidate)
+        if cand is None:
+            return False
+        prev = _parse_iso(existing)
+        return prev is None or prev < cand
 
     # Callback target per run id — an explicit callback-delivery run
     # (source_kind='agent', parent_run_id → the delegated run) reports INTO the
@@ -674,12 +686,22 @@ def _prefilter_candidate_rows(
     *,
     project: str,
     include_background: bool,
+    live_ids: set[str],
 ) -> list[dict[str, Any]]:
-    # The session-level subset of _filter_nodes (project + background), applied to
-    # raw session rows so the pre-run cap never drops a row a project/background
-    # filter would keep. include_ended is deliberately excluded — it needs the
-    # run-derived status, so it stays a post-load node filter.
-    result = rows
+    # The session-level visibility filters that _build_nodes / _filter_nodes also
+    # apply, hoisted ahead of the run-load cap so hidden rows (archived chats,
+    # sessions under a disabled project, backgrounds, other projects) can't
+    # consume the cap and starve visible sessions. include_ended is deliberately
+    # excluded — it needs the run-derived status, so it stays a post-load filter.
+    def _hidden(r: dict[str, Any]) -> bool:
+        # Mirror _build_nodes: archived chat or archived (disabled) project,
+        # unless the session is live.
+        if r["id"] in live_ids:
+            return False
+        archived_project = r.get("scope_scope_type") == "project" and r.get("scope_enabled") == 0
+        return r.get("status") == "archived" or archived_project
+
+    result = [r for r in rows if not _hidden(r)]
     if not include_background:
         result = [r for r in result if (r.get("visibility") or "foreground") != "background"]
     if project and project != "all":

@@ -660,6 +660,69 @@ def test_missing_lineage_reference_terminates(isolated_state):
     assert "ses_ghost" not in ids
 
 
+def test_active_view_captures_nonterminal_past_window_and_aliases(isolated_state):
+    # Active view (A5) surfaces any session with a non-terminal run regardless of
+    # the history window or the raw status alias: a stuck queued job older than
+    # the cutoff and a controller-down `running` row both count, with live_agents
+    # empty (controller unreachable).
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_oldq", scope_id=None, title="Old queued",
+                        last_active=NOW - timedelta(days=3))
+        _insert_run(conn, "run_oldq", session_id="ses_oldq", status="queued",
+                    created=NOW - timedelta(days=3))
+        _insert_session(conn, "ses_run", scope_id=None, title="Running",
+                        last_active=NOW - timedelta(minutes=5))
+        _insert_run(conn, "run_run", session_id="ses_run", status="running",
+                    created=NOW - timedelta(minutes=5))
+
+    payload = agent_graph.build_graph(
+        live_agents=[], now=NOW, engine=engine, include_ended=False, window="1h"
+    )
+    # running (no live process) normalizes to queued; the 3-day-old queued job is
+    # kept even though it is far outside the 1h window.
+    assert {n["session_id"]: n["status"] for n in payload["nodes"]} == {
+        "ses_oldq": "queued",
+        "ses_run": "queued",
+    }
+
+
+def test_null_status_callback_target_not_promoted(isolated_state):
+    # A run that records a callback route but no callback_status (A4: no edge)
+    # must not promote the (otherwise inactive) target into an unconnected node.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_caller", scope_id=None, title="Caller")
+        _insert_session(conn, "ses_target", scope_id=None, title="Target")
+        _insert_run(conn, "run_c", session_id="ses_caller",
+                    callback_session_id="ses_target", callback_status=None)
+
+    payload = agent_graph.build_graph(
+        live_agents=[{"session_id": "ses_caller", "state": "active"}], now=NOW, engine=engine
+    )
+    assert {n["session_id"] for n in payload["nodes"]} == {"ses_caller"}
+    assert not any(e["kind"] == "callback" for e in payload["edges"])
+
+
+def test_archived_sessions_excluded_before_cap(isolated_state):
+    # Archived sessions must be dropped before the node cap so a burst of recent
+    # archived chats can't consume the cap and starve an older visible session.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for idx in range(2):
+            sid = f"ses_arch{idx}"
+            _insert_session(conn, sid, scope_id=None, title=f"Arch{idx}",
+                            status="archived", last_active=NOW - timedelta(minutes=idx + 1))
+            _insert_run(conn, f"run_arch{idx}", session_id=sid,
+                        created=NOW - timedelta(minutes=idx + 1))
+        _insert_session(conn, "ses_vis", scope_id=None, title="Visible",
+                        last_active=NOW - timedelta(hours=2))
+        _insert_run(conn, "run_vis", session_id="ses_vis", created=NOW - timedelta(hours=2))
+
+    payload = agent_graph.build_graph(live_agents=[], now=NOW, engine=engine, node_cap=1)
+    assert [n["session_id"] for n in payload["nodes"]] == ["ses_vis"]
+
+
 def test_visibility_emitted_and_filtered(isolated_state):
     # M1's ``agent_sessions.visibility`` is now a hard column: every node
     # carries it (legacy rows backfill to foreground), a background session is
