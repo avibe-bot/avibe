@@ -272,12 +272,12 @@ class MemoryRuntime:
 
         self._activation_loop = asyncio.get_running_loop()
         async with self._reconcile_lock:
-            # Shared ensure(force=True) can delete the active fingerprint
-            # directory before invoking our activation bridge. A retained
-            # process can still be supervising a delayed restart even when it
-            # has no live child, so require Memory to be disabled first.
-            # A concurrent reconcile is similarly blocked until this operation
-            # has either committed or failed.
+            # Shared ensure(force=True) can delete the active fingerprint directory
+            # before invoking our activation bridge. Coordinate with the lifecycle: if
+            # a supervisor is retained (even one whose child has exited and is in the
+            # 'down' state after failed restarts), stop it first so Repair can replace
+            # the artifact and recover enabled/down Memory. A concurrent reconcile is
+            # blocked until this operation has either committed or failed.
             if self._artifact_installing or self._process is not None:
                 return {
                     "ok": False,

@@ -711,6 +711,11 @@ def _snapshot_process_group(process_group: int | None) -> dict[int, float]:
         try:
             if os.getpgid(candidate.pid) == process_group:
                 identities[candidate.pid] = candidate.create_time()
+        except psutil.AccessDenied:
+            # The member exists but its identity cannot be verified. Keep it with a
+            # sentinel so the "all confirmed" check sees an unverifiable member and
+            # fails closed (no killpg) rather than silently dropping it.
+            identities[candidate.pid] = -1.0
         except (OSError, psutil.Error):
             continue
     return identities
