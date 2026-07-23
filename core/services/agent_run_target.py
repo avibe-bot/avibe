@@ -15,17 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, update
 
 from core.message_context import (
     build_context_session_key,
     build_thread_session_anchor,
+    build_thread_session_anchor_candidates,
     resolve_context_settings_key,
     resolve_context_thread_id,
 )
 from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
-from storage.agent_session_rows import create_agent_session_row
+from storage.agent_session_rows import create_agent_session_row, utc_now_iso
 from storage.models import agent_sessions, scope_settings, scopes
 
 logger = logging.getLogger(__name__)
@@ -152,27 +153,49 @@ def resolve_agent_run_target(
         scope_row = _scope_for_context(conn, context, platform, settings_key)
         scope_id = scope_row.get("scope_id") if scope_row else None
 
+        anchor_candidates = (anchor,)
+        thread_id = resolve_context_thread_id(context) or context.thread_id
+        if platform == "telegram" and thread_id:
+            canonical_anchor = build_thread_session_anchor(platform, context.channel_id, thread_id)
+            if anchor == canonical_anchor:
+                anchor_candidates = build_thread_session_anchor_candidates(
+                    platform,
+                    context.channel_id,
+                    thread_id,
+                )
+
         existing = None
         for candidate_scope_id in _session_scope_ids_for_context(
             context,
             platform=platform,
             preferred_scope_id=_optional_str(scope_id),
         ):
-            existing = conn.execute(
-                select(
-                    agent_sessions,
-                    scopes.c.scope_type.label("_scope_type"),
-                )
-                .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
-                .where(agent_sessions.c.scope_id == candidate_scope_id)
-                .where(agent_sessions.c.session_anchor == anchor)
-                # Never resolve a turn onto an archived row. The archived row's
-                # anchor is vacated on archive (so it won't match a live thread
-                # anyway); this is the explicit guard, matching the bind path.
-                .where(agent_sessions.c.status != "archived")
-                .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
-                .limit(1)
-            ).mappings().first()
+            for candidate_anchor in anchor_candidates:
+                existing = conn.execute(
+                    select(
+                        agent_sessions,
+                        scopes.c.scope_type.label("_scope_type"),
+                    )
+                    .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
+                    .where(agent_sessions.c.scope_id == candidate_scope_id)
+                    .where(agent_sessions.c.session_anchor == candidate_anchor)
+                    # Never resolve a turn onto an archived row. The archived row's
+                    # anchor is vacated on archive (so it won't match a live thread
+                    # anyway); this is the explicit guard, matching the bind path.
+                    .where(agent_sessions.c.status != "archived")
+                    .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
+                    .limit(1)
+                ).mappings().first()
+                if existing is not None:
+                    if candidate_anchor != anchor:
+                        conn.execute(
+                            update(agent_sessions)
+                            .where(agent_sessions.c.id == existing["id"])
+                            .values(session_anchor=anchor, updated_at=utc_now_iso())
+                        )
+                        existing = dict(existing)
+                        existing["session_anchor"] = anchor
+                    break
             if existing is not None:
                 break
         if existing is not None:

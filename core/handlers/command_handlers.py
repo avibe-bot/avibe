@@ -6,7 +6,11 @@ import time
 from typing import Any, Optional
 from config.platform_registry import get_platform_descriptor
 from core.bind_security import BindAttemptLimiter
-from core.message_context import requires_typed_user_session_key
+from core.message_context import (
+    build_thread_session_anchor,
+    requires_typed_user_session_key,
+    resolve_context_thread_id,
+)
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
 from modules.agents.base import AgentRequest
@@ -119,10 +123,13 @@ class CommandHandlers(BaseHandler):
                 logger.debug("Failed to resolve session anchor for /new", exc_info=True)
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
         payload = context.platform_specific or {}
+        thread_id = resolve_context_thread_id(context) or context.thread_id
         if payload.get("is_dm", False):
             base_id = context.thread_id or context.channel_id or context.user_id
         else:
-            base_id = context.thread_id or context.message_id or context.channel_id or context.user_id
+            if thread_id:
+                return build_thread_session_anchor(platform, context.channel_id, thread_id)
+            base_id = context.message_id or context.channel_id or context.user_id
         return f"{platform}_{base_id}"
 
     def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
@@ -777,7 +784,8 @@ class CommandHandlers(BaseHandler):
         # mutating an existing record. Reject in-thread invocations so resume always
         # opens a FRESH scope-level session (maintainer decision; preserves the
         # native_session_id write-once invariant). WeChat above has no threads.
-        if context.thread_id and context.thread_id != context.message_id:
+        thread_id = resolve_context_thread_id(context) or context.thread_id
+        if thread_id and thread_id != context.message_id:
             channel_context = self._get_channel_context(context)
             await im_client.send_message(channel_context, self._t("command.resume.scopeOnly"))
             return

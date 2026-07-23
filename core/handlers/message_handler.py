@@ -13,6 +13,7 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from core.message_output import terminal_output_for, terminal_turn_output
+from core.message_context import resolve_context_thread_id
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -138,7 +139,8 @@ class MessageHandler(BaseHandler):
             # Skip automatic cleanup; receiver tasks are retained until shutdown
 
             # Allow "stop" shortcut inside Slack threads
-            if is_human and context.thread_id and control_message.strip().lower() in ["stop", "/stop"]:
+            active_thread_id = resolve_context_thread_id(context) or context.thread_id
+            if is_human and active_thread_id and control_message.strip().lower() in ["stop", "/stop"]:
                 if await self._handle_inline_stop(context):
                     return None
 

@@ -1,7 +1,9 @@
 from core.message_context import (
     build_context_session_key,
     build_thread_session_anchor,
+    build_thread_session_anchor_candidates,
     resolve_context_settings_key,
+    thread_id_from_session_anchor,
 )
 from modules.im import MessageContext
 
@@ -37,3 +39,26 @@ def test_telegram_thread_anchor_includes_chat_id():
 
 def test_non_telegram_thread_anchor_keeps_existing_shape():
     assert build_thread_session_anchor("slack", "C123", "171717.999") == "slack_171717.999"
+
+
+def test_telegram_thread_anchor_candidates_include_legacy_shape():
+    assert build_thread_session_anchor_candidates("telegram", "-100123", "42") == (
+        "telegram_-100123_42",
+        "telegram_42",
+    )
+    assert build_thread_session_anchor_candidates("slack", "C123", "171717.999") == (
+        "slack_171717.999",
+    )
+
+
+def test_thread_id_from_session_anchor_accepts_canonical_and_legacy_shapes():
+    assert (
+        thread_id_from_session_anchor(
+            "telegram_-100123_42:runtime_abc",
+            platform="telegram",
+            channel_id="-100123",
+        )
+        == "42"
+    )
+    assert thread_id_from_session_anchor("telegram_42", platform="telegram", channel_id="-100123") == "42"
+    assert thread_id_from_session_anchor("telegram_-100123", platform="telegram", channel_id="-100123") is None

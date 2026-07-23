@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from core.services import sessions as sessions_service
 from core.services.agent_run_target import resolve_agent_run_target
@@ -318,6 +319,51 @@ def test_telegram_general_topic_fallback_anchor_reuses_session(tmp_path):
     assert first.session_anchor == "telegram_-1001_1"
     assert follow_up.session_anchor == "telegram_-1001_1"
     assert follow_up.agent_session_id == first.agent_session_id
+
+
+def test_telegram_topic_migrates_legacy_anchor_without_losing_native_session(tmp_path):
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=group_scope_id,
+            agent_backend="codex",
+            agent_variant="codex",
+            session_anchor="telegram_42",
+            native_session_id="native-topic-session",
+            workdir=str(group_workdir),
+        )
+
+    context = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_forum": True, "is_topic_message": True},
+    )
+    target = resolve_agent_run_target(
+        context,
+        controller=controller,
+        base_session_id="telegram_-1001_42",
+    )
+
+    assert target.agent_session_id == session_id
+    assert target.session_anchor == "telegram_-1001_42"
+    assert target.native_session_id == "native-topic-session"
+    with controller.sqlite_engine.connect() as conn:
+        migrated_anchor = conn.execute(
+            select(agent_sessions.c.session_anchor).where(agent_sessions.c.id == session_id)
+        ).scalar_one()
+    assert migrated_anchor == "telegram_-1001_42"
 
 
 def test_existing_background_im_target_carries_visibility(tmp_path):

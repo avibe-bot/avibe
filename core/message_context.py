@@ -48,6 +48,41 @@ def build_thread_session_anchor(platform: str, channel_id: str, thread_id: str) 
     return f"{platform}_{thread_id}"
 
 
+def build_thread_session_anchor_candidates(
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+) -> tuple[str, ...]:
+    """Return the canonical anchor followed by any compatible legacy anchor."""
+    canonical = build_thread_session_anchor(platform, channel_id, thread_id)
+    legacy = f"{platform}_{thread_id}"
+    return (canonical, legacy) if legacy != canonical else (canonical,)
+
+
+def thread_id_from_session_anchor(
+    anchor: str,
+    *,
+    platform: str,
+    channel_id: str,
+) -> Optional[str]:
+    """Recover a thread ID from canonical and pre-scoped session anchors."""
+    base_anchor = str(anchor or "").split(":", 1)[0]
+    if not base_anchor:
+        return None
+
+    if platform == "telegram":
+        canonical_prefix = f"{platform}_{channel_id}_"
+        if base_anchor.startswith(canonical_prefix):
+            thread_id = base_anchor[len(canonical_prefix) :]
+            return thread_id or None
+
+    legacy_prefix = f"{platform}_"
+    if not base_anchor.startswith(legacy_prefix):
+        return None
+    thread_id = base_anchor[len(legacy_prefix) :]
+    return thread_id if thread_id and thread_id != str(channel_id) else None
+
+
 def resolve_context_scope_settings_key(context: MessageContext) -> str:
     """Resolve the context-aware settings key without changing session identity."""
     base = resolve_context_settings_key(context)

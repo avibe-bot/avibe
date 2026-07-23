@@ -45,6 +45,22 @@ Use one context-aware settings key/resolver for mention policy, authorization,
 message visibility, cwd, and Agent routing. Keep the existing channel-based
 session key stable; topic identity remains the session anchor.
 
+### Topic identity contract
+
+The logical topic identity is always `(chat_id, topic_id)`. Telegram General is
+topic `1` even when inbound and outbound Bot API payloads omit
+`message_thread_id`.
+
+- persisted thread scope native ID: `<chat_id>/<topic_id>`
+- runtime settings key: `thread::<chat_id>::<topic_id>`
+- explicit delivery key: `telegram::channel::<chat_id>::thread::<topic_id>`
+- runtime session anchor: `telegram_<chat_id>_<topic_id>`
+
+Session-ID targeting must map a persisted thread scope back to its parent
+channel plus topic delivery key. Existing `telegram_<topic_id>` session anchors
+are compatibility inputs only and migrate to the scoped anchor on first use so
+native backend history is preserved without retaining cross-chat collisions.
+
 ### Discovery and API
 
 Telegram cannot list all forum topics. Discover topics passively from inbound
