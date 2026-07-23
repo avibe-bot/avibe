@@ -473,14 +473,13 @@ class EverOSProcess:
             self._memory_dir / ".child-home" / ".local" / "share",
             self._memory_dir / ".child-home" / ".local" / "state",
             self._memory_dir / "generated",
-            self._memory_dir / "generated" / ".empty-ingest",
         ):
             _ensure_owner_directory(directory)
         _ensure_owner_directory(self._provider_root)
 
     def _write_generated_config(self) -> None:
         generated = self._memory_dir / "generated"
-        ingest_dir = generated / ".empty-ingest"
+        attachments_root = self._effective_home / "attachments" / "avibe"
         timezone_name = self._timezone_for_root()
         timezone = _toml_string(timezone_name)
         everos_contents = "\n".join(
@@ -497,7 +496,7 @@ class EverOSProcess:
                 'base_url = ""',
                 "",
                 "[multimodal]",
-                f"file_uri_allow_dirs = [{_toml_string(str(ingest_dir))}]",
+                f"file_uri_allow_dirs = [{_toml_string(str(attachments_root))}]",
                 "",
             )
         )
@@ -538,9 +537,13 @@ class EverOSProcess:
             "XDG_DATA_HOME": str(child_home / ".local" / "share"),
             "XDG_STATE_HOME": str(child_home / ".local" / "state"),
             "EVEROS_ROOT": str(self._provider_root),
+            "AVIBE_MEMORY_ATTACHMENTS_ROOT": str(self._effective_home / "attachments" / "avibe"),
             "EVEROS_LLM__BASE_URL": str(settings.llm_base_url),
             "EVEROS_LLM__MODEL": str(settings.llm_model),
             "EVEROS_LLM__API_KEY": str(settings.llm_api_key),
+            "EVEROS_MULTIMODAL__BASE_URL": str(settings.llm_base_url),
+            "EVEROS_MULTIMODAL__MODEL": str(settings.llm_model),
+            "EVEROS_MULTIMODAL__API_KEY": str(settings.llm_api_key),
             "EVEROS_EMBEDDING__BASE_URL": str(settings.embedding_base_url),
             "EVEROS_EMBEDDING__MODEL": str(settings.embedding_model),
             "EVEROS_EMBEDDING__API_KEY": str(settings.embedding_api_key),

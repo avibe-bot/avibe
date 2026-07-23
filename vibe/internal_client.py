@@ -413,6 +413,7 @@ async def memory_capture(
     text: str,
     occurred_at_ms: int,
     *,
+    attachments: Optional[list[dict[str, Any]]] = None,
     socket_path: Optional[Path] = None,
     timeout: float = 2.0,
 ) -> dict[str, Any]:
@@ -426,6 +427,7 @@ async def memory_capture(
             "session_id": session_id,
             "text": text,
             "occurred_at_ms": occurred_at_ms,
+            "attachments": attachments or [],
         },
         socket_path=socket_path,
         timeout=timeout,

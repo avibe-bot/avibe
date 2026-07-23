@@ -123,30 +123,34 @@ Dependencies page offers repair, and ordinary chat is unaffected.
 
 ### 2.3 Capture
 
-The capture unit is one accepted, stable human-text message from either the
-Workbench or an eligible private IM conversation.
+The capture unit is one accepted, stable human-authored message from either the
+Workbench or an eligible private IM conversation. Workbench messages may carry
+locally uploaded attachments; private IM remains text-only.
 
-The MVP captures only normalized user-authored text. It does not capture:
+The MVP captures normalized user-authored text plus Workbench attachments. It
+does not capture:
 
 - assistant responses;
 - recalled memory content;
 - framework metadata or system prompts;
 - tool calls or tool output;
-- attachment bytes, captions, file paths, OCR, or derived attachment summaries;
+- private-IM attachments or Avibe-generated OCR/attachment summaries;
 - rich, forwarded, shared, edited, system, bot, or self-authored events;
 - Memory commands;
 - empty, command-only, or over-limit input.
 
-Capturing user text only is deliberate. It removes the memory-feedback problem
-and keeps agent responses and tool output outside capture. Whether assistant
-context materially improves memory quality is a future POC, not a hidden
-phase-1 requirement.
+Capturing only user-authored content is deliberate. It removes the
+memory-feedback problem and keeps agent responses and tool output outside
+capture. Workbench uses the already-persisted upload directly: Avibe stores a
+bounded `file://` descriptor in the delivery row but does not copy or parse the
+file. EverOS parses it synchronously during `add`.
 
 Each entry applies its own admission policy before the shared capture seam:
 
 - Workbench captures only a committed user row after the direct-loopback,
   no-forwarded-metadata, and CSRF checks. Its UI process submits bounded
-  committed-row fields over Avibe's existing controller UDS.
+  committed-row fields and resolved attachment descriptors over Avibe's
+  existing controller UDS.
 - Private IM captures only an ordinary human text turn after platform DM
   classification, centralized bind/enable authorization, the administrator
   co-owner check, command interception, and native-message deduplication. The
@@ -175,7 +179,8 @@ provider-internal evidence inspection.
 A controller-owned worker drains the local queue. For each row it:
 
 1. maps the install, principal, and source conversation to fixed EverOS fields;
-2. sends the text through the internal EverOS port;
+2. sends the text and any Workbench attachment descriptors through the internal
+   EverOS port;
 3. flushes that capture so direct queries do not depend on backend session-close
    events;
 4. marks the local row delivered after the public provider operations succeed;
@@ -336,13 +341,14 @@ migration backups and does not claim forensic secure erase.
 
 Before enablement, the owner is told:
 
-- eligible Workbench and bound, enabled administrator-DM user text is copied
-  into a bounded local delivery queue;
+- eligible Workbench user content and bound, enabled administrator-DM user text
+  is copied into a bounded local delivery queue;
 - a row that succeeds or exhausts its retry budget immediately scrubs its text;
   its content-free idempotency tombstone may remain for 90 days within the
   100,000-row bound;
 - the Memory LLM and embedding endpoints are separate from agent subscriptions;
-- a remote Memory endpoint receives captured text or search queries and may
+- a remote Memory endpoint receives captured text, Workbench attachment
+  content parsed by EverOS, or search queries and may
   retain them under its own policy;
 - private IM text has already traversed that platform before local capture, and
   an IM `/memory` query plus its bounded result remains subject to the platform's
@@ -421,10 +427,11 @@ storage. This versioned launcher is the only allowed package-level integration
 and is tested against each runtime artifact.
 
 The MVP supports the same POSIX desktop environments on which the pinned runtime
-and Unix-domain socket pass the phase-0 and integration tests. It does not add a
-new filesystem allowlist or promise stronger power-loss durability than Avibe's
-normal SQLite state. Unsupported native Windows behavior is reported honestly
-after testing rather than inferred in the design.
+and Unix-domain socket pass the phase-0 and integration tests. EverOS file reads
+are allowlisted to Avibe's Workbench attachment root. The MVP does not promise
+stronger power-loss durability than Avibe's normal SQLite state. Unsupported
+native Windows behavior is reported honestly after testing rather than inferred
+in the design.
 
 The local queue has fixed internal caps:
 
@@ -501,13 +508,14 @@ The MVP is releasable to a local experimental cohort when:
 1. the phase-0 POC selects official EverOS or an explicitly scoped Avibe fork;
 2. a loopback owner can install or repair `memory-runtime` from Dependencies
    without a system Python 3.12, and Clear all leaves that runtime intact;
-3. a loopback owner can enable, send a Workbench message, observe indexing,
-   search the resulting memory, view the profile, and clear all local Memory
-   state end to end;
+3. a loopback owner can enable, send a Workbench text or attachment message,
+   observe indexing, search the resulting memory, view the profile, and clear
+   all local Memory state end to end;
 4. a bound, enabled administrator can send ordinary text in a supported private
    IM, observe the same pool being indexed, and query it with `/memory`;
-5. unbound, disabled, non-administrator, group, scheduled, bot/self, attachment,
-   forwarded, and Memory-command inputs produce no capture or provider call;
+5. unbound, disabled, non-administrator, group, scheduled, bot/self,
+   private-IM attachment, forwarded, and Memory-command inputs produce no
+   capture or provider call;
 6. `/memory status`, `/memory profile`, and `/memory search <query>` return typed
    ephemeral Workbench results or bounded inert private-IM replies without
    creating a capture or agent turn;

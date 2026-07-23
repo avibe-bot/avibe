@@ -101,6 +101,7 @@ class QueueRow:
     last_error: MemoryErrorCode | None
     created_at: str
     completed_at: str | None
+    payload_attachments: str | None = None
     add_request_id: str | None = None
     flush_observation: Literal["not_attempted", "in_flight", "succeeded", "rejected", "unknown"] | None = None
     flush_status: Literal["extracted", "no_extraction"] | None = None
@@ -183,6 +184,7 @@ class MemoryStore:
         source_message_id: str,
         session_id: str,
         payload_text: str,
+        payload_attachments: str | None = None,
         occurred_at_ms: int,
         max_provider_timestamp_ms: int,
         nonterminal_limit: int = MAX_NONTERMINAL_QUEUE_ROWS,
@@ -247,16 +249,18 @@ class MemoryStore:
                 """
                 INSERT INTO memory_capture_queue (
                     source_message_digest, epoch, session_id, payload_text,
+                    payload_attachments,
                     occurred_at_ms, provider_timestamp_ms, state, attempts,
                     next_retry_at, lease_owner, lease_at, last_error,
                     created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
                 """,
                 (
                     source_message_digest,
                     meta.epoch,
                     session_ref,
                     payload_text,
+                    payload_attachments,
                     occurred_at_ms,
                     provider_timestamp_ms,
                     now,
@@ -279,6 +283,7 @@ class MemoryStore:
                     last_error=None,
                     created_at=now,
                     completed_at=None,
+                    payload_attachments=payload_attachments,
                 ),
             )
 
@@ -332,7 +337,8 @@ class MemoryStore:
             result = conn.execute(
                 """
                 UPDATE memory_capture_queue
-                SET state = 'delivered', payload_text = NULL, next_retry_at = NULL,
+                SET state = 'delivered', payload_text = NULL, payload_attachments = NULL,
+                    next_retry_at = NULL,
                     lease_owner = NULL, lease_at = NULL, last_error = NULL,
                     completed_at = ?, add_request_id = ?,
                     flush_observation = 'not_attempted'
@@ -544,6 +550,7 @@ class MemoryStore:
                     """
                     UPDATE memory_capture_queue
                     SET state = 'dead', attempts = ?, payload_text = NULL,
+                        payload_attachments = NULL,
                         next_retry_at = NULL, lease_owner = NULL, lease_at = NULL,
                         last_error = ?, completed_at = ?
                     WHERE source_message_digest = ? AND epoch = ?
@@ -623,7 +630,9 @@ class MemoryStore:
                         THEN 1 ELSE 0 END) AS distill_failed,
                     COALESCE(SUM(
                         CASE WHEN state IN ('pending', 'processing')
-                        THEN length(CAST(payload_text AS BLOB)) ELSE 0 END
+                        THEN length(CAST(payload_text AS BLOB))
+                           + length(CAST(COALESCE(payload_attachments, '') AS BLOB))
+                        ELSE 0 END
                     ), 0) AS plaintext_bytes
                 FROM memory_capture_queue
                 WHERE epoch = ?
@@ -1015,6 +1024,10 @@ class MemoryStore:
             if user_version == 2:
                 conn.executescript((migrations / "0003_error_timestamp.sql").read_text(encoding="utf-8"))
                 conn.execute("PRAGMA user_version = 3")
+                user_version = 3
+            if user_version == 3:
+                conn.executescript((migrations / "0004_workbench_attachments.sql").read_text(encoding="utf-8"))
+                conn.execute("PRAGMA user_version = 4")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -1237,6 +1250,11 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         epoch=int(row["epoch"]),
         session_id=str(row["session_id"]),
         payload_text=str(row["payload_text"]) if row["payload_text"] is not None else None,
+        payload_attachments=(
+            str(row["payload_attachments"])
+            if row["payload_attachments"] is not None
+            else None
+        ),
         occurred_at_ms=int(row["occurred_at_ms"]),
         provider_timestamp_ms=int(row["provider_timestamp_ms"]),
         state=str(row["state"]),

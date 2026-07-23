@@ -16,7 +16,7 @@ from typing import Any, Deque, Literal, Protocol, runtime_checkable
 
 import httpx
 
-from core.memory.types import MemoryErrorCode, MemoryItem, is_memory_error_code
+from core.memory.types import CaptureAttachment, MemoryErrorCode, MemoryItem, is_memory_error_code
 from core.memory.observations import (
     AddAck,
     FlushRejected,
@@ -40,6 +40,8 @@ _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PROFILE_QUERY = "profile"
 
+ProviderAttachment = CaptureAttachment
+
 
 @dataclass(frozen=True)
 class ProviderCapture:
@@ -47,6 +49,7 @@ class ProviderCapture:
     session_ref: str
     text: str
     provider_timestamp_ms: int
+    attachments: tuple[CaptureAttachment, ...] = ()
 
 
 class MemoryProviderFailure(RuntimeError):
@@ -136,6 +139,21 @@ class EverOSPort:
     async def add(self, capture: ProviderCapture) -> AddAck:
         """Durably hand one capture to EverOS and return its acknowledgement."""
 
+        content: str | list[dict[str, str]] = capture.text
+        if capture.attachments:
+            content = []
+            if capture.text.strip():
+                content.append({"type": "text", "text": capture.text})
+            content.extend(
+                {
+                    "type": attachment.kind,
+                    "name": attachment.name,
+                    "uri": attachment.uri,
+                    "ext": attachment.ext,
+                }
+                for attachment in capture.attachments
+            )
+
         status_code, raw = await self._sidecar_write(
             "POST",
             "/api/v1/memory/add",
@@ -148,7 +166,7 @@ class EverOSPort:
                         "sender_id": capture.principal_id,
                         "role": "user",
                         "timestamp": capture.provider_timestamp_ms,
-                        "content": capture.text,
+                        "content": content,
                     }
                 ],
             },

@@ -20,6 +20,7 @@ from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
 from core.memory.store import MAX_NONTERMINAL_QUEUE_ROWS, MemoryMeta, MemoryStore, QueueStats
 from core.memory.types import (
     CaptureAccepted,
+    CaptureAttachment,
     CaptureDuplicate,
     CaptureReceipt,
     CaptureRequest,
@@ -33,6 +34,7 @@ from core.memory.types import (
     MemoryResult,
     MemoryStatus,
     OperationFailed,
+    encode_capture_attachments,
     is_memory_error_code,
 )
 from core.memory.worker import MemoryWorker, ProcessingEvent
@@ -40,6 +42,8 @@ from core.memory.worker import MemoryWorker, ProcessingEvent
 
 MAX_CAPTURE_TEXT_BYTES = 32 * 1024
 MAX_CAPTURE_IDENTIFIER_BYTES = 1024
+MAX_CAPTURE_ATTACHMENTS = 8
+MAX_CAPTURE_ATTACHMENT_METADATA_BYTES = 16 * 1024
 MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
 MAX_PROVIDER_TIMESTAMP_MS = 4_102_444_800_000
 MAX_QUERY_BYTES = 8 * 1024
@@ -231,6 +235,7 @@ class MemoryModule:
                 source_message_id=request.source_message_id,
                 session_id=request.session_id,
                 payload_text=normalized_text,
+                payload_attachments=encode_capture_attachments(request.attachments),
                 occurred_at_ms=request.occurred_at_ms,
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                 nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
@@ -503,12 +508,40 @@ class MemoryModule:
             return "memory_invalid_input"
         if request.occurred_at_ms < 0 or request.occurred_at_ms > MAX_PROVIDER_TIMESTAMP_MS:
             return "memory_invalid_input"
+        if (
+            not isinstance(request.attachments, tuple)
+            or len(request.attachments) > MAX_CAPTURE_ATTACHMENTS
+            or any(not self._valid_capture_attachment(item) for item in request.attachments)
+        ):
+            return "memory_invalid_input"
+        encoded_attachments = encode_capture_attachments(request.attachments)
+        attachment_bytes = _utf8_bytes(encoded_attachments) if encoded_attachments is not None else b""
+        if attachment_bytes is None:
+            return "memory_invalid_input"
+        if len(attachment_bytes) > MAX_CAPTURE_ATTACHMENT_METADATA_BYTES:
+            return "memory_input_too_large"
         text_bytes = _utf8_bytes(normalized_text)
-        if text_bytes is None or not normalized_text.strip() or self._is_memory_command(normalized_text):
+        if text_bytes is None:
+            return "memory_invalid_input"
+        if normalized_text.strip() and self._is_memory_command(normalized_text):
+            return "memory_invalid_input"
+        if not normalized_text.strip() and not request.attachments:
             return "memory_invalid_input"
         if len(text_bytes) > MAX_CAPTURE_TEXT_BYTES:
             return "memory_input_too_large"
         return None
+
+    @staticmethod
+    def _valid_capture_attachment(value: object) -> bool:
+        if not isinstance(value, CaptureAttachment):
+            return False
+        if value.kind not in {"image", "audio", "doc", "pdf", "html", "email"}:
+            return False
+        if not all(isinstance(item, str) and item for item in (value.name, value.uri, value.ext)):
+            return False
+        if not value.uri.startswith("file://") or not value.ext.isalnum() or len(value.ext) > 8:
+            return False
+        return _utf8_bytes("\0".join((value.name, value.uri, value.ext))) is not None
 
     async def _status(
         self,

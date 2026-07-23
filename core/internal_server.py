@@ -53,6 +53,34 @@ logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
 
 
+def _memory_capture_attachments(value: object) -> tuple | None:
+    from core.memory import CaptureAttachment
+
+    if not isinstance(value, list) or len(value) > 8:
+        return None
+    attachments = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"type", "name", "uri", "ext"}:
+            return None
+        if (
+            item.get("type") not in {"image", "audio", "doc", "pdf", "html", "email"}
+            or not all(isinstance(item.get(key), str) for key in ("name", "uri", "ext"))
+        ):
+            return None
+        try:
+            attachments.append(
+                CaptureAttachment(
+                    kind=item["type"],
+                    name=item["name"],
+                    uri=item["uri"],
+                    ext=item["ext"],
+                )
+            )
+        except (KeyError, TypeError):
+            return None
+    return tuple(attachments)
+
+
 def default_socket_path() -> Path:
     """Where the internal server binds by default.
 
@@ -535,14 +563,24 @@ def create_app(controller: "Controller") -> FastAPI:
         if module is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         payload = await _safe_json(request)
+        attachments = (
+            _memory_capture_attachments(payload.get("attachments", []))
+            if isinstance(payload, dict)
+            else None
+        )
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"source_message_id", "session_id", "text", "occurred_at_ms"}
+            or set(payload)
+            not in (
+                {"source_message_id", "session_id", "text", "occurred_at_ms"},
+                {"source_message_id", "session_id", "text", "occurred_at_ms", "attachments"},
+            )
             or not isinstance(payload.get("source_message_id"), str)
             or not isinstance(payload.get("session_id"), str)
             or not isinstance(payload.get("text"), str)
             or not isinstance(payload.get("occurred_at_ms"), int)
             or isinstance(payload.get("occurred_at_ms"), bool)
+            or attachments is None
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
@@ -553,7 +591,15 @@ def create_app(controller: "Controller") -> FastAPI:
             # never waits for EverOS or a model endpoint. Returning only after
             # it finishes gives the UI a durable capture-before-dispatch
             # handoff while its outcome remains non-critical to agent dispatch.
-            receipt = await module.capture(CaptureRequest(**payload))
+            receipt = await module.capture(
+                CaptureRequest(
+                    source_message_id=payload["source_message_id"],
+                    session_id=payload["session_id"],
+                    text=payload["text"],
+                    occurred_at_ms=payload["occurred_at_ms"],
+                    attachments=attachments,
+                )
+            )
         except Exception:
             logger.warning("internal memory capture failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})

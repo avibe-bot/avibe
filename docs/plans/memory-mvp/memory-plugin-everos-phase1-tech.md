@@ -62,8 +62,8 @@ There are two kinds of failure and they must not be mixed:
 - private-IM user-text capture and the same read-only `/memory` grammar for
   bound, enabled administrator co-owners;
 - local `vibe memory status|profile|search` over the existing controller UDS;
-- user-text-only capture after an accepted Workbench or eligible private-IM
-  message;
+- user-authored text plus direct Workbench attachment forwarding after an
+  accepted Workbench message; eligible private IM remains text-only;
 - controller-owned local queue and worker;
 - Avibe-managed, platform-qualified `memory-runtime` dependency;
 - provisional EverOS 1.1.3 sidecar;
@@ -474,6 +474,7 @@ memory_capture_queue
 ├── epoch                  INTEGER NOT NULL
 ├── session_id             TEXT NOT NULL
 ├── payload_text           TEXT
+├── payload_attachments    TEXT       # bounded typed-content JSON; nullable
 ├── occurred_at_ms         INTEGER NOT NULL
 ├── provider_timestamp_ms  INTEGER NOT NULL
 ├── state                  TEXT NOT NULL
@@ -545,15 +546,18 @@ Workbench uses the committed local message id. Private IM uses a canonical
 source-qualified id such as `im:<platform>:<native_message_id>`; the module
 stores only a scope-keyed digest of that value as the queue key. Both payloads
 contain a source-neutral
-conversation reference, normalized raw user text before framework metadata, and
-server receipt time. Browser, adapter payload, or command arguments cannot
+conversation reference, normalized raw user text before framework metadata,
+optional Workbench attachment descriptors, and server receipt time. Browser,
+adapter payload, or command arguments cannot
 supply the principal, role decision, epoch, provider ids, or capture flag.
 
 When the Workbench queue merges several composer segments into one committed
 message, capture uses that merged row: its id is the `source_message_id`, its
-merged normalized text is the payload, and the earliest segment's server
-receipt time is `occurred_at_ms`. Framework-added metadata headers never enter
-the captured text.
+merged normalized text and resolved attachment descriptors are the payload, and
+the earliest segment's server receipt time is `occurred_at_ms`.
+Framework-added metadata headers never enter the captured text. Attachment
+files remain owned by the existing Workbench upload store; Memory neither
+copies nor deletes them.
 
 Private IM captures only ordinary human text. Group/MPIM, unbound, disabled,
 non-administrator, scheduled/harness, bot/self, rich, forwarded/shared, edited,
@@ -573,6 +577,8 @@ Capture validation:
 - text is normalized to NFC with CRLF/CR converted to LF;
 - blank input and Memory route operations are skipped;
 - UTF-8 text must be at most 32 KiB;
+- at most eight attachment descriptors may be present; each must use a bounded
+  EverOS content type and a `file://` URI below the Workbench attachment root;
 - ids and session values must satisfy fixed nonblank byte caps;
 - queue nonterminal rows must remain below 500;
 - observed free disk must be at least 512 MiB.
@@ -866,12 +872,14 @@ ordinary chat still start.
   `uds=<verified path>`. The parent Avibe process and `MemoryModule` do not
   import EverOS. This version-pinned entry-point load is the only allowed
   package-internal integration and is covered by artifact and sidecar tests.
-- The launcher wraps the ASGI application with a small text-only request guard.
+- The launcher wraps the ASGI application with a small request guard.
   It accepts only `GET /health` and the exact MVP shapes for
   `POST /api/v1/memory/add`, `/flush`, `/search`, and `/get`. The `/get` guard
   permits only the fixed user principal and `memory_type=profile|episode`; no
   `agent_id` or agent-memory kind is accepted. The guard rejects every other
-  route plus file or multimodal fields before EverOS parsers run.
+  route plus any file URI outside Avibe's Workbench attachment root before
+  EverOS parsers run. The configured Memory LLM endpoint is also supplied as
+  EverOS's multimodal endpoint.
 - Execute only the verified embedded Python and package lock selected by the
   POC; never use a system Python, user site packages, `PATH` package tools, or an
   unbounded upstream version.
@@ -897,8 +905,8 @@ ordinary chat still start.
 - Disable body access logs and do not persist raw sidecar stdout/stderr.
 - Generate and validate the provider configuration before capture opens. The
   generated config pins chat/user-memory mode, disables episode reflection and
-  LLM rerank, restricts any file-URI ingestion directory setting to an empty
-  Avibe-owned directory, sets the fixed project mapping, and records the local
+  LLM rerank, restricts file-URI ingestion to Avibe's Workbench attachment
+  directory, sets the fixed project mapping, and records the local
   IANA timezone resolved at first enablement. Avibe validates this generated
   structure before launch and the launcher receives only that file plus an
   allowlisted environment; it does not parse masked `everos config show` output.
@@ -990,8 +998,10 @@ Rules:
 - Clear requires an explicit confirmation boolean/string accepted only after the
   UI modal and CSRF checks.
 - Settings responses expose `has_api_key`, never the key or reusable mask.
-- No endpoint accepts principal, provider project, provider root, session ref,
-  local path, scope key, epoch, or socket path from client JSON.
+- No browser endpoint accepts principal, provider project, provider root,
+  session ref, local path, scope key, epoch, or socket path from client JSON;
+  the trusted UI process resolves opaque attachment tokens before its typed UDS
+  handoff.
 
 The UI uses text nodes for provider content. It does not use raw HTML rendering
 or pass results through generic Markdown/directive processing.
@@ -1286,8 +1296,8 @@ The phase-0 POC supplies the provider facts. Production integration tests reuse
 its synthetic fixtures for:
 
 - pinned managed artifact/config startup;
-- launcher-owned ASGI factory load, exact route/shape text-only request guard,
-  and UDS-only health;
+- launcher-owned ASGI factory load, exact route/shape request guard including
+  Workbench attachment confinement, and UDS-only health;
 - add+flush through `EverOSPort.ingest()`;
 - search/profile mapping and response bounds;
 - stop/restart;

@@ -20,7 +20,7 @@ from core.memory.everos import (
     ProviderCapture,
 )
 from core.memory.store import MemoryStore, QueueRow
-from core.memory.types import MemoryErrorCode, is_memory_error_code
+from core.memory.types import MemoryErrorCode, decode_capture_attachments, is_memory_error_code
 
 
 MAX_DRAIN_BATCH_SIZE = 32
@@ -210,11 +210,21 @@ class MemoryWorker:
             await self._return_system_failure(row, "memory_processing_failed")
             return False
 
+        attachments = decode_capture_attachments(row.payload_attachments)
+        if attachments is None:
+            await self._record_message_failure(
+                row,
+                "memory_invalid_input",
+                retryable=False,
+            )
+            return False
+
         capture = ProviderCapture(
             principal_id=meta.principal_id,
             session_ref=row.session_id,
             text=row.payload_text,
             provider_timestamp_ms=row.provider_timestamp_ms,
+            attachments=attachments,
         )
         try:
             ack = await asyncio.wait_for(

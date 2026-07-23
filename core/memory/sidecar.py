@@ -7,9 +7,11 @@ import asyncio
 import importlib
 import json
 import os
+import stat
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 
 _MAX_BODY_BYTES = 64 * 1024
@@ -32,11 +34,18 @@ def serve(uds: Path, owner_id: str) -> None:
     factory_module = importlib.import_module("everos.entrypoints.api.app")
     create_app = getattr(factory_module, "create_app")
     app = create_app()
+    attachments_root = Path(os.environ["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
 
     @app.middleware("http")
     async def guard(request: Any, call_next: Any) -> Any:
         body = await request.body()
-        if _request_rejection(request.method, request.url.path, body, owner_id) is not None:
+        if _request_rejection(
+            request.method,
+            request.url.path,
+            body,
+            owner_id,
+            attachments_root=attachments_root,
+        ) is not None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
         return await call_next(request)
 
@@ -44,7 +53,14 @@ def serve(uds: Path, owner_id: str) -> None:
     uvicorn.Server(config).run()
 
 
-def _request_rejection(method: str, path: str, body: bytes, owner_id: str) -> str | None:
+def _request_rejection(
+    method: str,
+    path: str,
+    body: bytes,
+    owner_id: str,
+    *,
+    attachments_root: Path | None = None,
+) -> str | None:
     if method == "GET" and path == "/health":
         return None
     if method != "POST" or path not in {
@@ -63,7 +79,7 @@ def _request_rejection(method: str, path: str, body: bytes, owner_id: str) -> st
     if not isinstance(payload, dict):
         return "shape"
     if path == "/api/v1/memory/add":
-        return _validate_add(payload, owner_id)
+        return _validate_add(payload, owner_id, attachments_root=attachments_root)
     if path == "/api/v1/memory/flush":
         return _validate_flush(payload)
     if path == "/api/v1/memory/search":
@@ -79,7 +95,12 @@ def _exact_keys(payload: dict[str, Any], keys: set[str]) -> bool:
     return set(payload) == keys
 
 
-def _validate_add(payload: dict[str, Any], owner_id: str) -> str | None:
+def _validate_add(
+    payload: dict[str, Any],
+    owner_id: str,
+    *,
+    attachments_root: Path | None,
+) -> str | None:
     if not _exact_keys(payload, {"session_id", "app_id", "project_id", "messages"}) or not _valid_scope(payload):
         return "add"
     messages = payload.get("messages")
@@ -93,10 +114,59 @@ def _validate_add(payload: dict[str, Any], owner_id: str) -> str | None:
         or message.get("role") != "user"
         or not isinstance(message.get("timestamp"), int)
         or isinstance(message.get("timestamp"), bool)
-        or not isinstance(message.get("content"), str)
     ):
         return "add"
+    content = message.get("content")
+    if isinstance(content, str):
+        return None
+    if not isinstance(content, list) or not 1 <= len(content) <= 9:
+        return "add"
+    for item in content:
+        if not isinstance(item, dict):
+            return "add"
+        if item.get("type") == "text":
+            if set(item) != {"type", "text"} or not isinstance(item.get("text"), str):
+                return "add"
+            continue
+        if not _valid_workbench_attachment(item, attachments_root):
+            return "add"
     return None
+
+
+def _valid_workbench_attachment(item: dict[str, Any], attachments_root: Path | None) -> bool:
+    if set(item) != {"type", "name", "uri", "ext"}:
+        return False
+    if item.get("type") not in {"image", "audio", "doc", "pdf", "html", "email"}:
+        return False
+    name = item.get("name")
+    uri = item.get("uri")
+    extension = item.get("ext")
+    if (
+        attachments_root is None
+        or not isinstance(name, str)
+        or not name
+        or len(name.encode("utf-8")) > 512
+        or not isinstance(uri, str)
+        or not isinstance(extension, str)
+        or not extension.isalnum()
+        or len(extension) > 8
+    ):
+        return False
+    parsed = urlparse(uri)
+    if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+        return False
+    try:
+        root = attachments_root.resolve(strict=True)
+        raw_path = Path(unquote(parsed.path))
+        raw_info = raw_path.lstat()
+        if stat.S_ISLNK(raw_info.st_mode):
+            return False
+        path = raw_path.resolve(strict=True)
+        path.relative_to(root)
+        info = path.lstat()
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
 
 
 def _validate_flush(payload: dict[str, Any]) -> str | None:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Literal, TypeAlias
 
 
 MemoryKind = Literal["profile", "episode", "fact"]
+MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
 MemoryFailureKind = Literal[
     "delivery_abandoned",
     "distillation_rejected",
@@ -58,11 +60,68 @@ def is_memory_error_code(value: object) -> bool:
 
 
 @dataclass(frozen=True)
+class CaptureAttachment:
+    """One Workbench-owned local file forwarded unchanged to the provider."""
+
+    kind: MemoryContentKind
+    name: str
+    uri: str
+    ext: str
+
+
+@dataclass(frozen=True)
 class CaptureRequest:
     source_message_id: str
     session_id: str
     text: str
     occurred_at_ms: int
+    attachments: tuple[CaptureAttachment, ...] = ()
+
+
+def encode_capture_attachments(attachments: tuple[CaptureAttachment, ...]) -> str | None:
+    if not attachments:
+        return None
+    return json.dumps(
+        [
+            {
+                "type": attachment.kind,
+                "name": attachment.name,
+                "uri": attachment.uri,
+                "ext": attachment.ext,
+            }
+            for attachment in attachments
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def decode_capture_attachments(payload: str | None) -> tuple[CaptureAttachment, ...] | None:
+    if payload is None:
+        return ()
+    try:
+        value = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, list) or not 1 <= len(value) <= 8:
+        return None
+    attachments: list[CaptureAttachment] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"type", "name", "uri", "ext"}:
+            return None
+        kind = item.get("type")
+        name = item.get("name")
+        uri = item.get("uri")
+        ext = item.get("ext")
+        if (
+            kind not in {"image", "audio", "doc", "pdf", "html", "email"}
+            or not isinstance(name, str)
+            or not isinstance(uri, str)
+            or not isinstance(ext, str)
+        ):
+            return None
+        attachments.append(CaptureAttachment(kind=kind, name=name, uri=uri, ext=ext))
+    return tuple(attachments)
 
 
 @dataclass(frozen=True)

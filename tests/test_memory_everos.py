@@ -15,6 +15,7 @@ from core.memory.everos import (
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
+    ProviderAttachment,
     ProviderCapture,
 )
 
@@ -78,6 +79,42 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
             "/api/v1/memory/flush",
             {"session_id": "src--one--e1", "app_id": "avibe", "project_id": "personal"},
         ),
+    ]
+
+
+def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None:
+    received: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"status": "accumulated"}})
+
+    capture = ProviderCapture(
+        principal_id="owner-1",
+        session_ref="src--one--e1",
+        text="remember this diagram",
+        provider_timestamp_ms=1_725_000_001_234,
+        attachments=(
+            ProviderAttachment(
+                kind="image",
+                name="diagram.png",
+                uri="file:///owned/attachments/diagram.png",
+                ext="png",
+            ),
+        ),
+    )
+
+    with _sidecar_transport(handler):
+        asyncio.run(EverOSPort(Path("/tmp/everos.sock")).add(capture))
+
+    assert received["messages"][0]["content"] == [
+        {"type": "text", "text": "remember this diagram"},
+        {
+            "type": "image",
+            "name": "diagram.png",
+            "uri": "file:///owned/attachments/diagram.png",
+            "ext": "png",
+        },
     ]
 
 

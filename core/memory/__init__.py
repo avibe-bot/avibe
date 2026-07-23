@@ -3,6 +3,7 @@
 from core.memory.module import MemoryModule
 from core.memory.types import (
     CaptureAccepted,
+    CaptureAttachment,
     CaptureDuplicate,
     CaptureReceipt,
     CaptureRequest,
@@ -20,6 +21,7 @@ from core.memory.types import (
 
 __all__ = [
     "CaptureAccepted",
+    "CaptureAttachment",
     "CaptureDuplicate",
     "CaptureReceipt",
     "CaptureRequest",

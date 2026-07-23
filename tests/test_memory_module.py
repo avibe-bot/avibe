@@ -22,6 +22,7 @@ from core.memory.everos import (
     MemoryProviderSystemFailure,
 )
 from core.memory.module import (
+    MAX_CAPTURE_ATTACHMENT_METADATA_BYTES,
     MAX_CAPTURE_IDENTIFIER_BYTES,
     MAX_CAPTURE_TEXT_BYTES,
     MAX_QUERY_BYTES,
@@ -31,6 +32,7 @@ from core.memory.module import (
 from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import (
     CaptureAccepted,
+    CaptureAttachment,
     CaptureDuplicate,
     CaptureSkipped,
     ClearCompleted,
@@ -77,6 +79,7 @@ def _request(
     session: str = "conversation-1",
     text: str = "remember this",
     occurred_at_ms: int = 1_000,
+    attachments: tuple[CaptureAttachment, ...] = (),
 ):
     from core.memory.types import CaptureRequest
 
@@ -85,6 +88,7 @@ def _request(
         session_id=session,
         text=text,
         occurred_at_ms=occurred_at_ms,
+        attachments=attachments,
     )
 
 
@@ -165,6 +169,24 @@ async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_pa
     assert "raw-session-id-canary" not in dump
 
 
+async def test_capture_queues_workbench_attachment_descriptor_and_forwards_it(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    attachment = CaptureAttachment(
+        kind="image",
+        name="diagram.png",
+        uri="file:///owned/attachments/diagram.png",
+        ext="png",
+    )
+
+    assert await module.capture(_request(attachments=(attachment,))) == CaptureAccepted()
+    queued = store.list_queue_rows()[0]
+    assert queued.payload_attachments is not None
+
+    assert await module._worker.drain_once() == 1
+    assert provider.captures[0].attachments == (attachment,)
+    assert store.list_queue_rows()[0].payload_attachments is None
+
+
 async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path, disk_free_bytes=lambda: 0)
 
@@ -174,14 +196,38 @@ async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_
     oversized_id = await module.capture(
         _request(source="x" * (MAX_CAPTURE_IDENTIFIER_BYTES + 1), text="content")
     )
+    oversized_attachments = await module.capture(
+        _request(
+            source="source-attachments",
+            attachments=tuple(
+                CaptureAttachment(
+                    kind="doc",
+                    name=f"doc-{index}.txt",
+                    uri=f"file:///owned/{'x' * (MAX_CAPTURE_ATTACHMENT_METADATA_BYTES // 4)}-{index}.txt",
+                    ext="txt",
+                )
+                for index in range(8)
+            ),
+        )
+    )
+    invalid_unicode = await module.capture(
+        _request(
+            source="source-unicode",
+            attachments=(
+                CaptureAttachment(kind="doc", name="\ud800.txt", uri="file:///owned/doc.txt", ext="txt"),
+            ),
+        )
+    )
     disk = await module.capture(_request(source="source-4", text="content"))
 
     assert blank == CaptureSkipped(reason="memory_invalid_input")
     assert command == CaptureSkipped(reason="memory_invalid_input")
     assert too_large == CaptureSkipped(reason="memory_input_too_large")
     assert oversized_id == CaptureSkipped(reason="memory_invalid_input")
+    assert oversized_attachments == CaptureSkipped(reason="memory_input_too_large")
+    assert invalid_unicode == CaptureSkipped(reason="memory_invalid_input")
     assert disk == CaptureSkipped(reason="memory_low_disk_space")
-    assert store.ensure_meta().missed_count == 5
+    assert store.ensure_meta().missed_count == 7
     assert store.ensure_meta().last_error == "memory_low_disk_space"
     assert store.list_queue_rows() == ()
 

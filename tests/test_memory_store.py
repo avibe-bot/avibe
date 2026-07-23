@@ -89,7 +89,7 @@ def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: 
     with sqlite3.connect(store.path) as conn:
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 3
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 4
     assert {
         "add_request_id",
         "flush_observation",
@@ -98,6 +98,7 @@ def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: 
         "flush_request_id",
         "flush_observed_at",
     }.issubset(queue_columns)
+    assert "payload_attachments" in queue_columns
     assert {
         "processing_fault_kind",
         "processing_fault_since",
@@ -166,7 +167,7 @@ def test_v1_store_migrates_once_and_projects_legacy_delivery_as_unknown(tmp_path
     assert stats.last_flush_at is None
     assert reopened.ensure_meta().last_error_at == "2026-01-01T00:00:00.000Z"
     with sqlite3.connect(store.path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 3
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 4
 
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:

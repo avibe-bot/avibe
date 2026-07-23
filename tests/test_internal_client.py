@@ -228,6 +228,14 @@ def test_memory_capture_round_trip(socket_path):
                 "session-1",
                 "ordinary text",
                 123,
+                attachments=[
+                    {
+                        "type": "image",
+                        "name": "diagram.png",
+                        "uri": "file:///owned/attachments/diagram.png",
+                        "ext": "png",
+                    }
+                ],
                 socket_path=socket_path,
             )
 
@@ -238,6 +246,14 @@ def test_memory_capture_round_trip(socket_path):
         "session_id": "session-1",
         "text": "ordinary text",
         "occurred_at_ms": 123,
+        "attachments": [
+            {
+                "type": "image",
+                "name": "diagram.png",
+                "uri": "file:///owned/attachments/diagram.png",
+                "ext": "png",
+            }
+        ],
     }
     assert result == {"status_code": 200, "body": {"status": "accepted"}}
 

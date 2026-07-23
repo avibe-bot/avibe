@@ -6901,6 +6901,66 @@ def _workbench_memory_command_is_text_only(
     return isinstance(content.get("text"), str) and (text is None or isinstance(text, str))
 
 
+def _workbench_memory_capture_is_eligible(
+    payload: object,
+    text: str,
+    quick_reply_for: object,
+    attachments: list[dict],
+) -> bool:
+    if not isinstance(payload, dict) or quick_reply_for or payload.get("files"):
+        return False
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return False
+    return bool(text.strip() or attachments)
+
+
+def _workbench_memory_attachment_payload(spec: object) -> dict[str, str] | None:
+    if not isinstance(spec, dict):
+        return None
+    path_value = spec.get("path")
+    name = spec.get("name")
+    mimetype = spec.get("mimetype")
+    if not all(isinstance(value, str) and value for value in (path_value, name, mimetype)):
+        return None
+    try:
+        path = Path(path_value).resolve(strict=True)
+        allowed_root = (paths.get_attachments_dir() / "avibe").resolve(strict=True)
+        path.relative_to(allowed_root)
+    except (OSError, ValueError):
+        return None
+    extension = path.suffix.lstrip(".").lower()
+    if not extension.isalnum() or len(extension) > 8:
+        return None
+    normalized_mime = mimetype.lower().split(";", 1)[0].strip()
+    if normalized_mime.startswith("image/"):
+        kind = "image"
+    elif normalized_mime.startswith("audio/"):
+        kind = "audio"
+    elif normalized_mime == "application/pdf" or extension == "pdf":
+        kind = "pdf"
+    elif normalized_mime == "text/html" or extension in {"html", "htm"}:
+        kind = "html"
+    elif normalized_mime == "message/rfc822" or extension == "eml":
+        kind = "email"
+    else:
+        kind = "doc"
+    display_name = Path(name).name
+    if len(display_name.encode("utf-8")) > 512:
+        display_name = display_name.encode("utf-8")[:512].decode("utf-8", errors="ignore")
+    if not display_name:
+        return None
+    return {
+        "type": kind,
+        "name": display_name,
+        "uri": path.as_uri(),
+        "ext": extension,
+    }
+
+
 def _memory_command_result(command: str, result: dict[str, Any]) -> Response:
     return _memory_response(
         {
@@ -6970,14 +7030,31 @@ def _workbench_message_occurred_at_ms(message: dict[str, Any]) -> int:
     return int(time.time() * 1000)
 
 
-async def _handoff_workbench_memory_capture(message: dict[str, Any], session_id: str) -> None:
+async def _handoff_workbench_memory_capture(
+    message: dict[str, Any],
+    session_id: str,
+    attachment_specs: list[dict],
+) -> None:
     """Submit one post-commit capture handoff before ordinary dispatch starts."""
 
     from vibe import internal_client
 
     message_id = message.get("id")
     text = message.get("text")
-    if not isinstance(message_id, str) or not message_id or not isinstance(text, str) or not text.strip():
+    if not isinstance(text, str):
+        content = message.get("content")
+        text = content.get("text") if isinstance(content, dict) else ""
+    attachments = [
+        payload
+        for spec in attachment_specs
+        if (payload := _workbench_memory_attachment_payload(spec)) is not None
+    ]
+    if (
+        not isinstance(message_id, str)
+        or not message_id
+        or not isinstance(text, str)
+        or (not text.strip() and not attachments)
+    ):
         return
 
     started_at = time.monotonic()
@@ -6987,6 +7064,7 @@ async def _handoff_workbench_memory_capture(message: dict[str, Any], session_id:
             session_id,
             text,
             _workbench_message_occurred_at_ms(message),
+            attachments=attachments,
         )
     except Exception:
         # Capture is best effort: a rejected/unavailable local sidecar must never
@@ -8064,10 +8142,15 @@ async def sessions_messages_create(session_id: str):
         return jsonify({"error": "session is archived", "code": "session_archived"}), 409
     if (
         memory_cli_admitted
-        and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
+        and _workbench_memory_capture_is_eligible(
+            payload,
+            dispatch_text,
+            quick_reply_for,
+            attachment_specs,
+        )
         and not is_memory_command_candidate(dispatch_text)
     ):
-        await _handoff_workbench_memory_capture(message, session_id)
+        await _handoff_workbench_memory_capture(message, session_id, attachment_specs)
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.

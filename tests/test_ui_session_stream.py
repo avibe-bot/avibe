@@ -208,10 +208,11 @@ def test_workbench_capture_handoff_is_accepted_after_commit_before_dispatch(isol
     _, session_id = _make_session(tmp_path)
     events: list[str] = []
 
-    async def handoff_capture(row, observed_session_id):
+    async def handoff_capture(row, observed_session_id, attachments):
         assert row["id"]
         assert row["text"] == "capture this"
         assert observed_session_id == session_id
+        assert attachments == []
         events.append("handoff")
 
     async def dispatch(payload):
@@ -237,6 +238,67 @@ def test_workbench_capture_handoff_is_accepted_after_commit_before_dispatch(isol
     assert response.status_code == 201
     assert response.get_json()["metadata"]["_memory_cli_admitted"] is True
     assert events == ["handoff", "dispatch"]
+
+
+def test_workbench_memory_capture_handoff_includes_uploaded_attachment(isolated_state, tmp_path):
+    import base64
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    captured: list[dict] = []
+
+    async def handoff_capture(_row, observed_session_id, attachments):
+        assert observed_session_id == session_id
+        captured.extend(attachments)
+
+    async def dispatch(_payload):
+        return {"status_code": 202, "body": {"ok": True, "session_id": session_id}}
+
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    upload = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        json={
+            "name": "diagram.png",
+            "mime": "image/png",
+            "data": base64.b64encode(b"not-decoded-by-memory").decode("ascii"),
+        },
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+    token = upload.get_json()["token"]
+
+    with (
+        patch("vibe.ui_server._handoff_workbench_memory_capture", handoff_capture),
+        patch("vibe.internal_client.dispatch_async", dispatch),
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": {
+                    "text": "remember this diagram",
+                    "attachments": [{"token": token}],
+                }
+            },
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 201
+    assert len(captured) == 1
+    assert captured[0]["name"] == "diagram.png"
+    assert captured[0]["mimetype"] == "image/png"
+    assert Path(captured[0]["path"]).read_bytes() == b"not-decoded-by-memory"
+
+    from vibe.ui_server import _workbench_memory_attachment_payload
+
+    memory_payload = _workbench_memory_attachment_payload(
+        {**captured[0], "name": f"{'图' * 300}.png"}
+    )
+    assert memory_payload is not None
+    assert len(memory_payload["name"].encode("utf-8")) <= 512
 
 
 def test_workbench_memory_capture_skips_forwarded_metadata(isolated_state, tmp_path):

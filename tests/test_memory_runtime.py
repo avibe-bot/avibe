@@ -650,12 +650,17 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     generated = (tmp_path / "memory" / "generated" / "everos.toml").read_text(encoding="utf-8")
 
     assert environment["EVEROS_LLM__API_KEY"] == "llm-secret"
+    assert environment["EVEROS_MULTIMODAL__BASE_URL"] == environment["EVEROS_LLM__BASE_URL"]
+    assert environment["EVEROS_MULTIMODAL__MODEL"] == environment["EVEROS_LLM__MODEL"]
+    assert environment["EVEROS_MULTIMODAL__API_KEY"] == "llm-secret"
+    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(tmp_path / "attachments" / "avibe")
     assert environment["EVEROS_EMBEDDING__API_KEY"] == "embedding-secret"
     assert "HTTP_PROXY" not in environment
     assert "SSL_CERT_FILE" not in environment
     assert "llm-secret" not in generated
     assert "embedding-secret" not in generated
     assert "rerank" in generated
+    assert str(tmp_path / "attachments" / "avibe") in generated
 
 
 def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:
