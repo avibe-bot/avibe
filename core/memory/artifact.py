@@ -32,6 +32,7 @@ from core.process_isolation import isolated_subprocess_kwargs
 
 EVEROS_VERSION = "1.1.3"
 _MANIFEST_RESOURCE = "memory_runtime_manifest.json"
+_MAX_CURRENT_POINTER_BYTES = 16 * 1024
 _SPEC = ManagedRuntimeSpec(
     runtime_id="memory-runtime",
     manifest_resource=_MANIFEST_RESOURCE,
@@ -128,7 +129,20 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def status(self) -> dict[str, Any]:
         """Keep the manifest's release-state reason visible to Dependencies."""
 
+        pointer, pointer_invalid = self._read_active_pointer()
+        if pointer is not None and self._verified_active_pointer_binary(pointer) is None:
+            pointer_invalid = True
         status_payload = super().status()
+        if pointer_invalid:
+            status_payload.update(
+                {
+                    "installed": False,
+                    "status": "error",
+                    "path": None,
+                    "reason": "memory_runtime_install_failed",
+                }
+            )
+            return status_payload
         if status_payload.get("reason") is not None:
             return status_payload
         try:
@@ -266,11 +280,48 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         )
 
     def _active_pointer(self) -> dict[str, Any] | None:
+        pointer, _invalid = self._read_active_pointer()
+        return pointer
+
+    def _read_active_pointer(self) -> tuple[dict[str, Any] | None, bool]:
+        """Read the active pointer without treating an existing corrupt file as absent."""
+
+        path = self.runtime_dir / "current.json"
         try:
-            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            return None
-        return pointer if isinstance(pointer, dict) else None
+            expected = path.lstat()
+        except FileNotFoundError:
+            return None, False
+        except OSError:
+            return None, True
+        if not stat.S_ISREG(expected.st_mode) or expected.st_size > _MAX_CURRENT_POINTER_BYTES:
+            return None, True
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError:
+            return None, True
+        try:
+            actual = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(actual.st_mode)
+                or actual.st_dev != expected.st_dev
+                or actual.st_ino != expected.st_ino
+                or actual.st_size > _MAX_CURRENT_POINTER_BYTES
+            ):
+                return None, True
+            payload = os.read(descriptor, _MAX_CURRENT_POINTER_BYTES + 1)
+        except OSError:
+            return None, True
+        finally:
+            os.close(descriptor)
+        if len(payload) > _MAX_CURRENT_POINTER_BYTES:
+            return None, True
+        try:
+            pointer = json.loads(payload.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            return None, True
+        return (pointer, False) if isinstance(pointer, dict) else (None, True)
 
     def _verified_active_pointer_binary(self, pointer: dict[str, Any]) -> Path | None:
         """Verify the binary referenced by ``current.json`` without a manifest lookup."""

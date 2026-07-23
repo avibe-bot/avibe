@@ -272,18 +272,40 @@ class MemoryRuntime:
 
         self._activation_loop = asyncio.get_running_loop()
         async with self._reconcile_lock:
-            # Shared ensure(force=True) can delete the active fingerprint directory
-            # before invoking our activation bridge. Coordinate with the lifecycle: if
-            # a supervisor is retained (even one whose child has exited and is in the
-            # 'down' state after failed restarts), stop it first so Repair can replace
-            # the artifact and recover enabled/down Memory. A concurrent reconcile is
-            # blocked until this operation has either committed or failed.
-            if self._artifact_installing or self._process is not None:
+            if self._artifact_installing:
                 return {
                     "ok": False,
                     "reason": "memory_runtime_install_requires_disabled_memory",
                     "download_error": None,
                 }
+            # Shared ensure(force=True) can delete the active fingerprint directory
+            # before invoking our activation bridge. Stop a retained supervisor,
+            # including its terminal "down" state, while claims are fenced so a
+            # repair can safely replace the executable it might otherwise relaunch.
+            supervisor = self._process
+            if supervisor is not None:
+                async with self.module._lifecycle_lock:
+                    try:
+                        claims_paused = await self.module._worker.pause_and_wait()
+                    except Exception:
+                        claims_paused = False
+                    if not claims_paused:
+                        self._runtime_error = "memory_runtime_install_failed"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
+                    try:
+                        await supervisor.stop()
+                    except Exception:
+                        self._runtime_error = "memory_runtime_install_failed"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
+                    self._process = None
             self._artifact_installing = True
         try:
             payload = await asyncio.to_thread(self._artifact_manager.ensure, force=True)

@@ -67,6 +67,60 @@ def test_memory_artifact_uses_shared_manager_status_shape(tmp_path: Path) -> Non
     assert manager.artifact_fingerprint() is None
 
 
+@pytest.mark.parametrize("pointer_contents", [b"not-json", b"[]"])
+def test_memory_artifact_status_marks_unreadable_active_pointer_as_error(tmp_path: Path, pointer_contents: bytes) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    manager.runtime_dir.mkdir(parents=True)
+    (manager.runtime_dir / "current.json").write_bytes(pointer_contents)
+
+    status = manager.status()
+
+    assert status["installed"] is False
+    assert status["status"] == "error"
+    assert status["reason"] == "memory_runtime_install_failed"
+
+
+@pytest.mark.parametrize("binary_state", ["missing", "tampered"])
+def test_memory_artifact_status_marks_broken_active_binary_as_error(tmp_path: Path, binary_state: str) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    install_dir = manager.runtime_dir / "versions" / "old"
+    binary = install_dir / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+    pointer = {
+        "provider": "manifest",
+        "runtime_id": "memory-runtime",
+        "runtime_version": "1.0",
+        "platform": "darwin-arm64",
+        "install_dir": str(install_dir),
+        "manifest_sha256": "a" * 64,
+        "archive_sha256": "b" * 64,
+        "bin_path": "bin/python",
+    }
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(
+            {
+                **pointer,
+                "binary_sha256": binary_sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+    if binary_state == "missing":
+        binary.unlink()
+    else:
+        binary.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    status = manager.status()
+
+    assert status["installed"] is False
+    assert status["status"] == "error"
+    assert status["reason"] == "memory_runtime_install_failed"
+
+
 def test_memory_artifact_rejects_incompatible_nonempty_root_before_pointer_activation(tmp_path: Path) -> None:
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True, mode=0o700)
@@ -644,6 +698,57 @@ def test_sidecar_cleanup_does_not_group_signal_an_unconfirmed_member(monkeypatch
     assert child_signals == [signal.SIGTERM]
 
 
+def test_sidecar_group_snapshot_fails_closed_for_an_inaccessible_member(monkeypatch) -> None:
+    parent_id = 42_424
+    child_id = 42_425
+    group_id = 42_424
+    group_signals: list[tuple[int, int]] = []
+    child_signals: list[int] = []
+
+    class _GroupMember:
+        def __init__(self, process_id: int, created_at: float | None) -> None:
+            self.pid = process_id
+            self._created_at = created_at
+
+        def create_time(self) -> float:
+            if self._created_at is None:
+                raise psutil.AccessDenied(pid=self.pid)
+            return self._created_at
+
+    class _TrackedChild:
+        pid = parent_id
+        returncode = None
+
+        def send_signal(self, signum: int) -> None:
+            child_signals.append(signum)
+
+    monkeypatch.setattr(
+        memory_process.psutil,
+        "process_iter",
+        lambda: [_GroupMember(parent_id, 11.0), _GroupMember(child_id, None)],
+    )
+    monkeypatch.setattr(memory_process.os, "getpgid", lambda _process_id: group_id)
+    monkeypatch.setattr(memory_process, "_confirmed_owned_processes", lambda _identities: {parent_id: 11.0})
+    monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
+
+    snapshot = memory_process._snapshot_process_group(group_id)
+    declared_safe = memory_process._group_contains_only_confirmed_owned_processes(
+        group_id,
+        {parent_id: 11.0, child_id: 12.0},
+    )
+    _signal_owned_group_or_process(
+        _TrackedChild(),
+        group_id,
+        {parent_id: 11.0, child_id: 12.0},
+        signal.SIGTERM,
+    )
+
+    assert snapshot == {parent_id: 11.0, child_id: -1.0}
+    assert declared_safe is False
+    assert group_signals == []
+    assert child_signals == [signal.SIGTERM]
+
+
 def test_sidecar_cleanup_keeps_access_denied_identity_live_without_signaling(monkeypatch) -> None:
     process_id = 42_425
 
@@ -784,9 +889,9 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
     assert calls == [True]
 
 
-def test_runtime_refuses_active_artifact_repair_before_replace(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    calls: list[bool] = []
+    events: list[str] = []
 
     class _Artifact:
         def provider_root_format(self) -> None:
@@ -796,23 +901,44 @@ def test_runtime_refuses_active_artifact_repair_before_replace(monkeypatch, tmp_
             return None
 
         def ensure(self, *, force: bool) -> dict:
-            calls.append(force)
+            assert force is True
+            assert runtime._process is None
+            events.append("ensure")
             return {"ok": True}
 
-    class _RunningProcess:
-        # A supervised retry may have no current child but must still prevent
-        # force replacement of the executable it will relaunch.
+    class _DownProcess:
+        # A failed supervisor retains its retry task even after its child exits.
         running = False
+        consecutive_failures = 5
+        down = True
 
-    runtime = MemoryRuntime(MemoryConfig(enabled=False), artifact_manager=_Artifact(), effective_home=tmp_path)
-    runtime._process = _RunningProcess()
+        async def stop(self) -> None:
+            events.append("stop")
+
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+    )
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=processing),
+        artifact_manager=_Artifact(),
+        effective_home=tmp_path,
+    )
+    runtime._process = _DownProcess()
+
+    async def pause_and_wait() -> bool:
+        events.append("pause")
+        return True
+
+    monkeypatch.setattr(runtime.module._worker, "pause_and_wait", pause_and_wait)
 
     assert asyncio.run(runtime.install_artifact()) == {
-        "ok": False,
-        "reason": "memory_runtime_install_requires_disabled_memory",
+        "ok": True,
+        "reason": None,
         "download_error": None,
     }
-    assert calls == []
+    assert events == ["pause", "stop", "ensure"]
+    assert runtime._process is None
 
 
 def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
