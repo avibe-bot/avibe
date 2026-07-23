@@ -365,6 +365,24 @@ def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
     assert resolved.source_id == "src_primary01"
 
 
+def test_opencode_resolution_rejects_models_outside_checked_menu(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    service.store.load().agents["opencode"].menu.checked = []
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.resolve(
+                backend="opencode",
+                model_id="anthropic/claude-opus-4-6",
+                request={},
+            )
+        )
+
+    assert exc_info.value.code == "mapping_target_unavailable"
+    assert adapter.invocations == []
+
+
 def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
     service = _service(tmp_path, FakeAdapter([]))
     config = service.store.load()

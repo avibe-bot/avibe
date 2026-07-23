@@ -74,6 +74,7 @@ class FakeAdapter:
         self.synced = []
         self.flows = {}
         self.fail_sync = False
+        self.fail_cancel = False
 
     async def ensure_installed(self):
         return await self.status()
@@ -157,6 +158,8 @@ class FakeAdapter:
 
     async def cancel_oauth(self, flow_id):
         self.cancelled.append(flow_id)
+        if self.fail_cancel:
+            raise RuntimeError("temporary engine failure")
 
 
 def _service(tmp_path):
@@ -499,6 +502,88 @@ def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
     assert adapter.revoked == ["cred_oauth_rollback"]
     assert store.config.sources == []
     assert service.oauth_flows.channel(flow["flow_id"]) is None
+
+
+def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_path):
+    async def run_race():
+        class BlockingSyncAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.sync_started = asyncio.Event()
+                self.release_sync = asyncio.Event()
+                self.block_next_sync = False
+
+            async def sync_sources(self, bindings):
+                self.synced.append(tuple(bindings))
+                if self.block_next_sync:
+                    self.block_next_sync = False
+                    self.sync_started.set()
+                    await self.release_sync.wait()
+
+        store = MemoryStore()
+        adapter = BlockingSyncAdapter()
+        service = ModelHubService(
+            store=store,
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        )
+        flow = await service.oauth_start(
+            {"vendor": "anthropic", "channel": "hub", "experimental_consent": True}
+        )
+        adapter.flows[flow["flow_id"]] = OAuthFlowState(
+            **{
+                **adapter.flows[flow["flow_id"]].__dict__,
+                "state": "success",
+                "credential_ref": "cred_oauth_single_owner",
+            }
+        )
+        payload = {
+            "kind": "subscription",
+            "vendor": "anthropic",
+            "display_name": "Single owner",
+            "supply_channel": "hub",
+            "oauth_flow_ref": flow["flow_id"],
+            "experimental_consent": True,
+        }
+
+        adapter.block_next_sync = True
+        first = asyncio.create_task(service.create_source(payload))
+        await adapter.sync_started.wait()
+        second = asyncio.create_task(service.create_source(payload))
+        await asyncio.sleep(0)
+        adapter.release_sync.set()
+        return await asyncio.gather(first, second, return_exceptions=True), store, adapter
+
+    results, store, adapter = asyncio.run(run_race())
+
+    assert sum(isinstance(result, dict) for result in results) == 1
+    failures = [result for result in results if isinstance(result, ModelHubError)]
+    assert len(failures) == 1
+    assert failures[0].code == "flow_not_found"
+    assert len(store.config.sources) == 1
+    assert store.config.sources[0].credential_ref == "cred_oauth_single_owner"
+    assert adapter.revoked == []
+
+
+def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
+    async def run_cancel_retry():
+        service, _, adapter = _service(tmp_path)
+        flow = await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        adapter.fail_cancel = True
+        with pytest.raises(ModelHubError) as exc_info:
+            await service.oauth_cancel(flow["flow_id"])
+        assert exc_info.value.code == "engine_down"
+        assert service.oauth_flows.channel(flow["flow_id"]) == "native_cli"
+
+        adapter.fail_cancel = False
+        await service.oauth_cancel(flow["flow_id"])
+        return service, adapter, flow["flow_id"]
+
+    service, adapter, flow_id = asyncio.run(run_cancel_retry())
+
+    assert service.oauth_flows.channel(flow_id) is None
+    assert adapter.cancelled == [flow_id, flow_id]
 
 
 def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tmp_path):

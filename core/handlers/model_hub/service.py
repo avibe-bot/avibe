@@ -445,6 +445,103 @@ class ModelHubService:
             )
         )
 
+    def _apply_discovered_models(
+        self,
+        source: ModelHubSourceConfig,
+        manual_models: list[ModelHubModelConfig],
+        discovered: list[str],
+    ) -> None:
+        discovered_at = self.now().isoformat()
+        manual_model_ids = {model.id for model in manual_models}
+        source.models = [
+            ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=discovered_at)
+            for model_id in discovered
+            if model_id not in manual_model_ids
+        ] + manual_models
+
+    async def _commit_new_source_locked(
+        self,
+        source: ModelHubSourceConfig,
+        *,
+        consented: bool,
+        previous: Optional[ModelHubConfig] = None,
+    ) -> None:
+        previous = previous or self.store.load()
+        config = self._clone_config(previous)
+        if any(item.id == source.id for item in config.sources):
+            raise ModelHubError("migration_item_conflict", status=409)
+        config.sources.append(source)
+        config.priority_order.append(source.id)
+        if consented:
+            config.subscription_hub_experimental = True
+        await self._commit_synced(previous, config)
+
+    async def _create_oauth_source(
+        self,
+        source: ModelHubSourceConfig,
+        manual_models: list[ModelHubModelConfig],
+        *,
+        oauth_ref: str,
+        channel: Literal["native_cli", "hub"],
+        vendor: str,
+        consented: bool,
+    ) -> dict:
+        # Claim and consume a completed flow under the aggregate lock. This
+        # prevents a duplicate browser retry from revoking the winning source's
+        # credential while still retaining rollback ownership before discovery.
+        async with self._mutation_lock:
+            rollback_credential_ref: Optional[str] = None
+            persisted = False
+            try:
+                flow_channel = self._oauth_channel(oauth_ref)
+                if flow_channel != channel:
+                    raise ModelHubError("flow_not_found", status=404)
+                flow = await self._oauth_status(oauth_ref, flow_channel)
+                if flow.state != "success" or (channel == "hub" and not flow.credential_ref):
+                    raise ModelHubError("flow_not_found", status=404)
+                if flow.vendor != vendor or not flow.source_id.startswith("src_"):
+                    raise ModelHubError("flow_not_found", status=404)
+
+                source.id = flow.source_id
+                previous = self.store.load()
+                if any(item.id == source.id for item in previous.sources):
+                    raise ModelHubError("migration_item_conflict", status=409)
+                if channel == "hub":
+                    source.credential_ref = cast(str, flow.credential_ref)
+                    rollback_credential_ref = source.credential_ref
+
+                discovered = (
+                    await self._discover(source)
+                    if channel == "hub"
+                    else list(_native_model_ids(vendor))
+                )
+                if channel == "native_cli" and not discovered:
+                    raise ModelHubError("discovery_failed")
+                self._apply_discovered_models(source, manual_models, discovered)
+                await self._commit_new_source_locked(
+                    source,
+                    consented=consented,
+                    previous=previous,
+                )
+                persisted = True
+                try:
+                    self.oauth_flows.forget(oauth_ref)
+                except OSError:
+                    pass
+                return source.to_payload()
+            except Exception:
+                if rollback_credential_ref is not None and not persisted:
+                    try:
+                        await self.adapter.revoke_credential(rollback_credential_ref)
+                    except Exception:
+                        pass
+                    else:
+                        try:
+                            self.oauth_flows.forget(oauth_ref)
+                        except OSError:
+                            pass
+                raise
+
     def list_sources(self) -> list[dict]:
         config = self.store.load()
         by_id = {source.id: source for source in config.sources}
@@ -525,79 +622,37 @@ class ModelHubService:
         if kind == "api_key" and not credential_value:
             raise ModelHubError("discovery_failed")
 
-        rollback_credential_ref: Optional[str] = None
+        if oauth_ref:
+            return await self._create_oauth_source(
+                source,
+                manual_models,
+                oauth_ref=oauth_ref,
+                channel=cast(Literal["native_cli", "hub"], channel),
+                vendor=vendor,
+                consented=consented,
+            )
+        if kind == "subscription":
+            raise ModelHubError("flow_not_found", status=404)
+
+        rollback_credential_ref = await self._engine_call(
+            self.adapter.provision_credential(vendor, protocol, cast(str, credential_value), source.base_url)
+        )
+        source.credential_ref = rollback_credential_ref
+        source.masked_credential = _mask_credential(cast(str, credential_value))
         persisted = False
         try:
-            if credential_value:
-                rollback_credential_ref = await self._engine_call(
-                    self.adapter.provision_credential(vendor, protocol, credential_value, source.base_url)
-                )
-                source.credential_ref = rollback_credential_ref
-                source.masked_credential = _mask_credential(credential_value)
-            elif oauth_ref:
-                flow_channel = self._oauth_channel(oauth_ref)
-                if flow_channel != channel:
-                    raise ModelHubError("flow_not_found", status=404)
-                flow = await self._oauth_status(oauth_ref, flow_channel)
-                if flow.state != "success" or not flow.credential_ref:
-                    if channel == "hub":
-                        raise ModelHubError("flow_not_found", status=404)
-                    if flow.state != "success":
-                        raise ModelHubError("flow_not_found", status=404)
-                if flow.vendor != vendor or not flow.source_id.startswith("src_"):
-                    raise ModelHubError("flow_not_found", status=404)
-                source.id = flow.source_id
-                if channel == "hub":
-                    source.credential_ref = flow.credential_ref
-                    if any(item.id == source.id for item in self.store.load().sources):
-                        raise ModelHubError("migration_item_conflict", status=409)
-                    rollback_credential_ref = flow.credential_ref
-            elif kind == "subscription":
-                raise ModelHubError("flow_not_found", status=404)
-
-            discovered = (
-                await self._discover(source)
-                if channel == "hub"
-                else list(_native_model_ids(vendor))
-            )
-            if channel == "native_cli" and not discovered:
-                raise ModelHubError("discovery_failed")
-            discovered_at = self.now().isoformat()
-            manual_model_ids = {model.id for model in manual_models}
-            source.models = [
-                ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=discovered_at)
-                for model_id in discovered
-                if model_id not in manual_model_ids
-            ] + manual_models
+            discovered = await self._discover(source)
+            self._apply_discovered_models(source, manual_models, discovered)
             async with self._mutation_lock:
-                previous = self.store.load()
-                config = self._clone_config(previous)
-                if any(item.id == source.id for item in config.sources):
-                    raise ModelHubError("migration_item_conflict", status=409)
-                config.sources.append(source)
-                config.priority_order.append(source.id)
-                if consented:
-                    config.subscription_hub_experimental = True
-                await self._commit_synced(previous, config)
+                await self._commit_new_source_locked(source, consented=consented)
                 persisted = True
-            if oauth_ref:
-                try:
-                    self.oauth_flows.forget(oauth_ref)
-                except OSError:
-                    pass
             return source.to_payload()
         except Exception:
-            if rollback_credential_ref is not None and not persisted:
+            if not persisted:
                 try:
                     await self.adapter.revoke_credential(rollback_credential_ref)
                 except Exception:
                     pass
-                else:
-                    if oauth_ref:
-                        try:
-                            self.oauth_flows.forget(oauth_ref)
-                        except OSError:
-                            pass
             raise
 
     async def patch_source(self, source_id: str, payload: dict) -> dict:
@@ -933,13 +988,11 @@ class ModelHubService:
         if not isinstance(flow_id, str):
             raise ModelHubError("flow_not_found", status=404)
         channel = self._oauth_channel(flow_id)
-        try:
-            await self._oauth_call(
-                self._oauth_adapter(channel).cancel_oauth(flow_id),
-                flow_id=flow_id,
-            )
-        finally:
-            self.oauth_flows.forget(flow_id)
+        await self._oauth_call(
+            self._oauth_adapter(channel).cancel_oauth(flow_id),
+            flow_id=flow_id,
+        )
+        self.oauth_flows.forget(flow_id)
 
     async def runtime_status(self) -> dict:
         return _runtime_payload(await self._engine_call(self.adapter.status()))
@@ -1103,6 +1156,9 @@ class ModelHubService:
             try:
                 provider, target_model = parse_opencode_model_id(target_model)
             except ValueError:
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            selected_identifier = f"{provider}/{target_model}"
+            if agent.menu is None or selected_identifier not in agent.menu.checked:
                 raise ModelHubError("mapping_target_unavailable", status=409)
         event_agent = cast(EventAgent, backend)
         if mapping_applied:
