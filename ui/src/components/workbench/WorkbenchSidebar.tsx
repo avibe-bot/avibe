@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CodeXml,
   Ellipsis,
+  EyeOff,
   FileText,
   Folder,
   FolderOpen,
@@ -33,7 +34,9 @@ import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
+import { useApi } from '../../context/ApiContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
@@ -210,6 +213,8 @@ const SessionRow: React.FC<{
 }> = ({ session, unread, onForkSession, onRenameSession, onArchiveSession }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const api = useApi();
+  const { showToast } = useToast();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
@@ -368,6 +373,32 @@ const SessionRow: React.FC<{
         >
           <Pencil className="size-3 text-muted" />
           {t('workbench.sessionRename')}
+        </button>
+        <button
+          type="button"
+          onClick={async () => {
+            setMenuOpen(false);
+            try {
+              // Move to background (M1 PATCH). The row leaves the list on its own
+              // via the A6 session.activity pipeline — no client-side removal. Not
+              // a delete: offer an immediate Undo and say where it went. Hiding the
+              // currently-open chat is fine — we don't navigate; it just leaves the
+              // list while the chat stays usable.
+              await api.setSessionVisibility(session.id, 'background');
+              showToast(t('workbench.sessionHiddenToast'), 'success', {
+                label: t('common.undo'),
+                onClick: () => {
+                  void api.setSessionVisibility(session.id, 'foreground');
+                },
+              });
+            } catch (err) {
+              showToast(err instanceof Error ? err.message : String(err), 'error');
+            }
+          }}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+        >
+          <EyeOff className="size-3 text-muted" />
+          {t('workbench.sessionHideToBackground')}
         </button>
         <Button
           type="button"

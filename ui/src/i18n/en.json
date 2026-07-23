@@ -38,6 +38,7 @@
     "confirm": "Confirm",
     "clear": "Clear",
     "retry": "Retry",
+    "undo": "Undo",
     "loading": "Loading...",
     "saving": "Saving...",
     "saved": "Saved",
@@ -997,6 +998,8 @@
     "sessionReference": "Reference this session",
     "sessionFork": "Fork session",
     "sessionForkUnavailable": "This session has no native agent session to fork yet.",
+    "sessionHideToBackground": "Hide to background",
+    "sessionHiddenToast": "Hidden to background · Find it in Agents → Runs",
     "sessionArchive": "Archive session",
     "archiveSession": {
       "title": "Archive this session permanently?",

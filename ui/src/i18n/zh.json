@@ -38,6 +38,7 @@
     "confirm": "确定",
     "clear": "清除",
     "retry": "重试",
+    "undo": "撤销",
     "loading": "加载中...",
     "saving": "保存中...",
     "saved": "已保存",
@@ -997,6 +998,8 @@
     "sessionReference": "引用该会话",
     "sessionFork": "复刻会话",
     "sessionForkUnavailable": "此会话还没有可复刻的原生 Agent 会话。",
+    "sessionHideToBackground": "隐藏到后台",
+    "sessionHiddenToast": "已隐藏到后台 · 可在 Agents→Runs 找回",
     "sessionArchive": "归档会话",
     "archiveSession": {
       "title": "永久归档此会话？",
