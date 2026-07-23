@@ -902,6 +902,19 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
             "key": "sk-test-transient-only",
             "models": [{"id": pasted_key, "provenance": "manual"}],
         },
+        {
+            "kind": "api_key",
+            "vendor": "anthropic",
+            "display_name": "Safe source",
+            "key": "sk-test-transient-only",
+            "models": [
+                {
+                    "id": "safe-model-id",
+                    "display_name": pasted_key,
+                    "provenance": "manual",
+                }
+            ],
+        },
     ):
         with pytest.raises(ModelHubError) as exc_info:
             asyncio.run(service.create_source(payload))
@@ -925,6 +938,37 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
 
     assert exc_info.value.code == "mapping_target_unavailable"
     assert pasted_key not in json.dumps(store.config.to_payload())
+
+
+def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "display_name": "Safe relay",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-test-transient-only",
+            }
+        )
+    )
+
+    async def credential_bearing_models(vendor, protocol, base_url, credential_ref):
+        return ("sk-model-never-persist-this",)
+
+    adapter.discover_models = credential_bearing_models
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.patch_source(
+                source["id"],
+                {"base_url": "https://other-relay.example/v1"},
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources[0].base_url == "https://relay.example/v1"
+    assert "sk-model-never-persist-this" not in json.dumps(store.config.to_payload())
 
 
 def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):

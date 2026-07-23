@@ -440,15 +440,17 @@ class ModelHubService:
         self._engine_synced = True
 
     async def _ensure_engine_synced(self) -> None:
-        if self._engine_synced and not self.revocations.list():
+        pending_revocations = self.revocations.list()
+        if self._engine_synced and not pending_revocations:
             return
         async with self._mutation_lock:
-            if self._engine_synced and not self.revocations.list():
+            pending_revocations = self.revocations.list()
+            if self._engine_synced and not pending_revocations:
                 return
             config = self.store.load()
-            await self._sync_sources(config)
+            await self._sync_sources(config, force_empty=bool(pending_revocations))
             active_source_ids = {source.id for source in config.sources}
-            for pending in self.revocations.list():
+            for pending in pending_revocations:
                 if pending.source_id in active_source_ids:
                     self.revocations.remove(pending.source_id)
                     continue
@@ -677,7 +679,9 @@ class ModelHubService:
         try:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
             if any(
-                model.provenance != "manual" or contains_credential_material(model.id)
+                model.provenance != "manual"
+                or contains_credential_material(model.id)
+                or contains_credential_material(model.display_name or "")
                 for model in manual_models
             ):
                 raise ValueError("Client-declared source models must use manual provenance")
@@ -766,16 +770,7 @@ class ModelHubService:
                 source.base_url = base_url
                 discovered = await self._discover(source)
                 manual = [model for model in source.models if model.provenance == "manual"]
-                manual_ids = {model.id for model in manual}
-                source.models = [
-                    ModelHubModelConfig(
-                        id=model_id,
-                        provenance="discovered",
-                        discovered_at=self.now().isoformat(),
-                    )
-                    for model_id in discovered
-                    if model_id not in manual_ids
-                ] + manual
+                self._apply_discovered_models(source, manual, discovered)
             if "base_url" in payload:
                 await self._commit_synced(previous, config)
             else:
@@ -803,6 +798,8 @@ class ModelHubService:
         model_id: str,
     ) -> bool:
         for agent in config.agents.values():
+            if agent.mode != "hub":
+                continue
             for provider, target_model_id in self._selected_targets(agent):
                 if target_model_id != model_id or (
                     provider is not None and provider != opencode_provider_id(source.vendor)

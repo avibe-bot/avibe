@@ -723,6 +723,10 @@ def test_restart_replays_credential_revoke_after_delete_commit(tmp_path):
     crashing = CrashingAdapter([])
     service = _service(tmp_path, crashing)
     service.revocations = journal
+    native = service.store.load().sources[1]
+    native.kind = "subscription"
+    native.supply_channel = "native_cli"
+    native.credential_ref = None
 
     with pytest.raises(SimulatedProcessExit):
         asyncio.run(service.delete_source("src_primary01", force=True))
@@ -743,6 +747,8 @@ def test_restart_replays_credential_revoke_after_delete_commit(tmp_path):
     )
 
     assert resolved.source_id == "src_backup001"
+    assert resolved.supply_channel == "native_cli"
+    assert recovered.synced == [()]
     assert recovered.revoked == ["cred_src_primary01"]
     assert journal.list() == []
 
@@ -843,6 +849,10 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.delete_source("src_primary01"))
     assert exc_info.value.code == "mode_switch_blocked"
+
+    config.agents["claude"].mode = "direct"
+    asyncio.run(service.delete_source("src_primary01"))
+    assert [source.id for source in service.store.load().sources] == ["src_backup001"]
 
 
 def test_event_log_is_bounded_and_sanitizes_labels(tmp_path):
