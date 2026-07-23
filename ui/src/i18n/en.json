@@ -324,7 +324,9 @@
           "label": "Memory runtime",
           "detail": "Runs local memory distillation and search on your machine."
         }
-      }
+      },
+      "statusUnsupported": "Unsupported",
+      "statusError": "Error"
     },
     "backends": {
       "routingTitle": "Default routing",
@@ -704,7 +706,11 @@
     "memory_provider_timeout": "The Memory request timed out.",
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_processing_failed": "Memory processing failed.",
-    "memory_clear_failed": "Clearing Memory data failed."
+    "memory_clear_failed": "Clearing Memory data failed.",
+    "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
+    "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
+    "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
+    "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now."
   },
   "apps": {
     "title": "Apps",
@@ -2770,7 +2776,7 @@
       "disclosureTitle": "Before you enable Memory",
       "disclosure": [
         "Eligible Workbench and bound, enabled administrator private-IM text is copied into a bounded local queue for processing.",
-        "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days.",
+        "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days, bounded to the newest 100,000 rows.",
         "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
         "These remote endpoints receive captured text or search queries and may retain them under their own policy.",
         "Private-IM text has already traveled over that platform before capture, and an IM /memory reply is subject to that platform's own retention and sync.",
@@ -2779,7 +2785,8 @@
         "Clear all removes this install's local Memory data but cannot retract copies already sent to a remote endpoint or your original chat history.",
         "Delivery to the Memory endpoints is at-least-once — a rare duplicate derived memory is possible after a timeout or crash.",
         "Every enabled IM administrator is a co-owner of the same personal memory pool."
-      ]
+      ],
+      "clearKeyLabel": "Clear the saved key"
     },
     "clear": {
       "button": "Clear all",
@@ -2795,12 +2802,20 @@
       "keeps": [
         "Your original Avibe chat history",
         "Copies already sent to a remote Memory endpoint",
-        "Existing logs, crash reports, or backups"
+        "Copies or snapshots you created yourself",
+        "Any data stored outside the dedicated Memory folder",
+        "Existing logs, crash reports, or backups",
+        "Physical traces on the storage device — this is not a secure wipe"
       ],
       "confirmLabel": "Clear all",
       "clearing": "Clearing…",
       "cleared": "Memory data cleared.",
       "failed": "Clear failed."
+    },
+    "kind": {
+      "profile": "Profile",
+      "episode": "Episode",
+      "fact": "Fact"
     }
   }
 }

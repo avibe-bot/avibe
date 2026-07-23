@@ -21,6 +21,7 @@ import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent } from '../ui/card';
+import { Checkbox } from '../ui/checkbox';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
@@ -101,7 +102,14 @@ const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
   clearKey: false,
 });
 
-function buildEndpointPatch(draft: EndpointDraft, original: MemoryEndpointConfig): MemoryEndpointPatch | undefined {
+// `allowClear` gates the explicit `api_key: null` clear. Slice 2 rejects a null-key patch when the
+// resulting state is enabled (memory_key_clear_while_enabled), so the caller only allows a clear
+// while Memory stays disabled — a cleared-then-enabled combo in one save simply keeps the key.
+function buildEndpointPatch(
+  draft: EndpointDraft,
+  original: MemoryEndpointConfig,
+  allowClear: boolean,
+): MemoryEndpointPatch | undefined {
   const patch: MemoryEndpointPatch = {};
   let changed = false;
   const baseUrl = draft.baseUrl.trim() || null;
@@ -118,7 +126,7 @@ function buildEndpointPatch(draft: EndpointDraft, original: MemoryEndpointConfig
   if (trimmedKey) {
     patch.api_key = trimmedKey;
     changed = true;
-  } else if (draft.clearKey) {
+  } else if (draft.clearKey && allowClear) {
     patch.api_key = null;
     changed = true;
   }
@@ -191,16 +199,20 @@ const EndpointFields: React.FC<{
         />
         <p className="text-[11px] text-muted">{t('memory.settings.apiKeyClearHint')}</p>
         {canClearKey && original.has_api_key ? (
-          <label className="mt-0.5 flex w-fit items-center gap-2 text-[11.5px] text-muted">
-            <input
-              type="checkbox"
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange({ ...draft, clearKey: !draft.clearKey, apiKey: '' })}
+            className="mt-0.5 flex w-fit items-center gap-2 text-[11.5px] text-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Checkbox
+              presentational
               checked={draft.clearKey}
               disabled={disabled}
-              onChange={(e) => onChange({ ...draft, clearKey: e.target.checked, apiKey: '' })}
-              className="size-3.5 rounded border-border-strong"
+              className="size-3.5"
             />
-            {t('common.clear')} {t('memory.settings.apiKey').toLowerCase()}
-          </label>
+            {t('memory.settings.clearKeyLabel')}
+          </button>
         ) : null}
       </div>
     </div>
@@ -313,15 +325,21 @@ const ProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
     try {
       const res = await api.getMemoryProfile();
       if (isItemsSuccess(res)) {
+        // Only a SUCCESSFUL response is the benign Provider-A case: `profile_warning:'empty'`
+        // (or simply zero items) renders as the graceful "not available"/empty copy.
         setItems(res.items);
         setWarning(res.profile_warning ?? null);
+        setError(null);
       } else {
-        // A profile failure — including the provider-inconsistent POC case — is a WARNING, not a
-        // hard error: render the graceful "not available" copy instead of blocking the tab.
-        setItems([]);
-        setWarning('empty');
+        // A closed failure — sidecar down, provider outage, timeout, etc. — is a real ERROR, not
+        // the accepted empty-profile warning. Surface it distinctly per its code.
+        setItems(null);
+        setWarning(null);
+        setError(errorMessage(t, (res as { error?: string })?.error) || t('memory.profile.loadFailed'));
       }
     } catch {
+      setItems(null);
+      setWarning(null);
       setError(t('memory.profile.loadFailed'));
     } finally {
       setLoading(false);
@@ -366,7 +384,7 @@ const ProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
             // Inert text nodes only (tech §14.1) — never Markdown/HTML rendering of provider content.
             <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary">{item.kind}</Badge>
+                <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
                 {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
               </div>
               <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
@@ -445,7 +463,7 @@ const SearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
           {items.map((item, idx) => (
             <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary">{item.kind}</Badge>
+                <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
                 {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
               </div>
               <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
@@ -463,9 +481,10 @@ const SettingsPanel: React.FC<{
   status: MemoryStatus | null;
   dependencyReady: boolean;
   onSaved: (next: MemorySettings) => void;
+  onReloadStatus: () => void;
   onClearAll: () => void;
   clearing: boolean;
-}> = ({ settings, status, dependencyReady, onSaved, onClearAll, clearing }) => {
+}> = ({ settings, status, dependencyReady, onSaved, onReloadStatus, onClearAll, clearing }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -494,8 +513,12 @@ const SettingsPanel: React.FC<{
     try {
       const patch: MemorySettingsPatch = {};
       if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-      const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm);
-      const embeddingPatch = embeddingLocked ? undefined : buildEndpointPatch(embeddingDraft, settings.processing.embedding);
+      // A key clear is accepted only while the resulting state stays disabled (Slice 2).
+      const allowClear = !enabledDraft;
+      const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
+      const embeddingPatch = embeddingLocked
+        ? undefined
+        : buildEndpointPatch(embeddingDraft, settings.processing.embedding, allowClear);
       if (llmPatch || embeddingPatch) {
         patch.processing = {};
         if (llmPatch) patch.processing.llm = llmPatch;
@@ -511,9 +534,16 @@ const SettingsPanel: React.FC<{
         showToast(t('memory.settings.saved'), 'success');
       } else {
         setError(errorMessage(t, (res as { error?: string })?.error));
+        // A failed enable did not persist — revert the toggle to the stored state so it reflects
+        // reality, and refresh status so a runtime-dependency blocker (and its Dependencies
+        // affordance) reappears instead of a stale "enabled" toggle hiding it.
+        setEnabledDraft(settings.enabled);
+        onReloadStatus();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
+      setEnabledDraft(settings.enabled);
+      onReloadStatus();
     } finally {
       setSaving(false);
     }
@@ -746,6 +776,7 @@ export const MemoryPage: React.FC = () => {
                   setSettings(next);
                   void loadStatus();
                 }}
+                onReloadStatus={() => void loadStatus()}
                 onClearAll={() => setClearOpen(true)}
                 clearing={clearing}
               />

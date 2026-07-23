@@ -1419,8 +1419,9 @@ export type DependencyItem = {
   required: boolean;
   installed: boolean;
   version: string | null;
-  status: 'ready' | 'missing' | 'upgrade_required';
+  status: 'ready' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
   reason?: string | null;
+  release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
 };
 
@@ -1431,7 +1432,9 @@ export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
 export type MemoryEndpointConfig = {
   base_url: string | null;
   model: string | null;
-  api_key: string | null;
+  // Write-only: the settings GET never returns a usable key, only `has_api_key`.
+  // Typed as `null` so no caller can read a saved key back off the response.
+  api_key: null;
   has_api_key: boolean;
 };
 

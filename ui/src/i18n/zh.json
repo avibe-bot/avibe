@@ -324,7 +324,9 @@
           "label": "记忆运行时",
           "detail": "在本机运行记忆提炼与搜索。"
         }
-      }
+      },
+      "statusUnsupported": "不受支持",
+      "statusError": "错误"
     },
     "backends": {
       "routingTitle": "默认路由",
@@ -704,7 +706,11 @@
     "memory_provider_timeout": "记忆请求超时。",
     "memory_provider_response_invalid": "记忆返回了无效的响应。",
     "memory_processing_failed": "记忆处理失败。",
-    "memory_clear_failed": "清除记忆数据失败。"
+    "memory_clear_failed": "清除记忆数据失败。",
+    "memory_runtime_unpublished": "当前 Avibe 版本尚未发布记忆运行时。",
+    "memory_runtime_manifest_missing": "记忆运行时的清单缺失。",
+    "memory_runtime_manifest_unavailable": "无法下载记忆运行时的清单。",
+    "memory_runtime_archive_unavailable": "记忆运行时的下载包当前不可用。"
   },
   "apps": {
     "title": "应用",
@@ -2770,7 +2776,7 @@
       "disclosureTitle": "启用记忆前请了解",
       "disclosure": [
         "符合条件的 Workbench 文本，以及已绑定、已启用管理员的私聊文本，会被复制到一个有边界的本地队列中等待处理。",
-        "一条消息处理成功或重试耗尽后，其文本会立即被清除；一个不含内容的去重标记最多保留 90 天。",
+        "一条消息处理成功或重试耗尽后，其文本会立即被清除；一个不含内容的去重标记最多保留 90 天，且以最新的 100,000 条为上限。",
         "记忆使用的 LLM 与 Embedding 端点与你的 Agent 模型订阅是分开的。",
         "这些远程端点会接收到被捕获的文本或搜索查询，并可能按其自身策略保留。",
         "私聊文本在被捕获前已经过该平台传输，IM 上的 /memory 回复同样受该平台自身的留存与同步策略约束。",
@@ -2779,7 +2785,8 @@
         "「清除全部」只会移除本机上的本地记忆数据，无法追回已发送到远程端点的副本，也不会影响原始聊天记录。",
         "发往记忆端点的投递是至少一次——超时或崩溃后偶尔可能出现重复的派生记忆。",
         "每一位已启用的 IM 管理员都是同一个个人记忆池的共同所有者。"
-      ]
+      ],
+      "clearKeyLabel": "清除已保存的密钥"
     },
     "clear": {
       "button": "清除全部",
@@ -2795,12 +2802,20 @@
       "keeps": [
         "你原始的 Avibe 聊天记录",
         "已发送到远程记忆端点的副本",
-        "现有的日志、崩溃报告或备份"
+        "你自己创建的副本或快照",
+        "存储在专用记忆目录之外的任何数据",
+        "现有的日志、崩溃报告或备份",
+        "存储设备上的物理残留——这不是安全擦除"
       ],
       "confirmLabel": "清除全部",
       "clearing": "清除中…",
       "cleared": "记忆数据已清除。",
       "failed": "清除失败。"
+    },
+    "kind": {
+      "profile": "画像",
+      "episode": "事件",
+      "fact": "事实"
     }
   }
 }
