@@ -115,6 +115,9 @@ export const OAuthConnectDialog: React.FC<{
       }
     };
 
+    // Clear any stale flow from a prior open so the previous success/failure
+    // isn't shown while the new startOAuth request is in flight.
+    apply(null);
     setErrorKey(null);
     setCode('');
     setSubmitting(false);
@@ -146,6 +149,13 @@ export const OAuthConnectDialog: React.FC<{
     const id = window.setInterval(() => tick(), 1000);
     return () => window.clearInterval(id);
   }, [open]);
+
+  // Consent is per-attempt: reset the experimental hub opt-in whenever the
+  // dialog (re)opens or the vendor changes, so a prior hub consent never
+  // silently carries into a new connect.
+  React.useEffect(() => {
+    if (open) setChannel('native_cli');
+  }, [open, vendor]);
 
   const submit = async () => {
     const cur = flowRef.current;

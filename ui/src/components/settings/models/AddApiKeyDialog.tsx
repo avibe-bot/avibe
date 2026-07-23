@@ -60,9 +60,13 @@ export const AddApiKeyDialog: React.FC<{
   const [discovered, setDiscovered] = React.useState(0);
   const [error, setError] = React.useState<string | null>(null);
   const closeTimer = React.useRef<number | null>(null);
+  // Bumped on every open/close so a test-and-add resolving after the dialog was
+  // closed or reopened is dropped instead of clobbering the new state.
+  const submitSeq = React.useRef(0);
 
   // Reset the form each time the dialog opens; clear any pending auto-close.
   React.useEffect(() => {
+    submitSeq.current += 1;
     if (open) {
       setVendor(DEFAULT_VENDOR.value);
       setApiKey('');
@@ -85,6 +89,7 @@ export const AddApiKeyDialog: React.FC<{
 
   const submit = async () => {
     if (!apiKey.trim()) return;
+    const seq = submitSeq.current;
     setPhase('submitting');
     setError(null);
     try {
@@ -94,11 +99,13 @@ export const AddApiKeyDialog: React.FC<{
         base_url: baseUrl.trim() || null,
         key: apiKey.trim(),
       });
+      if (submitSeq.current !== seq) return; // dialog closed/reopened mid-request
       setDiscovered(source.models.length);
       setPhase('done');
       onAdded(source);
       closeTimer.current = window.setTimeout(onClose, 1500);
     } catch (e: any) {
+      if (submitSeq.current !== seq) return;
       setError(e?.code || e?.message || 'discovery_failed');
       setPhase('error');
     }

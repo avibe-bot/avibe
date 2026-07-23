@@ -104,7 +104,12 @@ export const SettingsModelsPage: React.FC = () => {
           return priority.order.map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
         });
       })
-      .catch(() => showToast(t('settings.models.toast.reorderFailed') as string, 'error'));
+      .catch(() => {
+        showToast(t('settings.models.toast.reorderFailed') as string, 'error');
+        // The optimistic preview order diverged from the server; re-fetch so the
+        // list reflects the persisted (unchanged) order rather than a phantom one.
+        void refreshSourcesAgents();
+      });
   };
 
   const connectHub = async (agent: AgentSupply) => {
@@ -121,7 +126,9 @@ export const SettingsModelsPage: React.FC = () => {
   };
 
   const hubCount = agents.filter((a) => a.mode === 'hub').length;
-  const healthy = (runtime?.status.health ?? 'ok') !== 'down' && !sources.some((s) => s.state.status === 'error');
+  // Only a fully-ok runtime + no errored source is "一切正常"; degraded / down /
+  // not_installed / unknown all warrant the warning pill.
+  const healthy = runtime?.status.health === 'ok' && !sources.some((s) => s.state.status === 'error');
 
   return (
     <SettingsPageShell

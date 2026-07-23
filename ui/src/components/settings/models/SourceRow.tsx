@@ -8,9 +8,18 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { BillingChip, ExperimentalChip, StateChip } from './chips';
 import { SupplyTooltip } from './SupplyTooltip';
-import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
+import { ACCENT_ICON, ACCENT_TILE, VENDOR_OPTIONS, sourceVisual } from './vendorMeta';
 import { cooldownEtaMinutes, formatSpend } from './format';
 import type { Source } from './types';
+
+// An api_key points at a custom endpoint when its base URL is set and differs
+// from the vendor's official one — covers both vendor='custom' (official = null)
+// and an official vendor whose prefilled Base URL was edited to a relay.
+function isCustomEndpoint(source: Source): boolean {
+  if (!source.base_url) return false;
+  const official = VENDOR_OPTIONS.find((v) => v.value === source.vendor)?.base_url ?? null;
+  return source.base_url !== official;
+}
 
 // The mono sub-line shows the source identity: account_label (subscriptions)
 // or masked_credential (api keys) — both server-provided display data (contract
@@ -25,7 +34,7 @@ function useSubline(source: Source): string {
       ? source.supply_channel === 'native_cli'
         ? (t('settings.models.source.nativeSupply') as string)
         : (t('settings.models.source.hubHosted') as string)
-      : source.base_url && source.vendor === 'custom'
+      : isCustomEndpoint(source)
         ? (t('settings.models.source.customEndpoint') as string)
         : (t('settings.models.source.officialEndpoint') as string);
 
