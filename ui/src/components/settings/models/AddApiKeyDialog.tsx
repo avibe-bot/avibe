@@ -112,7 +112,10 @@ export const AddApiKeyDialog: React.FC<{
   };
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    // Block close (Esc / overlay / X) while the test-and-add request is in
+    // flight — the source is provisioned server-side, so closing mid-request
+    // would leave a created source the UI never reflected.
+    <Dialog open={open} onOpenChange={(v) => !v && phase !== 'submitting' && onClose()}>
       <DialogContent className="max-w-[560px] gap-5">
         <DialogHeader>
           <DialogTitle className="text-[18px] font-bold">{t('settings.models.addKey.title')}</DialogTitle>
@@ -183,7 +186,7 @@ export const AddApiKeyDialog: React.FC<{
             {t('settings.models.addKey.vaultNote')}
           </span>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={onClose}>
+            <Button variant="outline" size="sm" onClick={onClose} disabled={phase === 'submitting'}>
               {t('common.cancel')}
             </Button>
             <Button

@@ -53,6 +53,9 @@ export const SettingsModelsPage: React.FC = () => {
   // freshest order without threading it through the framer callback).
   const sourcesRef = React.useRef<Source[]>(sources);
   sourcesRef.current = sources;
+  // Bumped per reorder-commit so an out-of-order PUT /priority response from a
+  // superseded drag can't overwrite the newest order.
+  const reorderSeq = React.useRef(0);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -94,10 +97,12 @@ export const SettingsModelsPage: React.FC = () => {
   };
 
   const reorderCommit = () => {
+    const seq = ++reorderSeq.current;
     const order = sourcesRef.current.map((s) => s.id);
     modelsApi
       .putPriority(order)
       .then((priority) => {
+        if (reorderSeq.current !== seq) return; // superseded by a newer reorder
         // Re-echo the server's authoritative order.
         setSources((prev) => {
           const byId = new Map(prev.map((s) => [s.id, s]));
@@ -105,6 +110,7 @@ export const SettingsModelsPage: React.FC = () => {
         });
       })
       .catch(() => {
+        if (reorderSeq.current !== seq) return;
         showToast(t('settings.models.toast.reorderFailed') as string, 'error');
         // The optimistic preview order diverged from the server; re-fetch so the
         // list reflects the persisted (unchanged) order rather than a phantom one.

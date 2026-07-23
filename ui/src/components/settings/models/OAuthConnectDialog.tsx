@@ -150,12 +150,13 @@ export const OAuthConnectDialog: React.FC<{
     return () => window.clearInterval(id);
   }, [open]);
 
-  // Consent is per-attempt: reset the experimental hub opt-in whenever the
-  // dialog (re)opens or the vendor changes, so a prior hub consent never
-  // silently carries into a new connect.
+  // Consent is per-attempt: reset the experimental hub opt-in when the dialog
+  // CLOSES, so the next open's start effect always begins from native_cli.
+  // (Resetting on open would run after the start effect and briefly launch a
+  // stale hub flow before the reset lands.)
   React.useEffect(() => {
-    if (open) setChannel('native_cli');
-  }, [open, vendor]);
+    if (!open) setChannel('native_cli');
+  }, [open]);
 
   const submit = async () => {
     const cur = flowRef.current;
@@ -163,12 +164,15 @@ export const OAuthConnectDialog: React.FC<{
     setSubmitting(true);
     try {
       const next = await modelsApi.submitOAuth(cur.flow_id, code.trim());
+      // Drop the response if the dialog closed or a new flow started meanwhile.
+      if (flowRef.current?.flow_id !== cur.flow_id) return;
       flowRef.current = next;
       setFlow(next);
     } catch {
+      if (flowRef.current?.flow_id !== cur.flow_id) return;
       setErrorKey('settings.models.oauth.error.generic');
     } finally {
-      setSubmitting(false);
+      if (flowRef.current?.flow_id === cur.flow_id) setSubmitting(false);
     }
   };
 
