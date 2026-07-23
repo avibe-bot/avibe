@@ -82,13 +82,13 @@ jobs:
             artifact: win32-arm64
     steps:
       - name: Checkout Show Runtime
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           repository: avibe-bot/vibe-show-runtime
           ref: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -102,7 +102,7 @@ jobs:
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
 
       - name: Upload Show Runtime bundle
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: show-runtime-${{ matrix.artifact }}
           path: |
@@ -118,12 +118,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -136,7 +136,7 @@ jobs:
           npm run build
 
       - name: Download Show Runtime bundles
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           pattern: show-runtime-*
           path: runtime-artifacts
@@ -153,7 +153,7 @@ jobs:
           cp vibe/show_runtime_manifest.json runtime-artifacts/show-runtime-manifest.json
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -311,7 +311,7 @@ jobs:
           gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: dist
           path: dist/
@@ -324,7 +324,7 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           name: dist
           path: dist/
@@ -336,7 +336,7 @@ jobs:
           test -n "$(find dist -maxdepth 1 -type f -name 'avibe_os-*' -print -quit)"
 
       - name: Publish avibe-os to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247  # release/v1
         with:
           skip-existing: true
         # Uses trusted publishing (OIDC), no API token needed
@@ -357,7 +357,7 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           name: dist
           path: dist/
@@ -369,7 +369,7 @@ jobs:
           test -n "$(find dist -maxdepth 1 -type f -name 'vibe_remote-*' -print -quit)"
 
       - name: Publish vibe-remote to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247  # release/v1
         with:
           skip-existing: true
         # Uses trusted publishing (OIDC), no API token needed

@@ -28,7 +28,7 @@ jobs:
           - arch: arm64
             target: aarch64-linux-musl
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - name: Build static tmux
         shell: bash
         run: |
@@ -54,7 +54,7 @@ jobs:
         run: |
           (cd dist && shasum -a 256 "tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.tar.gz" > "tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.sha256")
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: tmux-linux-${{ matrix.arch }}
           path: dist/tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.*
@@ -71,7 +71,7 @@ jobs:
           - arch: arm64
             runner: macos-15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - name: Build relocatable tmux
         shell: bash
         run: |
@@ -92,7 +92,7 @@ jobs:
         run: |
           (cd dist && shasum -a 256 "tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.tar.gz" > "tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.sha256")
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: tmux-darwin-${{ matrix.arch }}
           path: dist/tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.*
@@ -102,7 +102,7 @@ jobs:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           pattern: tmux-*
           path: dist
@@ -145,7 +145,7 @@ jobs:
         env:
           TMUX_VERSION: ${{ inputs.tmux_version }}
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: tmux-runtime-manifest
           path: dist/tmux-runtime-manifest.json

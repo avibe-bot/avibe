@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Resolve pinned manifest identity
         id: manifest
@@ -132,7 +132,7 @@ jobs:
           github.event_name != 'schedule' ||
           github.event.schedule == '47 4 * * 0' ||
           steps.probe.outcome == 'failure'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: git-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}
           path: ${{ runner.temp }}/git-runtime-release

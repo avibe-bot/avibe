@@ -430,7 +430,7 @@ jobs:
           set -euo pipefail
           tar -czf git-source-patched.tar.gz -C source "git-$GIT_VERSION"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: git-source-patched
           path: git-source-patched.tar.gz
@@ -448,11 +448,11 @@ jobs:
           - arch: arm64
             platform: linux/arm64
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           name: git-source-patched
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
       - name: Build and verify static local-only Git
         shell: bash
@@ -564,7 +564,7 @@ jobs:
               (cd /work/dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
             '
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: git-runtime-linux-${{ matrix.arch }}
           path: dist/git-*.tar.gz*
@@ -582,7 +582,7 @@ jobs:
           - arch: arm64
             runner: macos-15
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           name: git-source-patched
 
@@ -699,7 +699,7 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$archive" -C ../package bin/git
           (cd ../dist && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: git-runtime-darwin-${{ matrix.arch }}
           path: dist/git-*.tar.gz*
@@ -711,7 +711,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
           pattern: git-runtime-*
           path: dist
@@ -775,14 +775,14 @@ jobs:
           )
           PY
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: git-runtime-manifest
           path: dist/git-runtime-manifest.json
 
       - name: Publish runtime release assets
         if: inputs.release_tag != ''
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3
         with:
           tag_name: ${{ inputs.release_tag }}
           name: "Avibe local-only Git runtime ${{ env.GIT_VERSION }} (build ${{ env.GIT_RELEASE_REVISION }})"
