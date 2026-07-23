@@ -1048,7 +1048,7 @@ def _agent_run_examples_text() -> str:
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
           Use --scope-id <scopes.id> to place a new Session in a specific existing scope.
-          New and forked delegated Sessions default to --visibility background; pass foreground to enable outward delivery.
+          New and forked delegated Sessions are background by default; pass --visible to make them user-facing and enable outward delivery.
           --cwd only applies to new Sessions; existing Sessions keep their own cwd.
 
         Callback:
@@ -1067,7 +1067,7 @@ def _agent_run_examples_text() -> str:
 
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-          vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
+          vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
 
         Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
@@ -3553,9 +3553,9 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
         )
     if session_id and visibility:
         raise TaskCliError(
-            "--visibility only applies when creating or forking a Session",
+            "visibility options only apply when creating or forking a Session",
             code="visibility_with_existing_session",
-            hint="Use `vibe session update --visibility ...` to change an existing Session.",
+            hint="Use `vibe session update --visible|--hidden` (or `--visibility ...`) to change an existing Session.",
             help_command=help_command,
         )
     if session_id and (create_session or create_per_run):
@@ -4788,7 +4788,7 @@ def cmd_session_update(args):
             raise TaskCliError(
                 "no update field supplied",
                 code="missing_session_update",
-                hint="Pass --title, --visibility, or --scope-id.",
+                hint="Pass --title, --visible/--hidden, --visibility, or --scope-id.",
                 help_command="vibe session update --help",
             )
         session_id, session_default_notice = _resolve_caller_session_id(
@@ -11926,10 +11926,18 @@ def build_parser():
     agent_run_parser.add_argument("--create-session-per-run", action="store_true", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
     agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
-    agent_run_parser.add_argument(
+    agent_visibility_group = agent_run_parser.add_mutually_exclusive_group()
+    agent_visibility_group.add_argument(
         "--visibility",
         choices=("foreground", "background"),
         help="Visibility for the new or forked Session (default: background)",
+    )
+    agent_visibility_group.add_argument(
+        "--visible",
+        dest="visibility",
+        action="store_const",
+        const="foreground",
+        help="Make the new or forked Session user-facing from the start",
     )
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
@@ -12042,10 +12050,25 @@ def build_parser():
     session_update_parser.add_argument(
         "--title", help="New title. Pass an empty string to clear it (reverts to id-based display)."
     )
-    session_update_parser.add_argument(
+    session_visibility_group = session_update_parser.add_mutually_exclusive_group()
+    session_visibility_group.add_argument(
         "--visibility",
         choices=("foreground", "background"),
         help="Show the Session in normal chat lists or keep it background-only.",
+    )
+    session_visibility_group.add_argument(
+        "--visible",
+        dest="visibility",
+        action="store_const",
+        const="foreground",
+        help="Promote the Session into normal chat lists.",
+    )
+    session_visibility_group.add_argument(
+        "--hidden",
+        dest="visibility",
+        action="store_const",
+        const="background",
+        help="Hide the Session from normal chat lists and suppress outward delivery.",
     )
     session_update_parser.add_argument(
         "--scope-id",

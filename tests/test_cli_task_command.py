@@ -285,6 +285,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--sync" in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
+    assert "--visible" in captured.out
     assert "--deliver-key" not in captured.out
     assert "Avibe Agent shell examples:" in captured.out
     assert "Normal terminal examples:" in captured.out
@@ -294,7 +295,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
     assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
     assert (
-        "vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'"
+        "vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'"
         in captured.out
     )
     assert (
@@ -321,6 +322,37 @@ def test_agent_run_rejects_async_and_sync_together(capsys) -> None:
     payload = json.loads(capsys.readouterr().err)
     assert payload["code"] == "invalid_arguments"
     assert "not allowed with argument --async" in payload["error"]
+
+
+def test_agent_run_visible_sugar_sets_foreground_visibility() -> None:
+    args = _parse_agent_run(["--agent", "worker", "--visible", "--message", "hello"])
+
+    assert args.visibility == "foreground"
+
+
+def test_agent_run_visible_conflicts_with_explicit_visibility(capsys) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            [
+                "agent",
+                "run",
+                "--agent",
+                "worker",
+                "--visible",
+                "--visibility",
+                "background",
+                "--message",
+                "hello",
+            ]
+        )
+
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "invalid_arguments"
+    assert "--visibility" in payload["error"]
+    assert "--visible" in payload["error"]
 
 
 def test_agent_run_runtime_rejects_async_and_sync_together() -> None:
