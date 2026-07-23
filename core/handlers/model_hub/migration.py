@@ -33,6 +33,16 @@ MigrationAction = Literal["import", "controlled_import", "keep_native", "reauth"
 MigrationKind = Literal["api_key", "oauth_native", "opencode_provider"]
 _CUSTOM_ENDPOINT_NOTE = "settings.models.source.customEndpoint"
 _NATIVE_SUPPLY_NOTE = "settings.models.source.nativeSupply"
+_OPENCODE_BUILTIN_PROTOCOLS: dict[
+    str,
+    Literal["anthropic", "openai_compatible"],
+] = {
+    "alibaba-cn": "openai_compatible",
+    "deepseek": "openai_compatible",
+    "minimax": "anthropic",
+    "openrouter": "openai_compatible",
+    "poe": "openai_compatible",
+}
 
 
 class MigrationConflictError(ValueError):
@@ -208,6 +218,11 @@ def _claude_items(
             )
         )
 
+    # Claude settings env takes precedence over the native OAuth store. A
+    # leftover OAuth credential must not outrank the auth the CLI will use.
+    if api_key or auth_token:
+        return items
+
     oauth_signed_in = read_claude_oauth_signed_in(home)
     if not oauth_signed_in and oauth_probe is not None:
         try:
@@ -246,9 +261,13 @@ def _codex_items(
         return []
     state = read_codex_auth_state(home)
     items: list[NativeMigrationItem] = []
+    raw_auth_mode = auth_data.get("auth_mode")
+    auth_mode = raw_auth_mode.strip().lower() if isinstance(raw_auth_mode, str) else None
+    api_key_is_active = auth_mode != "chatgpt"
+    oauth_is_active = auth_mode != "apikey"
 
     api_key = auth_data.get("OPENAI_API_KEY")
-    if isinstance(api_key, str) and api_key.strip():
+    if api_key_is_active and isinstance(api_key, str) and api_key.strip():
         api_key = api_key.strip()
         base_url = state.get("base_url")
         if not isinstance(base_url, str) or not base_url.strip():
@@ -281,8 +300,8 @@ def _codex_items(
             )
         )
 
-    tokens = auth_data.get("tokens") if isinstance(auth_data, dict) else None
-    if not isinstance(tokens, dict) or not any(
+    tokens = auth_data.get("tokens")
+    if not oauth_is_active or not isinstance(tokens, dict) or not any(
         isinstance(tokens.get(key), str) and bool(tokens[key].strip())
         for key in ("access_token", "refresh_token", "id_token")
     ):
@@ -353,6 +372,9 @@ def _opencode_protocol(
         return "anthropic"
     if custom_adapter == "openai-compatible":
         return "openai_compatible"
+    builtin_protocol = _OPENCODE_BUILTIN_PROTOCOLS.get(provider_id)
+    if builtin_protocol is not None:
+        return builtin_protocol
     npm = provider_config.get("npm") or catalog_provider.get("npm")
     if npm == "@ai-sdk/anthropic":
         return "anthropic"
@@ -532,6 +554,10 @@ def _new_source(
     )
 
 
+def _migration_rollback_id(source_id: str, credential_ref: str) -> str:
+    return f"{source_id}:migration:{_stable_suffix(credential_ref)}"
+
+
 async def apply_native_migration(
     host: MigrationHost,
     item_ids: object,
@@ -629,4 +655,7 @@ async def apply_native_migration(
         finally:
             if not persisted:
                 for source_id, credential_ref in reversed(provisioned):
-                    await host._rollback_credential(source_id, credential_ref)
+                    await host._rollback_credential(
+                        _migration_rollback_id(source_id, credential_ref),
+                        credential_ref,
+                    )

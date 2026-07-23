@@ -45,6 +45,7 @@ class MigrationAdapter:
         self.revoked: list[str] = []
         self.synced: list[tuple[object, ...]] = []
         self.fail_discovery_ref: str | None = None
+        self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
 
     async def provision_credential(
@@ -76,6 +77,8 @@ class MigrationAdapter:
             raise RuntimeError("redacted sync failure")
 
     async def revoke_credential(self, credential_ref: str) -> None:
+        if credential_ref in self.fail_revoke_refs:
+            raise RuntimeError("redacted revoke failure")
         self.revoked.append(credential_ref)
 
 
@@ -127,6 +130,13 @@ def _write_claude(home: Path, *, malformed: bool = False) -> None:
         )
         + "\n",
     )
+    _write(
+        home / ".claude" / ".credentials.json",
+        json.dumps({"claudeAiOauth": {"accessToken": "claude-oauth-token"}}),
+    )
+
+
+def _write_claude_oauth(home: Path) -> None:
     _write(
         home / ".claude" / ".credentials.json",
         json.dumps({"claudeAiOauth": {"accessToken": "claude-oauth-token"}}),
@@ -239,7 +249,7 @@ def _translation_value(payload: dict, key: str) -> object:
 
 def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) -> None:
     cases = (
-        ("claude", _write_claude, 2),
+        ("claude", _write_claude, 1),
         ("codex", _write_codex, 2),
         ("opencode", _write_opencode, 2),
     )
@@ -300,6 +310,46 @@ def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) 
     ]
 
 
+def test_claude_settings_env_suppresses_stale_oauth_store(tmp_path: Path) -> None:
+    native_home = tmp_path / "native-home"
+    _write_claude(native_home)
+
+    items = scan_native_configs(
+        ModelHubConfig(),
+        home=native_home,
+        mask_credential=_mask_credential,
+    )
+
+    assert [(item.kind, item.proposed_action) for item in items] == [
+        ("api_key", "import")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("auth_mode", "expected_kind"),
+    (("chatgpt", "oauth_native"), ("apikey", "api_key")),
+)
+def test_codex_scan_respects_explicit_auth_mode(
+    tmp_path: Path,
+    auth_mode: str,
+    expected_kind: str,
+) -> None:
+    native_home = tmp_path / auth_mode
+    _write_codex(native_home)
+    auth_path = native_home / ".codex" / "auth.json"
+    auth = json.loads(auth_path.read_text(encoding="utf-8"))
+    auth["auth_mode"] = auth_mode
+    auth_path.write_text(json.dumps(auth), encoding="utf-8")
+
+    items = scan_native_configs(
+        ModelHubConfig(),
+        home=native_home,
+        mask_credential=_mask_credential,
+    )
+
+    assert [item.kind for item in items] == [expected_kind]
+
+
 def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
     native_home = tmp_path / "native-home"
     _write_claude(native_home)
@@ -352,7 +402,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert scan_response.status_code == 200
     scan = scan_response.get_json()
     _validate_scan({"items": scan["items"]})
-    assert len(scan["items"]) == 6
+    assert len(scan["items"]) == 5
 
     apply_response = client.post(
         "/api/models/migration/apply",
@@ -362,15 +412,15 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     )
     assert apply_response.status_code == 200
     body = apply_response.get_json()
-    assert body["applied"] == 6
-    assert len(body["sources"]) == 6
-    assert len(store.config.sources) == 6
+    assert body["applied"] == 5
+    assert len(body["sources"]) == 5
+    assert len(store.config.sources) == 5
     assert len(adapter.provisioned) == 4
     assert adapter.revoked == []
     assert before == _tree_digest(native_home)
     by_id = {source.id: source for source in store.config.sources}
-    assert all(by_id[source_id].billing == "monthly" for source_id in store.config.priority_order[:2])
-    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order[2:])
+    assert by_id[store.config.priority_order[0]].billing == "monthly"
+    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order[1:])
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
@@ -402,7 +452,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     """Scenario: MH-MIG-002."""
 
     native_home = tmp_path / "native-home"
-    _write_claude(native_home)
+    _write_claude_oauth(native_home)
     _write_codex(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
@@ -571,6 +621,37 @@ def test_opencode_unsupported_native_sdk_is_not_guessed_as_compatible(tmp_path: 
     )
 
 
+def test_opencode_builtin_provider_is_importable_without_catalog_cache(
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".config" / "opencode" / "opencode.json",
+        json.dumps(
+            {
+                "provider": {
+                    "openrouter": {
+                        "options": {
+                            "apiKey": "sk-openrouter-123456",
+                            "baseURL": "https://openrouter.example/v1",
+                        }
+                    }
+                }
+            }
+        ),
+    )
+
+    [item] = scan_native_configs(
+        ModelHubConfig(),
+        home=native_home,
+        mask_credential=_mask_credential,
+    )
+
+    assert item.vendor == "openrouter"
+    assert item.protocol == "openai_compatible"
+    assert item.base_url == "https://openrouter.example/v1"
+
+
 def test_opencode_env_placeholder_without_auth_fallback_is_not_importable(tmp_path: Path) -> None:
     native_home = tmp_path / "native-home"
     _write(
@@ -613,12 +694,10 @@ def test_apply_scans_claude_oauth_off_the_event_loop(
     tmp_path: Path,
 ) -> None:
     native_home = tmp_path / "native-home"
-    _write_claude(native_home)
-    (native_home / ".claude" / ".credentials.json").unlink()
     _isolate_native_home(monkeypatch, native_home)
     service, _, _ = _service(tmp_path)
     probe_threads: list[int] = []
-    service.migration_claude_oauth_probe = lambda: (probe_threads.append(threading.get_ident()) or False)
+    service.migration_claude_oauth_probe = lambda: (probe_threads.append(threading.get_ident()) or True)
     item_id = service.migration_scan()["items"][0]["id"]
     probe_threads.clear()
     event_loop_thread = threading.get_ident()
@@ -665,6 +744,38 @@ def test_failed_persist_sync_restores_config_and_revokes_credentials(
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
     assert store.config.priority_order == []
+
+
+def test_failed_revoke_survives_retry_with_same_source_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write_opencode(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    item_id = service.migration_scan()["items"][0]["id"]
+    adapter.fail_discovery_ref = "cred_migration_1"
+    adapter.fail_revoke_refs.add("cred_migration_1")
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.migration_apply([item_id]))
+    assert error.value.code == "engine_down"
+    [pending] = service.revocations.list()
+    assert ":migration:" in pending.source_id
+    assert pending.credential_ref == "cred_migration_1"
+
+    adapter.fail_discovery_ref = None
+    adapter.fail_revoke_refs.clear()
+    result = asyncio.run(service.migration_apply([item_id]))
+    assert result["applied"] == 1
+    [active] = store.config.sources
+    assert active.id != pending.source_id
+    assert active.credential_ref == "cred_migration_2"
+
+    asyncio.run(service._ensure_engine_synced())
+    assert adapter.revoked == ["cred_migration_1"]
+    assert service.revocations.list() == []
 
 
 def test_apply_rejects_a_credential_changed_after_scan(
