@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import subprocess
 import stat
 import sys
 import tarfile
@@ -548,23 +549,45 @@ class _FixtureInstaller:
         }
 
 
-def _fixture_supervisor(tmp_path: Path) -> tuple[EngineSupervisor, EngineStateStore]:
+def _fixture_supervisor(
+    tmp_path: Path,
+    *,
+    process_factory=subprocess.Popen,
+) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
     _write_mock_engine(binary)
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
     return (
-        EngineSupervisor(installer=installer, state_store=store, startup_timeout=5),
+        EngineSupervisor(
+            installer=installer,
+            state_store=store,
+            startup_timeout=5,
+            process_factory=process_factory,
+        ),
         store,
     )
 
 
-def test_supervisor_starts_checks_health_and_stops_mock_engine(tmp_path: Path) -> None:
-    supervisor, store = _fixture_supervisor(tmp_path)
+def test_supervisor_starts_checks_health_and_stops_mock_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_env: dict[str, str] = {}
+
+    def spawn(*args, **kwargs):
+        captured_env.update(kwargs["env"])
+        return subprocess.Popen(*args, **kwargs)
+
+    monkeypatch.setenv("MANAGEMENT_PASSWORD", "untrusted-management-secret")
+    monkeypatch.setenv("MODEL_HUB_TEST_KEEP", "kept")
+    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
 
     first = supervisor.ensure_running()
     assert first.base_url.startswith("http://127.0.0.1:")
+    assert "MANAGEMENT_PASSWORD" not in captured_env
+    assert captured_env["MODEL_HUB_TEST_KEEP"] == "kept"
     assert supervisor.status()["status"]["health"] == "ok"
     config_path = store.root / "instances" / "install-1" / "config.yaml"
     first_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -675,6 +698,64 @@ def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -
         assert restored is not None
         assert restored.credential_ref == old_ref
         assert supervisor.restore_calls == 1
+
+    asyncio.run(run())
+
+
+def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> None:
+    restart_started = threading.Event()
+    allow_restart = threading.Event()
+    invoked_refs: list[str] = []
+
+    class Client:
+        async def invoke(self, source, model_id, request, *, stream):
+            invoked_refs.append(source.credential_ref)
+            return object()
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self._client = Client()
+
+        def client_if_running(self):
+            return self._client
+
+        def restart_if_running(self) -> None:
+            restart_started.set()
+            assert allow_restart.wait(timeout=2)
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        old_ref = store.store_api_key(
+            "old-secret",
+            base_url="https://old.example.test/v1",
+        )
+        new_ref = store.store_api_key(
+            "new-secret",
+            base_url="https://new.example.test/v1",
+        )
+        store.sync_sources([_binding(old_ref, base_url="https://old.example.test/v1")])
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        sync_task = asyncio.create_task(
+            adapter.sync_sources([_binding(new_ref, base_url="https://new.example.test/v1")])
+        )
+        assert await asyncio.to_thread(restart_started.wait, 2)
+        invoke_task = asyncio.create_task(
+            adapter.invoke("src_fixture123", "model-a", {}, False, "codex")
+        )
+        await asyncio.sleep(0.05)
+        assert not invoke_task.done()
+
+        allow_restart.set()
+        await sync_task
+        await invoke_task
+        assert invoked_refs == [new_ref]
 
     asyncio.run(run())
 

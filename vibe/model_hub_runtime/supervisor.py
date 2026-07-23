@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import signal
 import socket
 import subprocess
@@ -151,6 +152,7 @@ class EngineSupervisor:
             process = self._process_factory(
                 [str(binary), "-config", str(config_path)],
                 cwd=instance_dir,
+                env=_engine_environment(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -207,6 +209,12 @@ def _allocate_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+def _engine_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.pop("MANAGEMENT_PASSWORD", None)
+    return environment
 
 
 def _utc_now() -> str:

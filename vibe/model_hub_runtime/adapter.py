@@ -95,6 +95,7 @@ class CLIProxyEngineAdapter:
     ) -> None:
         self.supervisor = supervisor or get_engine_supervisor()
         self.state_store = state_store or self.supervisor.state_store
+        self._routing_lock = asyncio.Lock()
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
@@ -131,21 +132,22 @@ class CLIProxyEngineAdapter:
         return connection.gateway_token
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
-        previous = await asyncio.to_thread(self.state_store.list_sources)
-        was_running = await asyncio.to_thread(self.supervisor.client_if_running) is not None
-        await asyncio.to_thread(self.state_store.sync_sources, bindings)
-        try:
-            await asyncio.to_thread(self.supervisor.restart_if_running)
-        except Exception:
-            await asyncio.to_thread(self.state_store.replace_sources, previous)
-            if was_running:
-                try:
-                    await asyncio.to_thread(self.supervisor.ensure_running)
-                except Exception as restore_error:
-                    raise EngineStateError(
-                        "source sync failed and the previous engine state could not be restored"
-                    ) from restore_error
-            raise
+        async with self._routing_lock:
+            previous = await asyncio.to_thread(self.state_store.list_sources)
+            was_running = await asyncio.to_thread(self.supervisor.client_if_running) is not None
+            await asyncio.to_thread(self.state_store.sync_sources, bindings)
+            try:
+                await asyncio.to_thread(self.supervisor.restart_if_running)
+            except Exception:
+                await asyncio.to_thread(self.state_store.replace_sources, previous)
+                if was_running:
+                    try:
+                        await asyncio.to_thread(self.supervisor.ensure_running)
+                    except Exception as restore_error:
+                        raise EngineStateError(
+                            "source sync failed and the previous engine state could not be restored"
+                        ) from restore_error
+                raise
 
     async def provision_credential(
         self,
@@ -364,26 +366,29 @@ class CLIProxyEngineAdapter:
         stream: bool,
         origin: str,
     ) -> EngineInvokeHandle:
-        source = await asyncio.to_thread(self.state_store.get_source, source_id)
-        if source is None:
-            raise EngineStateError("source is not registered")
-        if source.allowed_origins and origin not in source.allowed_origins:
-            raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
-        try:
-            client = await asyncio.to_thread(self.supervisor.client)
-        except EngineUnavailableError:
-            return completed_handle(
-                RawCallOutcome(
-                    kind=RawOutcomeKind.NETWORK_ERROR,
-                    http_status=None,
-                    error_code="engine_unavailable",
-                    redacted_message=None,
-                    stream_started=False,
-                    model_id=model_id,
-                    source_id=source_id,
+        async with self._routing_lock:
+            source = await asyncio.to_thread(self.state_store.get_source, source_id)
+            if source is None:
+                raise EngineStateError("source is not registered")
+            if source.allowed_origins and origin not in source.allowed_origins:
+                raise OriginNotAllowedError(
+                    f"origin {origin!r} is not allowed to use source {source_id!r}"
                 )
-            )
-        return await client.invoke(source, model_id, request, stream=stream)
+            try:
+                client = await asyncio.to_thread(self.supervisor.client)
+            except EngineUnavailableError:
+                return completed_handle(
+                    RawCallOutcome(
+                        kind=RawOutcomeKind.NETWORK_ERROR,
+                        http_status=None,
+                        error_code="engine_unavailable",
+                        redacted_message=None,
+                        stream_started=False,
+                        model_id=model_id,
+                        source_id=source_id,
+                    )
+                )
+            return await client.invoke(source, model_id, request, stream=stream)
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         inventory = await asyncio.to_thread(_auth_inventory, client)
