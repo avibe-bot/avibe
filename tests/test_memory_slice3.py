@@ -144,6 +144,8 @@ def test_private_memory_contract_requires_dm_admin_and_bounds_reply(platform: st
         ({"is_rich": True}, [], "normal"),
         ({}, [object()], "normal"),
         ({"scheduled": True}, [], "normal"),
+        ({"is_system": True}, [], "normal"),
+        ({"event": {"type": "system"}}, [], "normal"),
         ({}, [], "/memory status"),
     ],
 )
@@ -177,6 +179,8 @@ def test_private_memory_capture_uses_platform_native_dedup_key_once() -> None:
         ({"is_forwarded": True}, []),
         ({"edited": True}, []),
         ({"is_rich": True}, []),
+        ({"is_system": True}, []),
+        ({"event": {"type": "system"}}, []),
     ],
 )
 def test_private_memory_command_rejects_nonordinary_human_input(payload, files) -> None:

@@ -6548,8 +6548,8 @@ def _workbench_message_occurred_at_ms(message: dict[str, Any]) -> int:
     return int(time.time() * 1000)
 
 
-async def _schedule_workbench_memory_capture(message: dict[str, Any], session_id: str) -> None:
-    """Submit post-commit capture before dispatch without affecting its outcome."""
+async def _handoff_workbench_memory_capture(message: dict[str, Any], session_id: str) -> None:
+    """Submit one post-commit capture handoff before ordinary dispatch starts."""
 
     from vibe import internal_client
 
@@ -7618,7 +7618,7 @@ async def sessions_messages_create(session_id: str):
         and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
         and not is_memory_command_candidate(dispatch_text)
     ):
-        await _schedule_workbench_memory_capture(message, session_id)
+        await _handoff_workbench_memory_capture(message, session_id)
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.

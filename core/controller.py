@@ -1252,6 +1252,8 @@ class Controller:
                 "is_scheduled",
                 "is_bot",
                 "is_self",
+                "is_system",
+                "system",
                 "is_forwarded",
                 "forwarded",
                 "is_edited",
@@ -1267,6 +1269,8 @@ class Controller:
 
         raw_message = payload.get("event") or payload.get("message") or payload.get("raw_message")
         if isinstance(raw_message, dict):
+            if raw_message.get("is_system") or raw_message.get("system"):
+                return False
             if any(
                 raw_message.get(key)
                 for key in (
@@ -1282,8 +1286,18 @@ class Controller:
                 )
             ):
                 return False
+            if raw_message.get("type") in {"system", "system_message"}:
+                return False
             subtype = raw_message.get("subtype")
-            if subtype in {"bot_message", "file_share", "message_changed", "message_deleted", "message_replied"}:
+            if subtype in {
+                "bot_message",
+                "file_share",
+                "message_changed",
+                "message_deleted",
+                "message_replied",
+                "channel_join",
+                "channel_leave",
+            }:
                 return False
             if raw_message.get("blocks") or raw_message.get("rich_text") or raw_message.get("forwarded"):
                 return False

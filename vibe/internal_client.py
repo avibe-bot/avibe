@@ -406,8 +406,10 @@ async def memory_capture(
     occurred_at_ms: int,
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 2.0,
+    timeout: float = 0.5,
 ) -> dict[str, Any]:
+    """Hand one Workbench capture to the controller without awaiting its receipt."""
+
     return await _memory_request(
         "POST",
         "/internal/memory/capture",
@@ -482,7 +484,7 @@ async def _memory_request(
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://localhost",
-            timeout=httpx.Timeout(timeout, connect=5.0),
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
         ) as client:
             response = await client.request(method, route, json=payload)
     except _SOCKET_ERRORS as exc:

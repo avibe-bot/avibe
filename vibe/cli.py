@@ -209,11 +209,14 @@ def _print_cli_payload(kind: str, **fields) -> None:
 
 
 def _memory_cli_language() -> str:
-    """Read the configured CLI language without making Memory availability depend on config I/O."""
+    """Read an optional configured language without creating or migrating state."""
 
     try:
-        return normalize_language(getattr(V2Config.load(), "language", "en"))
-    except (FileNotFoundError, OSError, ValueError):
+        config_path = paths.get_config_path()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        language = payload.get("language") if isinstance(payload, dict) else None
+        return normalize_language(language if isinstance(language, str) else None)
+    except Exception:
         return "en"
 
 

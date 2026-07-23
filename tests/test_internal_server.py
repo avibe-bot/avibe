@@ -199,10 +199,12 @@ def test_create_app_exposes_minimal_endpoints():
 def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     controller = _build_controller_double()
     calls: list[tuple[str, object]] = []
+    capture_finished = asyncio.Event()
 
     class _Module:
         async def capture(self, request):
             calls.append(("capture", request))
+            capture_finished.set()
             return types.SimpleNamespace(status="accepted")
 
     class _Runtime:
@@ -241,7 +243,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     async def _go():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            return (
+            responses = (
                 await client.get("/internal/memory/status"),
                 await client.get("/internal/memory/profile"),
                 await client.post("/internal/memory/search", json={"query": "safe query", "limit": 3}),
@@ -260,6 +262,8 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.post("/internal/memory/search", json=[]),
                 await client.post("/internal/memory/capture", json={"text": "missing fields"}),
             )
+            await asyncio.wait_for(capture_finished.wait(), timeout=1)
+            return responses
 
     status, profile, search, capture, clear, install, reconcile, invalid, invalid_capture = asyncio.run(_go())
 
@@ -272,18 +276,55 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     assert reconcile.json() == {"ok": True, "state": "ready"}
     assert invalid.status_code == 400
     assert invalid_capture.status_code == 400
-    assert [name for name, _value in calls] == [
+    assert [name for name, _value in calls if name != "capture"] == [
         "status",
         "profile",
         "search",
-        "capture",
         "clear",
         "install",
         "reconcile",
     ]
-    captured_request = calls[3][1]
+    captured_request = next(value for name, value in calls if name == "capture")
     assert captured_request.source_message_id == "workbench:message-1"
     assert captured_request.session_id == "session-1"
+
+
+def test_memory_capture_endpoint_acks_handoff_before_capture_receipt():
+    controller = _build_controller_double()
+    capture_started = asyncio.Event()
+    release_capture = asyncio.Event()
+    capture_finished = asyncio.Event()
+
+    class _Module:
+        async def capture(self, request):
+            capture_started.set()
+            await release_capture.wait()
+            capture_finished.set()
+            return types.SimpleNamespace(status="accepted")
+
+    controller.memory_runtime = types.SimpleNamespace(module=_Module())
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/internal/memory/capture",
+                json={
+                    "source_message_id": "workbench:message-1",
+                    "session_id": "session-1",
+                    "text": "ordinary text",
+                    "occurred_at_ms": 123,
+                },
+            )
+            assert response.status_code == 200
+            assert response.json() == {"status": "accepted"}
+            await asyncio.wait_for(capture_started.wait(), timeout=1)
+            assert capture_finished.is_set() is False
+            release_capture.set()
+            await asyncio.wait_for(capture_finished.wait(), timeout=1)
+
+    asyncio.run(_go())
 
 
 def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):

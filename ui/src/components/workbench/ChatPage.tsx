@@ -21,7 +21,11 @@ import { activityItemKind, harnessNavPath, resolveActivityLabel, sortBackgroundA
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
-import { memoryCommandResultFromResponse, type MemoryCommandResult } from '../../lib/memoryCommandResult';
+import {
+  isPlainMemoryCommandRequest,
+  routeWorkbenchMessageResponse,
+  type MemoryCommandResult,
+} from '../../lib/memoryCommandResult';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
@@ -73,10 +77,6 @@ const WORKING_RECONCILE_INTERVAL_MS = 60 * 1000;
 // working far longer ago than this, so it still clears (Codex P2).
 const WORKING_SETTLE_GRACE_MS = 4000;
 const ACTIVITY_RECONCILE_INTERVAL_MS = 10 * 1000;
-
-type SyncTurnStateOptions = {
-  allowImmediateIdleClear?: boolean;
-};
 
 const emptyRuntimeState = (): SessionRuntimeState => ({
   in_flight: false,
@@ -397,7 +397,7 @@ export const ChatPage: React.FC = () => {
   // passes — otherwise a quick turn whose turn.end was missed leaves Stop stuck
   // until the next reconcile poll (Codex P2).
   const graceResyncRef = useRef<number | null>(null);
-  const syncTurnStateRef = useRef<((options?: SyncTurnStateOptions) => void) | null>(null);
+  const syncTurnStateRef = useRef<(() => void) | null>(null);
   // Mark a turn as live: bump the epoch + stamp the time, then show Stop. Used by
   // every "a turn is starting now" path so clear-on-idle stays race-safe. Also sets
   // ``workingRef`` synchronously so a settle refresh in the same tick reads it.
@@ -775,7 +775,7 @@ export const ChatPage: React.FC = () => {
   // directions: sets Stop when a turn is live, and clears a stale Stop (a
   // ``turn.end`` we missed while the socket was down) when the controller reports
   // idle — guarded so it can't drop a turn that's genuinely starting.
-  const syncTurnState = useCallback(async (options: SyncTurnStateOptions = {}) => {
+  const syncTurnState = useCallback(async () => {
     if (!sessionId) return;
     const epochAtRequest = turnEpochRef.current;
     try {
@@ -798,7 +798,7 @@ export const ChatPage: React.FC = () => {
       //      false negative.
       if (turnEpochRef.current !== epochAtRequest) return;
       const sinceSet = Date.now() - workingSetAtRef.current;
-      if (options.allowImmediateIdleClear || sinceSet > WORKING_SETTLE_GRACE_MS) {
+      if (sinceSet > WORKING_SETTLE_GRACE_MS) {
         workingRef.current = false;
         setWorking(false);
         // Agent Activity: the idle poll recovering a dropped terminal/turn.end is a
@@ -1137,7 +1137,17 @@ export const ChatPage: React.FC = () => {
       // feature; the backend enqueues it (202) instead of refusing.
       const ready = (attachments ?? []).filter((a) => a.status === 'ready');
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
-      markWorking();
+      const refs = references ?? [];
+      // A direct `/memory` read creates no turn. Avoid claiming foreground work
+      // for it, so its response can reconcile an existing turn without clearing
+      // the Stop state. If the server does not intercept it, its ordinary response
+      // below claims the turn after confirmation.
+      const directMemoryRead = isPlainMemoryCommandRequest(text, {
+        hasAttachments: ready.length > 0,
+        hasReferences: refs.length > 0,
+        metadata,
+      });
+      if (!directMemoryRead) markWorking();
       setError(null);
       setMemoryCommandResult(null);
       try {
@@ -1146,7 +1156,6 @@ export const ChatPage: React.FC = () => {
         // stream — we don't hold the response open. ``apiFetch`` attaches the
         // CSRF token that ``protect_mutating_ui_requests`` requires under
         // remote-access mode (raw ``fetch`` would 403).
-        const refs = references ?? [];
         const content =
           ready.length > 0 || refs.length > 0
             ? {
@@ -1192,18 +1201,17 @@ export const ChatPage: React.FC = () => {
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
         if (!response.ok) {
-          setWorking(false);
           throw new Error(body?.detail ? String(body.detail) : `HTTP ${response.status}`);
         }
-        const memoryCommandResult = memoryCommandResultFromResponse(body);
-        if (memoryCommandResult) {
+        const responseAction = routeWorkbenchMessageResponse(body);
+        if (responseAction.kind === 'memory_command_result') {
           // `/memory` never starts a turn. Ask the controller whether a different
           // turn is live instead of clearing the Stop state optimistically.
-          setMemoryCommandResult(memoryCommandResult);
-          void syncTurnStateRef.current?.({ allowImmediateIdleClear: true });
+          setMemoryCommandResult(responseAction.result);
+          void syncTurnStateRef.current?.();
           return;
         }
-        if (body?.already_answered) {
+        if (responseAction.kind === 'already_answered') {
           // A duplicate quick-reply the backend already had (stale tab / missed
           // event): no turn started HERE. Reconcile authoritatively rather than
           // force-clearing — a genuinely-running turn (e.g. clicking an old group
@@ -1213,30 +1221,35 @@ export const ChatPage: React.FC = () => {
           syncTurnStateRef.current?.();
           return false;
         }
-        if (body?.queued) {
+        if (responseAction.kind === 'queued') {
           // Sent while a turn was running → enqueued (shows above the composer
           // via queue.updated). A turn IS in flight, so keep working/Stop; don't
           // add a transcript row. Refresh immediately in case the event races.
+          if (directMemoryRead) markWorking();
           void refreshQueue();
           return;
         }
         // A turn started — show the user row. If this send happened from a
         // historical search window, first replace that window with the live tail;
         // the persisted prompt belongs there, not grafted below old context.
-        if (body && body.id) {
+        if (responseAction.kind === 'message') {
+          if (directMemoryRead) markWorking();
+          const message = responseAction.message as WorkbenchMessage;
           if (historicalWindowRef.current) {
             const caughtUp = await reloadLatestMessages();
             if (sessionId === sessionIdRef.current) {
-              if (caughtUp) setJumpTarget((body as WorkbenchMessage).id);
-              else appendMessage(body as WorkbenchMessage);
+              if (caughtUp) setJumpTarget(message.id);
+              else appendMessage(message);
             }
           } else {
-            appendMessage(body as WorkbenchMessage);
+            appendMessage(message);
           }
         }
       } catch (err: any) {
         if (sessionId === sessionIdRef.current) {
-          setWorking(false);
+          // The request may have raced a turn owned by another tab or source.
+          // Reconcile rather than clearing that turn's Stop state optimistically.
+          void syncTurnStateRef.current?.();
           setError(err?.message ?? String(err));
           // Signal the composer the send didn't start so it restores the text +
           // uploaded chips — the user can retry without re-uploading (Codex r5).

@@ -68,3 +68,19 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
 
     assert cli.cmd_memory(args) == 0
     assert capsys.readouterr().out.splitlines() == ["记忆状态：ready", "待处理：1；处理中：0；遗漏：0"]
+
+
+def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypatch, capsys) -> None:
+    args = cli.build_parser().parse_args(["memory", "status"])
+
+    def fail_config_path():
+        raise RuntimeError("source checkout migration guard")
+
+    def unavailable():
+        raise internal_client.InternalServerUnavailable("socket unavailable")
+
+    monkeypatch.setattr(cli.paths, "get_config_path", fail_config_path)
+    monkeypatch.setattr(internal_client, "memory_status_sync", unavailable)
+
+    assert cli.cmd_memory(args) == 1
+    assert capsys.readouterr().err.strip() == "Memory status failed: memory_sidecar_unavailable"

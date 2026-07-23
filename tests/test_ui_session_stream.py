@@ -199,17 +199,17 @@ def test_workbench_memory_intercept_returns_only_closed_errors(isolated_state, t
     }
 
 
-def test_workbench_capture_is_accepted_after_commit_before_dispatch(isolated_state, tmp_path):
+def test_workbench_capture_handoff_is_accepted_after_commit_before_dispatch(isolated_state, tmp_path):
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
     events: list[str] = []
 
-    async def schedule_capture(row, observed_session_id):
+    async def handoff_capture(row, observed_session_id):
         assert row["id"]
         assert row["text"] == "capture this"
         assert observed_session_id == session_id
-        events.append("capture")
+        events.append("handoff")
 
     async def dispatch(payload):
         assert payload["text"] == "capture this"
@@ -219,7 +219,7 @@ def test_workbench_capture_is_accepted_after_commit_before_dispatch(isolated_sta
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     with (
-        patch("vibe.ui_server._schedule_workbench_memory_capture", schedule_capture),
+        patch("vibe.ui_server._handoff_workbench_memory_capture", handoff_capture),
         patch("vibe.internal_client.dispatch_async", dispatch),
     ):
         response = client.post(
@@ -231,20 +231,20 @@ def test_workbench_capture_is_accepted_after_commit_before_dispatch(isolated_sta
         )
 
     assert response.status_code == 201
-    assert events == ["capture", "dispatch"]
+    assert events == ["handoff", "dispatch"]
 
 
 def test_workbench_memory_capture_skips_forwarded_metadata(isolated_state, tmp_path):
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
-    schedule_capture = Mock()
+    handoff_capture = Mock()
     dispatch = AsyncMock(return_value={"status_code": 202, "body": {"ok": True}})
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
 
     with (
-        patch("vibe.ui_server._schedule_workbench_memory_capture", schedule_capture),
+        patch("vibe.ui_server._handoff_workbench_memory_capture", handoff_capture),
         patch("vibe.internal_client.dispatch_async", dispatch),
     ):
         response = client.post(
@@ -256,7 +256,7 @@ def test_workbench_memory_capture_skips_forwarded_metadata(isolated_state, tmp_p
         )
 
     assert response.status_code == 201
-    schedule_capture.assert_not_called()
+    handoff_capture.assert_not_called()
     dispatch.assert_awaited_once()
 
 
