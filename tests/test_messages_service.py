@@ -662,6 +662,32 @@ def test_inbox_and_unread_queries_exclude_background_sessions(isolated_state):
     assert hidden is None
 
 
+def test_list_inbox_sessions_only_session_returns_row_past_window(isolated_state):
+    """``only_session`` fetches one specific foreground session regardless of how
+    many other sessions are more recently active — the path the Inbox foreground
+    reconcile (contract A6) uses to re-add a restored session that sorts past the
+    paged window."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_old", "Old")
+        _insert_msg(conn, scope_id, "ses_old", "agent", "older", "2026-05-30T09:00:00Z", read=True)
+        # Two newer sessions that fill a small window ahead of ses_old.
+        for idx, ts in enumerate(("2026-05-30T10:00:00Z", "2026-05-30T11:00:00Z")):
+            sid = f"ses_new{idx}"
+            _seed_titled_session(conn, scope_id, sid, f"New{idx}")
+            _insert_msg(conn, scope_id, sid, "agent", "newer", ts, read=True)
+
+    with engine.connect() as conn:
+        windowed = messages_service.list_inbox_sessions(conn, platform="avibe", limit=1)
+        targeted = messages_service.list_inbox_sessions(
+            conn, platform="avibe", only_session="ses_old", limit=1
+        )
+
+    assert "ses_old" not in [row["session_id"] for row in windowed["sessions"]]
+    assert [row["session_id"] for row in targeted["sessions"]] == ["ses_old"]
+
+
 def test_list_inbox_sessions_includes_notify_only_failed_turn(isolated_state):
     """A turn that fails before producing any ``result`` persists only a terminal
     ``notify``; that failed conversation must still surface in the inbox (with the

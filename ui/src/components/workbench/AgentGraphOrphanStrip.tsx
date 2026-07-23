@@ -50,7 +50,17 @@ export const AgentGraphOrphanStrip: React.FC<AgentGraphOrphanStripProps> = ({ ro
       <div className="flex flex-col gap-1.5">
         {rows.map((row) => (
           <OrphanRow
-            key={row.composite_key ?? `${row.backend}:${row.pid ?? row.native_session_id ?? ''}`}
+            // composite_key is the unique identifier when present; otherwise
+            // combine every stable identifier the row carries so two session-less
+            // rows from the same backend (e.g. OpenCode active rows with only a
+            // base_session_id, no pid/native id) can't collide onto one React key
+            // and swap OrphanRow state (a stuck/misdirected confirm or spinner).
+            key={
+              row.composite_key ??
+              [row.backend, row.base_session_id, row.native_session_id, row.pid, row.workdir]
+                .map((v) => v ?? '')
+                .join('|')
+            }
             row={row}
             onEnd={onEnd}
           />

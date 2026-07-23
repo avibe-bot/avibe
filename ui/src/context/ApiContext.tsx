@@ -610,7 +610,7 @@ export type ApiContextType = {
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
-  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
+  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
@@ -2648,6 +2648,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.unreadOnly) search.set('unread_only', '1');
       if (params?.limit) search.set('limit', String(params.limit));
       if (params?.before) search.set('before', params.before);
+      if (params?.onlySession) search.set('session', params.onlySession);
       const qs = search.toString();
       const path = qs ? `/api/inbox?${qs}` : '/api/inbox';
       const options = { handleError: params?.handleError };

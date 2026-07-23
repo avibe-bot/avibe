@@ -7658,6 +7658,10 @@ def inbox_list():
     except (TypeError, ValueError):
         limit = 30
     before = request.args.get("before") or None
+    # Targeted single-session fetch: lets a client (e.g. the Inbox visibility
+    # reconcile) guarantee one specific session's row is (re)loaded even when its
+    # activity sorts past the paged window.
+    only_session = request.args.get("session") or None
 
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -7667,6 +7671,7 @@ def inbox_list():
             unread_only=unread_only,
             limit=limit,
             before=before,
+            only_session=only_session,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
