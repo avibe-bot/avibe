@@ -116,7 +116,8 @@
     "capabilities": "Capabilities",
     "more": "More",
     "apps": "Apps",
-    "workbench": "Workbench"
+    "workbench": "Workbench",
+    "models": "Models"
   },
   "more": {
     "title": "More",
@@ -594,7 +595,171 @@
     "inProgressTitle": "This settings page is next in the redesign queue",
     "inProgressBody": "The new route and shell are live, but the feature-specific UI for this section is still being migrated from the old dashboard and wizard flows.",
     "inProgressHint": "Until this section is rebuilt, the setup wizard still exposes the underlying configuration paths.",
-    "openSetup": "Open setup wizard"
+    "openSetup": "Open setup wizard",
+    "models": {
+      "title": "Models",
+      "subtitle": "Connect a source once and every agent uses it; the list order is the spend order — Avibe switches on exhaustion and switches back on recovery.",
+      "addSource": "Add source",
+      "loadError": "Failed to load: {{detail}}",
+      "statusPill": {
+        "ok": "All good · {{count}} agents connected",
+        "degraded": "Some sources need attention · {{count}} agents connected"
+      },
+      "sources": {
+        "title": "Sources",
+        "subtitle": "One global list; drag to reorder — the order is the spend order",
+        "empty": "No sources yet — use “Add source” to connect a subscription or API key."
+      },
+      "source": {
+        "nativeSupply": "Native supply",
+        "hubHosted": "Hub-hosted",
+        "officialEndpoint": "Official endpoint",
+        "customEndpoint": "Custom endpoint",
+        "retryIn": "retry in {{minutes}} min",
+        "reorder": "Reorder",
+        "cooldown": {
+          "timeout": "Repeated timeouts"
+        }
+      },
+      "billing": {
+        "monthly": "Monthly",
+        "metered": "Metered ¥"
+      },
+      "state": {
+        "active": "In use",
+        "standby": "Standby",
+        "cooldown": "Cooling down",
+        "error": "Unavailable"
+      },
+      "usage": {
+        "monthSpend": "{{amount}} this month"
+      },
+      "supplyTooltip": {
+        "label": "Supplies: "
+      },
+      "mode": {
+        "hub": "Hub",
+        "direct": "Direct"
+      },
+      "menuKind": {
+        "fixed": "Fixed menu",
+        "open": "Open menu"
+      },
+      "experimental": "Experimental",
+      "agents": {
+        "title": "Agent",
+        "subtitle": "Which model each agent uses, and who supplies it",
+        "backendSettings": "Backend settings",
+        "modelMenu": "Model menu",
+        "connectHub": "Connect to Hub",
+        "menuComingSoon": "Model menus arrive in the next milestone",
+        "modelCount": "{{count}} models",
+        "multiSource": "Multiple sources",
+        "multiSourceCustom": "Multiple sources · {{count}} custom"
+      },
+      "recent": {
+        "title": "Recent switches",
+        "viewAll": "View all",
+        "collapse": "Collapse",
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "empty": "No switches yet"
+      },
+      "advanced": {
+        "title": "Advanced",
+        "detail": "Cross-vendor auto-substitution (off) · Request log · Diagnostics",
+        "comingSoon": "Advanced settings are coming soon"
+      },
+      "addMenu": {
+        "claude": {
+          "title": "Connect Claude subscription",
+          "subtitle": "Pro / Max · browser sign-in"
+        },
+        "chatgpt": {
+          "title": "Connect ChatGPT subscription",
+          "subtitle": "Plus / Pro · browser sign-in"
+        },
+        "apiKey": {
+          "title": "Add API Key…",
+          "subtitle": "Any vendor or compatible service, editable URL"
+        }
+      },
+      "addKey": {
+        "title": "Add API Key",
+        "subtitle": "Any vendor or compatible service; connect once, shared by every agent.",
+        "vendorLabel": "Vendor",
+        "vendorHint": "Choosing Anthropic / OpenAI / Zhipu / Kimi etc. prefills the official URL.",
+        "keyLabel": "API KEY",
+        "baseUrlLabel": "SERVICE URL (BASE URL)",
+        "baseUrlHint": "Official vendors are prefilled and editable; for a compatible service (relay, self-hosted gateway) enter the URL it gives you.",
+        "discovered": "Connected · discovered {{count}} models, added to the supply list",
+        "failed": "Connection failed: {{detail}}",
+        "testing": "Connecting…",
+        "vaultNote": "Stored locally; can go in Vault",
+        "vendors": {
+          "custom": "Custom · OpenAI / Anthropic compatible",
+          "anthropic": "Anthropic",
+          "openai": "OpenAI",
+          "zhipuai": "Zhipu",
+          "kimi": "Kimi",
+          "xai": "xAI"
+        }
+      },
+      "oauth": {
+        "title": {
+          "anthropic": "Connect Claude subscription",
+          "openai": "Connect ChatGPT subscription",
+          "generic": "Connect subscription"
+        },
+        "starting": "Preparing…",
+        "connected": "Connected — added to your sources",
+        "step1": {
+          "authLink": "Open the authorization link (any device's browser works)",
+          "devicePage": "Open the device authorization page"
+        },
+        "pasteCode": {
+          "hint": "After you sign in and approve, paste the code back here"
+        },
+        "callback": {
+          "hint": "After signing in, paste the callback URL your browser landed on"
+        },
+        "deviceCode": {
+          "hint": "Enter the device code on that page; this continues automatically"
+        },
+        "status": {
+          "awaitingPaste": "Waiting for authorization · times out in {{time}}",
+          "awaitingDevice": "Waiting to finish · detected automatically, nothing to paste",
+          "verifying": "Verifying…",
+          "success": "Connected"
+        },
+        "error": {
+          "start": "Couldn't start authorization, please retry",
+          "timeout": "Authorization timed out, please reconnect",
+          "generic": "Connection failed, please retry"
+        },
+        "hubOption": {
+          "title": "Let the Hub hold this subscription (experimental)",
+          "subtitle": "The Hub stores and forwards the credential; may violate vendor terms",
+          "on": "On",
+          "off": "Off"
+        }
+      },
+      "consent": {
+        "title": "Hub-held subscription · risk notice",
+        "subtitle": "Please confirm you understand the risks before enabling.",
+        "points": [
+          "This source uses your own subscription login. Vendor terms generally intend a subscription for personal use inside the official client; routing it through the hub proxy is an unofficial use that may violate those terms.",
+          "There is a real risk of rate-limiting, review, or account suspension (Claude subscriptions used via proxies have been auto-disabled). Enabling this is your choice and at your own risk.",
+          "For the safest setup, use Direct mode for subscriptions (official client, direct connection), or add an API Key source instead — vendors explicitly permit programmatic / proxied use of API keys."
+        ],
+        "confirm": "I understand the risks, continue"
+      },
+      "toast": {
+        "reorderFailed": "Couldn't save the new order",
+        "connected": "Connected to the Hub",
+        "connectFailed": "Couldn't connect, please retry"
+      }
+    }
   },
   "remoteAccess": {
     "badge": "Avibe Cloud provider",

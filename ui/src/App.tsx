@@ -66,6 +66,12 @@ const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ def
 const ShowPageRoute = lazy(() =>
   import('./components/apps/ShowPageRoute').then((m) => ({ default: m.ShowPageRoute })),
 );
+// Settings → Models (Model Hub, L4). Lazy so its code + framer-motion Reorder
+// stay out of the main entry — the surface is nav-gated until its backend
+// dependencies land (see models/featureFlags.ts).
+const SettingsModelsPage = lazy(() =>
+  import('./components/settings/models/SettingsModelsPage').then((m) => ({ default: m.SettingsModelsPage })),
+);
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
@@ -541,6 +547,14 @@ const router = createBrowserRouter(
         <Route path="/admin/settings/backends/opencode" element={<SettingsOpencodeProviderPage />} />
         <Route path="/admin/settings/backends/claude" element={<SettingsClaudeProviderPage />} />
         <Route path="/admin/settings/backends/codex" element={<SettingsCodexProviderPage />} />
+        <Route
+          path="/admin/settings/models"
+          element={
+            <Suspense fallback={<AppsRouteFallback />}>
+              <SettingsModelsPage />
+            </Suspense>
+          }
+        />
         <Route path="/admin/settings/dependencies" element={<SettingsDependenciesPage />} />
         <Route path="/admin/settings/messaging" element={<SettingsMessagingPage />} />
         <Route path="/admin/settings/diagnostics" element={<SettingsDiagnosticsPage />} />
@@ -564,6 +578,7 @@ const router = createBrowserRouter(
         <Route path="/settings/backends/opencode" element={<Navigate to="/admin/settings/backends/opencode" replace />} />
         <Route path="/settings/backends/claude" element={<Navigate to="/admin/settings/backends/claude" replace />} />
         <Route path="/settings/backends/codex" element={<Navigate to="/admin/settings/backends/codex" replace />} />
+        <Route path="/settings/models" element={<Navigate to="/admin/settings/models" replace />} />
         <Route path="/settings/dependencies" element={<Navigate to="/admin/settings/dependencies" replace />} />
         <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
         <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
