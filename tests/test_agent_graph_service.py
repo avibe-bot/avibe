@@ -592,6 +592,32 @@ def test_node_cap_truncates(seeded):
     assert {n["session_id"] for n in payload["nodes"]} == {"ses_root", "ses_child_a"}
 
 
+def test_cap_applies_project_filter_before_capping(isolated_state):
+    # With more candidates than the cap, a project-filtered view must still
+    # return that project's session even when it is older than sessions in other
+    # scopes — the pre-run candidate cap applies the project/background filter
+    # first, so a busy install can't crowd the selected project out of the cap
+    # (and its runs are the only ones loaded).
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_scope(conn)
+        _insert_session(conn, "ses_proj", scope_id=PROJECT_SCOPE, title="Proj",
+                        last_active=NOW - timedelta(hours=3))
+        _insert_run(conn, "run_proj", session_id="ses_proj", created=NOW - timedelta(hours=3))
+        # Two newer standalone sessions that would win a global recency cap.
+        for idx in range(2):
+            sid = f"ses_free{idx}"
+            _insert_session(conn, sid, scope_id=None, title=f"Free{idx}",
+                            last_active=NOW - timedelta(minutes=idx + 1))
+            _insert_run(conn, f"run_free{idx}", session_id=sid,
+                        created=NOW - timedelta(minutes=idx + 1))
+
+    payload = agent_graph.build_graph(
+        live_agents=[], now=NOW, engine=engine, node_cap=1, project=PROJECT_ID
+    )
+    assert [n["session_id"] for n in payload["nodes"]] == ["ses_proj"]
+
+
 def test_visibility_emitted_and_filtered(isolated_state):
     # M1's ``agent_sessions.visibility`` is now a hard column: every node
     # carries it (legacy rows backfill to foreground), a background session is

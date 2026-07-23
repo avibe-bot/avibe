@@ -140,10 +140,17 @@ export const AgentGraphTab: React.FC = () => {
         // loading stuck true forever.
         if (mountedRef.current && !background) setLoading(false);
         // Run the single coalesced refresh requested while this one was in
-        // flight, so bursts collapse to one trailing fetch.
-        if (mountedRef.current && pendingBgRef.current) {
+        // flight, so bursts collapse to one trailing fetch — but only if no
+        // newer fetch has started. If the user changed a filter (or any newer
+        // fetch bumped seqRef) the current `fetchGraph` closure holds stale
+        // params; replaying it would overwrite the graph with the old filter's
+        // results. The newer in-flight fetch already covers freshness, so drop
+        // the stale trailing refresh.
+        if (mountedRef.current && pendingBgRef.current && seq === seqRef.current) {
           pendingBgRef.current = false;
           void fetchGraph(true);
+        } else if (seq !== seqRef.current) {
+          pendingBgRef.current = false;
         }
       }
     },
@@ -387,6 +394,10 @@ export const AgentGraphTab: React.FC = () => {
                 triggerNodes={triggerNodes}
                 edges={edges}
                 selectedId={selectedNodeId}
+                // Refit the viewport when the filters change the layout (small→
+                // large graph, different project/window); SSE-only refreshes keep
+                // the same key and preserve the current pan/zoom.
+                fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}`}
                 onSelectNode={setSelectedNodeId}
                 onSelectTrigger={onSelectTrigger}
                 onOpenChat={(id) => navigate(`/chat/${encodeURIComponent(id)}`)}

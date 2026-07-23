@@ -131,6 +131,9 @@ interface AgentGraphCanvasProps {
   triggerNodes: AgentGraphTriggerNode[];
   edges: AgentGraphEdge[];
   selectedId: string | null;
+  // Changes when the user changes a filter; a new value re-fits the viewport to
+  // the new layout. Unchanged across SSE/poll refreshes so they keep the view.
+  fitKey: string;
   onSelectNode: (sessionId: string) => void;
   onSelectTrigger: (definitionId: string) => void;
   onOpenChat: (sessionId: string) => void;
@@ -148,6 +151,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   triggerNodes,
   edges,
   selectedId,
+  fitKey,
   onSelectNode,
   onSelectTrigger,
   onOpenChat,
@@ -245,8 +249,14 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   useEffect(() => setRfNodes(computedNodes), [computedNodes, setRfNodes]);
   useEffect(() => setRfEdges(computedEdges), [computedEdges, setRfEdges]);
 
-  // Fit once, after the first non-empty layout is measured; later SSE refreshes
-  // keep the viewport stable (no jump).
+  // A deliberate filter/layout change re-arms the fit guard so the next measured
+  // layout re-fits; SSE/poll refreshes keep the same fitKey and preserve the view.
+  useEffect(() => {
+    fittedRef.current = false;
+  }, [fitKey]);
+
+  // Fit after the first non-empty layout is measured (and again after a fitKey
+  // change re-arms the guard); plain SSE refreshes keep the viewport stable.
   useEffect(() => {
     if (!fittedRef.current && rfNodes.length) {
       fittedRef.current = true;

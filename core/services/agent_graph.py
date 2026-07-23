@@ -228,22 +228,38 @@ def build_graph(
             if not candidate_ids:
                 return _empty_payload(now, window, live_unreachable)
 
-            runs_by_session = _load_runs(conn, candidate_ids)
-            # Pull in lineage sessions referenced by ANY run of a candidate — even
-            # a spawn/callback run older than the window (e.g. a long-lived live
-            # session's original delegation). Without this the edge would be
-            # dropped in pruning because its other endpoint was never loaded, and
-            # the live node would look like a human-started root with no report
-            # target. Expand to a fixed point: a lineage session's own runs can
-            # reference further ancestors/targets.
+            # Bound the expensive run-history load: rank the candidate SESSIONS
+            # (cheap — no runs) the same way the node cap ranks nodes, after the
+            # session-level project/background filters, and keep only the top
+            # ``node_cap`` before loading runs. A busy install can have many more
+            # candidates than the cap; loading every run for all of them on each
+            # SSE/poll refresh is wasted work since the response is truncated
+            # anyway. ``include_ended`` is intentionally NOT pre-applied here
+            # (``queued`` is a run-derived status), so a recent queued session
+            # that survives the cap still reaches the active view.
+            candidate_rows = _load_sessions(conn, candidate_ids)
+            eligible = _prefilter_candidate_rows(
+                candidate_rows, project=project, include_background=include_background,
+            )
+            eligible.sort(key=lambda r: _session_sort_key(r, live_ids))
+            candidate_truncated = len(eligible) > node_cap
+            session_by_id = {r["id"]: r for r in eligible[:node_cap]}
+
+            runs_by_session = _load_runs(conn, set(session_by_id))
+            # Pull in lineage sessions referenced by ANY run of a retained
+            # candidate — even a spawn/callback run older than the window (e.g. a
+            # long-lived live session's original delegation) — so the edge and its
+            # "who started it / reports to" endpoints survive. Fixed point: a
+            # lineage session's own runs can reference further ancestors/targets.
             while True:
-                extra = _lineage_refs(runs_by_session) - candidate_ids
+                extra = _lineage_refs(runs_by_session) - set(session_by_id)
                 if not extra:
                     break
-                candidate_ids |= extra
                 runs_by_session.update(_load_runs(conn, extra))
-            session_rows = _load_sessions(conn, candidate_ids)
-            edges, trigger_ids = _build_edges(runs_by_session, candidate_ids)
+                for row in _load_sessions(conn, extra):
+                    session_by_id.setdefault(row["id"], row)
+            session_rows = list(session_by_id.values())
+            edges, trigger_ids = _build_edges(runs_by_session, set(session_by_id))
             trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
     finally:
         if owned_engine:
@@ -252,7 +268,8 @@ def build_graph(
     nodes = _build_nodes(session_rows, runs_by_session, live_by_session)
     nodes = _filter_nodes(nodes, project=project, include_ended=include_ended,
                           include_background=include_background)
-    nodes, truncated = _cap_nodes(nodes, node_cap)
+    nodes, cap_truncated = _cap_nodes(nodes, node_cap)
+    truncated = candidate_truncated or cap_truncated
 
     node_ids = {n["session_id"] for n in nodes}
     edges = _filter_edges(edges, node_ids, {t["definition_id"] for t in trigger_nodes})
@@ -615,6 +632,36 @@ def _node_sort_key(node: dict[str, Any]) -> tuple[int, str]:
 def _invert_iso(value: str) -> str:
     # Sort ISO timestamps descending under an ascending sort by inverting bytes.
     return "".join(chr(0x10FFFF - ord(c)) if ord(c) < 0x10FFFF else c for c in value)
+
+
+def _session_sort_key(row: dict[str, Any], live_ids: set[str]) -> tuple[int, str]:
+    # Mirror _node_sort_key on a raw session row so candidates can be ranked (and
+    # capped) before their run histories are loaded.
+    activity = row.get("last_active_at") or row.get("created_at") or ""
+    sid = row["id"]
+    return (0 if sid in live_ids else 1, _invert_iso(activity) + sid)
+
+
+def _prefilter_candidate_rows(
+    rows: list[dict[str, Any]],
+    *,
+    project: str,
+    include_background: bool,
+) -> list[dict[str, Any]]:
+    # The session-level subset of _filter_nodes (project + background), applied to
+    # raw session rows so the pre-run cap never drops a row a project/background
+    # filter would keep. include_ended is deliberately excluded — it needs the
+    # run-derived status, so it stays a post-load node filter.
+    result = rows
+    if not include_background:
+        result = [r for r in result if (r.get("visibility") or "foreground") != "background"]
+    if project and project != "all":
+        if project == "standalone":
+            result = [r for r in result if not r.get("scope_id")]
+        else:
+            target = f"avibe::project::{project}"
+            result = [r for r in result if r.get("scope_id") == target]
+    return list(result)
 
 
 def _cap_nodes(nodes: list[dict[str, Any]], node_cap: int) -> tuple[list[dict[str, Any]], bool]:
