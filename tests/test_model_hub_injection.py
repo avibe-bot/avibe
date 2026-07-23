@@ -38,6 +38,7 @@ from modules.agents.model_hub import (
     opencode_model_for_overlay,
     overlay_identifier_bytes,
     persisted_launch_identity,
+    resolve_opencode_overlay_launch,
 )
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.opencode.server import OpenCodeServerManager
@@ -705,6 +706,8 @@ def test_mh_ovl_001_unavailable_menu_entry_does_not_block_healthy_model(tmp_path
         "anthropic/claude-opus",
         "custom/local-model",
     ]
+    assert cooling_overlay.available_identifiers == ("custom/local-model",)
+    assert opencode_model_for_overlay(None, cooling_overlay) == "custom/local-model"
     assert opencode_model_for_overlay("custom/local-model", cooling_overlay) == "custom/local-model"
     with pytest.raises(ModelHubError):
         asyncio.run(router.resolve("opencode", "anthropic/claude-opus"))
@@ -715,6 +718,68 @@ def test_mh_ovl_001_unavailable_menu_entry_does_not_block_healthy_model(tmp_path
     assert reduced_overlay is not None
     assert reduced_overlay.checked_identifiers == ("custom/local-model",)
     assert opencode_model_for_overlay("custom/local-model", reduced_overlay) == "custom/local-model"
+
+
+def test_mh_ovl_001_turn_uses_overlay_source_snapshot(tmp_path: Path) -> None:
+    primary = _source(
+        "src_hub_snapshot_a",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus",),
+    )
+    backup = _source(
+        "src_hub_snapshot_b",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus",),
+    )
+    agents = _agents()
+    agents["opencode"].menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["anthropic/claude-opus"],
+    )
+    config = ModelHubConfig(
+        sources=[primary, backup],
+        priority_order=[primary.id, backup.id],
+        agents=agents,
+    )
+    adapter = LaunchAdapter(
+        {
+            primary.id: "route-snapshot-a",
+            backup.id: "route-snapshot-b",
+        }
+    )
+    service = _service(
+        tmp_path,
+        config,
+        adapter,
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = _router(service, overlay_path=tmp_path / "overlay.json")
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+    assert overlay is not None
+
+    config.priority_order = [backup.id, primary.id]
+    launch = asyncio.run(
+        resolve_opencode_overlay_launch(
+            SimpleNamespace(model_hub_runtime=router),
+            "anthropic/claude-opus",
+            overlay,
+        )
+    )
+
+    assert launch.source_id == primary.id
+    assert launch.runtime_model == "route-snapshot-a/claude-opus"
+    assert asyncio.run(router.resolve("opencode", "anthropic/claude-opus")).source_id == backup.id
+    context = SimpleNamespace()
+    bind_launch(context, launch)
+    assert asyncio.run(router.record_native_failure(context, "429 rate limit")) is True
+    assert primary.state.status == "cooldown"
+    assert backup.state.status == "standby"
 
 
 def test_mh_chan_001_switch_telemetry_is_isolated_per_model_route(tmp_path: Path) -> None:
@@ -1016,6 +1081,54 @@ def test_mh_inj_codex_runtime_change_interrupts_current_session_first() -> None:
             "turn/interrupt",
             {"threadId": "thread-current", "turnId": "turn-current"},
         )
+        assert active["turn"] is None
+        agent._remove_ack_reaction.assert_awaited_once_with(interrupted_request)
+        agent._event_handler._release_stream_turn.assert_called_once_with(interrupted_request.context)
+
+    asyncio.run(exercise())
+
+
+def test_mh_inj_codex_runtime_change_replaces_transport_when_interrupt_fails() -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        active = {"turn": "turn-current"}
+        transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="direct",
+            send_request=AsyncMock(side_effect=ConnectionError("transport closed")),
+        )
+        interrupted_request = SimpleNamespace(context=object())
+
+        def clear_pending(turn_id: str):
+            assert turn_id == "turn-current"
+            active["turn"] = None
+            return interrupted_request
+
+        agent._transports = {"/work": transport}
+        agent._session_mgr = SimpleNamespace(get_thread_id=Mock(return_value="thread-current"))
+        agent._turn_registry = SimpleNamespace(get_active_turn=lambda _base: active["turn"])
+        agent._event_handler = SimpleNamespace(
+            clear_pending=Mock(side_effect=clear_pending),
+            _release_stream_turn=Mock(),
+        )
+        agent._remove_ack_reaction = AsyncMock()
+        request = SimpleNamespace(
+            working_path="/work",
+            base_session_id="session-current",
+        )
+        launch = ModelHubLaunch(
+            "codex",
+            "hub",
+            "gpt-5",
+            "gpt-5",
+            "route/gpt-5",
+            "src_hub",
+            "http://127.0.0.1:18443",
+            "token",
+        )
+
+        await agent._interrupt_active_turn_before_runtime_change(request, launch)
+
         assert active["turn"] is None
         agent._remove_ack_reaction.assert_awaited_once_with(interrupted_request)
         agent._event_handler._release_stream_turn.assert_called_once_with(interrupted_request.context)

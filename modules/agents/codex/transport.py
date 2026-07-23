@@ -69,8 +69,8 @@ class CodexTransport:
 
         cmd = (
             [self._binary, "--dangerously-bypass-approvals-and-sandbox"]
-            + self._runtime_args
             + ["app-server"]
+            + self._runtime_args
             + self._extra_args
         )
         logger.info("Launching Codex app-server: %s (cwd=%s)", " ".join(cmd), self._cwd)

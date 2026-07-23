@@ -842,10 +842,21 @@ class CodexAgent(BaseAgent):
         active_turn = self._turn_registry.get_active_turn(request.base_session_id)
         if not thread_id or not active_turn:
             return
-        await transport.send_request(
-            "turn/interrupt",
-            {"threadId": thread_id, "turnId": active_turn},
-        )
+        try:
+            await transport.send_request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": active_turn},
+            )
+        except Exception:
+            # A dead/wedged transport cannot acknowledge the interrupt. Hide
+            # and release the old turn anyway so the runtime-change path can
+            # replace that transport instead of waiting on it forever.
+            logger.warning(
+                "Codex turn interrupt failed before Model Hub runtime change; "
+                "replacing stale transport for cwd=%s",
+                request.working_path,
+                exc_info=True,
+            )
         interrupted_request = self._event_handler.clear_pending(active_turn)
         if interrupted_request:
             await self._remove_ack_reaction(interrupted_request)

@@ -26,7 +26,7 @@ from modules.agents.model_hub import (
     bind_launch,
     opencode_model_for_overlay,
     persisted_launch_identity,
-    resolve_model_hub_launch,
+    resolve_opencode_overlay_launch,
 )
 
 from .caller_context import bind_session as bind_caller_context_session
@@ -313,10 +313,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_str = getattr(opencode_cfg, "default_model", None)
             model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
             if model_hub_runtime is not None and model_str:
-                model_hub_launch = await resolve_model_hub_launch(
+                model_hub_launch = await resolve_opencode_overlay_launch(
                     self.controller,
-                    "opencode",
                     model_str,
+                    model_hub_overlay,
                 )
                 bind_launch(request.context, model_hub_launch)
             # Bare model id (no ``provider/`` prefix): only inject ``providerID``

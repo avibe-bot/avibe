@@ -8,7 +8,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
 
@@ -72,6 +72,8 @@ class OpenCodeOverlay:
     content_hash: str
     content: bytes
     checked_identifiers: tuple[str, ...]
+    available_identifiers: tuple[str, ...]
+    launches: tuple[ModelHubLaunch, ...] = field(repr=False)
 
 
 def bind_launch(context: Any, launch: ModelHubLaunch) -> None:
@@ -153,6 +155,18 @@ async def resolve_model_hub_launch(
         target_model=requested_model,
         runtime_model=requested_model,
     )
+
+
+async def resolve_opencode_overlay_launch(
+    controller: Any,
+    requested_model: str,
+    overlay: OpenCodeOverlay | None,
+) -> ModelHubLaunch:
+    router = getattr(controller, "model_hub_runtime", None)
+    resolver = getattr(router, "resolve_opencode_overlay_launch", None)
+    if overlay is not None and callable(resolver):
+        return await resolver(overlay, requested_model)
+    return await resolve_model_hub_launch(controller, "opencode", requested_model)
 
 
 def build_claude_hub_env(
@@ -489,6 +503,24 @@ class ModelHubRuntimeRouter:
         self._emit_channel_switch(launch)
         return launch
 
+    async def resolve_opencode_overlay_launch(
+        self,
+        overlay: OpenCodeOverlay,
+        requested_model: str,
+    ) -> ModelHubLaunch:
+        """Activate the exact source snapshot used to build an overlay."""
+
+        launch = next(
+            (item for item in overlay.launches if item.requested_model == requested_model),
+            None,
+        )
+        if launch is None:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        config = self.service.store.load()
+        self._emit_source_switch(launch, config)
+        self._emit_channel_switch(launch)
+        return launch
+
     async def record_native_failure(self, context: Any, diagnostic: str) -> bool:
         """Record a terminal source failure for the next per-turn resolution.
 
@@ -541,9 +573,11 @@ class ModelHubRuntimeRouter:
 
         gateway_base_url, gateway_token = await self._gateway_credentials()
         providers: dict[str, dict[str, Any]] = {}
+        projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
+        launches: list[ModelHubLaunch] = []
         sources_by_id = {source.id: source for source in config.sources}
-        for identifier in sorted(checked):
+        for identifier in dict.fromkeys(checked):
             try:
                 provider_id, model_id = parse_opencode_model_id(identifier)
             except ValueError:
@@ -553,7 +587,11 @@ class ModelHubRuntimeRouter:
                 model_id,
                 provider=provider_id,
             )
-            source = next((candidate for candidate in candidates if candidate.supply_channel == "hub"), None)
+            available_source = next(
+                (candidate for candidate in candidates if candidate.supply_channel == "hub"),
+                None,
+            )
+            source = available_source
             if source is None:
                 # Keep a cooling/error route's public identifier stable in the
                 # overlay. Per-turn resolution still rejects that requested
@@ -590,9 +628,23 @@ class ModelHubRuntimeRouter:
                 "id": f"{prefix}/{model_id}",
                 "name": model.display_name or model_id,
             }
-            available_identifiers.append(identifier)
+            projected_identifiers.append(identifier)
+            if available_source is not None:
+                available_identifiers.append(identifier)
+                launches.append(
+                    ModelHubLaunch(
+                        backend="opencode",
+                        channel="hub",
+                        requested_model=identifier,
+                        target_model=model_id,
+                        runtime_model=f"{prefix}/{model_id}",
+                        source_id=source.id,
+                        gateway_base_url=gateway_base_url,
+                        gateway_token=gateway_token,
+                    )
+                )
 
-        if not available_identifiers:
+        if not projected_identifiers:
             raise ModelHubError("mapping_target_unavailable", status=409)
 
         content = (
@@ -610,7 +662,9 @@ class ModelHubRuntimeRouter:
             path=self.overlay_path,
             content_hash=content_hash,
             content=content,
-            checked_identifiers=tuple(available_identifiers),
+            checked_identifiers=tuple(projected_identifiers),
+            available_identifiers=tuple(available_identifiers),
+            launches=tuple(launches),
         )
 
     def _secure_write_overlay(self, content: bytes) -> None:
@@ -643,7 +697,9 @@ def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | Non
         return model
     candidate = str(model or "").strip()
     if not candidate:
-        return overlay.checked_identifiers[0]
+        if not overlay.available_identifiers:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        return overlay.available_identifiers[0]
     if candidate in overlay.checked_identifiers:
         return candidate
     matches = [identifier for identifier in overlay.checked_identifiers if identifier.endswith(f"/{candidate}")]
