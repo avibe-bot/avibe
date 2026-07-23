@@ -18,6 +18,26 @@ from vibe.model_hub_runtime.state import SourceRecord
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 64 * 1024
 _MODEL_PROBE_BYTES = 4 * 1024 * 1024
+_SAFE_ERROR_CODES = frozenset(
+    {
+        "api_error",
+        "authentication_error",
+        "billing_error",
+        "context_length_exceeded",
+        "insufficient_quota",
+        "invalid_api_key",
+        "invalid_request_error",
+        "model_not_found",
+        "not_found_error",
+        "overloaded_error",
+        "permission_error",
+        "quota_exceeded",
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "request_too_large",
+        "server_error",
+    }
+)
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
@@ -180,22 +200,27 @@ class EngineClient:
                     )
                 )
             if not stream:
-                buffered = bytearray(first)
-                async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
-                    buffered.extend(chunk)
-                    if len(buffered) > _MAX_RESPONSE_BYTES:
-                        response.close()
-                        await session.close()
-                        return completed_handle(
-                            _outcome(
-                                kind=RawOutcomeKind.PROTOCOL_ERROR,
-                                source=source,
-                                model_id=model_id,
-                                http_status=response.status,
-                                message="upstream response exceeded the local limit",
-                            )
+                try:
+                    first = await asyncio.wait_for(
+                        _read_limited(
+                            response.content,
+                            _MAX_RESPONSE_BYTES,
+                            initial=first,
+                        ),
+                        timeout=self.timeout,
+                    )
+                except _ResponseTooLargeError:
+                    response.close()
+                    await session.close()
+                    return completed_handle(
+                        _outcome(
+                            kind=RawOutcomeKind.PROTOCOL_ERROR,
+                            source=source,
+                            model_id=model_id,
+                            http_status=response.status,
+                            message="upstream response exceeded the local limit",
                         )
-                first = bytes(buffered)
+                    )
                 if not _is_json(first):
                     response.close()
                     await session.close()
@@ -350,8 +375,15 @@ async def probe_models(
     return tuple(model_ids)
 
 
-async def _read_limited(content: aiohttp.StreamReader, limit: int) -> bytes:
-    payload = bytearray()
+async def _read_limited(
+    content: aiohttp.StreamReader,
+    limit: int,
+    *,
+    initial: bytes = b"",
+) -> bytes:
+    payload = bytearray(initial)
+    if len(payload) > limit:
+        raise _ResponseTooLargeError
     while True:
         chunk = await content.read(min(_STREAM_CHUNK_BYTES, limit + 1 - len(payload)))
         if not chunk:
@@ -464,9 +496,15 @@ def _error_code(payload: bytes) -> str | None:
     error = decoded.get("error")
     if isinstance(error, dict):
         value = error.get("type") or error.get("code")
-        return str(value) if value else None
+        return _safe_error_code(value)
     value = decoded.get("code")
-    return str(value) if value else None
+    return _safe_error_code(value)
+
+
+def _safe_error_code(value: object) -> str | None:
+    if not isinstance(value, str) or value not in _SAFE_ERROR_CODES:
+        return None
+    return value
 
 
 def _is_json(payload: bytes) -> bool:

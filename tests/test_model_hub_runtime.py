@@ -227,6 +227,11 @@ def test_config_generation_is_private_and_never_logs_secrets(
     ):
         assert secret not in caplog.text
 
+    secrets_path = instance_dir / "runtime-secrets.json"
+    secrets_path.chmod(0o644)
+    with pytest.raises(EngineStateError, match="runtime secret permissions are unsafe"):
+        store.prepare_instance("install-1")
+
 
 def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> None:
     store = EngineStateStore(tmp_path / "state")
@@ -238,6 +243,10 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
 
     with pytest.raises(EngineStateError, match="invalid source base URL"):
         store.sync_sources([_binding(credential_ref, base_url="https://user:password@example.test/v1")])
+
+    incomplete_ref = store.store_api_key("secret", base_url=None)
+    with pytest.raises(EngineStateError, match="requires a base URL"):
+        store.sync_sources([_binding(incomplete_ref, base_url=None)])
 
     auth_file = store.auth_dir / "oauth.json"
     auth_file.write_text("{}", encoding="utf-8")
@@ -454,6 +463,9 @@ class Handler(BaseHTTPRequestHandler):
         if payload['model'].endswith('/rate-limited'):
             self._json(429, {{'error': {{'type': 'quota_exceeded', 'message': 'upstream-secret'}}}})
             return
+        if payload['model'].endswith('/unsafe-error-code'):
+            self._json(400, {{'error': {{'type': 'invalid_key_upstream-secret'}}}})
+            return
         if payload['model'].endswith('/stalled-first-byte'):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -467,6 +479,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', '1')
             self.end_headers()
+            self.wfile.flush()
+            time.sleep(1)
+            return
+        if payload['model'].endswith('/stalled-non-stream'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', '2')
+            self.end_headers()
+            self.wfile.write(b'{{')
             self.wfile.flush()
             time.sleep(1)
             return
@@ -573,7 +594,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
                 _binding(
                     credential_ref,
                     allowed_origins=("codex",),
-                    model_ids=("model-a", "rate-limited"),
+                    model_ids=("model-a", "rate-limited", "unsafe-error-code"),
                 )
             ]
         )
@@ -601,11 +622,86 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         assert failure.http_status == 429
         assert failure.error_code == "quota_exceeded"
         assert "upstream-secret" not in (failure.redacted_message or "")
+        unsafe_code = await adapter.invoke("src_fixture123", "unsafe-error-code", {}, False, "codex")
+        assert (await unsafe_code.outcome()).error_code is None
         await adapter.stop()
         with pytest.raises(EngineStateError, match="still bound"):
             await adapter.revoke_credential(credential_ref)
         await adapter.sync_sources([])
         await adapter.revoke_credential(credential_ref)
+
+    asyncio.run(run())
+
+
+def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -> None:
+    class Supervisor:
+        def __init__(self) -> None:
+            self.restore_calls = 0
+
+        def client_if_running(self):
+            return object()
+
+        def restart_if_running(self) -> None:
+            raise EngineUnavailableError("models.engine.health_failed")
+
+        def ensure_running(self):
+            self.restore_calls += 1
+            return object()
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        old_ref = store.store_api_key(
+            "old-secret",
+            base_url="https://old.example.test/v1",
+        )
+        new_ref = store.store_api_key(
+            "new-secret",
+            base_url="https://new.example.test/v1",
+        )
+        old_binding = _binding(old_ref, base_url="https://old.example.test/v1")
+        store.sync_sources([old_binding])
+        supervisor = Supervisor()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=supervisor,  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        with pytest.raises(EngineUnavailableError, match="models.engine.health_failed"):
+            await adapter.sync_sources(
+                [_binding(new_ref, base_url="https://new.example.test/v1")]
+            )
+
+        restored = store.get_source("src_fixture123")
+        assert restored is not None
+        assert restored.credential_ref == old_ref
+        assert supervisor.restore_calls == 1
+
+    asyncio.run(run())
+
+
+def test_adapter_engine_unavailable_outcome_contains_only_a_stable_code(tmp_path: Path) -> None:
+    class Supervisor:
+        def client(self):
+            raise EngineUnavailableError("models.engine.health_failed")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources([_binding(credential_ref)])
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        handle = await adapter.invoke("src_fixture123", "model-a", {}, False, "codex")
+        outcome = await handle.outcome()
+
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.error_code == "engine_unavailable"
+        assert outcome.redacted_message is None
 
     asyncio.run(run())
 
@@ -663,8 +759,19 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("model_id", ["stalled-first-byte", "stalled-error-body"])
-def test_engine_client_times_out_before_first_body_byte(tmp_path: Path, model_id: str) -> None:
+@pytest.mark.parametrize(
+    ("model_id", "stream"),
+    [
+        ("stalled-first-byte", True),
+        ("stalled-error-body", True),
+        ("stalled-non-stream", False),
+    ],
+)
+def test_engine_client_times_out_before_completion(
+    tmp_path: Path,
+    model_id: str,
+    stream: bool,
+) -> None:
     async def run() -> None:
         supervisor, store = _fixture_supervisor(tmp_path / model_id)
         credential_ref = store.store_api_key(
@@ -680,7 +787,7 @@ def test_engine_client_times_out_before_first_body_byte(tmp_path: Path, model_id
             source,
             model_id,
             {},
-            stream=True,
+            stream=stream,
         )
 
         assert handle.stream is None
@@ -738,7 +845,7 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
 
 @pytest.mark.parametrize(
     "oauth_record_case",
-    ["new", "refresh", "conflict", "patch_failure"],
+    ["new", "refresh", "conflict", "patch_failure", "new_patch_failure"],
 )
 def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
     tmp_path: Path,
@@ -748,12 +855,16 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         def __init__(self) -> None:
             self.auth_calls = 0
             self.patches: list[dict[str, object]] = []
+            self.deletes: list[str] = []
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             if path == "/auth-files":
+                if method == "DELETE":
+                    self.deletes.append(str((query or {}).get("name")))
+                    return {"status": "ok"}
                 self.auth_calls += 1
                 if self.auth_calls == 1:
-                    if oauth_record_case == "new":
+                    if oauth_record_case in {"new", "new_patch_failure"}:
                         return {"files": []}
                     return {
                         "files": [
@@ -780,7 +891,7 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             if path == "/get-auth-status":
                 return {"status": "ok"}
             if path == "/auth-files/fields":
-                if oauth_record_case == "patch_failure":
+                if oauth_record_case in {"patch_failure", "new_patch_failure"}:
                     raise EngineClientError("patch failed")
                 self.patches.append(dict(payload or {}))
                 return {"status": "ok"}
@@ -807,7 +918,7 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         (store.auth_dir / "claude-account.json").chmod(0o600)
         existing_ref = None
         existing_prefix = None
-        if oauth_record_case != "new":
+        if oauth_record_case not in {"new", "new_patch_failure"}:
             existing_ref = store.bind_oauth_credential(
                 "src_other1234" if oauth_record_case == "conflict" else "src_fixture123",
                 "anthropic",
@@ -849,11 +960,18 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             assert not client.patches
             return
 
-        if oauth_record_case == "patch_failure":
+        if oauth_record_case in {"patch_failure", "new_patch_failure"}:
             assert completed.state == "failed"
             assert completed.error_key == "models.oauth.binding_failed"
             assert concurrent.state == "failed"
-            assert store.credential_metadata(existing_ref)["prefix"] == existing_prefix
+            if oauth_record_case == "patch_failure":
+                assert store.credential_metadata(existing_ref)["prefix"] == existing_prefix
+                assert (store.auth_dir / "claude-account.json").exists()
+                assert not client.deletes
+            else:
+                assert client.deletes == ["claude-account.json"]
+                assert not (store.auth_dir / "claude-account.json").exists()
+                assert not list((store.root / "credentials").glob("*.json"))
             retry = await adapter.start_oauth("src_fixture123", "anthropic")
             assert retry.state == "awaiting_action"
             return

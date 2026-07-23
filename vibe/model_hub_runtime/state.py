@@ -74,6 +74,7 @@ class EngineStateStore:
             self._remove_obsolete_instances(instance_dir)
             secrets_path = instance_dir / "runtime-secrets.json"
             if not rotate:
+                self._assert_private_file(secrets_path, "runtime secret permissions are unsafe")
                 existing = self._read_json(secrets_path)
                 if existing:
                     management_key = existing.get("management_key")
@@ -182,6 +183,7 @@ class EngineStateStore:
                     raise EngineStateError("unsupported source protocol")
                 vendor = str(binding.vendor).strip().lower()
                 base_url = _validated_base_url(binding.base_url)
+                _validate_source_target(vendor, protocol, base_url)
                 if credential["kind"] == "api_key":
                     if (
                         credential.get("vendor") != vendor
@@ -224,6 +226,11 @@ class EngineStateStore:
                 )
             self._write_sources(records)
             return records
+
+    def replace_sources(self, sources: Sequence[SourceRecord]) -> None:
+        """Restore a previously validated source projection."""
+        with self._lock:
+            self._write_sources(sources)
 
     def set_models(self, source_id: str, model_ids: Sequence[str]) -> SourceRecord:
         with self._lock:
@@ -316,6 +323,18 @@ class EngineStateStore:
         payload = self.credential_metadata(credential_ref)
         value = payload.get("auth_name") if payload.get("kind") == "oauth" else None
         return str(value) if value else None
+
+    def oauth_credential_ref(self, auth_name: str) -> str | None:
+        normalized = auth_name.strip()
+        with self._lock:
+            matches = [
+                credential_ref
+                for credential_ref, payload in self._oauth_credentials()
+                if payload.get("auth_name") == normalized
+            ]
+        if len(matches) > 1:
+            raise EngineStateError("OAuth auth record binding is ambiguous")
+        return matches[0] if matches else None
 
     def delete_oauth_auth_file(self, auth_name: str) -> None:
         """Delete one managed OAuth file without requiring a running engine."""
@@ -447,6 +466,15 @@ class EngineStateStore:
             path.mkdir(parents=True, mode=0o700)
         path.chmod(0o700)
 
+    @staticmethod
+    def _assert_private_file(path: Path, message: str) -> None:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            raise EngineStateError(message)
+
 
 def _safe_identifier(value: str) -> str:
     cleaned = "".join(character if character.isalnum() or character in "._-" else "_" for character in value)
@@ -474,3 +502,10 @@ def _validated_base_url(value: str | None) -> str | None:
     ):
         raise EngineStateError("invalid source base URL")
     return normalized
+
+
+def _validate_source_target(vendor: str, protocol: str, base_url: str | None) -> None:
+    if protocol == "openai_responses" and base_url is None and vendor not in {"openai", "codex"}:
+        raise EngineStateError("Responses API source requires a base URL")
+    if protocol in {"openai_chat", "openai_compatible"} and base_url is None and vendor != "openai":
+        raise EngineStateError("OpenAI-compatible source requires a base URL")

@@ -131,8 +131,21 @@ class CLIProxyEngineAdapter:
         return connection.gateway_token
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
+        previous = await asyncio.to_thread(self.state_store.list_sources)
+        was_running = await asyncio.to_thread(self.supervisor.client_if_running) is not None
         await asyncio.to_thread(self.state_store.sync_sources, bindings)
-        await asyncio.to_thread(self.supervisor.restart_if_running)
+        try:
+            await asyncio.to_thread(self.supervisor.restart_if_running)
+        except Exception:
+            await asyncio.to_thread(self.state_store.replace_sources, previous)
+            if was_running:
+                try:
+                    await asyncio.to_thread(self.supervisor.ensure_running)
+                except Exception as restore_error:
+                    raise EngineStateError(
+                        "source sync failed and the previous engine state could not be restored"
+                    ) from restore_error
+            raise
 
     async def provision_credential(
         self,
@@ -364,7 +377,7 @@ class CLIProxyEngineAdapter:
                     kind=RawOutcomeKind.NETWORK_ERROR,
                     http_status=None,
                     error_code="engine_unavailable",
-                    redacted_message="local Model Hub engine is unavailable",
+                    redacted_message=None,
                     stream_started=False,
                     model_id=model_id,
                     source_id=source_id,
@@ -390,19 +403,23 @@ class CLIProxyEngineAdapter:
             return
         auth = candidates[0]
         try:
+            existing_credential_ref = await asyncio.to_thread(
+                self.state_store.oauth_credential_ref,
+                auth.name,
+            )
             credential_ref = await asyncio.to_thread(
                 self.state_store.bind_oauth_credential,
                 flow.source_id,
                 flow.vendor,
                 auth.name,
             )
+            credential = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
         except EngineStateError:
             self._fail_flow(flow, "models.oauth.binding_failed")
             return
-        credential = await asyncio.to_thread(
-            self.state_store.credential_metadata,
-            credential_ref,
-        )
         try:
             await asyncio.to_thread(
                 client.management_request,
@@ -412,22 +429,31 @@ class CLIProxyEngineAdapter:
             )
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
         except (EngineClientError, EngineStateError):
-            try:
-                await asyncio.to_thread(
-                    client.management_request,
-                    "DELETE",
-                    "/auth-files",
-                    query={"name": auth.name},
-                )
-            except EngineClientError:
-                pass
-            try:
-                await asyncio.to_thread(
-                    self.state_store.revoke_credential,
-                    credential_ref,
-                )
-            except EngineStateError:
-                pass
+            if existing_credential_ref is None:
+                if auth.identity not in flow.before_auth_fingerprints:
+                    try:
+                        await asyncio.to_thread(
+                            client.management_request,
+                            "DELETE",
+                            "/auth-files",
+                            query={"name": auth.name},
+                        )
+                    except EngineClientError:
+                        pass
+                    try:
+                        await asyncio.to_thread(
+                            self.state_store.delete_oauth_auth_file,
+                            auth.name,
+                        )
+                    except EngineStateError:
+                        pass
+                try:
+                    await asyncio.to_thread(
+                        self.state_store.revoke_credential,
+                        credential_ref,
+                    )
+                except EngineStateError:
+                    pass
             self._fail_flow(flow, "models.oauth.binding_failed")
             return
         flow.credential_ref = credential_ref
