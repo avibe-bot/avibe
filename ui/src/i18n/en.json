@@ -1559,6 +1559,7 @@
     "topicSettingsDesc": "Topics inherit the group until you create an override. New topics appear here after the bot sees a message.",
     "topicEmptyTitle": "No topics discovered yet",
     "topicEmptyDesc": "Send a message in a forum topic, then refresh the group list.",
+    "topicGeneralName": "General",
     "topicFallbackName": "Topic {{id}}",
     "topicIdLabel": "Topic ID: {{id}}",
     "topicCustomBadge": "Custom",

@@ -111,6 +111,38 @@ def test_remember_thread_lists_discovered_and_configured_topics(tmp_path: Path) 
     assert topics[0]["name"] == "Releases"
 
 
+def test_passively_discovered_topics_leave_fallback_names_to_ui(tmp_path: Path) -> None:
+    # Scenario: TELEGRAM-TOPIC-004
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat(
+        "telegram",
+        "-1001",
+        name="Engineering",
+        native_type="supergroup",
+        supports_threads=True,
+        db_path=db_path,
+    )
+    chat_discovery.remember_thread(
+        "telegram",
+        "-1001",
+        "1",
+        native_type="forum_topic",
+        db_path=db_path,
+    )
+    chat_discovery.remember_thread(
+        "telegram",
+        "-1001",
+        "42",
+        native_type="forum_topic",
+        db_path=db_path,
+    )
+
+    topics = chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path)
+
+    assert [(topic["id"], topic["name"]) for topic in topics] == [("1", ""), ("42", "")]
+
+
 def test_remember_chat_debounce_does_not_suppress_retry_after_persist_failure(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)

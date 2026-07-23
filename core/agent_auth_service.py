@@ -576,7 +576,7 @@ class AgentAuthService:
             logger.debug("Failed to derive OpenCode session info for provider resolution: %s", err)
             return None
 
-        session_key = self._get_settings_key(context)
+        session_key = self._get_session_key(context)
         get_session_id = getattr(sessions, "get_agent_session_id", None)
         if not callable(get_session_id):
             return None

@@ -1559,6 +1559,7 @@
     "topicSettingsDesc": "Topic 默认继承群组设置；创建覆盖后可单独控制。Bot 收到 topic 消息后会自动发现并显示在这里。",
     "topicEmptyTitle": "还没有发现 Topic",
     "topicEmptyDesc": "先在 forum topic 中发送一条消息，然后刷新群组列表。",
+    "topicGeneralName": "常规",
     "topicFallbackName": "Topic {{id}}",
     "topicIdLabel": "话题 ID：{{id}}",
     "topicCustomBadge": "单独设置",

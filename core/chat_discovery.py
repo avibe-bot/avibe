@@ -461,7 +461,7 @@ def list_thread_payloads(
                 result.append(
                     {
                         "id": thread_id,
-                        "name": str(row["display_name"] or ("General" if thread_id == "1" else f"Topic {thread_id}")),
+                        "name": str(row["display_name"] or ""),
                         "native_type": str(row["native_type"] or "thread"),
                         "configured": row["settings_scope_id"] is not None,
                         "metadata": metadata,
@@ -475,6 +475,7 @@ def list_thread_payloads(
                     item["id"] != "1",
                     not item["configured"],
                     item["name"].lower(),
+                    item["id"],
                 ),
             )
     finally:
