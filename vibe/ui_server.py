@@ -4519,24 +4519,31 @@ def settings_post():
     return jsonify(api.save_settings(payload))
 
 
-@app.route("/api/settings/thread", methods=["POST"])
-def thread_settings_post():
-    from vibe import api
+@app.post("/api/settings/thread", include_in_schema=False)
+async def thread_settings_post(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
 
-    return jsonify(api.save_thread_settings(request.json or {}))
+        body = await starlette_request.body()
+        payload = await starlette_request.json() if body else {}
+        return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-@app.route("/api/settings/thread", methods=["DELETE"])
-def thread_settings_delete():
-    from vibe import api
+@app.delete("/api/settings/thread", include_in_schema=False)
+async def thread_settings_delete(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
 
-    return jsonify(
-        api.delete_thread_settings(
-            request.args.get("platform", ""),
-            request.args.get("channel_id", ""),
-            request.args.get("thread_id", ""),
+        query = starlette_request.query_params
+        return api.delete_thread_settings(
+            query.get("platform", ""),
+            query.get("channel_id", ""),
+            query.get("thread_id", ""),
         )
-    )
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/slack/auth_test", methods=["POST"])

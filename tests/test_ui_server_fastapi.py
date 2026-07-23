@@ -59,6 +59,62 @@ def test_fastapi_schema_routes_are_not_exposed():
     assert client.get("/openapi.json").status_code != 200
 
 
+def test_thread_settings_routes_use_native_fastapi(monkeypatch):
+    from vibe import api
+
+    saved_payloads = []
+    deleted_scopes = []
+    monkeypatch.setattr(
+        api,
+        "save_thread_settings",
+        lambda payload: saved_payloads.append(payload) or {"ok": True, "settings": payload["settings"]},
+    )
+    monkeypatch.setattr(
+        api,
+        "delete_thread_settings",
+        lambda platform, channel_id, thread_id: deleted_scopes.append(
+            (platform, channel_id, thread_id)
+        )
+        or {"ok": True, "removed": True},
+    )
+
+    post_route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/settings/thread" and "POST" in route.methods
+    )
+    delete_route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/settings/thread" and "DELETE" in route.methods
+    )
+    assert post_route.endpoint.__name__ == "thread_settings_post"
+    assert delete_route.endpoint.__name__ == "thread_settings_delete"
+
+    client = app.test_client()
+    saved = client.post(
+        "/api/settings/thread",
+        json={
+            "platform": "telegram",
+            "channel_id": "-1001",
+            "thread_id": "42",
+            "settings": {"enabled": True},
+        },
+        headers=csrf_headers(client),
+    )
+    deleted = client.delete(
+        "/api/settings/thread?platform=telegram&channel_id=-1001&thread_id=42",
+        headers=csrf_headers(client),
+    )
+
+    assert saved.status_code == 200
+    assert saved.get_json()["settings"] == {"enabled": True}
+    assert saved_payloads[0]["thread_id"] == "42"
+    assert deleted.status_code == 200
+    assert deleted.get_json() == {"ok": True, "removed": True}
+    assert deleted_scopes == [("telegram", "-1001", "42")]
+
+
 def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
     from vibe import runtime
 
