@@ -8832,6 +8832,21 @@ def _show_page_file_response(root: Path, asset_path: str):
     return response
 
 
+def _show_page_runtime_failure_response(
+    page_dir: Path,
+    session_id: str,
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+):
+    if not _is_show_page_spa_route_request(asset_path, starlette_request):
+        return None
+    if not _is_show_page_entry_asset(asset_path):
+        static_response = _show_page_file_response(page_dir, asset_path)
+        if static_response.status_code != 404:
+            return static_response
+    return _show_page_recovery_response(session_id)
+
+
 def _show_session_event_error_response(exc: Exception):
     code = getattr(exc, "code", "show_session_event_failed")
     status = 404 if code == "session_not_found" else 400
@@ -10081,9 +10096,14 @@ async def serve_private_show_page(session_id, asset_path):
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
-                if _is_show_page_entry_asset(asset_path):
-                    response = _show_page_recovery_response(page.session_id)
-                    logger.debug("Show runtime unavailable; serving recovery Show Page", exc_info=True)
+                response = _show_page_runtime_failure_response(
+                    page_dir,
+                    page.session_id,
+                    asset_path,
+                    request._request,
+                )
+                if response is not None:
+                    logger.debug("Show runtime unavailable; serving fallback Show Page response", exc_info=True)
                 else:
                     logger.debug("Show runtime unavailable; serving static Show Page", exc_info=True)
         if response is None:
@@ -10214,9 +10234,14 @@ async def serve_public_show_page(share_id, asset_path):
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
-                if _is_show_page_entry_asset(asset_path):
-                    response = _show_page_recovery_response(page.session_id)
-                    logger.debug("Show runtime unavailable; serving recovery public Show Page", exc_info=True)
+                response = _show_page_runtime_failure_response(
+                    page_dir,
+                    page.session_id,
+                    asset_path,
+                    request._request,
+                )
+                if response is not None:
+                    logger.debug("Show runtime unavailable; serving fallback public Show Page response", exc_info=True)
                 else:
                     logger.debug("Show runtime unavailable; serving static public Show Page", exc_info=True)
         if response is None:

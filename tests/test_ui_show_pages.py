@@ -433,6 +433,39 @@ def test_show_page_history_route_retries_entry_after_runtime_404(monkeypatch, tm
         assert all(call[2]["x-vibe-show-base"] == expected_base for call in manager.calls)
 
 
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_page_history_route_uses_recovery_when_runtime_unavailable(monkeypatch, tmp_path, surface):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    if surface == "private":
+        _create_show_page("ses123", "private")
+        public_path = "/show/ses123/reports/daily"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+    else:
+        share_id = _create_show_page("ses123", "public")
+        public_path = f"/p/{share_id}/reports/daily"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+
+    manager = _FakeShowRuntimeManager(fail=True)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            public_path,
+            headers={"Accept": "text/html"},
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert b"Loading Show Page" in response.content
+    assert b"Ready to visualize" in response.content
+    assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/reports/daily"]
+
+
 @pytest.mark.parametrize(
     ("asset_path", "accept"),
     [
@@ -491,6 +524,27 @@ def test_private_show_page_real_extensionless_asset_precedes_spa_fallback(monkey
     assert response.status_code == 200
     assert response.content == b"real extensionless asset"
     assert [call[1] for call in manager.calls] == [asset_runtime_path]
+
+
+def test_private_show_page_real_extensionless_asset_survives_runtime_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    (paths.get_show_page_dir("ses123") / "robots").write_text("real extensionless asset", encoding="utf-8")
+    manager = _FakeShowRuntimeManager(fail=True)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/robots",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/html"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"real extensionless asset"
+    assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/robots"]
 
 
 def _icon_token(session_id: str) -> str:
