@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
+import { MODEL_HUB_NAV_ENABLED } from './settings/models/featureFlags';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
@@ -298,6 +299,19 @@ export const AppShell: React.FC = () => {
         { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
       ],
     },
+    // 模型 (Model Hub, L4): sits between 通讯平台 and 后端. Nav-gated until its
+    // backend dependencies land (MODEL_HUB_NAV_ENABLED); the route is always
+    // registered for direct access + review.
+    ...(MODEL_HUB_NAV_ENABLED
+      ? [
+          {
+            to: '/admin/settings/models',
+            label: t('nav.models'),
+            icon: Cpu,
+            match: (p: string) => p.startsWith('/admin/settings/models'),
+          },
+        ]
+      : []),
     {
       to: '/admin/settings/backends',
       label: t('nav.backends'),
@@ -314,7 +328,8 @@ export const AppShell: React.FC = () => {
       match: (p) =>
         p.startsWith('/admin/settings') &&
         !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends'),
+        !p.startsWith('/admin/settings/backends') &&
+        !p.startsWith('/admin/settings/models'),
     },
   ];
 
@@ -336,7 +351,8 @@ export const AppShell: React.FC = () => {
       match: (p) =>
         p.startsWith('/admin/settings') &&
         !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends'),
+        !p.startsWith('/admin/settings/backends') &&
+        !p.startsWith('/admin/settings/models'),
     },
   ];
   // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom

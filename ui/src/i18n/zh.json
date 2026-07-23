@@ -123,7 +123,8 @@
     "capabilities": "能力",
     "more": "更多",
     "apps": "Apps",
-    "workbench": "工作台"
+    "workbench": "工作台",
+    "models": "模型"
   },
   "more": {
     "title": "更多",
@@ -601,7 +602,177 @@
     "inProgressTitle": "这个设置页已经有新路由，但功能 UI 还在迁移中",
     "inProgressBody": "新版路由和页面壳子已经就位，但这个分区的具体界面还在从旧 Dashboard 和向导流程迁移。",
     "inProgressHint": "在该分区完成重构前，底层配置仍可先通过设置向导进行调整。",
-    "openSetup": "打开设置向导"
+    "openSetup": "打开设置向导",
+    "models": {
+      "title": "模型",
+      "subtitle": "连一次来源，所有 Agent 统一供给；顺序即优先级，用完自动切换、恢复自动切回。",
+      "addSource": "添加来源",
+      "loadError": "加载失败：{{detail}}",
+      "statusPill": {
+        "ok": "一切正常 · {{count}} 个 Agent 已接入",
+        "degraded": "部分来源需留意 · {{count}} 个 Agent 已接入"
+      },
+      "sources": {
+        "title": "来源",
+        "subtitle": "全局一份；拖动调整顺序 —— 顺序就是花钱顺序",
+        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。"
+      },
+      "source": {
+        "nativeSupply": "原生供给",
+        "hubHosted": "中枢托管",
+        "officialEndpoint": "官方地址",
+        "customEndpoint": "自定义地址",
+        "retryIn": "{{minutes}} 分后重试",
+        "reorder": "拖动排序",
+        "cooldown": {
+          "timeout": "连续超时"
+        }
+      },
+      "billing": {
+        "monthly": "包月",
+        "metered": "按量 ¥"
+      },
+      "state": {
+        "active": "使用中",
+        "standby": "备用",
+        "cooldown": "暂不可用",
+        "error": "不可用"
+      },
+      "usage": {
+        "monthSpend": "本月 {{amount}}"
+      },
+      "supplyTooltip": {
+        "label": "供应："
+      },
+      "mode": {
+        "hub": "中枢 Hub",
+        "direct": "直连 Direct"
+      },
+      "menuKind": {
+        "fixed": "菜单固定",
+        "open": "菜单开放"
+      },
+      "experimental": "实验",
+      "agents": {
+        "title": "Agent",
+        "subtitle": "每个 Agent 用什么模型、由谁供给",
+        "backendSettings": "后端设置",
+        "modelMenu": "模型菜单",
+        "connectHub": "接入中枢",
+        "menuComingSoon": "模型菜单即将上线（随下一个里程碑发布）",
+        "modelCount": "{{count}} 个模型",
+        "multiSource": "多来源",
+        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义"
+      },
+      "recent": {
+        "title": "最近切换",
+        "viewAll": "查看全部",
+        "collapse": "收起",
+        "today": "今天",
+        "yesterday": "昨天",
+        "empty": "暂无切换记录"
+      },
+      "advanced": {
+        "title": "高级",
+        "detail": "跨厂商自动顶替（默认关）· 请求日志 · 诊断",
+        "comingSoon": "高级设置即将上线"
+      },
+      "addMenu": {
+        "claude": {
+          "title": "连接 Claude 订阅",
+          "subtitle": "Pro / Max · 浏览器登录"
+        },
+        "chatgpt": {
+          "title": "连接 ChatGPT 订阅",
+          "subtitle": "Plus / Pro · 浏览器登录"
+        },
+        "apiKey": {
+          "title": "添加 API Key…",
+          "subtitle": "任何厂商或兼容服务，可改地址"
+        }
+      },
+      "addKey": {
+        "title": "添加 API Key",
+        "subtitle": "任何厂商或兼容服务；连接一次，所有 Agent 共用。",
+        "vendorLabel": "服务商",
+        "vendorHint": "选择 Anthropic / OpenAI / 智谱 / Kimi 等厂商时，自动填官方地址。",
+        "keyLabel": "API KEY",
+        "baseUrlLabel": "服务地址（BASE URL）",
+        "baseUrlHint": "官方厂商已预填，可改；使用兼容服务（如中转、自建网关）时填它提供的地址。",
+        "discovered": "连接成功 · 发现 {{count}} 个可用模型，已加入供应清单",
+        "failed": "连接失败：{{detail}}",
+        "testing": "连接中…",
+        "vaultNote": "只存本机，可入 Vault",
+        "vendors": {
+          "custom": "自定义 · OpenAI / Anthropic 兼容",
+          "anthropic": "Anthropic",
+          "openai": "OpenAI",
+          "zhipuai": "智谱",
+          "kimi": "Kimi",
+          "xai": "xAI"
+        }
+      },
+      "oauth": {
+        "title": {
+          "anthropic": "连接 Claude 订阅",
+          "openai": "连接 ChatGPT 订阅",
+          "generic": "连接订阅"
+        },
+        "starting": "正在准备…",
+        "connected": "连接成功，已加入来源列表",
+        "step1": {
+          "authLink": "打开授权链接（任何设备的浏览器都行）",
+          "devicePage": "打开设备授权页"
+        },
+        "pasteCode": {
+          "hint": "登录同意后，把页面给的授权码粘贴回来"
+        },
+        "callback": {
+          "hint": "登录后，把浏览器最终停留的回调地址粘贴回来"
+        },
+        "deviceCode": {
+          "hint": "在那个页面输入设备码，这里会自动继续"
+        },
+        "status": {
+          "awaitingPaste": "等待授权 · {{time}} 后超时",
+          "awaitingDevice": "等待完成 · 自动检测，无需回填",
+          "verifying": "验证中…",
+          "success": "连接成功"
+        },
+        "error": {
+          "start": "无法开始授权，请重试",
+          "timeout": "授权超时，请重新连接",
+          "generic": "连接失败，请重试"
+        },
+        "hubOption": {
+          "title": "由中枢托管此订阅（实验）",
+          "subtitle": "凭据由中枢保存并转发，可能违反厂商条款",
+          "on": "已开启",
+          "off": "关"
+        }
+      },
+      "consent": {
+        "title": "由中枢托管订阅 · 风险提示",
+        "subtitle": "启用前请确认你已了解以下风险。",
+        "points": [
+          "该来源使用你本人订阅的登录凭据；厂商条款通常要求订阅仅供个人在官方客户端内使用，经由中枢代理转发属于非官方用法，可能违反其服务条款。",
+          "存在账号被风控、限流或封禁的真实风险（已有 Claude 订阅经代理使用被自动封号的先例）；是否启用由你自行决定并承担后果。",
+          "追求最稳妥时，请对订阅使用直连模式（官方客户端直接连接），或改用 API Key 来源（厂商明确允许程序化 / 代理调用）。"
+        ],
+        "confirm": "我已了解风险，继续"
+      },
+      "toast": {
+        "reorderFailed": "顺序保存失败",
+        "connected": "已接入中枢",
+        "connectFailed": "接入失败，请重试",
+        "refreshFailed": "刷新失败，请重试"
+      },
+      "backends": {
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "opencode": "OpenCode"
+      }
+    }
   },
   "remoteAccess": {
     "badge": "Avibe Cloud Provider",
