@@ -16,6 +16,7 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import stat
@@ -552,6 +553,16 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
+
+
+def test_workbench_memory_cli_admission_is_explicit_internal_turn_provenance(monkeypatch):
+    monkeypatch.setattr(internal_server, "_lookup_session", lambda _session_id: None)
+
+    admitted = internal_server._build_session_context("s1", memory_cli_admitted=True)
+    denied = internal_server._build_session_context("s1")
+
+    assert admitted.platform_specific["memory_cli_admitted"] is True
+    assert "memory_cli_admitted" not in denied.platform_specific
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():
@@ -1731,6 +1742,26 @@ def _manager_capturing_runs():
 
     mgr._run = _fake_run
     return mgr, runs
+
+
+def test_flush_restores_memory_cli_admission_only_when_every_queued_turn_was_local(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue([("first", None), ("second", None)])
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        rows = messages_service.list_queued(conn, session_id)
+        for row in rows:
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == row["id"])
+                .values(metadata_json=json.dumps({"_memory_cli_admitted": True}))
+            )
+    manager, runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+    assert runs[0][2].platform_specific["memory_cli_admitted"] is True
 
 
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):

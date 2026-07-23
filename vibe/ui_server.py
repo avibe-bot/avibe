@@ -7492,6 +7492,7 @@ async def sessions_messages_create(session_id: str):
     from vibe.sse_broker import broker
 
     payload = request.json or {}
+    memory_cli_admitted = is_direct_loopback_memory_request()
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
@@ -7578,6 +7579,7 @@ async def sessions_messages_create(session_id: str):
                 metadata={
                     **(payload.get("metadata") or {}),
                     "_web_push_user_key": web_push_user_key,
+                    "_memory_cli_admitted": memory_cli_admitted,
                 },
                 author_id=web_push_user_key,
                 author_name=payload.get("author_name"),
@@ -7626,7 +7628,7 @@ async def sessions_messages_create(session_id: str):
         # Archived between the pre-flight check and the reservation — stay terminal.
         return jsonify({"error": "session is archived", "code": "session_archived"}), 409
     if (
-        is_direct_loopback_memory_request()
+        memory_cli_admitted
         and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
         and not is_memory_command_candidate(dispatch_text)
     ):
@@ -7647,6 +7649,7 @@ async def sessions_messages_create(session_id: str):
         "scope_id": session["scope_id"],
         "user_message_id": message.get("id"),
         "files": attachment_specs,
+        "memory_cli_admitted": memory_cli_admitted,
     }
     try:
         result = await internal_client.dispatch_async(dispatch_payload)

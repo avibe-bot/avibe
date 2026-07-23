@@ -33,7 +33,11 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
 from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
-from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+from core.system_prompt_injection import (
+    build_system_prompt_injection,
+    get_enabled_agents_for_prompt,
+    memory_cli_prompt_admitted,
+)
 from vibe import backend_model_catalog
 
 from .base import BaseHandler
@@ -1019,6 +1023,7 @@ class SessionHandler(BaseHandler):
         system_prompt_injection = build_system_prompt_injection(
             include_quick_replies=quick_replies_on and platform != "wechat",
             include_show_pages=getattr(self.config, "show_pages_prompt", True),
+            include_memory_cli=memory_cli_prompt_admitted(self.controller, context),
             avibe_cloud_connected=avibe_cloud_url_available(self.config),
             context=context,
             fallback_platform=platform,

@@ -752,11 +752,12 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 "Config",
                 (),
                 {
-                    "platform": "slack",
+                    "platform": "avibe",
                     "reply_enhancements": True,
                     "show_pages_prompt": True,
                     "remote_access": None,
                     "language": "en",
+                    "memory": type("MemoryConfig", (), {"enabled": True})(),
                     "opencode": type(
                             "OpenCodeConfig",
                             (),
@@ -768,7 +769,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                     )(),
                 },
             )()
-            self.im_client = _StubClient("slack")
+            self.im_client = _StubClient("avibe")
             self.settings_manager = type("Settings", (), {"sessions": _Sessions()})()
             self.sessions = self.settings_manager.sessions
             self.processing_indicator = type("Processing", (), {"snapshot_request": lambda self, request: {}})()
@@ -795,14 +796,14 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
             context=MessageContext(
                 user_id="u",
                 channel_id="c",
-                platform="slack",
-                platform_specific={"agent_session_id": "ses_test"},
+                platform="avibe",
+                platform_specific={"agent_session_id": "ses_test", "memory_cli_admitted": True},
             ),
             message="hello",
             working_path="/tmp/work",
             base_session_id="base",
             composite_session_id="base:/tmp/work",
-            session_key="slack::c",
+            session_key="avibe::c",
         )
         await agent._process_message(request)
 
@@ -812,6 +813,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
+    assert "## Personal Memory" in calls[0]["system"]
+    assert 'vibe memory search "<query>" --json' in calls[0]["system"]
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():

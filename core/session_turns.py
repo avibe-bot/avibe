@@ -999,6 +999,9 @@ class SessionTurnManager:
                         )
                     )
                     user_owner = user_owners[0] if len(user_owners) == 1 else None
+                    memory_cli_admitted = all(
+                        (row.get("metadata") or {}).get("_memory_cli_admitted") is True for row in segment
+                    )
                     user_metadata = None
                     if user_owner:
                         user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
@@ -1042,6 +1045,12 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
+            if context.platform_specific is None:
+                context.platform_specific = {}
+            if memory_cli_admitted:
+                context.platform_specific["memory_cli_admitted"] = True
+            else:
+                context.platform_specific.pop("memory_cli_admitted", None)
             await self._run(session_id, context, user_row.get("text") or "")
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt

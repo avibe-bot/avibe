@@ -18,7 +18,11 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import terminal_output_for
 from core.resource_governance import governor_from_controller
-from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+from core.system_prompt_injection import (
+    build_system_prompt_injection,
+    get_enabled_agents_for_prompt,
+    memory_cli_prompt_admitted,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 
 from .caller_context import bind_session as bind_caller_context_session
@@ -349,6 +353,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
+                include_memory_cli=memory_cli_prompt_admitted(self.controller, request.context),
                 avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
                 context=request.context,
                 fallback_platform=platform,

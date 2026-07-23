@@ -114,6 +114,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
     ):
         client = app.test_client()
         headers = csrf_headers(client)
@@ -127,12 +128,14 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert payload["author"] == "user"
     assert payload["author_id"] == "remote:user-a"
     assert payload["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert payload["metadata"]["_memory_cli_admitted"] is False
     assert payload["text"] == "no stream"
     # The turn was kicked off fire-and-forget with the session + text.
     dispatch_mock.assert_awaited_once()
     sent = dispatch_mock.await_args.args[0]
     assert sent["session_id"] == session_id
     assert sent["text"] == "no stream"
+    assert sent["memory_cli_admitted"] is False
 
 
 def test_workbench_memory_intercepts_before_persist_or_dispatch(isolated_state, tmp_path):
@@ -213,6 +216,7 @@ def test_workbench_capture_handoff_is_accepted_after_commit_before_dispatch(isol
 
     async def dispatch(payload):
         assert payload["text"] == "capture this"
+        assert payload["memory_cli_admitted"] is True
         events.append("dispatch")
         return {"status_code": 202, "body": {"ok": True, "session_id": session_id}}
 
@@ -231,6 +235,7 @@ def test_workbench_capture_handoff_is_accepted_after_commit_before_dispatch(isol
         )
 
     assert response.status_code == 201
+    assert response.get_json()["metadata"]["_memory_cli_admitted"] is True
     assert events == ["handoff", "dispatch"]
 
 

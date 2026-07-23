@@ -162,6 +162,38 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
 
 
+def test_claude_system_prompt_follows_live_memory_enabled_state(tmp_path: Path) -> None:
+    controller = _Controller(tmp_path)
+    controller.config.memory = type("MemoryConfig", (), {"enabled": False})()
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"memory_cli_admitted": True},
+    )
+
+    disabled = handler._build_claude_system_prompt(
+        context,
+        session_key="test::C123",
+        agent_name="claude",
+        session_anchor="slack_C123",
+        agent_system_prompt=None,
+    )
+    controller.config.memory.enabled = True
+    enabled = handler._build_claude_system_prompt(
+        context,
+        session_key="test::C123",
+        agent_name="claude",
+        session_anchor="slack_C123",
+        agent_system_prompt=None,
+    )
+
+    assert "## Personal Memory" not in disabled["append"]
+    assert "## Personal Memory" in enabled["append"]
+    assert 'vibe memory search "<query>" --json' in enabled["append"]
+
+
 def test_session_handler_injects_vendored_git_into_gitless_child_env(
     monkeypatch,
     tmp_path: Path,
