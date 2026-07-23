@@ -67,6 +67,14 @@ export interface WorkbenchProjectsTree {
   /** Permanently archive a session: calls the API (which reclaims its bound
    *  tasks/watches/runs) then drops the row from the tree. Throws on failure. */
   archiveSession: (projectId: string, sessionId: string) => Promise<void>;
+  /** Hide/restore a session: PATCHes visibility, then reconciles the tree on the
+   *  response (drop on 'background', refetch on 'foreground') so it works even
+   *  when the session.activity SSE stream is down. Throws on failure. */
+  setSessionVisibility: (
+    projectId: string,
+    sessionId: string,
+    visibility: 'foreground' | 'background',
+  ) => Promise<void>;
   /** After NewProjectDialog: dedup-by-id, hoist to top, expand, fetch sessions if not loaded. */
   upsertProjectToTop: (project: WorkbenchProject) => void;
 }
@@ -103,7 +111,7 @@ function patchSessionRow(
 // Drop a session id from every project's loaded rows — used when an archive
 // broadcast (possibly from another tab) should remove the row live. Returns a
 // new state only when a row was actually removed.
-function removeSessionRow(
+export function removeSessionRow(
   prev: Record<string, ProjectSessionsState>,
   sessionId: string,
 ): Record<string, ProjectSessionsState> {
@@ -602,6 +610,32 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [api],
   );
 
+  const setSessionVisibility = useCallback(
+    async (
+      projectId: string,
+      sessionId: string,
+      visibility: 'foreground' | 'background',
+    ) => {
+      // Reconcile the tree on the successful PATCH response, the same way the
+      // archive path does — do NOT trust only the A6 session.activity SSE event,
+      // which never arrives on a dropped/degraded stream (remote/mobile). Without
+      // this, a hidden row stays visible and clickable until reconnect/reload, so
+      // "Hide to background" appears to do nothing. Reuses the same
+      // removeSessionRow / reconcileSessions the live listener uses, so the
+      // API-response and SSE paths converge and a duplicate live event is a no-op.
+      // Undo (-> foreground) refetches the project rather than guessing the row's
+      // original position; listSessions is foreground-only, so it drops/restores
+      // the row authoritatively.
+      await api.setSessionVisibility(sessionId, visibility);
+      if (visibility === 'background') {
+        setSessions((prev) => removeSessionRow(prev, sessionId));
+      } else {
+        void reconcileSessions(projectId);
+      }
+    },
+    [api, reconcileSessions],
+  );
+
   const upsertProjectToTop = useCallback(
     (project: WorkbenchProject) => {
       // create_project is find-or-create by path: opening a tracked folder returns
@@ -645,6 +679,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       archiveProject,
       renameSession,
       archiveSession,
+      setSessionVisibility,
       upsertProjectToTop,
     }),
     [
@@ -665,6 +700,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       archiveProject,
       renameSession,
       archiveSession,
+      setSessionVisibility,
       upsertProjectToTop,
     ],
   );

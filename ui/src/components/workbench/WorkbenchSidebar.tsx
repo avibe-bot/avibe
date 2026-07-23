@@ -34,7 +34,6 @@ import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
-import { useApi } from '../../context/ApiContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -210,10 +209,17 @@ const SessionRow: React.FC<{
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, onForkSession, onRenameSession, onArchiveSession }) => {
+  onSetSessionVisibility: (sessionId: string, visibility: 'foreground' | 'background') => Promise<void>;
+}> = ({
+  session,
+  unread,
+  onForkSession,
+  onRenameSession,
+  onArchiveSession,
+  onSetSessionVisibility,
+}) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const api = useApi();
   const { showToast } = useToast();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const location = useLocation();
@@ -379,16 +385,17 @@ const SessionRow: React.FC<{
           onClick={async () => {
             setMenuOpen(false);
             try {
-              // Move to background (M1 PATCH). The row leaves the list on its own
-              // via the A6 session.activity pipeline — no client-side removal. Not
-              // a delete: offer an immediate Undo and say where it went. Hiding the
-              // currently-open chat is fine — we don't navigate; it just leaves the
-              // list while the chat stays usable.
-              await api.setSessionVisibility(session.id, 'background');
+              // Move to background (M1 PATCH). onSetSessionVisibility reconciles the
+              // tree on the response (like archive), so the row leaves even if the
+              // session.activity SSE stream is down — the live event then dedupes.
+              // Not a delete: offer an immediate Undo and say where it went. Hiding
+              // the currently-open chat is fine — we don't navigate; it just leaves
+              // the list while the chat stays usable.
+              await onSetSessionVisibility(session.id, 'background');
               showToast(t('workbench.sessionHiddenToast'), 'success', {
                 label: t('common.undo'),
                 onClick: () => {
-                  void api.setSessionVisibility(session.id, 'foreground');
+                  void onSetSessionVisibility(session.id, 'foreground');
                 },
               });
             } catch (err) {
@@ -450,6 +457,7 @@ const ProjectRow: React.FC<{
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
+  onSetSessionVisibility: (sessionId: string, visibility: 'foreground' | 'background') => Promise<void>;
 }> = ({
   project,
   expanded,
@@ -467,6 +475,7 @@ const ProjectRow: React.FC<{
   onForkSession,
   onRenameSession,
   onArchiveSession,
+  onSetSessionVisibility,
 }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
@@ -663,6 +672,7 @@ const ProjectRow: React.FC<{
                 onForkSession={onForkSession}
                 onRenameSession={onRenameSession}
                 onArchiveSession={onArchiveSession}
+                onSetSessionVisibility={onSetSessionVisibility}
               />
             ))}
           {hasMore && (
@@ -715,6 +725,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     archiveProject,
     renameSession,
     archiveSession,
+    setSessionVisibility,
     upsertProjectToTop,
   } = useWorkbenchProjectsTree();
   const [popoverOpen, setPopoverOpen] = useState(false);
@@ -957,6 +968,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   onForkSession={(sessionId) => forkSession(project.id, sessionId)}
                   onRenameSession={(sessionId, title) => renameSession(project.id, sessionId, title)}
                   onArchiveSession={(sessionId) => archiveSession(project.id, sessionId)}
+                  onSetSessionVisibility={(sessionId, visibility) =>
+                    setSessionVisibility(project.id, sessionId, visibility)
+                  }
                 />
               );
             })}
