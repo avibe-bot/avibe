@@ -179,7 +179,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
           }) as string}
         >
-          {detectItem && (
+          {mode === 'direct' && detectItem && (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5">
               <span className="flex min-w-0 items-center gap-2 text-[12px] leading-relaxed text-foreground">
                 <Info className="size-3.5 shrink-0 text-gold" />
