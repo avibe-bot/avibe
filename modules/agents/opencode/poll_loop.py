@@ -338,6 +338,9 @@ class OpenCodePollLoop:
                                 )
 
                         diagnostic = f"{error_name} - {error_msg[:500]}".strip(" -")
+                        record_failure = getattr(self._agent, "record_model_hub_native_failure", None)
+                        if callable(record_failure):
+                            await record_failure(request.context, diagnostic)
                         message = f"OpenCode error: {diagnostic}"
                         await emit_backend_failure(
                             self._agent.controller,

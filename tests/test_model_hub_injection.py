@@ -857,7 +857,7 @@ def test_mh_inj_codex_runtime_change_interrupts_current_session_first() -> None:
             runtime_fingerprint="direct",
             send_request=AsyncMock(return_value={}),
         )
-        interrupted_request = SimpleNamespace()
+        interrupted_request = SimpleNamespace(context=object())
 
         def clear_pending(turn_id: str):
             assert turn_id == "turn-current"
@@ -867,7 +867,10 @@ def test_mh_inj_codex_runtime_change_interrupts_current_session_first() -> None:
         agent._transports = {"/work": transport}
         agent._session_mgr = SimpleNamespace(get_thread_id=Mock(return_value="thread-current"))
         agent._turn_registry = SimpleNamespace(get_active_turn=lambda _base: active["turn"])
-        agent._event_handler = SimpleNamespace(clear_pending=Mock(side_effect=clear_pending))
+        agent._event_handler = SimpleNamespace(
+            clear_pending=Mock(side_effect=clear_pending),
+            _release_stream_turn=Mock(),
+        )
         agent._remove_ack_reaction = AsyncMock()
         request = SimpleNamespace(
             working_path="/work",
@@ -892,6 +895,7 @@ def test_mh_inj_codex_runtime_change_interrupts_current_session_first() -> None:
         )
         assert active["turn"] is None
         agent._remove_ack_reaction.assert_awaited_once_with(interrupted_request)
+        agent._event_handler._release_stream_turn.assert_called_once_with(interrupted_request.context)
 
     asyncio.run(exercise())
 

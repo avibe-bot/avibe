@@ -1438,6 +1438,7 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     # failed settlement, then suppresses the idle "(No response from OpenCode)"
     # result that would overwrite the terminal state.
     emitted = []
+    model_hub_failures = []
 
     class _AuthSvc:
         async def maybe_emit_auth_recovery_message(
@@ -1483,6 +1484,10 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
         def _extract_response_text(self, message):
             return ""
 
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            model_hub_failures.append((context, diagnostic))
+            return True
+
     class _Server:
         async def list_messages(self, session_id, directory):
             return [
@@ -1526,6 +1531,7 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     assert [item[0] for item in emitted] == ["notify", "result"]
     assert emitted[0][1] == "OpenCode error: ProviderError - rate limited"
     assert emitted[1][1:] == ("", True, "silent", "ProviderError - rate limited")
+    assert model_hub_failures == [(request.context, "ProviderError - rate limited")]
 
 
 def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():

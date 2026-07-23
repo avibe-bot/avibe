@@ -849,6 +849,12 @@ class CodexAgent(BaseAgent):
         interrupted_request = self._event_handler.clear_pending(active_turn)
         if interrupted_request:
             await self._remove_ack_reaction(interrupted_request)
+            # The app-server may be replaced before its interrupted completion
+            # notification arrives. Settle the old request now; release is
+            # token-guarded, so it cannot close the replacement turn.
+            release = getattr(self._event_handler, "_release_stream_turn", None)
+            if callable(release):
+                release(interrupted_request.context)
 
     # ------------------------------------------------------------------
     # Thread management
