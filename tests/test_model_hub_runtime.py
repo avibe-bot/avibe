@@ -9,6 +9,7 @@ import stat
 import sys
 import tarfile
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -335,7 +336,11 @@ def _models_endpoint():
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            midpoint = len(body) // 2
+            self.wfile.write(body[:midpoint])
+            self.wfile.flush()
+            time.sleep(0.05)
+            self.wfile.write(body[midpoint:])
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -449,6 +454,22 @@ class Handler(BaseHTTPRequestHandler):
         if payload['model'].endswith('/rate-limited'):
             self._json(429, {{'error': {{'type': 'quota_exceeded', 'message': 'upstream-secret'}}}})
             return
+        if payload['model'].endswith('/stalled-first-byte'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', '1')
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(1)
+            return
+        if payload['model'].endswith('/stalled-error-body'):
+            self.send_response(429)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', '1')
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(1)
+            return
         if payload['model'].endswith('/slow-stream'):
             first = b'data: {{"type":"content_block_delta"}}\\n\\n'
             second = b'data: {{"type":"message_stop"}}\\n\\n'
@@ -507,6 +528,7 @@ class _FixtureInstaller:
 
 
 def _fixture_supervisor(tmp_path: Path) -> tuple[EngineSupervisor, EngineStateStore]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
     _write_mock_engine(binary)
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
@@ -637,6 +659,79 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
         assert b"message_stop" in body
         assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
         supervisor.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("model_id", ["stalled-first-byte", "stalled-error-body"])
+def test_engine_client_times_out_before_first_body_byte(tmp_path: Path, model_id: str) -> None:
+    async def run() -> None:
+        supervisor, store = _fixture_supervisor(tmp_path / model_id)
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources([_binding(credential_ref, model_ids=(model_id,))])
+        connection = supervisor.ensure_running()
+        source = store.get_source("src_fixture123")
+        assert source is not None
+
+        handle = await EngineClient(connection, timeout=0.05).invoke(
+            source,
+            model_id,
+            {},
+            stream=True,
+        )
+
+        assert handle.stream is None
+        assert (await handle.outcome()).kind is RawOutcomeKind.TIMEOUT
+        supervisor.stop()
+
+    asyncio.run(run())
+
+
+def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            assert (method, path) == ("GET", "/auth-files/models")
+            assert query == {"name": "claude-account.json"}
+            return {
+                "models": [
+                    {"id": "model-id", "alias": "ignored-alias"},
+                    {"alias": "model-alias", "name": "ignored-name"},
+                    {"name": "model-name"},
+                ]
+            }
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+        def client(self):
+            return Client()
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential(
+            "src_fixture123",
+            "anthropic",
+            "claude-account.json",
+        )
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        models = await adapter.discover_models(
+            "anthropic",
+            "anthropic",
+            None,
+            credential_ref,
+        )
+
+        assert models == ("model-id", "model-alias", "model-name")
 
     asyncio.run(run())
 

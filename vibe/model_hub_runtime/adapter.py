@@ -522,7 +522,11 @@ def _model_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
         return ()
     result: list[str] = []
     for item in models:
-        value = item.get("id") if isinstance(item, dict) else item
+        value = (
+            item.get("id") or item.get("alias") or item.get("name")
+            if isinstance(item, dict)
+            else item
+        )
         if isinstance(value, str) and value and value not in result:
             result.append(value)
     return tuple(result)

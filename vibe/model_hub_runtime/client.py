@@ -38,6 +38,10 @@ class EngineClientError(RuntimeError):
         self.error_type = error_type
 
 
+class _ResponseTooLargeError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class EngineConnection:
     base_url: str
@@ -135,9 +139,18 @@ class EngineClient:
         )
         session = aiohttp.ClientSession(timeout=timeout)
         try:
-            response = await session.post(self._url(endpoint), json=body, headers=headers)
+            response = await asyncio.wait_for(
+                session.post(self._url(endpoint), json=body, headers=headers),
+                timeout=self.timeout,
+            )
             if response.status >= 400:
-                payload = await response.content.read(_MAX_RESPONSE_BYTES)
+                try:
+                    payload = await asyncio.wait_for(
+                        _read_limited(response.content, _MAX_RESPONSE_BYTES),
+                        timeout=self.timeout,
+                    )
+                except _ResponseTooLargeError:
+                    payload = b""
                 outcome = _outcome(
                     kind=RawOutcomeKind.HTTP_ERROR,
                     source=source,
@@ -150,7 +163,10 @@ class EngineClient:
                 await session.close()
                 return completed_handle(outcome)
 
-            first = await response.content.read(_STREAM_CHUNK_BYTES)
+            first = await asyncio.wait_for(
+                response.content.read(_STREAM_CHUNK_BYTES),
+                timeout=self.timeout,
+            )
             if not first:
                 response.close()
                 await session.close()
@@ -310,13 +326,13 @@ async def probe_models(
                         f"model discovery returned HTTP {response.status}",
                         status_code=response.status,
                     )
-                payload = await response.content.read(_MODEL_PROBE_BYTES + 1)
+                payload = await _read_limited(response.content, _MODEL_PROBE_BYTES)
+    except _ResponseTooLargeError:
+        raise EngineClientError("model discovery response is too large") from None
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
         raise EngineClientError("model discovery failed", error_type="network_error") from None
-    if len(payload) > _MODEL_PROBE_BYTES:
-        raise EngineClientError("model discovery response is too large")
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -332,6 +348,17 @@ async def probe_models(
         if isinstance(value, str) and value and value not in model_ids:
             model_ids.append(value)
     return tuple(model_ids)
+
+
+async def _read_limited(content: aiohttp.StreamReader, limit: int) -> bytes:
+    payload = bytearray()
+    while True:
+        chunk = await content.read(min(_STREAM_CHUNK_BYTES, limit + 1 - len(payload)))
+        if not chunk:
+            return bytes(payload)
+        payload.extend(chunk)
+        if len(payload) > limit:
+            raise _ResponseTooLargeError
 
 
 async def _response_stream(
