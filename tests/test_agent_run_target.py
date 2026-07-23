@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from core.services import sessions as sessions_service
 from core.services.agent_run_target import resolve_agent_run_target
@@ -15,6 +16,7 @@ from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
+from config.v2_settings import make_thread_native_id
 
 
 def _controller(tmp_path):
@@ -146,6 +148,222 @@ def test_im_channel_scope_workdir_creates_session_snapshot(tmp_path):
     assert session["agent_name"] == "codex"
     assert session["agent_backend"] == "codex"
     assert session["agent_variant"] == "codex"
+
+
+def test_telegram_topic_scope_workdir_wins_over_group(tmp_path):
+    # Scenario: TELEGRAM-TOPIC-003
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    topic_workdir = tmp_path / "topic"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+        topic_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="thread",
+            native_id=make_thread_native_id("-1001", "42"),
+            parent_scope_id=group_scope_id,
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, topic_scope_id, workdir=str(topic_workdir))
+
+    ctx = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_forum": True, "is_topic_message": True},
+    )
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="telegram_topic_42")
+
+    assert target.scope_id == "telegram::thread::-1001/42"
+    assert target.workdir == str(topic_workdir)
+    assert target.agent_session_id
+    with controller.sqlite_engine.connect() as conn:
+        session = sessions_service.get_session(conn, target.agent_session_id)
+    assert session["workdir"] == str(topic_workdir)
+    assert session["agent_id"] == "agent-codex-default"
+    assert session["agent_name"] == "codex"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "codex"
+
+
+def test_telegram_topic_override_reuses_parent_scoped_session(tmp_path):
+    # Scenario: TELEGRAM-TOPIC-003
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    topic_workdir = tmp_path / "topic"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+        topic_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="thread",
+            native_id=make_thread_native_id("-1001", "42"),
+            parent_scope_id=group_scope_id,
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, topic_scope_id, workdir=str(topic_workdir))
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=group_scope_id,
+            agent_backend="codex",
+            agent_variant="codex",
+            session_anchor="telegram_topic_42",
+            native_session_id="native-topic-session",
+            workdir=str(group_workdir),
+        )
+
+    ctx = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_forum": True, "is_topic_message": True},
+    )
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="telegram_topic_42")
+
+    assert target.agent_session_id == session_id
+    assert target.scope_id == "telegram::channel::-1001"
+    assert target.native_session_id == "native-topic-session"
+    assert target.workdir == str(group_workdir)
+
+
+def test_telegram_topic_override_removal_reuses_topic_scoped_session(tmp_path):
+    # Scenario: TELEGRAM-TOPIC-003
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    topic_workdir = tmp_path / "topic"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+        topic_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="thread",
+            native_id=make_thread_native_id("-1001", "42"),
+            parent_scope_id=group_scope_id,
+            now="2026-06-04T05:00:00Z",
+        )
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=topic_scope_id,
+            agent_backend="codex",
+            agent_variant="codex",
+            session_anchor="telegram_topic_42",
+            native_session_id="native-topic-session",
+            workdir=str(topic_workdir),
+        )
+
+    ctx = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_forum": True, "is_topic_message": True},
+    )
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="telegram_topic_42")
+
+    assert target.agent_session_id == session_id
+    assert target.scope_id == "telegram::thread::-1001/42"
+    assert target.native_session_id == "native-topic-session"
+    assert target.workdir == str(topic_workdir)
+
+
+def test_telegram_general_topic_fallback_anchor_reuses_session(tmp_path):
+    # Scenario: TELEGRAM-TOPIC-003
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+
+    def general_context(message_id: str) -> MessageContext:
+        return MessageContext(
+            user_id="7",
+            channel_id="-1001",
+            message_id=message_id,
+            platform="telegram",
+            platform_specific={"is_forum": True, "is_topic_message": True},
+        )
+
+    first = resolve_agent_run_target(general_context("100"), controller=controller)
+    follow_up = resolve_agent_run_target(general_context("101"), controller=controller)
+
+    assert first.session_anchor == "telegram_-1001_1"
+    assert follow_up.session_anchor == "telegram_-1001_1"
+    assert follow_up.agent_session_id == first.agent_session_id
+
+
+def test_telegram_topic_migrates_legacy_anchor_without_losing_native_session(tmp_path):
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=group_scope_id,
+            agent_backend="codex",
+            agent_variant="codex",
+            session_anchor="telegram_42",
+            native_session_id="native-topic-session",
+            workdir=str(group_workdir),
+        )
+
+    context = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_forum": True, "is_topic_message": True},
+    )
+    target = resolve_agent_run_target(
+        context,
+        controller=controller,
+        base_session_id="telegram_-1001_42",
+    )
+
+    assert target.agent_session_id == session_id
+    assert target.session_anchor == "telegram_-1001_42"
+    assert target.native_session_id == "native-topic-session"
+    with controller.sqlite_engine.connect() as conn:
+        migrated_anchor = conn.execute(
+            select(agent_sessions.c.session_anchor).where(agent_sessions.c.id == session_id)
+        ).scalar_one()
+    assert migrated_anchor == "telegram_-1001_42"
 
 
 def test_existing_background_im_target_carries_visibility(tmp_path):

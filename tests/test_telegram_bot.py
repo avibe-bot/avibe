@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import paths
 from core import chat_discovery
 from core.auth import AuthResult
+from core.message_context import resolve_context_thread_id
 from modules.agents.native_sessions import NativeResumeSession
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from modules.im.multi import MultiIMClient
@@ -50,6 +51,32 @@ def test_strip_leading_bot_mention_returns_empty_for_mention_only() -> None:
     }
 
     assert bot._strip_leading_bot_mention(message, "@vibe_remote_bot") == ""
+
+
+def test_discovered_general_topic_leaves_name_for_ui_localization() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    chat = {
+        "id": -100123,
+        "type": "supergroup",
+        "title": "Forum",
+        "is_forum": True,
+    }
+    message = {"is_topic_message": True}
+
+    with (
+        patch.object(chat_discovery, "remember_chat"),
+        patch.object(chat_discovery, "remember_thread") as remember_thread,
+    ):
+        bot._remember_discovered_chat(chat, message)
+
+    remember_thread.assert_called_once_with(
+        "telegram",
+        "-100123",
+        "1",
+        name="",
+        native_type="forum_topic",
+        metadata={"is_general": True},
+    )
 
 
 def test_strip_leading_bot_mention_keeps_message_body() -> None:
@@ -111,6 +138,35 @@ def test_denied_memory_command_reaches_only_safe_handler() -> None:
     bot.dispatch_text_command.assert_awaited_once()
     bot.send_message.assert_not_awaited()
     bot.on_message_callback.assert_not_awaited()
+
+
+def test_forum_message_uses_topic_require_mention_override() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token", require_mention=True))
+    bot._bot_user = {"id": 1, "username": "vibe_remote_bot"}
+    settings_keys: list[str] = []
+
+    def get_require_mention(settings_key, global_default=False):
+        settings_keys.append(settings_key)
+        return False
+
+    bot.settings_manager = SimpleNamespace(get_require_mention=get_require_mention)
+    bot.on_message_callback = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 78,
+                "message_thread_id": 42,
+                "is_topic_message": True,
+                "chat": {"id": -100123, "type": "supergroup", "title": "Core Forum", "is_forum": True},
+                "from": {"id": 42},
+                "text": "hello topic",
+            }
+        )
+    )
+
+    assert settings_keys == ["thread::-100123::42"]
+    bot.on_message_callback.assert_awaited_once()
 
 
 def test_inbound_message_refreshes_config_before_reading_options() -> None:
@@ -313,6 +369,118 @@ def test_start_new_topic_session_allows_forum_context_without_thread_id() -> Non
     assert topic_context.thread_id == "88"
     send_mock.assert_awaited_once()
     assert send_mock.await_args.args[0] == context
+
+
+def test_auto_topic_handoff_rechecks_authorization_before_dispatch() -> None:
+    bot = TelegramBot(
+        TelegramConfig(
+            bot_token="123456:test-token",
+            forum_auto_topic=True,
+            require_mention=False,
+        )
+    )
+    auth_thread_ids: list[str | None] = []
+
+    def check_authorization(**kwargs):
+        auth_thread_ids.append(kwargs.get("thread_id"))
+        if len(auth_thread_ids) == 1:
+            return SimpleNamespace(allowed=True, denial="")
+        return SimpleNamespace(allowed=False, denial="unauthorized_channel")
+
+    bot.check_authorization = check_authorization
+    bot.build_auth_denial_text = lambda denial, channel_id=None: None
+    bot._maybe_route_to_forum_topic = AsyncMock(
+        return_value=MessageContext(
+            user_id="42",
+            channel_id="-100123",
+            thread_id="88",
+            message_id="77",
+            platform="telegram",
+            platform_specific={
+                "is_dm": False,
+                "chat_type": "supergroup",
+                "is_forum": True,
+                "is_topic_message": True,
+            },
+        )
+    )
+    bot._spawn_message_callback_task = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 77,
+                "message_thread_id": 1,
+                "is_topic_message": True,
+                "chat": {
+                    "id": -100123,
+                    "type": "supergroup",
+                    "title": "Core Forum",
+                    "is_forum": True,
+                },
+                "from": {"id": 42},
+                "text": "start a session",
+            }
+        )
+    )
+
+    assert auth_thread_ids == ["1", "88"]
+    bot._spawn_message_callback_task.assert_not_awaited()
+
+
+def test_auto_topic_handoff_rechecks_destination_mention_policy() -> None:
+    bot = TelegramBot(
+        TelegramConfig(
+            bot_token="123456:test-token",
+            forum_auto_topic=True,
+            require_mention=True,
+        )
+    )
+    settings_keys: list[str] = []
+
+    def get_require_mention(settings_key, global_default=False):
+        settings_keys.append(settings_key)
+        return settings_key != "thread::-100123::1"
+
+    bot.settings_manager = SimpleNamespace(get_require_mention=get_require_mention)
+    bot.check_authorization = lambda **kwargs: SimpleNamespace(allowed=True, denial="")
+    bot._maybe_route_to_forum_topic = AsyncMock(
+        return_value=MessageContext(
+            user_id="42",
+            channel_id="-100123",
+            thread_id="88",
+            message_id="77",
+            platform="telegram",
+            platform_specific={
+                "is_dm": False,
+                "chat_type": "supergroup",
+                "is_forum": True,
+                "is_topic_message": True,
+            },
+        )
+    )
+    bot._spawn_message_callback_task = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 77,
+                "message_thread_id": 1,
+                "is_topic_message": True,
+                "chat": {
+                    "id": -100123,
+                    "type": "supergroup",
+                    "title": "Core Forum",
+                    "is_forum": True,
+                },
+                "from": {"id": 42},
+                "text": "start a session",
+            }
+        )
+    )
+
+    assert settings_keys == ["thread::-100123::1", "thread::-100123::88"]
+    bot._spawn_message_callback_task.assert_not_awaited()
 
 
 def test_build_message_context_records_discovered_chat(tmp_path, monkeypatch) -> None:
@@ -679,6 +847,34 @@ def test_pending_cwd_prompt_consumes_next_plain_message() -> None:
     assert bot._interaction_scope_key(context) not in bot._cwd_prompts
 
 
+def test_interaction_scope_key_separates_forum_topics() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    topic_42 = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="42",
+        platform="telegram",
+        platform_specific={"is_dm": False},
+    )
+    topic_43 = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="43",
+        platform="telegram",
+        platform_specific={"is_dm": False},
+    )
+    general = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        platform="telegram",
+        platform_specific={"is_dm": False, "is_forum": True},
+    )
+
+    assert bot._interaction_scope_key(topic_42) == "-100123:42:42"
+    assert bot._interaction_scope_key(topic_43) == "-100123:42:43"
+    assert bot._interaction_scope_key(general) == "-100123:42:1"
+
+
 def test_pending_cwd_prompt_bypasses_slash_command_with_args() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(
@@ -989,6 +1185,7 @@ def test_resume_menu_uses_short_callback_ids() -> None:
     assert keyboard.buttons[0][0].callback_data == "tg_resume:0"
     state = bot._resume_states[bot._interaction_scope_key(context)]
     assert state.options == [("codex", "session_abcdefghijklmnopqrstuvwxyz")]
+    assert state.thread_id == "1"
     assert "cx...Latest answer" in text
 
 
@@ -997,15 +1194,15 @@ def test_resume_callback_submits_selected_session() -> None:
     context = MessageContext(
         user_id="42",
         channel_id="-100123",
-        thread_id="1",
         message_id="55",
         platform="telegram",
-        platform_specific={"is_dm": False},
+        platform_specific={"is_dm": False, "is_forum": True},
     )
     bot._resume_states[bot._interaction_scope_key(context)] = SimpleNamespace(
         message_id="55",
         options=[("claude", "sess_123")],
         is_dm=False,
+        thread_id="1",
     )
     bot._controller = SimpleNamespace(
         session_handler=SimpleNamespace(handle_resume_session_submission=AsyncMock()),
@@ -1014,7 +1211,15 @@ def test_resume_callback_submits_selected_session() -> None:
     with patch.object(bot, "edit_message", new=AsyncMock(return_value=True)):
         asyncio.run(bot._handle_resume_callback(context, "tg_resume:0"))
 
-    bot._controller.session_handler.handle_resume_session_submission.assert_awaited_once()
+    bot._controller.session_handler.handle_resume_session_submission.assert_awaited_once_with(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="1",
+        agent="claude",
+        session_id="sess_123",
+        is_dm=False,
+        platform="telegram",
+    )
 
 
 def test_routing_callback_save_persists_selected_backend() -> None:
@@ -1308,6 +1513,7 @@ def test_settings_callback_save_updates_language_and_deletes_menu() -> None:
         global_require_mention=True,
         current_language="zh",
         is_dm=False,
+        thread_id="1",
     )
     bot._controller = SimpleNamespace(
         settings_handler=SimpleNamespace(handle_settings_update=AsyncMock()),
@@ -1326,7 +1532,45 @@ def test_settings_callback_save_updates_language_and_deletes_menu() -> None:
         notify_user=True,
         is_dm=False,
         platform="telegram",
+        thread_id="1",
     )
+
+
+def test_callback_context_preserves_general_forum_identity() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    bot.check_authorization = lambda **kwargs: SimpleNamespace(allowed=True, denial=None)
+    captured_contexts: list[MessageContext] = []
+
+    async def handle_internal(context: MessageContext, callback_data: str) -> bool:
+        captured_contexts.append(context)
+        return True
+
+    bot._handle_internal_callback = handle_internal
+
+    with patch.object(bot, "answer_callback", new=AsyncMock(return_value=True)):
+        asyncio.run(
+            bot._handle_callback_query(
+                {
+                    "id": "cb-general",
+                    "data": "tg_settings:save",
+                    "from": {"id": 42},
+                    "message": {
+                        "message_id": 66,
+                        "is_topic_message": True,
+                        "chat": {
+                            "id": -100123,
+                            "type": "supergroup",
+                            "title": "Core Forum",
+                            "is_forum": True,
+                        },
+                    },
+                }
+            )
+        )
+
+    assert len(captured_contexts) == 1
+    assert resolve_context_thread_id(captured_contexts[0]) == "1"
+    assert bot._interaction_scope_key(captured_contexts[0]) == "-100123:42:1"
 
 
 def test_open_question_modal_edits_message_with_telegram_buttons() -> None:

@@ -7,7 +7,7 @@ from config import paths
 from config.platform_registry import get_platform_descriptor
 from config.v2_sessions import SessionsStore
 from config.v2_settings import SettingsStore, ChannelSettings, GuildSettings, RoutingSettings, SCOPED_KEY_SEP
-from config.v2_settings import normalize_routing_settings
+from config.v2_settings import normalize_routing_settings, split_thread_settings_key
 from config.v2_settings import UserSettings as BoundUserSettings
 from modules.sessions_facade import SessionsFacade
 
@@ -103,6 +103,10 @@ class SettingsManager:
         paths.ensure_data_dirs()
         self.settings_file = Path(settings_file) if settings_file else paths.get_settings_path()
         self.platform = platform
+        # The controller replaces this with the live platform config during
+        # dependency injection. Keep standalone managers aligned with the
+        # built-in defaults before that happens.
+        self.require_mention_default = lambda: platform == "telegram"
         self.channel_settings: Dict[str, UserSettings] = {}
         self.dm_user_settings: Dict[str, UserSettings] = {}
         self.store = SettingsStore.get_instance(self.settings_file)
@@ -266,6 +270,15 @@ class SettingsManager:
 
         self._reload_if_changed()
 
+        thread_ref = split_thread_settings_key(normalized_id)
+        if thread_ref is not None:
+            channel_id, thread_id = thread_ref
+            thread = self.store.find_thread(channel_id, thread_id, platform=self.platform)
+            if thread is not None:
+                return self._from_channel_settings(thread)
+            parent = self.store.find_channel(channel_id, platform=self.platform)
+            return self._from_channel_settings(parent or ChannelSettings())
+
         if normalized_id in self.dm_user_settings:
             return self.dm_user_settings[normalized_id]
         if normalized_id in self.channel_settings:
@@ -294,6 +307,23 @@ class SettingsManager:
         normalized_id = self._normalize_user_id(user_id)
 
         settings.show_message_types = self._normalize_show_message_types(settings.show_message_types)
+
+        thread_ref = split_thread_settings_key(normalized_id)
+        if thread_ref is not None:
+            channel_id, thread_id = thread_ref
+            existing_thread = self.store.find_thread(channel_id, thread_id, platform=self.platform)
+            existing = existing_thread
+            if existing_thread is None:
+                existing = self.store.find_channel(channel_id, platform=self.platform)
+            updated = self._to_channel_settings(settings)
+            if existing is not None:
+                updated.require_mention = existing.require_mention
+                updated.require_bind = existing.require_bind
+            if existing_thread is None and updated.require_mention is None:
+                updated.require_mention = bool(self.require_mention_default())
+            self.store.update_thread(channel_id, thread_id, updated, platform=self.platform)
+            self._last_seen_store_mtime = self.store._file_mtime
+            return
 
         if normalized_id in self.dm_user_settings:
             self.dm_user_settings[normalized_id] = settings
@@ -335,6 +365,14 @@ class SettingsManager:
         """Get raw ChannelSettings for a channel without creating defaults."""
         self._reload_if_changed()
         key = str(channel_id)
+        thread_ref = split_thread_settings_key(key)
+        if thread_ref is not None:
+            parent_id, thread_id = thread_ref
+            return self.store.find_effective_channel(
+                parent_id,
+                thread_id=thread_id,
+                platform=self.platform,
+            )
         return self.store.get_channels_for_platform(self.platform).get(key)
 
     def has_guild_scope(self) -> bool:
@@ -466,7 +504,16 @@ class SettingsManager:
         """
         self._reload_if_changed()
         key = str(channel_id)
-        channel_settings = self.store.get_channels_for_platform(self.platform).get(key)
+        thread_ref = split_thread_settings_key(key)
+        if thread_ref is not None:
+            parent_id, thread_id = thread_ref
+            channel_settings = self.store.find_effective_channel(
+                parent_id,
+                thread_id=thread_id,
+                platform=self.platform,
+            )
+        else:
+            channel_settings = self.store.get_channels_for_platform(self.platform).get(key)
 
         if channel_settings is not None and channel_settings.require_mention is not None:
             return channel_settings.require_mention
@@ -481,6 +528,24 @@ class SettingsManager:
             value: True=require mention, False=don't require, None=use global default
         """
         key = str(channel_id)
+        thread_ref = split_thread_settings_key(key)
+        if thread_ref is not None:
+            parent_id, thread_id = thread_ref
+            channel_settings = self.store.find_thread(parent_id, thread_id, platform=self.platform)
+            if channel_settings is None:
+                parent = self.store.find_channel(parent_id, platform=self.platform)
+                channel_settings = ChannelSettings(**vars(parent)) if parent is not None else ChannelSettings()
+                if value is None:
+                    value = (
+                        parent.require_mention
+                        if parent is not None and parent.require_mention is not None
+                        else bool(self.require_mention_default())
+                    )
+            channel_settings.require_mention = value
+            self.store.update_thread(parent_id, thread_id, channel_settings, platform=self.platform)
+            self._last_seen_store_mtime = self.store._file_mtime
+            logger.info("Updated require_mention for thread %s/%s: %s", parent_id, thread_id, value)
+            return
         channel_settings = self.store.get_channel(key, platform=self.platform)
         channel_settings.require_mention = value
         self.store.update_channel(key, channel_settings, platform=self.platform)
@@ -490,7 +555,14 @@ class SettingsManager:
         """Get the raw per-channel require_mention override (may be None)."""
         self._reload_if_changed()
         key = str(channel_id)
-        channel_settings = self.store.get_channels_for_platform(self.platform).get(key)
+        thread_ref = split_thread_settings_key(key)
+        if thread_ref is not None:
+            parent_id, thread_id = thread_ref
+            channel_settings = self.store.find_thread(parent_id, thread_id, platform=self.platform)
+            if channel_settings is None:
+                channel_settings = self.store.find_channel(parent_id, platform=self.platform)
+        else:
+            channel_settings = self.store.get_channels_for_platform(self.platform).get(key)
         if channel_settings is not None:
             return channel_settings.require_mention
         return None

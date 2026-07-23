@@ -194,6 +194,36 @@ def test_telegram_plain_group_session_base_id_uses_stable_channel_id() -> None:
     assert handler.get_base_session_id(context) == "telegram_-100123"
 
 
+def test_telegram_general_topic_session_base_id_includes_chat_and_canonical_topic() -> None:
+    handler = SessionHandler(_Controller(platform="telegram", channel_message_sessions=False))
+    first = MessageContext(
+        user_id="u-1",
+        channel_id="-100123",
+        message_id="42",
+        platform="telegram",
+        platform_specific={"is_dm": False, "is_forum": True, "is_topic_message": True},
+    )
+    follow_up = MessageContext(
+        user_id="u-1",
+        channel_id="-100123",
+        message_id="43",
+        platform="telegram",
+        platform_specific={"is_dm": False, "is_forum": True, "is_topic_message": True},
+    )
+
+    other_forum = MessageContext(
+        user_id="u-1",
+        channel_id="-100999",
+        message_id="42",
+        platform="telegram",
+        platform_specific={"is_dm": False, "is_forum": True, "is_topic_message": True},
+    )
+
+    assert handler.get_base_session_id(first) == "telegram_-100123_1"
+    assert handler.get_base_session_id(follow_up) == "telegram_-100123_1"
+    assert handler.get_base_session_id(other_forum) == "telegram_-100999_1"
+
+
 def test_scheduled_channel_session_uses_provisional_anchor_on_threaded_surfaces() -> None:
     controller = _Controller(platform="slack", dm_threads=False)
     handler = SessionHandler(controller)

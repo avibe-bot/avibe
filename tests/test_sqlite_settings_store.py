@@ -61,6 +61,42 @@ def test_channel_require_bind_persists(tmp_path: Path) -> None:
         reloaded.close()
 
 
+def test_telegram_thread_settings_round_trip_and_parent_fallback(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    parent = ChannelSettings(enabled=True, require_mention=True, require_bind=False)
+    topic = ChannelSettings(
+        enabled=True,
+        show_message_types=["assistant", "toolcall"],
+        custom_cwd="/topics/release",
+        routing=RoutingSettings(agent_name="reviewer", model="gpt-5.4"),
+        require_mention=False,
+        require_bind=True,
+    )
+    store.update_channel("-1001", parent, platform="telegram")
+    store.update_thread("-1001", "42", topic, platform="telegram")
+    store.close()
+
+    reloaded = SettingsStore(settings_path)
+    try:
+        effective = reloaded.find_effective_channel("-1001", thread_id="42", platform="telegram")
+        inherited = reloaded.find_effective_channel("-1001", thread_id="99", platform="telegram")
+        assert effective is not None
+        assert effective.require_mention is False
+        assert effective.require_bind is True
+        assert effective.show_message_types == ["assistant", "toolcall"]
+        assert effective.routing.agent_name == "reviewer"
+        assert effective.custom_cwd == "/topics/release"
+        assert inherited is not None
+        assert inherited.require_mention is True
+        assert reloaded.get_threads_for_platform("telegram")["-1001"]["42"] == effective
+
+        assert reloaded.delete_thread("-1001", "42", platform="telegram") is True
+        assert reloaded.find_effective_channel("-1001", thread_id="42", platform="telegram").require_mention is True
+    finally:
+        reloaded.close()
+
+
 def test_bound_and_enabled_user_checks_are_separate(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     store = SettingsStore(settings_path)
@@ -221,6 +257,64 @@ def test_settings_manager_runtime_save_preserves_require_bind(tmp_path: Path, mo
         assert reloaded.custom_cwd == "/new"
         assert reloaded.require_mention is True
         assert reloaded.require_bind is True
+    finally:
+        manager.store.close()
+
+
+def test_settings_manager_topic_override_materializes_inherited_mention_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+
+    manager = SettingsManager(settings_file=str(settings_path), platform="telegram")
+    manager.require_mention_default = lambda: False
+    try:
+        manager.store.update_channel(
+            "-1001",
+            ChannelSettings(enabled=True, require_mention=None),
+            platform="telegram",
+        )
+        settings_key = v2_settings.make_thread_settings_key("-1001", "42")
+        settings = manager.get_user_settings(settings_key)
+        settings.custom_cwd = "/topic"
+
+        manager.update_user_settings(settings_key, settings)
+
+        topic = manager.store.find_thread("-1001", "42", platform="telegram")
+        assert topic is not None
+        assert topic.custom_cwd == "/topic"
+        assert topic.require_mention is False
+    finally:
+        manager.store.close()
+
+
+def test_settings_manager_topic_mention_inherit_materializes_live_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # Scenario: TELEGRAM-TOPIC-001
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+
+    manager = SettingsManager(settings_file=str(settings_path), platform="telegram")
+    current_default = {"value": False}
+    manager.require_mention_default = lambda: current_default["value"]
+    try:
+        manager.store.update_channel(
+            "-1001",
+            ChannelSettings(enabled=True, require_mention=None),
+            platform="telegram",
+        )
+        manager.set_require_mention(v2_settings.make_thread_settings_key("-1001", "42"), None)
+        current_default["value"] = True
+        manager.set_require_mention(v2_settings.make_thread_settings_key("-1001", "43"), None)
+
+        first = manager.store.find_thread("-1001", "42", platform="telegram")
+        second = manager.store.find_thread("-1001", "43", platform="telegram")
+        assert first is not None and first.require_mention is False
+        assert second is not None and second.require_mention is True
     finally:
         manager.store.close()
 

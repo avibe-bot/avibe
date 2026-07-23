@@ -877,6 +877,29 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(controller.agent_service.stop_requests), 1)
         self.assertEqual(controller.agent_service.requests, [])
 
+    async def test_control_text_handles_inline_stop_in_telegram_general_topic(self):
+        controller = _StubController(platform="telegram", ack_mode="reaction", typing_result=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="-1001",
+            thread_id=None,
+            message_id="m1",
+            platform="telegram",
+            platform_specific={
+                "control_text": "stop",
+                "is_dm": False,
+                "is_forum": True,
+                "is_topic_message": True,
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+
+        self.assertEqual(len(controller.agent_service.stop_requests), 1)
+        self.assertEqual(controller.agent_service.requests, [])
+
     async def test_target_routing_subagent_preserves_backend_runtime_key_for_stop(self):
         from core.handlers.command_handlers import CommandHandlers
 

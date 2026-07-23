@@ -398,6 +398,8 @@ export type ApiContextType = {
   saveConfig: (payload: any) => Promise<any>;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
+  saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
+  deleteThreadSettings: (platform: string, channelId: string, threadId: string) => Promise<any>;
   getUsers: (platform?: string) => Promise<any>;
   saveUsers: (payload: any, platform?: string) => Promise<any>;
   toggleAdmin: (userId: string, isAdmin: boolean, platform?: string) => Promise<any>;
@@ -2440,6 +2442,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveConfig: (payload) => postJson('/api/config', payload),
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),
     saveSettings: (payload, platform) => postJson('/api/settings', platform ? { ...payload, platform } : payload),
+    saveThreadSettings: (platform, channelId, threadId, settings) => postJson('/api/settings/thread', {
+      platform,
+      channel_id: channelId,
+      thread_id: threadId,
+      settings,
+    }),
+    deleteThreadSettings: (platform, channelId, threadId) => deleteJson(
+      `/api/settings/thread?platform=${encodeURIComponent(platform)}&channel_id=${encodeURIComponent(channelId)}&thread_id=${encodeURIComponent(threadId)}`,
+    ),
     getUsers: (platform) => getJson(platform ? `/api/users?platform=${encodeURIComponent(platform)}` : '/api/users'),
     saveUsers: (payload, platform) => postJson('/api/users', platform ? { ...payload, platform } : payload),
     toggleAdmin: (userId, isAdmin, platform) => postJson(`/api/users/${encodeURIComponent(userId)}/admin`, platform ? { is_admin: isAdmin, platform } : { is_admin: isAdmin }),

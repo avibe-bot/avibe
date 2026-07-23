@@ -20,7 +20,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
-from core.message_context import resolve_context_platform
+from config.v2_settings import split_thread_native_id
+from core.message_context import (
+    build_thread_session_anchor,
+    resolve_context_platform,
+    resolve_context_thread_id,
+    thread_id_from_session_anchor,
+)
 from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
@@ -173,8 +179,9 @@ def parse_scope_id(value: str) -> ParsedSessionKey:
 
 
 def session_anchor_for_target(target: ParsedSessionKey) -> str:
-    anchor_id = target.thread_id or target.scope_id
-    return f"{target.platform}_{anchor_id}"
+    if target.thread_id:
+        return build_thread_session_anchor(target.platform, target.scope_id, target.thread_id)
+    return f"{target.platform}_{target.scope_id}"
 
 
 @dataclass(frozen=True)
@@ -266,19 +273,27 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
     # the reply to that reserved session via ``agent_session_target`` — so a
     # project-scoped row IS a valid task target. (``--session-key`` targeting stays
     # channel/user-only: a bare project key wouldn't identify a single session.)
+    scoped_thread_id: Optional[str] = None
     if persisted_scope_id is None:
         platform = "avibe"
         scope_type = "project"
         native_scope_id = raw
-    elif not platform or scope_type not in {"channel", "user", "project"} or not native_scope_id:
-        raise ValueError(f"agent session id cannot be used as a task target: {raw}")
+    else:
+        if not platform or not native_scope_id:
+            raise ValueError(f"agent session id cannot be used as a task target: {raw}")
+        if scope_type == "thread":
+            try:
+                native_scope_id, scoped_thread_id = split_thread_native_id(native_scope_id)
+            except ValueError as exc:
+                raise ValueError(f"agent session id cannot be used as a task target: {raw}") from exc
+            scope_type = "channel"
+        elif scope_type not in {"channel", "user", "project"}:
+            raise ValueError(f"agent session id cannot be used as a task target: {raw}")
 
     anchor = str(row["session_anchor"] or "")
-    thread_id = (
-        None
-        if persisted_scope_id is None or anchor == raw
-        else _thread_id_from_session_anchor(anchor, platform=platform, scope_id=native_scope_id)
-    )
+    thread_id = scoped_thread_id
+    if thread_id is None and persisted_scope_id is not None and anchor != raw:
+        thread_id = _thread_id_from_session_anchor(anchor, platform=platform, scope_id=native_scope_id)
     session_metadata = _json_loads(row["session_metadata_json"], {})
     visibility = str(row["visibility"] or "foreground")
     return ResolvedSessionIdTarget(
@@ -348,17 +363,7 @@ def enqueue_session_callback(
 
 
 def _thread_id_from_session_anchor(anchor: str, *, platform: str, scope_id: str) -> Optional[str]:
-    if not anchor:
-        return None
-    base_anchor = anchor
-    if ":" in base_anchor:
-        base_anchor = base_anchor.split(":", 1)[0]
-    prefix = f"{platform}_"
-    if base_anchor.startswith(prefix):
-        base_anchor = base_anchor[len(prefix) :]
-    if base_anchor and base_anchor != scope_id:
-        return base_anchor
-    return None
+    return thread_id_from_session_anchor(anchor, platform=platform, channel_id=scope_id)
 
 
 def build_session_key_for_context(
@@ -376,7 +381,7 @@ def build_session_key_for_context(
         platform=platform,
         scope_type=scope_type,
         scope_id=scope_id,
-        thread_id=context.thread_id if include_thread else None,
+        thread_id=(resolve_context_thread_id(context) or context.thread_id) if include_thread else None,
     )
 
 
@@ -2941,8 +2946,21 @@ class ScheduledTaskService:
         clear_provisional_source = session_target.thread_id is None and self._supports_threaded_delivery(session_target)
 
         if delivery_target.thread_id:
-            alias_base = f"{delivery_target.platform}_{delivery_target.thread_id}"
-            if same_scope and alias_base == f"{session_target.platform}_{session_target.thread_id}":
+            alias_base = build_thread_session_anchor(
+                delivery_target.platform,
+                delivery_target.scope_id,
+                delivery_target.thread_id,
+            )
+            source_alias_base = (
+                build_thread_session_anchor(
+                    session_target.platform,
+                    session_target.scope_id,
+                    session_target.thread_id,
+                )
+                if session_target.thread_id
+                else None
+            )
+            if same_scope and alias_base == source_alias_base:
                 return {"mode": "none"}
             return {
                 "mode": "fixed_base",

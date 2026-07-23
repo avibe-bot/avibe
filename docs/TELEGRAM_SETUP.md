@@ -55,7 +55,18 @@ The most common Telegram setup issue is leaving privacy mode enabled. In that st
 
 Avibe discovers Telegram chats from inbound messages. Telegram does not provide a generic "list every chat the bot is in" API.
 
-Important: Telegram DMs are usable, but they stay hidden in the wizard chat-selection UI. The selectable list is for discovered groups and forum chats, not individual topics.
+Important: Telegram DMs are usable, but they stay hidden in the wizard chat-selection UI. The wizard selects discovered groups and forum chats. After setup, the dashboard's **Group Settings** page also lists forum topics that the bot has seen.
+
+### Configure individual forum topics
+
+Open **Dashboard → Group Settings → Telegram**, then expand a forum group. Every discovered topic initially inherits the group settings. Choose **Customize** to give that topic its own:
+
+- enabled state and `@mention` requirement
+- bound-user-only access policy
+- Vibe Agent, model, reasoning, and working directory
+- visible message types
+
+Choose **Use group settings** to delete the override and resume inheritance. Telegram does not provide a complete topic-list API, so a topic appears after the bot receives a message there. The General topic is treated as topic ID `1`.
 
 On first setup, do this in order:
 

@@ -1,0 +1,36 @@
+version: 1
+capability:
+  id: telegram_topic_routing
+  name: Telegram forum topic settings and routing
+  canonical_tests:
+    - tests/test_ui_api.py
+    - tests/test_auth_pipeline.py
+    - tests/test_agent_run_target.py
+status_legend:
+  covered: automated scenario or contract coverage exists
+  manual: currently validated by human regression
+scenarios:
+  - id: TELEGRAM-TOPIC-001
+    name: A topic override controls mention, bound-only, agent, and message-type settings
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_ui_api.py::test_telegram_topic_settings_api_and_discovery_payload
+  - id: TELEGRAM-TOPIC-002
+    name: An unconfigured topic inherits its parent group while a configured topic wins
+    status: covered
+    kind: fallback
+    layer: contract
+    test: tests/test_auth_pipeline.py::test_telegram_thread_auth_uses_topic_override_before_parent
+  - id: TELEGRAM-TOPIC-003
+    name: Agent workdir and routing resolve from the topic scope before the group scope
+    status: covered
+    kind: routing
+    layer: contract
+    test: tests/test_agent_run_target.py::test_telegram_topic_scope_workdir_wins_over_group
+  - id: TELEGRAM-TOPIC-004
+    name: Discovered forum topics can be customized and reset from Group Settings
+    status: manual
+    kind: ui
+    layer: manual
+    evidence: output/playwright/telegram-topic-settings.png

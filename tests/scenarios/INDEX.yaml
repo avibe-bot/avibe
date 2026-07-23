@@ -60,3 +60,15 @@ capabilities:
       - tests/test_tunnel_recovery.py
     unit_or_contract_tests:
       - tests/test_remote_access_vibe_cloud.py
+  - id: telegram_topic_routing
+    name: Telegram forum topic settings and routing
+    status: active
+    catalog: tests/scenarios/telegram_topic_routing/catalog.yaml
+    observations: tests/scenarios/telegram_topic_routing/observations.yaml
+    scenario_tests:
+      - tests/test_ui_api.py
+      - tests/test_auth_pipeline.py
+      - tests/test_agent_run_target.py
+    unit_or_contract_tests:
+      - tests/test_sqlite_settings_store.py
+      - tests/test_chat_discovery.py

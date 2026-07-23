@@ -26,6 +26,7 @@ import { EyebrowBadge, PlatformIcon, WizardCard } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
 import { CompactSelect, SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
+import { TelegramTopicList } from './TelegramTopicList';
 
 const PLATFORM_BRAND_COLORS: Record<string, string> = {
   slack: '#4A154B',
@@ -50,7 +51,7 @@ interface ChannelListProps {
   wizardPlatforms?: string[];
 }
 
-interface ChannelConfig {
+export interface ChannelConfig {
   enabled: boolean;
   show_message_types: string[];
   custom_cwd: string;
@@ -120,6 +121,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const [configs, setConfigs] = useState<Record<string, ChannelConfig>>(
     data.channelConfigsByPlatform?.[scopedInitialPlatform] || data.channelConfigs || {}
   );
+  const [threadConfigs, setThreadConfigs] = useState<Record<string, Record<string, ChannelConfig>>>({});
   const [config, setConfig] = useState<any>(data);
   const [pagePlatform, setPagePlatform] = useState<string>(forcedPlatform || data.platform || 'slack');
   const [opencodeOptionsByCwd, setOpencodeOptionsByCwd] = useState<Record<string, any>>({});
@@ -151,6 +153,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const [pageTab, setPageTab] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedChannelId, setExpandedChannelId] = useState<string | null>(null);
+  const [expandedTopicKey, setExpandedTopicKey] = useState<string | null>(null);
   const [showInactive, setShowInactive] = useState(true);
   // When true, also fetch channels the platform no longer returns (deleted /
   // inaccessible) so the user can review and remove them.
@@ -219,6 +222,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         if (!cancelled) {
           setConfig((current: any) => ({ ...current, agent_catalog: settings.agent_catalog || current.agent_catalog }));
           setConfigs(settings.channels || {});
+          if (targetPlatform === 'telegram') setThreadConfigs(settings.threads || {});
         }
       } catch {
         if (!cancelled) {
@@ -257,6 +261,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         api.getSettings(defaultPlatform).then(s => {
           setConfig((current: any) => ({ ...current, agent_catalog: s.agent_catalog || current.agent_catalog }));
           setConfigs(s.channels || {});
+          if (defaultPlatform === 'telegram') setThreadConfigs(s.threads || {});
           if (defaultPlatform === 'discord') {
             const allowlist = getDiscordGuildAllowlist(s);
             confirmedGuildAllowlistRef.current = allowlist;
@@ -298,6 +303,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (!platform) return;
     api.getSettings(platform).then((settings) => {
       setConfigs(settings.channels || {});
+      if (platform === 'telegram') setThreadConfigs(settings.threads || {});
       if (platform === 'discord') {
         const allowlist = getDiscordGuildAllowlist(settings);
         confirmedGuildAllowlistRef.current = allowlist;
@@ -702,8 +708,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     const neededClaudeCwds = new Set<string>();
     const neededCodexCwds = new Set<string>();
 
-    channels.forEach((channel) => {
-      const raw = configs[channel.id];
+    const collectBackendCwd = (raw: ChannelConfig | undefined) => {
       if (!raw || raw.enabled === false) return;
       const effectiveCwd = (raw.custom_cwd ?? '') || defaultCwd;
       const routing = raw.routing || {};
@@ -719,6 +724,13 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       if (backend === 'codex' && config.agents?.codex?.enabled) {
         neededCodexCwds.add(effectiveCwd);
       }
+    };
+
+    channels.forEach((channel) => {
+      collectBackendCwd(configs[channel.id]);
+    });
+    Object.values(threadConfigs).forEach((topics) => {
+      Object.values(topics).forEach(collectBackendCwd);
     });
 
     neededOpenCodeCwds.forEach((cwd) => {
@@ -738,7 +750,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         void loadCodexAgents(cwd);
       }
     });
-  }, [channels, configs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
+  }, [channels, configs, threadConfigs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
 
   const isChannelEnabled = (channelId: string) => {
     const channel = configs[channelId];
@@ -847,6 +859,45 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     }
   };
 
+  const saveTelegramTopicConfig = async (
+    channelId: string,
+    topicId: string,
+    next: ChannelConfig,
+  ) => {
+    setThreadConfigs((current) => ({
+      ...current,
+      [channelId]: { ...(current[channelId] || {}), [topicId]: next },
+    }));
+    try {
+      const result = await api.saveThreadSettings('telegram', channelId, topicId, next);
+      const saved = (result.settings || next) as ChannelConfig;
+      setThreadConfigs((current) => ({
+        ...current,
+        [channelId]: { ...(current[channelId] || {}), [topicId]: saved },
+      }));
+      showToast(t('channelList.settingsSaved'));
+    } catch {
+      const settings = await api.getSettings('telegram').catch(() => null);
+      if (settings) setThreadConfigs(settings.threads || {});
+      showToast(t('channelList.settingsSaveFailed'), 'error');
+    }
+  };
+
+  const resetTelegramTopicConfig = async (channelId: string, topicId: string) => {
+    try {
+      await api.deleteThreadSettings('telegram', channelId, topicId);
+      setThreadConfigs((current) => {
+        const nextChannel = { ...(current[channelId] || {}) };
+        delete nextChannel[topicId];
+        return { ...current, [channelId]: nextChannel };
+      });
+      setExpandedTopicKey((current) => current === `${channelId}::${topicId}` ? null : current);
+      showToast(t('channelList.settingsSaved'));
+    } catch {
+      showToast(t('channelList.settingsSaveFailed'), 'error');
+    }
+  };
+
   const loadAllPlatformsData = async (force = false) => {
     if (!isPage) return;
     const platforms = getEnabledPlatforms(config).filter((p) => platformSupportsChannels(config, p));
@@ -858,10 +909,14 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         platforms.map(async (p) => {
           let channelsList: any[] = [];
           let configsMap: Record<string, ChannelConfig> = {};
+          let threadConfigsMap: Record<string, Record<string, ChannelConfig>> = {};
           let refreshing = false;
           try {
             const settings = await api.getSettings(p);
             configsMap = (settings.channels || {}) as Record<string, ChannelConfig>;
+            if (p === 'telegram') {
+              threadConfigsMap = (settings.threads || {}) as Record<string, Record<string, ChannelConfig>>;
+            }
             if (p === 'lark') {
               const appId = config.lark?.app_id || '';
               const appSecret = config.lark?.app_secret || '';
@@ -900,7 +955,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           } catch {
             // ignore individual platform failures
           }
-          return { platform: p, channels: channelsList, configs: configsMap, refreshing };
+          return { platform: p, channels: channelsList, configs: configsMap, threadConfigs: threadConfigsMap, refreshing };
         })
       );
       if (allPlatformsRequestVersionRef.current !== requestVersion) return;
@@ -912,6 +967,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       }
       setAllChannelsByPlatform(channelsByPlatform);
       setAllConfigsByPlatform(configsByPlatform);
+      const telegramResult = results.find((result) => result.platform === 'telegram');
+      if (telegramResult) setThreadConfigs(telegramResult.threadConfigs);
       if (results.some((r) => r.refreshing)) scheduleAllPlatformsRefreshFollowup();
     } finally {
       endAllPlatformsLoading();
@@ -1643,24 +1700,79 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
 
                   {/* Expanded body — design.pen asPXu (VR/RoutingConfig) — shared with /users */}
                   {expanded && (
-                    <RoutingConfigPanel
-                      value={channelConfig}
-                      onChange={(patch) => updateRow(patch)}
-                      onBrowseDirectory={() => setBrowsingCwdFor(rowKey)}
-                      globalConfig={config}
-                      vibeAgents={vibeAgents}
-                      defaultAgentName={defaultAgentName}
-                      availableMessageTypes={availableMessageTypes(channelPlatform)}
-                      showRequireMention={true}
-                      inheritsFromKey={channelPlatform}
-                      opencodeOptions={opencodeOptions}
-                      claudeAgents={claudeAgents}
-                      claudeModels={claudeModels}
-                      claudeModelLabels={claudeModelLabels}
-                      claudeReasoningOptions={claudeReasoningOptions}
-                      codexAgents={codexAgents}
-                      codexModels={codexModels}
-                    />
+                    <>
+                      <RoutingConfigPanel
+                        value={channelConfig}
+                        onChange={(patch) => updateRow(patch)}
+                        onBrowseDirectory={() => setBrowsingCwdFor(rowKey)}
+                        globalConfig={config}
+                        vibeAgents={vibeAgents}
+                        defaultAgentName={defaultAgentName}
+                        availableMessageTypes={availableMessageTypes(channelPlatform)}
+                        showRequireMention={true}
+                        inheritsFromKey={channelPlatform}
+                        opencodeOptions={opencodeOptions}
+                        claudeAgents={claudeAgents}
+                        claudeModels={claudeModels}
+                        claudeModelLabels={claudeModelLabels}
+                        claudeReasoningOptions={claudeReasoningOptions}
+                        codexAgents={codexAgents}
+                        codexModels={codexModels}
+                      />
+                      {channelPlatform === 'telegram' && channel.supports_topics && (
+                        <TelegramTopicList<ChannelConfig>
+                          topics={channel.topics || []}
+                          configs={threadConfigs[channel.id] || {}}
+                          expandedTopicId={
+                            expandedTopicKey?.startsWith(`${channel.id}::`)
+                              ? expandedTopicKey.slice(channel.id.length + 2)
+                              : null
+                          }
+                          onToggleExpanded={(topicId) => {
+                            const key = `${channel.id}::${topicId}`;
+                            setExpandedTopicKey((current) => current === key ? null : key);
+                          }}
+                          onCustomize={(topicId) => {
+                            const snapshot: ChannelConfig = {
+                              ...channelConfig,
+                              show_message_types: [...channelConfig.show_message_types],
+                              routing: { ...channelConfig.routing },
+                            };
+                            void saveTelegramTopicConfig(channel.id, topicId, snapshot);
+                            setExpandedTopicKey(`${channel.id}::${topicId}`);
+                          }}
+                          onReset={(topicId) => void resetTelegramTopicConfig(channel.id, topicId)}
+                          onSetEnabled={(topicId, enabled) => {
+                            const topicConfig = threadConfigs[channel.id]?.[topicId];
+                            if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, enabled });
+                          }}
+                          renderEditor={(topicId, topicConfig) => {
+                            const topicCwd = topicConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
+                            return (
+                              <RoutingConfigPanel
+                                value={topicConfig}
+                                onChange={(patch) => void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, ...patch })}
+                                onBrowseDirectory={() => setBrowsingCwdFor(`telegram::${channel.id}::${topicId}`)}
+                                globalConfig={config}
+                                vibeAgents={vibeAgents}
+                                defaultAgentName={defaultAgentName}
+                                availableMessageTypes={availableMessageTypes('telegram')}
+                                showRequireMention={true}
+                                inheritsFromKey="telegram"
+                                opencodeOptions={opencodeOptionsByCwd[topicCwd]}
+                                claudeAgents={claudeAgentsByCwd[topicCwd] || []}
+                                claudeModels={claudeModels}
+                                claudeModelLabels={claudeModelLabels}
+                                claudeReasoningOptions={claudeReasoningOptions}
+                                codexAgents={codexAgentsByCwd[topicCwd] || []}
+                                codexModels={codexModels}
+                                containerClass="border-t border-cyan/20 bg-background/35"
+                              />
+                            );
+                          }}
+                        />
+                      )}
+                    </>
                   )}
                 </div>
               );
@@ -1670,16 +1782,21 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
 
         {/* Directory browser modal — page mode keys by `${platform}::${channelId}` */}
         {browsingCwdFor && (() => {
-          const sep = browsingCwdFor.indexOf('::');
-          if (sep < 0) return null;
-          const browsePlatform = browsingCwdFor.slice(0, sep);
-          const browseChannelId = browsingCwdFor.slice(sep + 2);
+          const [browsePlatform, browseChannelId, browseTopicId] = browsingCwdFor.split('::');
+          if (!browsePlatform || !browseChannelId) return null;
           const platformConfigs = browsePlatform === platform ? configs : (allConfigsByPlatform[browsePlatform] || {});
+          const selectedConfig = browseTopicId
+            ? threadConfigs[browseChannelId]?.[browseTopicId]
+            : platformConfigs[browseChannelId];
           return (
             <DirectoryBrowser
-              initialPath={platformConfigs[browseChannelId]?.custom_cwd || config.runtime?.default_cwd || '~/work'}
+              initialPath={selectedConfig?.custom_cwd || config.runtime?.default_cwd || '~/work'}
               onSelect={(path) => {
-                void updateConfigForPlatform(browsePlatform, browseChannelId, { custom_cwd: path });
+                if (browseTopicId && selectedConfig) {
+                  void saveTelegramTopicConfig(browseChannelId, browseTopicId, { ...selectedConfig, custom_cwd: path });
+                } else {
+                  void updateConfigForPlatform(browsePlatform, browseChannelId, { custom_cwd: path });
+                }
                 setBrowsingCwdFor(null);
               }}
               onClose={() => setBrowsingCwdFor(null)}

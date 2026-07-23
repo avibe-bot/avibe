@@ -17,6 +17,7 @@ from config.v2_config import (
     V2Config,
 )
 from config import paths
+from config.v2_settings import ChannelSettings, SettingsStore
 from core.vibe_agents import VibeAgentStore
 from core import chat_discovery
 from vibe import api, backend_model_catalog
@@ -2694,6 +2695,79 @@ def test_telegram_list_chats_returns_discovered_groups(tmp_path, monkeypatch):
     assert [chat["id"] for chat in result["channels"]] == ["-1001"]
     assert result["summary"]["visible_count"] == 1
     assert result["summary"]["hidden_private_count"] == 1
+
+
+def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch):
+    # Scenario: TELEGRAM-TOPIC-001
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+    SettingsStore.reset_instance()
+    try:
+        store = SettingsStore.get_instance()
+        store.update_channel("-1001", ChannelSettings(enabled=True, require_mention=True), platform="telegram")
+        chat_discovery.remember_chat(
+            "telegram", "-1001", name="Engineering", native_type="supergroup", supports_threads=True
+        )
+        chat_discovery.remember_thread(
+            "telegram", "-1001", "42", name="Releases", native_type="forum_topic"
+        )
+
+        saved = api.save_thread_settings(
+            {
+                "platform": "telegram",
+                "channel_id": "-1001",
+                "thread_id": "42",
+                "settings": {
+                    "enabled": True,
+                    "require_mention": False,
+                    "require_bind": True,
+                    "show_message_types": ["assistant", "toolcall"],
+                    "routing": {"agent_name": "reviewer", "model": "gpt-5.4"},
+                },
+            }
+        )
+        settings = api.get_settings("telegram")
+        chats = api.telegram_list_chats()
+
+        assert saved["ok"] is True
+        assert settings["threads"]["-1001"]["42"]["require_mention"] is False
+        assert settings["threads"]["-1001"]["42"]["require_bind"] is True
+        group = next(channel for channel in chats["channels"] if channel["id"] == "-1001")
+        assert group["topics"][0]["name"] == "Releases"
+        assert group["topics"][0]["configured"] is True
+
+        deleted = api.delete_thread_settings("telegram", "-1001", "42")
+        assert deleted["removed"] is True
+        assert api.get_settings("telegram")["threads"] == {}
+    finally:
+        SettingsStore.reset_instance()
+
+
+def test_telegram_topic_settings_materialize_inherited_mention_default(tmp_path, monkeypatch):
+    # Scenario: TELEGRAM-TOPIC-001
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+    monkeypatch.setattr(api, "_stored_platform_config", lambda _platform: SimpleNamespace(require_mention=False))
+    SettingsStore.reset_instance()
+    try:
+        store = SettingsStore.get_instance()
+        store.update_channel("-1001", ChannelSettings(enabled=True, require_mention=None), platform="telegram")
+
+        saved = api.save_thread_settings(
+            {
+                "platform": "telegram",
+                "channel_id": "-1001",
+                "thread_id": "42",
+                "settings": {
+                    "enabled": True,
+                    "require_mention": None,
+                },
+            }
+        )
+
+        assert saved["ok"] is True
+        assert saved["settings"]["require_mention"] is False
+        assert store.find_thread("-1001", "42", platform="telegram").require_mention is False
+    finally:
+        SettingsStore.reset_instance()
 
 
 def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):

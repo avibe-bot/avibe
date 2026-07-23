@@ -13,6 +13,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
+from config.v2_settings import make_thread_native_id
 from core.session_activities import SessionActivityRegistry
 from core.scheduled_tasks import (
     ParsedSessionKey,
@@ -31,6 +32,8 @@ from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
+from storage.agent_session_rows import create_agent_session_row
+from storage.settings_service import upsert_scope
 
 
 class _StubScheduler:
@@ -75,6 +78,14 @@ def test_session_anchor_for_target_uses_scope_until_thread_is_explicit() -> None
     assert session_anchor_for_target(thread) == "slack_171717.123"
 
 
+def test_session_anchor_for_telegram_topic_includes_chat_id() -> None:
+    first = parse_session_key("telegram::channel::-1001::thread::42")
+    second = parse_session_key("telegram::channel::-1002::thread::42")
+
+    assert session_anchor_for_target(first) == "telegram_-1001_42"
+    assert session_anchor_for_target(second) == "telegram_-1002_42"
+
+
 def test_resolve_session_id_target_keeps_scope_anchor_threadless(tmp_path: Path) -> None:
     from storage.sessions_service import SQLiteSessionsService
 
@@ -117,6 +128,64 @@ def test_resolve_session_id_target_preserves_reserved_user_scope(tmp_path: Path)
 
     assert resolved.session_key.to_key() == "discord::user::123456789"
     assert resolved.session_key.is_dm is True
+
+
+@pytest.mark.parametrize("anchor", ["telegram_-1001_42", "telegram_42"])
+def test_resolve_session_id_target_maps_telegram_topic_scope_to_delivery_key(
+    tmp_path: Path,
+    anchor: str,
+) -> None:
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "vibe.sqlite"
+    SQLiteSessionsService(db_path).close()
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            group_scope_id = upsert_scope(
+                conn,
+                platform="telegram",
+                scope_type="channel",
+                native_id="-1001",
+                now="2026-05-31T00:00:00Z",
+            )
+            topic_scope_id = upsert_scope(
+                conn,
+                platform="telegram",
+                scope_type="thread",
+                native_id=make_thread_native_id("-1001", "42"),
+                parent_scope_id=group_scope_id,
+                now="2026-05-31T00:00:00Z",
+            )
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=topic_scope_id,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor=anchor,
+                native_session_id="native-topic-session",
+                workdir=str(tmp_path),
+            )
+    finally:
+        engine.dispose()
+
+    resolved = resolve_session_id_target(session_id, db_path=db_path)
+
+    assert resolved.scope_id == topic_scope_id
+    assert resolved.session_key.to_key() == "telegram::channel::-1001::thread::42"
+
+
+def test_build_session_key_for_general_topic_uses_canonical_thread_id() -> None:
+    context = MessageContext(
+        user_id="7",
+        channel_id="-1001",
+        platform="telegram",
+        platform_specific={"is_dm": False, "is_forum": True},
+    )
+
+    parsed = build_session_key_for_context(context, include_thread=True)
+
+    assert parsed.to_key() == "telegram::channel::-1001::thread::1"
 
 
 def test_resolve_session_id_target_accepts_avibe_project_session(tmp_path: Path) -> None:
@@ -638,6 +707,25 @@ def test_build_context_separates_delivery_target_from_session_target() -> None:
     assert context.platform_specific["delivery_scope_session_key"] == "slack::channel::C123"
     assert context.platform_specific["scheduled_delivery_alias"]["mode"] == "sent_message"
     assert context.platform_specific["scheduled_delivery_alias"]["clear_source"] is False
+
+
+def test_telegram_delivery_alias_includes_chat_id() -> None:
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")),
+    )
+    session_target = parse_session_key("telegram::channel::-100123::thread::42")
+    delivery_target = parse_session_key("telegram::channel::-100456::thread::42")
+
+    strategy = service._build_delivery_alias_strategy(
+        session_target=session_target,
+        delivery_target=delivery_target,
+        session_context={"channel_id": "-100123"},
+        delivery_context={"channel_id": "-100456"},
+    )
+
+    assert strategy["mode"] == "fixed_base"
+    assert strategy["base_session_id"] == "telegram_-100456_42"
 
 
 def test_build_context_avibe_keys_on_session_id_not_project() -> None:

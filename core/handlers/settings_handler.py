@@ -675,6 +675,7 @@ class SettingsHandler(BaseHandler):
         user_id: str,
         show_message_types: list,
         channel_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
         require_mention: Optional[bool] = None,
         language: Optional[str] = None,
         notify_user: bool = True,
@@ -686,6 +687,7 @@ class SettingsHandler(BaseHandler):
             context = MessageContext(
                 user_id=user_id,
                 channel_id=channel_id if channel_id else user_id,
+                thread_id=thread_id,
                 platform=platform or self.config.platform,
                 platform_specific={"is_dm": is_dm, "platform": platform or self.config.platform},
             )
@@ -693,12 +695,12 @@ class SettingsHandler(BaseHandler):
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
 
+            if not is_dm:
+                settings_manager.set_require_mention(settings_key, require_mention)
+
             user_settings = settings_manager.get_user_settings(settings_key)
             user_settings.show_message_types = show_message_types
             settings_manager.update_user_settings(settings_key, user_settings)
-
-            if not is_dm:
-                settings_manager.set_require_mention(settings_key, require_mention)
 
             language_saved = True
             if language is not None and language != self.config.language:
@@ -750,6 +752,7 @@ class SettingsHandler(BaseHandler):
         view_id: str,
         view_hash: str,
         selection: RoutingModalSelection,
+        thread_id: Optional[str] = None,
         is_dm: bool = False,
         platform: Optional[str] = None,
     ) -> None:
@@ -763,6 +766,7 @@ class SettingsHandler(BaseHandler):
             context = MessageContext(
                 user_id=user_id,
                 channel_id=resolved_channel_id,
+                thread_id=thread_id,
                 platform=platform or self.config.platform,
                 platform_specific={"is_dm": is_dm, "platform": platform or self.config.platform},
             )
@@ -815,6 +819,7 @@ class SettingsHandler(BaseHandler):
         backend: str,
         opencode_agent: Optional[str],
         opencode_model: Optional[str],
+        thread_id: Optional[str] = None,
         opencode_reasoning_effort: Optional[str] = None,
         claude_agent: Optional[str] = None,
         claude_model: Optional[str] = None,
@@ -834,6 +839,7 @@ class SettingsHandler(BaseHandler):
             context = MessageContext(
                 user_id=user_id,
                 channel_id=channel_id if channel_id else user_id,
+                thread_id=thread_id,
                 platform=platform or self.config.platform,
                 platform_specific={"is_dm": is_dm, "platform": platform or self.config.platform},
             )

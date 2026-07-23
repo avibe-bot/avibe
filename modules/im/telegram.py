@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional
 
 from config.v2_config import TelegramConfig
 from core import chat_discovery
+from core.message_context import resolve_context_scope_settings_key, resolve_context_thread_id
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
 from modules.agents.native_sessions import AgentNativeSessionService, NativeResumeSession
@@ -37,12 +38,14 @@ class _TelegramResumeSessionState:
     message_id: str
     options: list[tuple[str, str]]
     is_dm: bool
+    thread_id: Optional[str]
 
 
 @dataclass
 class _TelegramRoutingState:
     message_id: str
     channel_id: str
+    thread_id: Optional[str]
     user_id: str
     is_dm: bool
     registered_backends: list[str]
@@ -83,6 +86,7 @@ class _TelegramSettingsState:
     global_require_mention: bool
     current_language: str
     is_dm: bool
+    thread_id: Optional[str]
 
 
 @dataclass
@@ -422,15 +426,7 @@ class TelegramBot(BaseIMClient):
 
         explicitly_addressed = self._is_explicitly_addressed(message, text)
 
-        effective_require_mention = self.config.require_mention
-        if self.settings_manager is not None and not context.platform_specific.get("is_dm", False):
-            try:
-                effective_require_mention = self.settings_manager.get_require_mention(
-                    context.channel_id,
-                    global_default=self.config.require_mention,
-                )
-            except Exception:
-                logger.debug("Failed to resolve Telegram effective require_mention", exc_info=True)
+        effective_require_mention = self._effective_require_mention(context)
 
         text = self._strip_leading_bot_mention(message, text)
 
@@ -444,6 +440,7 @@ class TelegramBot(BaseIMClient):
         denial = self.check_authorization(
             user_id=context.user_id,
             channel_id=context.channel_id,
+            thread_id=resolve_context_thread_id(context),
             is_dm=bool(context.platform_specific.get("is_dm")),
             text=text,
             settings_manager=self.settings_manager,
@@ -462,9 +459,45 @@ class TelegramBot(BaseIMClient):
         if await self.dispatch_text_command(context, text, allow_plain_bind=allow_plain_bind):
             return
 
+        original_thread_id = resolve_context_thread_id(context)
         context = await self._maybe_route_to_forum_topic(context, message, text)
+        if resolve_context_thread_id(context) != original_thread_id:
+            if (
+                self._effective_require_mention(context)
+                and not context.platform_specific.get("is_dm", False)
+                and not explicitly_addressed
+            ):
+                return
+            denial = self.check_authorization(
+                user_id=context.user_id,
+                channel_id=context.channel_id,
+                thread_id=resolve_context_thread_id(context),
+                is_dm=bool(context.platform_specific.get("is_dm")),
+                text=text,
+                settings_manager=self.settings_manager,
+            )
+            if not denial.allowed:
+                denial_text = self.build_auth_denial_text(denial.denial, context.channel_id)
+                if denial_text:
+                    await self.send_message(context, denial_text)
+                return
 
         await self._spawn_message_callback_task(context, text)
+
+    def _effective_require_mention(self, context: MessageContext) -> bool:
+        effective = self.config.require_mention
+        if self.settings_manager is None or context.platform_specific.get("is_dm", False):
+            return bool(effective)
+        try:
+            return bool(
+                self.settings_manager.get_require_mention(
+                    resolve_context_scope_settings_key(context),
+                    global_default=self.config.require_mention,
+                )
+            )
+        except Exception:
+            logger.debug("Failed to resolve Telegram effective require_mention", exc_info=True)
+            return bool(effective)
 
     async def _maybe_route_to_forum_topic(
         self,
@@ -552,6 +585,15 @@ class TelegramBot(BaseIMClient):
         if topic_id is None:
             raise RuntimeError("Telegram createForumTopic returned no message_thread_id")
 
+        chat_discovery.remember_thread(
+            "telegram",
+            context.channel_id,
+            str(topic_id),
+            name=topic_name,
+            native_type="forum_topic",
+            metadata={"auto_created": True, "is_general": False},
+        )
+
         topic_context = MessageContext(
             user_id=context.user_id,
             channel_id=context.channel_id,
@@ -599,6 +641,7 @@ class TelegramBot(BaseIMClient):
                 "is_dm": chat.get("type") == "private",
                 "chat_type": chat.get("type"),
                 "chat_title": chat.get("title") or chat.get("username"),
+                "is_forum": bool(chat.get("is_forum")) or bool(message.get("is_topic_message")),
                 "is_topic_message": bool(message.get("is_topic_message")),
                 "raw_message": message,
             },
@@ -616,6 +659,7 @@ class TelegramBot(BaseIMClient):
             auth_result = self.check_authorization(
                 user_id=context.user_id,
                 channel_id=context.channel_id,
+                thread_id=resolve_context_thread_id(context),
                 is_dm=bool(context.platform_specific.get("is_dm")),
                 action=primary_action,
                 settings_manager=self.settings_manager,
@@ -635,6 +679,7 @@ class TelegramBot(BaseIMClient):
             auth_result = self.check_authorization(
                 user_id=context.user_id,
                 channel_id=context.channel_id,
+                thread_id=resolve_context_thread_id(context),
                 is_dm=bool(context.platform_specific.get("is_dm")),
                 action=primary_action,
                 settings_manager=self.settings_manager,
@@ -719,6 +764,21 @@ class TelegramBot(BaseIMClient):
                     chat_discovery.METADATA_SUPPORTS_TOPICS: chat_type == "supergroup" and is_forum,
                 },
             )
+            topic_id = (message or {}).get("message_thread_id")
+            if topic_id is None and is_forum:
+                topic_id = 1
+            if topic_id is not None and is_forum:
+                created = (message or {}).get("forum_topic_created") or {}
+                edited = (message or {}).get("forum_topic_edited") or {}
+                topic_name = created.get("name") or edited.get("name") or ""
+                chat_discovery.remember_thread(
+                    "telegram",
+                    str(chat.get("id")),
+                    str(topic_id),
+                    name=str(topic_name or ""),
+                    native_type="forum_topic",
+                    metadata={"is_general": str(topic_id) == "1"},
+                )
         except Exception:
             logger.debug("Failed to remember Telegram discovered chat", exc_info=True)
 
@@ -835,7 +895,9 @@ class TelegramBot(BaseIMClient):
         payload = context.platform_specific or {}
         is_dm = bool(payload.get("is_dm"))
         scope = context.user_id if is_dm else context.channel_id
-        return f"{scope}:{context.user_id}"
+        thread_id = resolve_context_thread_id(context)
+        thread_suffix = f":{thread_id}" if not is_dm and thread_id is not None else ""
+        return f"{scope}:{context.user_id}{thread_suffix}"
 
     async def _consume_cwd_prompt(self, context: MessageContext, text: str) -> bool:
         prompt = self._cwd_prompts.get(self._interaction_scope_key(context))
@@ -1517,6 +1579,7 @@ class TelegramBot(BaseIMClient):
             message_id=message_id,
             options=options,
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
+            thread_id=resolve_context_thread_id(context),
         )
 
     async def _handle_resume_callback(self, context: MessageContext, callback_data: str) -> None:
@@ -1545,7 +1608,7 @@ class TelegramBot(BaseIMClient):
         await self._controller.session_handler.handle_resume_session_submission(
             user_id=context.user_id,
             channel_id=context.channel_id,
-            thread_id=context.thread_id,
+            thread_id=getattr(state, "thread_id", resolve_context_thread_id(context)),
             agent=agent,
             session_id=session_id,
             is_dm=state.is_dm,
@@ -1564,6 +1627,7 @@ class TelegramBot(BaseIMClient):
         state = _TelegramRoutingState(
             message_id="",
             channel_id=channel_id,
+            thread_id=resolve_context_thread_id(context),
             user_id=context.user_id,
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
             registered_backends=list(kwargs.get("registered_backends") or []),
@@ -1781,6 +1845,7 @@ class TelegramBot(BaseIMClient):
         auth_result = self.check_authorization(
             user_id=context.user_id,
             channel_id=context.channel_id,
+            thread_id=resolve_context_thread_id(context),
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
             action=state.callback_prefix,
             settings_manager=self.settings_manager,
@@ -2101,21 +2166,25 @@ class TelegramBot(BaseIMClient):
                 await self.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
                 return
             await self._delete_interaction_message(context, state.message_id)
-            await self._controller.settings_handler.handle_routing_update(
-                user_id=state.user_id,
-                channel_id=state.channel_id,
-                backend=state.backend,
-                opencode_agent=state.opencode_agent,
-                opencode_model=state.opencode_model,
-                opencode_reasoning_effort=state.opencode_reasoning_effort,
-                claude_agent=state.claude_agent,
-                claude_model=state.claude_model,
-                claude_reasoning_effort=state.claude_reasoning_effort,
-                codex_model=state.codex_model,
-                codex_reasoning_effort=state.codex_reasoning_effort,
-                is_dm=state.is_dm,
-                platform="telegram",
-            )
+            routing_update = {
+                "user_id": state.user_id,
+                "channel_id": state.channel_id,
+                "backend": state.backend,
+                "opencode_agent": state.opencode_agent,
+                "opencode_model": state.opencode_model,
+                "opencode_reasoning_effort": state.opencode_reasoning_effort,
+                "claude_agent": state.claude_agent,
+                "claude_model": state.claude_model,
+                "claude_reasoning_effort": state.claude_reasoning_effort,
+                "codex_model": state.codex_model,
+                "codex_reasoning_effort": state.codex_reasoning_effort,
+                "is_dm": state.is_dm,
+                "platform": "telegram",
+            }
+            state_thread_id = getattr(state, "thread_id", None)
+            if state_thread_id is not None:
+                routing_update["thread_id"] = state_thread_id
+            await self._controller.settings_handler.handle_routing_update(**routing_update)
             return
         if action == "back":
             state.picker_field = None
@@ -2177,6 +2246,7 @@ class TelegramBot(BaseIMClient):
             global_require_mention=global_require_mention,
             current_language=current_language or self._get_lang(),
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
+            thread_id=resolve_context_thread_id(context),
         )
         text, keyboard = self._render_settings_state(state, list(message_types or []))
         message_id = await self.send_message_with_buttons(context, text, keyboard)
@@ -2293,16 +2363,20 @@ class TelegramBot(BaseIMClient):
                 await self.send_message(context, f"❌ {self._t('error.settingsFailed')}")
                 return
             await self._delete_interaction_message(context, state.message_id)
-            await self._controller.settings_handler.handle_settings_update(
-                user_id=context.user_id,
-                show_message_types=state.show_message_types,
-                channel_id=context.channel_id,
-                require_mention=state.current_require_mention,
-                language=state.current_language,
-                notify_user=True,
-                is_dm=state.is_dm,
-                platform="telegram",
-            )
+            settings_update = {
+                "user_id": context.user_id,
+                "show_message_types": state.show_message_types,
+                "channel_id": context.channel_id,
+                "require_mention": state.current_require_mention,
+                "language": state.current_language,
+                "notify_user": True,
+                "is_dm": state.is_dm,
+                "platform": "telegram",
+            }
+            state_thread_id = getattr(state, "thread_id", None)
+            if state_thread_id is not None:
+                settings_update["thread_id"] = state_thread_id
+            await self._controller.settings_handler.handle_settings_update(**settings_update)
             return
 
         if action == "toggle" and len(parts) > 2:

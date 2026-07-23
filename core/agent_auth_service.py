@@ -462,6 +462,12 @@ class AgentAuthService:
     def _get_settings_key(self, context: MessageContext) -> str:
         return self.controller._get_settings_key(context)
 
+    def _get_session_key(self, context: MessageContext) -> str:
+        getter = getattr(self.controller, "_get_session_key", None)
+        if callable(getter):
+            return getter(context)
+        return self._get_settings_key(context)
+
     def _make_flow_key(self, context: MessageContext, backend: str) -> str:
         return f"{self._get_settings_key(context)}:{backend}"
 
@@ -570,7 +576,7 @@ class AgentAuthService:
             logger.debug("Failed to derive OpenCode session info for provider resolution: %s", err)
             return None
 
-        session_key = self._get_settings_key(context)
+        session_key = self._get_session_key(context)
         get_session_id = getattr(sessions, "get_agent_session_id", None)
         if not callable(get_session_id):
             return None
@@ -1735,14 +1741,15 @@ class AgentAuthService:
     async def _clear_backend_sessions_for_context(self, backend: str, context: MessageContext) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
         clear_backend_sessions = getattr(agent_service, "clear_backend_sessions", None)
+        session_key = self._get_session_key(context)
         if callable(clear_backend_sessions):
-            await clear_backend_sessions(backend, self._get_settings_key(context))
+            await clear_backend_sessions(backend, session_key)
             return
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
         clear_sessions = getattr(agent, "clear_sessions", None)
         if not callable(clear_sessions):
             return
-        await clear_sessions(self._get_settings_key(context))
+        await clear_sessions(session_key)
 
     def _find_flow_for_submission(self, context: MessageContext, backend_hint: str | None) -> AgentAuthFlow | None:
         settings_key = self._get_settings_key(context)

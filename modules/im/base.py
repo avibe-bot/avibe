@@ -274,6 +274,7 @@ class BaseIMClient(ABC):
         *,
         user_id: str,
         channel_id: str,
+        thread_id: Optional[str] = None,
         is_dm: bool,
         text: str = "",
         action: str = "",
@@ -291,6 +292,7 @@ class BaseIMClient(ABC):
         result = check_auth(
             user_id=user_id,
             channel_id=channel_id,
+            thread_id=thread_id,
             is_dm=is_dm,
             platform=getattr(settings_manager, "platform", None),
             action=resolved_action,

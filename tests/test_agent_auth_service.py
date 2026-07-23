@@ -550,6 +550,43 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(provider, "openai")
         mock_server.list_messages.assert_awaited_once_with("ses-existing", "/tmp/workdir")
 
+    async def test_resolve_opencode_provider_in_topic_uses_runtime_session_key(self):
+        controller = _StubController()
+        controller._get_settings_key = Mock(return_value="thread::-1001::42")
+        controller._get_session_key = Mock(return_value="telegram::-1001")
+        controller.sessions = SimpleNamespace(get_agent_session_id=Mock(return_value="ses-existing"))
+        mock_server = SimpleNamespace(
+            list_messages=AsyncMock(
+                return_value=[
+                    {"info": {"role": "assistant", "providerID": "openai", "modelID": "gpt-5.3-chat-latest"}}
+                ]
+            ),
+            get_default_agent_from_config=lambda: "build",
+            get_agent_model_from_config=lambda agent_name: None,
+        )
+        controller.agent_service = SimpleNamespace(
+            agents={"opencode": SimpleNamespace(_get_server=AsyncMock(return_value=mock_server))}
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="7",
+            channel_id="-1001",
+            thread_id="42",
+            platform="telegram",
+            platform_specific={"is_forum": True, "is_topic_message": True},
+        )
+
+        provider = await service._resolve_opencode_provider(context)
+
+        self.assertEqual(provider, "openai")
+        controller._get_session_key.assert_called_once_with(context)
+        controller.sessions.get_agent_session_id.assert_called_once_with(
+            "telegram::-1001",
+            "base-1:/tmp/workdir",
+            "opencode",
+        )
+        controller._get_settings_key.assert_not_called()
+
     async def test_handle_process_text_emits_opencode_device_flow_for_openai(self):
         controller = _StubController()
         service = AgentAuthService(controller)
@@ -1231,6 +1268,27 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         controller.agent_service.clear_backend_sessions.assert_awaited_once_with("codex", "C1")
         controller.agent_service.agents["codex"].clear_sessions.assert_not_awaited()
+
+    async def test_clear_backend_sessions_for_topic_uses_runtime_session_key(self):
+        controller = _StubController()
+        controller._get_session_key = Mock(return_value="telegram::-1001")
+        controller.agent_service.clear_backend_sessions = AsyncMock(return_value=1)
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="7",
+            channel_id="-1001",
+            thread_id="42",
+            platform="telegram",
+            platform_specific={"is_forum": True, "is_topic_message": True},
+        )
+
+        await service._clear_backend_sessions_for_context("opencode", context)
+
+        controller._get_session_key.assert_called_once_with(context)
+        controller.agent_service.clear_backend_sessions.assert_awaited_once_with(
+            "opencode",
+            "telegram::-1001",
+        )
 
     async def test_refresh_backend_runtime_registers_codex_when_enabled_after_startup(self):
         from config.v2_compat import CodexCompatConfig

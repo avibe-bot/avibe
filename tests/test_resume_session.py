@@ -455,7 +455,7 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             settings.set_calls,
-            [("telegram::-100123", "codex", "telegram_99", "sess_telegram_topic")],
+            [("telegram::-100123", "codex", "telegram_-100123_99", "sess_telegram_topic")],
         )
         self.assertEqual(settings.mark_calls, [("U777", "-100123", "99")])
         self.assertEqual(len(im_client.messages), 2)
@@ -523,6 +523,27 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
         await ctrl.command_handler.handle_resume(ctx)
 
         # No modal opened; a scope-only explanation is sent instead.
+        self.assertEqual(im_client.resume_calls, [])
+        self.assertEqual(len(im_client.messages), 1)
+        self.assertIn("channel level", im_client.messages[0][2])
+
+    async def test_handle_resume_in_telegram_general_topic_is_rejected(self):
+        settings = _StubSettingsManager()
+        im_client = _StubIMClient()
+        ctrl = _StubController()
+        ctrl.init_minimal(im_client, settings, _StubConfig(platform="telegram"))
+
+        context = MessageContext(
+            user_id="U1",
+            channel_id="-100123",
+            thread_id=None,
+            message_id="MSG1",
+            platform="telegram",
+            platform_specific={"is_dm": False, "is_forum": True, "is_topic_message": True},
+        )
+
+        await ctrl.command_handler.handle_resume(context)
+
         self.assertEqual(im_client.resume_calls, [])
         self.assertEqual(len(im_client.messages), 1)
         self.assertIn("channel level", im_client.messages[0][2])

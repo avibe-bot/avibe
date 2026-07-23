@@ -18,10 +18,12 @@ from storage.db import create_sqlite_engine
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import agent_events, media_objects, messages, scope_settings, scopes, state_meta
 from storage.settings_service import make_scope_id, upsert_scope
+from config.v2_settings import make_thread_native_id, split_thread_native_id
 
 logger = logging.getLogger(__name__)
 
 CHANNEL_SCOPE_TYPE = "channel"
+THREAD_SCOPE_TYPE = "thread"
 GUILD_SCOPE_TYPE = "guild"
 VISIBILITY_VISIBLE = "visible"
 VISIBILITY_NOT_RETURNED = "not_returned"
@@ -51,7 +53,7 @@ _REFRESH_TTL_SECONDS = 300.0
 _MIN_REFRESH_INTERVAL_SECONDS = 30.0
 
 _debounce_lock = threading.Lock()
-_debounce_cache: dict[tuple[str, str], tuple[float, tuple[Any, ...]]] = {}
+_debounce_cache: dict[tuple[str, ...], tuple[float, tuple[Any, ...]]] = {}
 
 _refresh_locks_lock = threading.Lock()
 _refresh_locks: dict[str, threading.Lock] = {}
@@ -299,7 +301,7 @@ def remember_chat(
         parent_id,
         tuple(sorted(normalized_metadata.items())),
     )
-    debounce_key = (platform, chat_id)
+    debounce_key = (str(_db_path(db_path)), platform, chat_id)
     monotonic_now = time.monotonic()
     with _debounce_lock:
         cached = _debounce_cache.get(debounce_key)
@@ -354,6 +356,130 @@ def remember_chat(
         engine.dispose()
     with _debounce_lock:
         _debounce_cache[debounce_key] = (monotonic_now, debounce_payload)
+
+
+def remember_thread(
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+    *,
+    name: str = "",
+    native_type: str = "thread",
+    metadata: dict[str, Any] | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Remember a passively discovered child thread without changing settings."""
+    platform = str(platform)
+    channel_id = str(channel_id).strip()
+    thread_id = str(thread_id).strip()
+    if not platform or not channel_id or not thread_id:
+        return
+
+    native_id = make_thread_native_id(channel_id, thread_id)
+    normalized_metadata = normalize_metadata(metadata)
+    normalized_metadata.update({"channel_id": channel_id, "thread_id": thread_id})
+    normalized_metadata.setdefault(METADATA_VISIBILITY_STATUS, VISIBILITY_VISIBLE)
+    # A newly observed topic is active again even if its scope row was retained
+    # only to preserve history after the parent forum was removed.
+    normalized_metadata.setdefault(METADATA_DISMISSED_AT, None)
+    debounce_payload = (name, native_type, tuple(sorted(normalized_metadata.items())))
+    debounce_key = (str(_db_path(db_path)), platform, f"thread:{native_id}")
+    monotonic_now = time.monotonic()
+    with _debounce_lock:
+        cached = _debounce_cache.get(debounce_key)
+        if cached is not None and monotonic_now - cached[0] < _DEBOUNCE_SECONDS and cached[1] == debounce_payload:
+            return
+
+    now = _utc_now_iso()
+    engine = _engine(db_path)
+    try:
+        with engine.begin() as conn:
+            parent_scope_id = upsert_scope(
+                conn,
+                platform,
+                CHANNEL_SCOPE_TYPE,
+                channel_id,
+                now=now,
+            )
+            row = _scope_row(conn, platform, THREAD_SCOPE_TYPE, native_id)
+            existing_metadata = _json_loads(row["metadata_json"], {}) if row else {}
+            upsert_scope(
+                conn,
+                platform,
+                THREAD_SCOPE_TYPE,
+                native_id,
+                parent_scope_id=parent_scope_id,
+                display_name=name,
+                native_type=native_type,
+                is_private=False,
+                supports_threads=False,
+                metadata=merge_metadata(existing_metadata, normalized_metadata),
+                now=now,
+            )
+    finally:
+        engine.dispose()
+    with _debounce_lock:
+        _debounce_cache[debounce_key] = (monotonic_now, debounce_payload)
+
+
+def list_thread_payloads(
+    platform: str,
+    channel_id: str,
+    *,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    parent_scope_id = make_scope_id(platform, CHANNEL_SCOPE_TYPE, str(channel_id))
+    engine = _engine(db_path)
+    try:
+        with engine.connect() as conn:
+            query = (
+                select(
+                    scopes.c.native_id,
+                    scopes.c.display_name,
+                    scopes.c.native_type,
+                    scopes.c.metadata_json,
+                    scopes.c.first_seen_at,
+                    scopes.c.last_seen_at,
+                    scope_settings.c.scope_id.label("settings_scope_id"),
+                )
+                .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(
+                    scopes.c.platform == platform,
+                    scopes.c.scope_type == THREAD_SCOPE_TYPE,
+                    scopes.c.parent_scope_id == parent_scope_id,
+                )
+            )
+            result: list[dict[str, Any]] = []
+            for row in conn.execute(query).mappings():
+                try:
+                    _, thread_id = split_thread_native_id(str(row["native_id"]))
+                except ValueError:
+                    continue
+                metadata = _json_loads(row["metadata_json"], {})
+                if metadata.get(METADATA_DISMISSED_AT):
+                    continue
+                result.append(
+                    {
+                        "id": thread_id,
+                        "name": str(row["display_name"] or ""),
+                        "native_type": str(row["native_type"] or "thread"),
+                        "configured": row["settings_scope_id"] is not None,
+                        "metadata": metadata,
+                        "first_seen_at": str(row["first_seen_at"] or ""),
+                        "last_seen_at": str(row["last_seen_at"] or ""),
+                    }
+                )
+            return sorted(
+                result,
+                key=lambda item: (
+                    item["id"] != "1",
+                    not item["configured"],
+                    item["name"].lower(),
+                    item["id"],
+                ),
+            )
+    finally:
+        engine.dispose()
 
 
 def list_chats(
@@ -835,6 +961,58 @@ def _scope_has_history(conn: Connection, scope_id: str) -> bool:
     return False
 
 
+def _descendant_scope_rows(conn: Connection, scope_id: str) -> list[dict[str, Any]]:
+    """Return descendant scope rows in parent-before-child order."""
+    descendants: list[dict[str, Any]] = []
+    pending = [scope_id]
+    visited = {scope_id}
+    while pending:
+        rows = (
+            conn.execute(select(scopes).where(scopes.c.parent_scope_id.in_(pending)))
+            .mappings()
+            .all()
+        )
+        pending = []
+        for row in rows:
+            child_id = str(row["id"])
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            descendants.append(dict(row))
+            pending.append(child_id)
+    return descendants
+
+
+def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) -> dict[str, bool]:
+    """Delete one scope's settings, then delete or dismiss its scope row."""
+    scope_id = str(row["id"])
+    conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
+    if _scope_has_history(conn, scope_id):
+        now = _utc_now_iso()
+        metadata = _json_loads(row["metadata_json"], {})
+        metadata[METADATA_DISMISSED_AT] = now
+        conn.execute(
+            scopes.update()
+            .where(scopes.c.id == scope_id)
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        return {"removed": False, "dismissed": True}
+    result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
+    return {"removed": bool(result.rowcount), "dismissed": False}
+
+
+def _clear_scope_debounce_entries(db_path: Path | None, rows: list[dict[str, Any]]) -> None:
+    """Allow deleted or dismissed scopes to be persisted on rediscovery."""
+    database_key = str(_db_path(db_path))
+    with _debounce_lock:
+        for row in rows:
+            scope_type = str(row["scope_type"])
+            native_id = str(row["native_id"])
+            if scope_type == THREAD_SCOPE_TYPE:
+                native_id = f"thread:{native_id}"
+            _debounce_cache.pop((database_key, str(row["platform"]), native_id), None)
+
+
 def delete_scope(
     platform: str,
     native_id: str,
@@ -849,6 +1027,8 @@ def delete_scope(
     scope with ON DELETE CASCADE, a hard delete would wipe that history. So:
 
     - the ``scope_settings`` row is always deleted (the user's config);
+    - descendant scopes and settings are removed by the same history-preserving
+      rules so a deleted parent cannot leave active child overrides behind;
     - if the scope owns no cascading history, the ``scopes`` row is physically
       deleted (clean removal);
     - otherwise the ``scopes`` row is kept and stamped ``dismissed_at`` so it is
@@ -863,20 +1043,12 @@ def delete_scope(
             row = conn.execute(select(scopes).where(scopes.c.id == scope_id)).mappings().one_or_none()
             if row is None:
                 return {"removed": False, "dismissed": False}
-            conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
-            if _scope_has_history(conn, scope_id):
-                metadata = _json_loads(row["metadata_json"], {})
-                metadata[METADATA_DISMISSED_AT] = _utc_now_iso()
-                conn.execute(
-                    scopes.update()
-                    .where(scopes.c.id == scope_id)
-                    .values(metadata_json=_json_dumps(metadata), updated_at=_utc_now_iso())
-                )
-                return {"removed": False, "dismissed": True}
-            # No cascading history — safe to physically delete. Child scopes keep
-            # their rows (parent_scope_id is ON DELETE SET NULL).
-            result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
-            return {"removed": bool(result.rowcount), "dismissed": False}
+            descendants = _descendant_scope_rows(conn, scope_id)
+            for descendant in reversed(descendants):
+                _remove_scope_row_preserving_history(conn, descendant)
+            outcome = _remove_scope_row_preserving_history(conn, dict(row))
+            _clear_scope_debounce_entries(db_path, [dict(row), *descendants])
+            return outcome
     finally:
         engine.dispose()
 

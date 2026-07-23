@@ -20,6 +20,7 @@ DEFAULT_SHOW_MESSAGE_TYPES: List[str] = ["assistant"]
 ALLOWED_MESSAGE_TYPES = {"assistant", "toolcall"}
 SCHEMA_VERSION = 5
 SCOPED_KEY_SEP = "::"
+THREAD_SETTINGS_PREFIX = "thread"
 
 # Bind code prefix and length
 _BIND_CODE_PREFIX = "vr-"
@@ -79,6 +80,30 @@ def _split_scoped_key(scoped_key: str) -> Tuple[Optional[str], str]:
         if platform:
             return platform, raw_id
     return None, scoped_key
+
+
+def make_thread_native_id(channel_id: str, thread_id: str) -> str:
+    """Build a platform-native thread key that stays unique across channels."""
+    return f"{channel_id}/{thread_id}"
+
+
+def split_thread_native_id(native_id: str) -> Tuple[str, str]:
+    channel_id, separator, thread_id = str(native_id).rpartition("/")
+    if not separator or not channel_id or not thread_id:
+        raise ValueError("thread native id must be '<channel_id>/<thread_id>'")
+    return channel_id, thread_id
+
+
+def make_thread_settings_key(channel_id: str, thread_id: str) -> str:
+    """Build the runtime-only key used to route operations to thread settings."""
+    return SCOPED_KEY_SEP.join((THREAD_SETTINGS_PREFIX, str(channel_id), str(thread_id)))
+
+
+def split_thread_settings_key(settings_key: str) -> Optional[Tuple[str, str]]:
+    parts = str(settings_key).split(SCOPED_KEY_SEP)
+    if len(parts) == 3 and parts[0] == THREAD_SETTINGS_PREFIX and parts[1] and parts[2]:
+        return parts[1], parts[2]
+    return None
 
 
 def _infer_channel_platform(channel_id: str) -> str:
@@ -231,6 +256,7 @@ class BindCode:
 @dataclass
 class SettingsState:
     channels: Dict[str, ChannelSettings] = field(default_factory=dict)
+    threads: Dict[str, ChannelSettings] = field(default_factory=dict)
     guilds: Dict[str, GuildSettings] = field(default_factory=dict)
     guild_scope_platforms: set[str] = field(default_factory=set)
     guild_default_enabled: Dict[str, bool] = field(default_factory=dict)
@@ -505,6 +531,10 @@ class SettingsStore:
     def _channel_key(self, channel_id: str, platform: Optional[str] = None) -> str:
         return _make_scoped_key(platform, channel_id) if platform else channel_id
 
+    def _thread_key(self, channel_id: str, thread_id: str, platform: Optional[str] = None) -> str:
+        native_id = make_thread_native_id(channel_id, thread_id)
+        return _make_scoped_key(platform, native_id) if platform else native_id
+
     def _user_key(self, user_id: str, platform: Optional[str] = None) -> str:
         return _make_scoped_key(platform, user_id) if platform else user_id
 
@@ -521,6 +551,62 @@ class SettingsStore:
         self.settings.channels = {k: v for k, v in self.settings.channels.items() if not k.startswith(prefix)}
         for channel_id, settings in channels.items():
             self.settings.channels[self._channel_key(str(channel_id), platform)] = settings
+
+    def get_threads_for_platform(self, platform: str) -> Dict[str, Dict[str, ChannelSettings]]:
+        result: Dict[str, Dict[str, ChannelSettings]] = {}
+        prefix = f"{platform}{SCOPED_KEY_SEP}"
+        for key, settings in self.settings.threads.items():
+            if not key.startswith(prefix):
+                continue
+            try:
+                channel_id, thread_id = split_thread_native_id(key[len(prefix) :])
+            except ValueError:
+                continue
+            result.setdefault(channel_id, {})[thread_id] = settings
+        return result
+
+    def find_thread(
+        self,
+        channel_id: str,
+        thread_id: str,
+        platform: Optional[str] = None,
+    ) -> Optional[ChannelSettings]:
+        return self.settings.threads.get(self._thread_key(channel_id, thread_id, platform))
+
+    def find_effective_channel(
+        self,
+        channel_id: str,
+        *,
+        thread_id: Optional[str] = None,
+        platform: Optional[str] = None,
+    ) -> Optional[ChannelSettings]:
+        if thread_id:
+            thread = self.find_thread(channel_id, thread_id, platform=platform)
+            if thread is not None:
+                return thread
+        return self.find_channel(channel_id, platform=platform)
+
+    def update_thread(
+        self,
+        channel_id: str,
+        thread_id: str,
+        settings: ChannelSettings,
+        platform: Optional[str] = None,
+    ) -> None:
+        self.settings.threads[self._thread_key(channel_id, thread_id, platform)] = settings
+        self.save()
+
+    def delete_thread(
+        self,
+        channel_id: str,
+        thread_id: str,
+        platform: Optional[str] = None,
+    ) -> bool:
+        removed = self.settings.threads.pop(self._thread_key(channel_id, thread_id, platform), None)
+        if removed is not None:
+            self.save()
+            return True
+        return False
 
     def get_guilds_for_platform(self, platform: str) -> Dict[str, GuildSettings]:
         result: Dict[str, GuildSettings] = {}

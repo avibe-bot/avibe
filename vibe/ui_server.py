@@ -4797,6 +4797,33 @@ def settings_post():
     return jsonify(api.save_settings(payload))
 
 
+@app.post("/api/settings/thread", include_in_schema=False)
+async def thread_settings_post(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        body = await starlette_request.body()
+        payload = await starlette_request.json() if body else {}
+        return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.delete("/api/settings/thread", include_in_schema=False)
+async def thread_settings_delete(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        query = starlette_request.query_params
+        return api.delete_thread_settings(
+            query.get("platform", ""),
+            query.get("channel_id", ""),
+            query.get("thread_id", ""),
+        )
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/slack/auth_test", methods=["POST"])
 def slack_auth_test():
     from vibe import api

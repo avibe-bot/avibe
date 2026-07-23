@@ -30,7 +30,9 @@ from config.v2_config import (
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
+from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
@@ -310,9 +312,8 @@ class SessionHandler(BaseHandler):
     def get_base_session_id(self, context: MessageContext, source: str = "human") -> str:
         """Get base session ID based on platform and context (without path)"""
         platform = self._get_context_platform(context)
-        payload = context.platform_specific or {}
-        session_target = payload.get("agent_session_target")
-        if isinstance(session_target, dict):
+        session_target = resolve_context_agent_session_target(context)
+        if session_target:
             reserved_anchor = str(session_target.get("session_anchor") or "").strip()
             if reserved_anchor:
                 return reserved_anchor
@@ -327,7 +328,10 @@ class SessionHandler(BaseHandler):
             else:
                 base_id = context.channel_id or context.user_id
         else:
-            base_id = context.thread_id
+            resolved_thread_id = resolve_context_thread_id(context)
+            base_id = resolved_thread_id or context.thread_id
+            if platform == "telegram" and base_id:
+                return build_thread_session_anchor(platform, context.channel_id, base_id)
             if not base_id:
                 use_message_id = True
                 getter = getattr(self.controller, "get_im_client_for_context", None)
@@ -345,20 +349,13 @@ class SessionHandler(BaseHandler):
 
     @staticmethod
     def _reserved_native_session_id(context: MessageContext) -> Optional[str]:
-        """Native session id bound to the RESERVED workbench row (by PK).
+        """Native session id bound to the selected persisted row (by PK).
 
-        avibe dispatch carries it in
-        ``platform_specific['agent_session_target']['native_session_id']`` (read
-        from the ``agent_sessions`` row). Resuming from this keeps the resume READ
-        on the same key as the by-PK bind WRITE, so a restart resumes the same
-        native session instead of forking a fresh one. ``None`` for IM/CLI turns
-        or before the first native is captured. Only returns the native when the
-        reserved row's ``agent_backend`` is Claude — after a header backend switch
-        the row still carries the previous backend's native, which Claude can't
-        resume. Mirrors ``BaseAgent._reserved_native_session_id``."""
-        payload = getattr(context, "platform_specific", None) or {}
-        target = payload.get("agent_session_target")
-        if not isinstance(target, dict):
+        This includes explicit Workbench targets and rows selected for IM turns.
+        Only returns the native when the row's backend is Claude; after a backend
+        switch, the previous backend's native id must not be resumed."""
+        target = resolve_context_agent_session_target(context)
+        if not target:
             return None
         native = str(target.get("native_session_id") or "").strip()
         if not native:
@@ -688,8 +685,8 @@ class SessionHandler(BaseHandler):
 
         explicit_model = subagent_model or routing_model_for_backend(routing, "claude")
         explicit_effort = subagent_reasoning_effort or routing_reasoning_effort_for_backend(routing, "claude")
-        session_target = payload.get("agent_session_target")
-        if isinstance(session_target, dict):
+        session_target = resolve_context_agent_session_target(context)
+        if session_target:
             explicit_model = subagent_model or session_target.get("model") or explicit_model
             explicit_effort = subagent_reasoning_effort or session_target.get("reasoning_effort") or explicit_effort
 
@@ -1576,8 +1573,8 @@ class SessionHandler(BaseHandler):
         # (mirrors BaseAgent.ensure_agent_session_id) so a pre-bind setup/query
         # failure persists the terminal notify under the OPEN Chat session rather
         # than a freshly-minted hidden row the page never sees (Codex P2).
-        target = (getattr(context, "platform_specific", None) or {}).get("agent_session_target")
-        if isinstance(target, dict) and target.get("id"):
+        target = resolve_context_agent_session_target(context)
+        if target and target.get("id"):
             reserved_id = str(target["id"]).strip()
             if reserved_id:
                 payload = dict(context.platform_specific or {})

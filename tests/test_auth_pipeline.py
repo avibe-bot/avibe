@@ -180,6 +180,37 @@ def test_require_bind_off_allows_any_channel_member():
     assert result.allowed is True
 
 
+def test_telegram_thread_auth_uses_topic_override_before_parent():
+    # Scenario: TELEGRAM-TOPIC-002
+    store = _Store()
+    parent = SimpleNamespace(enabled=True, require_bind=False)
+    topic = SimpleNamespace(enabled=True, require_bind=True)
+    store.settings.channels["-1001"] = parent
+    store.find_effective_channel = lambda channel_id, thread_id=None, platform=None: (
+        topic if channel_id == "-1001" and thread_id == "42" else parent
+    )
+
+    denied = check_auth(
+        user_id="U-stranger",
+        channel_id="-1001",
+        thread_id="42",
+        is_dm=False,
+        platform="telegram",
+        store=store,
+    )
+    inherited = check_auth(
+        user_id="U-stranger",
+        channel_id="-1001",
+        thread_id="99",
+        is_dm=False,
+        platform="telegram",
+        store=store,
+    )
+
+    assert denied.denial == "not_bound_channel"
+    assert inherited.allowed is True
+
+
 def test_require_bind_null_allows_any_member_regardless_of_platform_default():
     # Legacy channels store require_bind=None ("Anyone" in the old UI). The
     # platform default is a copy-on-enable seed, NOT a runtime fallback, so a
