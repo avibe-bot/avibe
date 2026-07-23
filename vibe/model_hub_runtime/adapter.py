@@ -263,7 +263,7 @@ class CLIProxyEngineAdapter:
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
-            self._expire_oauth_flows()
+            self._expire_oauth_flow(flow)
             if flow.state in {"success", "failed", "cancelled"}:
                 return flow.snapshot()
             try:
@@ -288,7 +288,7 @@ class CLIProxyEngineAdapter:
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
-            self._expire_oauth_flows()
+            self._expire_oauth_flow(flow)
             if flow.state in {"success", "failed", "cancelled"}:
                 raise EngineStateError("OAuth flow is no longer active")
             if flow.expects == "none":
@@ -321,7 +321,7 @@ class CLIProxyEngineAdapter:
     async def cancel_oauth(self, flow_id: str) -> None:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
-            self._expire_oauth_flows()
+            self._expire_oauth_flow(flow)
             if flow.state in {"success", "failed", "cancelled"}:
                 return
             try:
@@ -435,25 +435,30 @@ class CLIProxyEngineAdapter:
         with self._oauth_lock:
             self._active_oauth_providers.discard(flow.auth_provider)
 
-    def _expire_oauth_flows(self) -> None:
+    def _expire_oauth_flow(self, flow: _OAuthFlow) -> None:
         with self._oauth_lock:
-            self._expire_oauth_flows_locked()
+            self._expire_oauth_flow_locked(flow, datetime.now(timezone.utc))
 
     def _expire_oauth_flows_locked(self) -> None:
         now = datetime.now(timezone.utc)
         for flow in self._oauth_flows.values():
-            if flow.state in {"success", "failed", "cancelled"}:
+            if flow.operation_lock.locked():
                 continue
-            try:
-                expires_at = datetime.fromisoformat(flow.expires_at_iso)
-            except ValueError:
-                expires_at = now
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if expires_at <= now:
-                flow.state = "failed"
-                flow.error_key = "models.oauth.expired"
-                self._active_oauth_providers.discard(flow.auth_provider)
+            self._expire_oauth_flow_locked(flow, now)
+
+    def _expire_oauth_flow_locked(self, flow: _OAuthFlow, now: datetime) -> None:
+        if flow.state in {"success", "failed", "cancelled"}:
+            return
+        try:
+            expires_at = datetime.fromisoformat(flow.expires_at_iso)
+        except ValueError:
+            expires_at = now
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
+            flow.state = "failed"
+            flow.error_key = "models.oauth.expired"
+            self._active_oauth_providers.discard(flow.auth_provider)
 
 
 def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
