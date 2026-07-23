@@ -757,7 +757,13 @@
       "toast": {
         "reorderFailed": "顺序保存失败",
         "connected": "已接入中枢",
-        "connectFailed": "接入失败，请重试"
+        "connectFailed": "接入失败，请重试",
+        "refreshFailed": "刷新失败，请重试"
+      },
+      "backends": {
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "opencode": "OpenCode"
       }
     }
   },

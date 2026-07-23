@@ -92,9 +92,11 @@ export const SettingsModelsPage: React.FC = () => {
       setSources(s);
       setAgents(a);
     } catch {
-      /* keep the last good view */
+      // A mutation may have succeeded server-side but the re-read failed — tell
+      // the user the view might be stale rather than silently swallowing it.
+      if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
-  }, []);
+  }, [showToast, t]);
 
   const reorderPreview = (ids: string[]) => {
     setSources((prev) => {

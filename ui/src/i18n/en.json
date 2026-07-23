@@ -757,7 +757,13 @@
       "toast": {
         "reorderFailed": "Couldn't save the new order",
         "connected": "Connected to the Hub",
-        "connectFailed": "Couldn't connect, please retry"
+        "connectFailed": "Couldn't connect, please retry",
+        "refreshFailed": "Couldn't refresh, please retry"
+      },
+      "backends": {
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "opencode": "OpenCode"
       }
     }
   },

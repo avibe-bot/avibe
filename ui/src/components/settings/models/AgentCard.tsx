@@ -17,8 +17,6 @@ import { friendlyModelName } from './format';
 import { MODEL_MENUS_ENABLED } from './featureFlags';
 import type { AgentSupply, Source } from './types';
 
-const BACKEND_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
-
 const AgentRow: React.FC<{
   agent: AgentSupply;
   sources: Source[];
@@ -71,7 +69,9 @@ const AgentRow: React.FC<{
 
       <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
         <div className="flex items-center gap-2">
-          <span className="text-[15px] font-semibold text-foreground">{BACKEND_LABEL[agent.backend] ?? agent.backend}</span>
+          <span className="text-[15px] font-semibold text-foreground">
+            {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
+          </span>
           <MenuKindBadge kind={agent.menu_kind} />
         </div>
         {pill}

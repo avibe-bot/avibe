@@ -65,6 +65,12 @@ export const OAuthConnectDialog: React.FC<{
     e.preventDefault();
     e.stopPropagation();
     if (!text) return;
+    // navigator.clipboard is undefined in non-secure contexts / older browsers;
+    // touching .writeText there throws synchronously, not as a rejected promise.
+    if (!navigator.clipboard?.writeText) {
+      showToast(t('common.copyFailed') as string, 'error');
+      return;
+    }
     navigator.clipboard
       .writeText(text)
       .then(() => showToast(t('common.copied') as string, 'success'))
