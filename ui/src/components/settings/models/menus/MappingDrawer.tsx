@@ -19,18 +19,27 @@ import { buildTargetModels, type TargetModel } from './identifiers';
 import { SupplyDots } from './supplyBits';
 import { useCompactSourceLabel } from './sourceLabel';
 
-// The built-in id list shown when the backend hasn't populated mappings yet
-// (e.g. Codex just switched into Hub). Fixed-menu backends own these ids; the
-// contract stores only the OVERRIDES in agent.mappings (absent entry = 跟随原生),
-// so the full row list comes from here and the stored overrides are overlaid.
-const FIXED_BUILTINS: Record<'claude' | 'codex', string[]> = {
+// Mock stand-in for the fixed-menu backend's built-in model catalog. The
+// contract stores only OVERRIDES in agent.mappings (absent entry = 跟随原生), so
+// the full row list needs the backend's built-in id list, which agent-supply
+// does not yet expose.
+const MOCK_BUILTINS: Record<'claude' | 'codex', string[]> = {
   claude: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   codex: ['gpt-5.6', 'gpt-5.6-mini'],
 };
 
+// SINGLE swap point for the built-in catalog. Decided 2026-07-23: agent-supply
+// gains an additive optional `builtin_models: string[] | null` (fixed-menu
+// backends only), server-populated from the existing backend-models resolver,
+// in the post-batch integration pass. When it lands, this becomes:
+//   return agent.builtin_models ?? MOCK_BUILTINS[agent.backend] ?? [];
+// (a one-line change; nothing else in the drawer needs to move).
+const resolveBuiltinIds = (agent: AgentSupply): string[] =>
+  MOCK_BUILTINS[agent.backend as 'claude' | 'codex'] ?? [];
+
 const seedDraft = (agent: AgentSupply): AgentMapping[] => {
   const byId = new Map((agent.mappings ?? []).map((m) => [m.builtin_id, m]));
-  const ids = FIXED_BUILTINS[agent.backend as 'claude' | 'codex'] ?? [];
+  const ids = resolveBuiltinIds(agent);
   // Preserve any stored builtin id we don't know about, appended after the
   // canonical list, so a backend that adds ids stays visible.
   const extra = (agent.mappings ?? []).map((m) => m.builtin_id).filter((id) => !ids.includes(id));
