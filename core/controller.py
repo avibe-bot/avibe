@@ -8,7 +8,12 @@ import threading
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
-from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS, DEFAULT_AGENT_PROGRESS_STYLE
+from config.v2_config import (
+    DEFAULT_AGENT_BACKEND,
+    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_AGENT_PROGRESS_STYLE,
+    MemoryConfig,
+)
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
@@ -304,6 +309,12 @@ class Controller:
         self.native_session_service = None
         self.processing_indicator = ProcessingIndicatorService(self)
         self.audio_asr_service = AudioAsrService(self.config)
+        # Memory owns no IM capture in this slice. It is initialized here solely
+        # so the controller UDS can serve settings/status/read/clear requests.
+        from core.memory.runtime import MemoryRuntime
+
+        self.memory_runtime = MemoryRuntime(getattr(self.config, "memory", None) or MemoryConfig())
+        self.memory_module = self.memory_runtime.module
         self._migrate_discord_guild_scope_from_config()
 
         # Migrate legacy per-channel language into global config
@@ -500,6 +511,14 @@ class Controller:
             "backends": requested,
             "states": states,
         }
+
+    async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
+        """Hot-apply persisted Memory settings without restarting Avibe."""
+
+        result = await self.memory_runtime.reconcile(memory_config)
+        if result.get("ok") is True:
+            self.config.memory = memory_config
+        return result
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
@@ -1375,6 +1394,9 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            memory_config = getattr(self.config, "memory", None)
+            if memory_config is not None:
+                self._loop.create_task(self.memory_runtime.reconcile(memory_config), name="memory-runtime-reconcile")
             self.show_git_checkpoint_service.start()
             self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
             self._im_thread.start()
@@ -1519,6 +1541,9 @@ class Controller:
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        memory_runtime = getattr(self, "memory_runtime", None)
+        if memory_runtime is not None:
+            _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")
         show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()

@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import socket
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -49,6 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
+_SOCKET_MODE = 0o600
 
 
 def default_socket_path() -> Path:
@@ -425,6 +427,94 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.exception("internal Agent backend reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    def _memory_runtime():
+        return getattr(controller, "memory_runtime", None)
+
+    @app.post("/internal/reconcile-memory")
+    async def _reconcile_memory() -> Any:
+        """Hot-apply persisted Memory configuration on the controller loop."""
+
+        try:
+            from config.v2_config import V2Config
+
+            config = await asyncio.to_thread(V2Config.load)
+            result = await controller.reconcile_memory(config.memory)
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.warning("internal memory reconcile failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
+
+    @app.post("/internal/memory/install-runtime")
+    async def _memory_install_runtime() -> Any:
+        """Install or repair the managed runtime on the controller lifecycle."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
+        try:
+            result = await runtime.install_artifact()
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.warning("internal memory runtime install failed")
+            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
+
+    @app.get("/internal/memory/status")
+    async def _memory_status() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.status_payload()
+        except Exception:
+            logger.warning("internal memory status failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/profile")
+    async def _memory_profile() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        try:
+            return await runtime.profile_payload()
+        except Exception:
+            logger.warning("internal memory profile failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/search")
+    async def _memory_search(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"query", "limit"}
+            or not isinstance(payload.get("query"), str)
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        limit = payload.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.search_payload(payload["query"], limit)
+        except Exception:
+            logger.warning("internal memory search failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/clear")
+    async def _memory_clear(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.clear()
+        except Exception:
+            logger.warning("internal memory clear failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
     @app.get("/internal/events")
     async def _events() -> Any:
         """Long-lived SSE feed of Controller-side inbox events.
@@ -588,11 +678,7 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
             listener.close()
         except OSError:
             pass
-        try:
-            if target.exists() or target.is_symlink():
-                target.unlink()
-        except OSError:
-            logger.debug("could not unlink internal dispatch socket %s", target, exc_info=True)
+        _remove_owned_socket(target)
 
 
 def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Path]:
@@ -604,13 +690,9 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     uvicorn's path chmod while keeping the endpoint local-only.
     """
 
-    target = (socket_path or default_socket_path()).expanduser().resolve()
+    target = (socket_path or default_socket_path()).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() or target.is_symlink():
-        try:
-            target.unlink()
-        except OSError:
-            logger.warning("could not unlink stale dispatch socket %s; bind may fail", target)
+    _remove_stale_owned_socket(target)
 
     previous_umask = os.umask(0o077)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -618,16 +700,57 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
         listener.bind(str(target))
         listener.listen(2048)
         listener.setblocking(False)
-        try:
-            os.chmod(target, 0o600)
-        except OSError:
-            logger.warning("failed to chmod internal dispatch socket %s", target, exc_info=True)
+        os.chmod(target, _SOCKET_MODE)
+        _verify_owned_socket(target)
         return listener, target
     except Exception:
         listener.close()
+        _remove_socket_after_bind_failure(target)
         raise
     finally:
         os.umask(previous_umask)
+
+
+def _remove_stale_owned_socket(target: Path) -> None:
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        return
+    _verify_owned_socket(target)
+    target.unlink()
+
+
+def _remove_owned_socket(target: Path) -> None:
+    try:
+        _verify_owned_socket(target)
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.debug("could not unlink internal dispatch socket %s", target, exc_info=True)
+
+
+def _remove_socket_after_bind_failure(target: Path) -> None:
+    """Remove only a socket still owned by this user after a failed hardening step."""
+
+    try:
+        info = target.lstat()
+        if stat.S_ISSOCK(info.st_mode) and (not hasattr(os, "getuid") or info.st_uid == os.getuid()):
+            target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.debug("could not remove failed internal dispatch socket %s", target, exc_info=True)
+
+
+def _verify_owned_socket(target: Path) -> None:
+    info = target.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISSOCK(info.st_mode):
+        raise OSError("internal dispatch socket is unsafe")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise OSError("internal dispatch socket owner mismatch")
+    if stat.S_IMODE(info.st_mode) != _SOCKET_MODE:
+        raise OSError("internal dispatch socket mode mismatch")
 
 
 def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> asyncio.Task:

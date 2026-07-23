@@ -15,6 +15,7 @@ import os
 import subprocess
 import tarfile
 import urllib.error
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -824,6 +825,11 @@ def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
 
 def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=True))),
+    )
+    monkeypatch.setattr(
         api,
         "askill_update_status",
         lambda **_: {
@@ -848,17 +854,95 @@ def test_dependencies_status_shape(monkeypatch):
             return {"installed": True, "manifest": {"runtime_version": "1.4.0"}, "node_available": True, "node_version": "20.11"}
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    import core.memory.artifact as memory_artifact
+
+    class _MemoryMgr:
+        def status(self):
+            return {
+                "installed": False,
+                "status": "missing",
+                "manifest": {"everos_version": "1.1.3", "release_state": "unavailable"},
+                "reason": "memory_runtime_unpublished",
+            }
+
+    monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: _MemoryMgr())
     out = api.dependencies_status()
     assert out["ok"]
     by = {d["id"]: d for d in out["deps"]}
-    assert list(by) == ["askill", "avault", "show-runtime", "tmux", "node"]
+    assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
     assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
     assert by["avault"]["latest_version"] is None and by["avault"]["has_update"] is False
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
+    assert by["memory-runtime"] == {
+        "id": "memory-runtime",
+        "kind": "runtime",
+        "required": True,
+        "installed": False,
+        "version": "1.1.3",
+        "status": "missing",
+        "reason": "memory_runtime_unpublished",
+        "release_state": "unavailable",
+        "download_error": None,
+    }
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+@pytest.mark.parametrize(
+    ("runtime", "expected"),
+    [
+        ({"installed": False, "reason": "memory_runtime_platform_unsupported"}, "unsupported"),
+        ({"installed": False, "reason": "memory_runtime_install_failed"}, "error"),
+        ({"installed": False, "status": "error", "reason": None}, "error"),
+        ({"installed": False, "reason": "memory_runtime_unpublished"}, "missing"),
+    ],
+)
+def test_memory_runtime_dependency_status_maps_closed_failures(runtime, expected) -> None:
+    assert api._memory_runtime_dependency_status(runtime) == expected
+
+
+def test_memory_runtime_dependency_job_uses_controller_lifecycle(monkeypatch):
+    from vibe import internal_client
+
+    calls: list[bool] = []
+
+    def install_runtime() -> dict:
+        calls.append(True)
+        return {
+            "status_code": 200,
+            "body": {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_install_runtime_sync", install_runtime)
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": False,
+        "message": "memory_runtime_unpublished",
+        "output": None,
+        "reason": "memory_runtime_unpublished",
+        "download_error": None,
+    }
+    assert calls == [True]
+
+
+def test_memory_runtime_dependency_job_preserves_controller_closed_error(monkeypatch):
+    from vibe import internal_client
+
+    monkeypatch.setattr(
+        internal_client,
+        "memory_install_runtime_sync",
+        lambda: {"status_code": 503, "body": {"ok": False, "reason": "memory_runtime_missing"}},
+    )
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": False,
+        "message": "memory_runtime_missing",
+        "output": None,
+        "reason": "memory_runtime_missing",
+        "download_error": None,
+    }
 
 
 def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
