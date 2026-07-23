@@ -22,7 +22,9 @@ from core.managed_runtime import (
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
+    archive_path_is_unsafe,
     env_flag_enabled,
+    file_sha256,
     write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
@@ -111,6 +113,31 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         """Return a verified embedded Python without starting or downloading it."""
 
         return self.resolve_binary()
+
+    def resolve_binary(self) -> Path | None:
+        """Resolve only the executable selected by the active pointer."""
+
+        pointer = self._active_pointer()
+        if pointer is None:
+            return None
+        try:
+            return self._verified_active_pointer_binary(pointer)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def status(self) -> dict[str, Any]:
+        """Keep the manifest's release-state reason visible to Dependencies."""
+
+        status_payload = super().status()
+        if status_payload.get("reason") is not None:
+            return status_payload
+        try:
+            manifest = self._load_manifest(allow_network=False)
+            if manifest is not None and not self._manifest_installable(manifest):
+                status_payload["reason"] = self._install_reason
+        except Exception:  # noqa: BLE001
+            status_payload["reason"] = "memory_runtime_install_failed"
+        return status_payload
 
     def provider_root_format(self) -> str | None:
         pointer = self._active_pointer()
@@ -232,8 +259,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 empty = all(entry.name == sentinel_path.name for entry in entries)
         except OSError as exc:
             raise MemoryRuntimeActivationError("memory provider root cannot be inspected") from exc
-        if provider_root_format != candidate.provider_root_format and not empty:
-            raise MemoryRuntimeActivationError("memory provider root format is incompatible")
         return MemoryProviderRootState(
             exists=True,
             provider_root_format=provider_root_format,
@@ -246,6 +271,58 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         except (OSError, UnicodeError, ValueError):
             return None
         return pointer if isinstance(pointer, dict) else None
+
+    def _verified_active_pointer_binary(self, pointer: dict[str, Any]) -> Path | None:
+        """Verify the binary referenced by ``current.json`` without a manifest lookup."""
+
+        install_dir_value = pointer.get("install_dir")
+        bin_path = pointer.get("bin_path")
+        if (
+            pointer.get("provider") != "manifest"
+            or pointer.get("runtime_id") != self.spec.runtime_id
+            or not _safe_metadata_value(pointer.get("runtime_version"))
+            or not _safe_metadata_value(pointer.get("platform"))
+            or not _valid_sha256(pointer.get("manifest_sha256"))
+            or not _valid_sha256(pointer.get("archive_sha256"))
+            or not isinstance(install_dir_value, str)
+            or not isinstance(bin_path, str)
+            or archive_path_is_unsafe(bin_path)
+        ):
+            return None
+
+        configured_install_dir = Path(install_dir_value)
+        if not configured_install_dir.is_absolute():
+            return None
+        try:
+            install_dir = configured_install_dir.resolve(strict=True)
+            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
+            binary = (install_dir / bin_path).resolve(strict=True)
+        except OSError:
+            return None
+        if install_dir == versions_dir or versions_dir not in install_dir.parents or install_dir not in binary.parents:
+            return None
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            return None
+
+        try:
+            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        binary_sha256 = metadata.get("binary_sha256") if isinstance(metadata, dict) else None
+        if not (
+            isinstance(metadata, dict)
+            and metadata.get("provider") == "manifest"
+            and metadata.get("runtime_id") == self.spec.runtime_id
+            and metadata.get("runtime_version") == pointer["runtime_version"]
+            and metadata.get("platform") == pointer["platform"]
+            and metadata.get("manifest_sha256") == pointer["manifest_sha256"]
+            and metadata.get("archive_sha256") == pointer["archive_sha256"]
+            and metadata.get("bin_path") == bin_path
+            and _valid_sha256(binary_sha256)
+            and file_sha256(binary) == binary_sha256
+        ):
+            return None
+        return binary
 
     def _write_memory_current_pointer(
         self,
@@ -336,6 +413,10 @@ def _safe_metadata_value(value: object) -> bool:
         and len(value.encode("utf-8")) <= 128
         and all(character.isascii() and (character.isalnum() or character in {".", "-", "_"}) for character in value)
     )
+
+
+def _valid_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _read_owned_root_sentinel(path: Path, expected: os.stat_result) -> dict[str, Any]:

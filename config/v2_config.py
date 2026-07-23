@@ -268,10 +268,13 @@ class MemoryConfig:
 
     enabled: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
+    embedding_change_pending: bool = False
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
+        if not isinstance(self.embedding_change_pending, bool):
+            raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
         self.processing.validate()
         if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
             raise ValueError("Both Memory processing endpoints must be complete before enabling Memory")
@@ -350,7 +353,12 @@ def _looks_like_ui_mask(value: str) -> bool:
     return bool(stripped) and all(character in {"*", "•", "x", "X"} for character in stripped)
 
 
-def memory_config_to_payload(memory: MemoryConfig, *, include_secrets: bool = False) -> dict:
+def memory_config_to_payload(
+    memory: MemoryConfig,
+    *,
+    include_secrets: bool = False,
+    include_internal: bool = False,
+) -> dict:
     """Project Memory config without ever returning a reusable API key."""
 
     def endpoint_payload(endpoint: MemoryEndpointConfig) -> dict:
@@ -362,13 +370,18 @@ def memory_config_to_payload(memory: MemoryConfig, *, include_secrets: bool = Fa
             "has_api_key": bool(key),
         }
 
-    return {
+    payload = {
         "enabled": memory.enabled,
         "processing": {
             "llm": endpoint_payload(memory.processing.llm),
             "embedding": endpoint_payload(memory.processing.embedding),
         },
     }
+    if include_internal:
+        # This records a candidate that must be rechecked by the controller
+        # after a crash. It is never part of the settings response.
+        payload["embedding_change_pending"] = memory.embedding_change_pending
+    return payload
 
 
 @dataclass
@@ -730,6 +743,7 @@ class V2Config:
             raise ValueError("Config 'memory.processing.embedding' must be an object")
         memory = MemoryConfig(
             enabled=memory_payload.get("enabled", False),
+            embedding_change_pending=memory_payload.get("embedding_change_pending", False),
             processing=MemoryProcessingConfig(
                 llm=MemoryEndpointConfig(
                     **_filter_dataclass_fields(MemoryEndpointConfig, memory_llm_payload)
@@ -931,7 +945,11 @@ class V2Config:
                 "codex": self.agents.codex.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
-            "memory": memory_config_to_payload(self.memory, include_secrets=True),
+            "memory": memory_config_to_payload(
+                self.memory,
+                include_secrets=True,
+                include_internal=True,
+            ),
             "gateway": self.gateway.__dict__ if self.gateway else None,
             "ui": self.ui.__dict__,
             "remote_access": {

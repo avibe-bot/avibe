@@ -696,10 +696,10 @@ def _snapshot_owned_processes(pid: int, process_group: int | None) -> dict[int, 
         candidates = []
     for candidate in candidates:
         try:
-            identities[candidate.pid] = candidate.create_time()
+            identities.setdefault(candidate.pid, candidate.create_time())
         except psutil.Error:
             continue
-    identities.update(_snapshot_process_group(process_group))
+    _merge_owned_processes(identities, _snapshot_process_group(process_group))
     return identities
 
 
@@ -735,7 +735,7 @@ def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
     for process_id, created_at in identities.items():
         try:
             candidate = psutil.Process(process_id)
-            if abs(candidate.create_time() - created_at) > 0.001:
+            if candidate.create_time() != created_at:
                 continue
             if candidate.status() == psutil.STATUS_ZOMBIE:
                 continue
@@ -750,12 +750,36 @@ def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
     return live
 
 
-def _group_contains_owned_member(process_group: int | None, identities: Mapping[int, float]) -> bool:
+def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
+    """Return identities whose current creation time is readable and unchanged."""
+
+    confirmed: dict[int, float] = {}
+    for process_id, created_at in identities.items():
+        try:
+            candidate = psutil.Process(process_id)
+            if candidate.create_time() != created_at or candidate.status() == psutil.STATUS_ZOMBIE:
+                continue
+        except psutil.Error:
+            # AccessDenied is live-but-unverified: retain it for reaping, but
+            # never use it as authority to signal a numeric PID.
+            continue
+        confirmed[process_id] = created_at
+    return confirmed
+
+
+def _group_contains_only_confirmed_owned_processes(
+    process_group: int | None,
+    identities: Mapping[int, float],
+) -> bool:
+    """Whether a group can be signaled without bypassing PID identity checks."""
+
     if process_group is None:
         return False
     group_members = _snapshot_process_group(process_group)
-    live = _live_owned_processes(identities)
-    return any(process_id in live for process_id in group_members)
+    confirmed = _confirmed_owned_processes(identities)
+    return bool(group_members) and all(
+        confirmed.get(process_id) == created_at for process_id, created_at in group_members.items()
+    )
 
 
 def _signal_owned_group_or_process(
@@ -767,7 +791,7 @@ def _signal_owned_group_or_process(
     if (
         process_group is not None
         and hasattr(os, "killpg")
-        and _group_contains_owned_member(process_group, identities)
+        and _group_contains_only_confirmed_owned_processes(process_group, identities)
     ):
         try:
             os.killpg(process_group, signum)
@@ -779,7 +803,7 @@ def _signal_owned_group_or_process(
     if process.returncode is not None:
         return
     created_at = identities.get(process.pid)
-    if created_at is None or process.pid not in _live_owned_processes({process.pid: created_at}):
+    if created_at is None or process.pid not in _confirmed_owned_processes({process.pid: created_at}):
         return
     try:
         process.send_signal(signum)
@@ -788,10 +812,10 @@ def _signal_owned_group_or_process(
 
 
 def _signal_owned_processes(identities: Mapping[int, float], signum: int) -> None:
-    for process_id, created_at in _live_owned_processes(identities).items():
+    for process_id, created_at in _confirmed_owned_processes(identities).items():
         try:
             candidate = psutil.Process(process_id)
-            if abs(candidate.create_time() - created_at) > 0.001:
+            if candidate.create_time() != created_at:
                 continue
             candidate.send_signal(signum)
         except (psutil.NoSuchProcess, psutil.AccessDenied):

@@ -239,6 +239,46 @@ def test_memory_embedding_change_rolls_back_when_controller_rejects_it(monkeypat
     assert V2Config.load().memory.processing.embedding.model == "embed-v1"
 
 
+def test_memory_embedding_change_delegates_marker_settlement_to_controller(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    current.save()
+    observed: list[tuple[str | None, bool]] = []
+
+    async def reconcile():
+        persisted = V2Config.load().memory
+        observed.append((persisted.processing.embedding.model, persisted.embedding_change_pending))
+        persisted.embedding_change_pending = False
+        controller_config = V2Config.load()
+        controller_config.memory = persisted
+        controller_config.save()
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"embedding": {"model": "embed-v2"}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert observed == [("embed-v2", True)]
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.model == "embed-v2"
+    assert persisted.embedding_change_pending is False
+
+
 def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

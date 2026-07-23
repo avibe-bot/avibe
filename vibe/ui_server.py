@@ -6504,6 +6504,17 @@ def _memory_candidate_config(current: V2Config, memory_payload: dict) -> V2Confi
     return V2Config.from_payload(full_payload)
 
 
+def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Config) -> bool:
+    """Return whether the persisted vector-space identity would change."""
+
+    current_embedding = current.memory.processing.embedding
+    candidate_embedding = candidate.memory.processing.embedding
+    return (
+        current_embedding.base_url != candidate_embedding.base_url
+        or current_embedding.model != candidate_embedding.model
+    )
+
+
 def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     from core.memory.types import is_memory_error_code
 
@@ -6533,7 +6544,11 @@ async def memory_settings_patch(starlette_request: FastAPIRequest):
             patch_payload = await starlette_request.json()
             current = await asyncio.to_thread(V2Config.load)
             target_payload = _memory_settings_patch(current, patch_payload)
-            _memory_candidate_config(current, target_payload)
+            candidate = _memory_candidate_config(current, target_payload)
+            embedding_change_pending = (
+                current.memory.embedding_change_pending
+                or _memory_embedding_configuration_changed(current, candidate)
+            )
         except (TypeError, ValueError):
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
 
@@ -6542,7 +6557,15 @@ async def memory_settings_patch(starlette_request: FastAPIRequest):
         from vibe import api
 
         try:
-            saved = await asyncio.to_thread(api.save_memory_config, target_payload)
+            # Persist a durable marker before asking the controller to inspect
+            # the root. If Avibe exits in this interval, startup must re-run
+            # the same guarded inspection instead of treating the candidate as
+            # its own embedding baseline.
+            saved = await asyncio.to_thread(
+                api.save_memory_config,
+                target_payload,
+                embedding_change_pending=embedding_change_pending,
+            )
         except ValueError:
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
         except Exception:
@@ -6558,6 +6581,7 @@ async def memory_settings_patch(starlette_request: FastAPIRequest):
                 await asyncio.to_thread(
                     api.save_memory_config,
                     memory_config_to_payload(current.memory, include_secrets=True),
+                    embedding_change_pending=current.memory.embedding_change_pending,
                 )
                 await _memory_internal_response(internal_client.reconcile_memory)
             except Exception:

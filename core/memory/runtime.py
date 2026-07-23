@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
-from dataclasses import asdict
+from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import asdict, replace
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
 from config import paths
-from config.v2_config import MemoryConfig
+from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config
 from core.memory.artifact import (
     MemoryArtifactCandidate,
     MemoryArtifactManager,
@@ -53,6 +55,7 @@ class MemoryRuntime:
         self._processing_probe_lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
+        self._artifact_installing = False
         set_provider_root = getattr(self._artifact_manager, "set_provider_root", None)
         if callable(set_provider_root):
             set_provider_root(self._provider_root)
@@ -89,6 +92,8 @@ class MemoryRuntime:
 
         async with self._reconcile_lock:
             self._activation_loop = asyncio.get_running_loop()
+            if self._artifact_installing:
+                return {"ok": False, "error": "memory_runtime_install_failed"}
             # A durable clear marker always wins over sidecar startup. Recovery
             # owns the same worker/root lifecycle and must finish before a new
             # child can create or read provider state.
@@ -112,7 +117,9 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
 
-        embedding_changed = not skip_embedding_guard and _embedding_configuration_changed(self._config, config)
+        embedding_changed = not skip_embedding_guard and (
+            config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
+        )
         claims_paused = claims_already_paused
         if embedding_changed:
             # Stop the worker before inspecting provider state. A capture may
@@ -138,6 +145,19 @@ class MemoryRuntime:
                 if embedding_guard_rejected and resume_claims_on_failure:
                     self.module._worker.resume_claims()
                     claims_paused = False
+
+        if config.embedding_change_pending:
+            # A durable candidate marker prevents a post-save crash from
+            # comparing the candidate against itself on next startup. Clear it
+            # only after the guarded inspection succeeds, while claims remain
+            # paused, so no capture can resume against an unverified config.
+            if not await asyncio.to_thread(self._settle_embedding_change_pending, config):
+                error = "memory_runtime_install_failed"
+                if not (self._process and self._process.running):
+                    self._runtime_error = error
+                if claims_paused and resume_claims_on_failure:
+                    self.module._worker.resume_claims()
+                return {"ok": False, "error": error}
 
         if not config.enabled:
             self._config = config
@@ -251,6 +271,20 @@ class MemoryRuntime:
         """Install or repair EverOS through this controller-owned lifecycle."""
 
         self._activation_loop = asyncio.get_running_loop()
+        async with self._reconcile_lock:
+            # Shared ensure(force=True) can delete the active fingerprint
+            # directory before invoking our activation bridge. A retained
+            # process can still be supervising a delayed restart even when it
+            # has no live child, so require Memory to be disabled first.
+            # A concurrent reconcile is similarly blocked until this operation
+            # has either committed or failed.
+            if self._artifact_installing or self._process is not None:
+                return {
+                    "ok": False,
+                    "reason": "memory_runtime_install_requires_disabled_memory",
+                    "download_error": None,
+                }
+            self._artifact_installing = True
         try:
             payload = await asyncio.to_thread(self._artifact_manager.ensure, force=True)
         except Exception:
@@ -259,6 +293,9 @@ class MemoryRuntime:
                 "reason": "memory_runtime_install_failed",
                 "download_error": None,
             }
+        finally:
+            async with self._reconcile_lock:
+                self._artifact_installing = False
         if not isinstance(payload, dict):
             return {
                 "ok": False,
@@ -315,6 +352,20 @@ class MemoryRuntime:
         )
         try:
             future.result(timeout=90.0)
+        except FutureTimeoutError as timeout_error:
+            # ``cancel`` only requests cancellation. Wait until the submitted
+            # lifecycle transaction has settled so it cannot commit/restart in
+            # the background after the installer reports a timeout.
+            future.cancel()
+            try:
+                future.result()
+            except FutureCancelledError as exc:
+                raise MemoryRuntimeActivationError("memory runtime activation timed out") from timeout_error
+            except MemoryRuntimeActivationError:
+                raise
+            except Exception as exc:
+                raise MemoryRuntimeActivationError("memory runtime activation failed") from exc
+            return
         except MemoryRuntimeActivationError:
             raise
         except Exception as exc:
@@ -364,40 +415,35 @@ class MemoryRuntime:
                             meta,
                         )
                     commit()
-                    if self._config.enabled:
-                        result = await self._reconcile_locked(
-                            self._config,
-                            claims_already_paused=True,
-                            skip_embedding_guard=True,
-                            resume_claims_on_failure=False,
-                        )
-                        if result.get("ok") is not True:
-                            raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
-                    else:
-                        self._runtime_error = None
-                        self.module._worker.resume_claims()
+                    result = await self._reconcile_locked(
+                        self._config,
+                        claims_already_paused=True,
+                        skip_embedding_guard=not self._config.embedding_change_pending,
+                        resume_claims_on_failure=False,
+                    )
+                    if result.get("ok") is not True:
+                        raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
                     return
-                except Exception as activation_error:
+                except (Exception, asyncio.CancelledError) as activation_error:
                     try:
                         rollback()
                         self.module._restore_runtime_artifact_metadata(previous_metadata)
                         if sentinel_rewritten and meta is not None:
                             await asyncio.to_thread(self.module._write_root_sentinel, meta)
                             await asyncio.to_thread(self.module._verify_owned_provider_root, meta, require_empty=True)
-                        if self._config.enabled:
-                            rollback_result = await self._reconcile_locked(
-                                self._config,
-                                claims_already_paused=True,
-                                skip_embedding_guard=True,
-                                resume_claims_on_failure=False,
-                            )
-                            if rollback_result.get("ok") is not True:
-                                raise MemoryRuntimeActivationError("previous runtime reconciliation failed")
-                        else:
-                            self.module._worker.resume_claims()
+                        rollback_result = await self._reconcile_locked(
+                            self._config,
+                            claims_already_paused=True,
+                            skip_embedding_guard=not self._config.embedding_change_pending,
+                            resume_claims_on_failure=False,
+                        )
+                        if rollback_result.get("ok") is not True:
+                            raise MemoryRuntimeActivationError("previous runtime reconciliation failed")
                     except Exception as rollback_error:
                         self._runtime_error = "memory_runtime_install_failed"
                         raise MemoryRuntimeActivationError("memory runtime rollback failed") from rollback_error
+                    if isinstance(activation_error, asyncio.CancelledError):
+                        raise
                     raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
 
     async def _stop_sidecar_for_clear(self) -> None:
@@ -481,6 +527,22 @@ class MemoryRuntime:
         stats = self._store.queue_stats()
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
 
+    def _settle_embedding_change_pending(self, config: MemoryConfig) -> bool:
+        """Clear a persisted candidate marker only when its full config still matches."""
+
+        try:
+            with CONFIG_LOCK:
+                persisted = V2Config.load()
+                if not _same_memory_configuration(persisted.memory, config):
+                    return False
+                if persisted.memory.embedding_change_pending:
+                    persisted.memory.embedding_change_pending = False
+                    persisted.save()
+                config.embedding_change_pending = False
+            return True
+        except Exception:
+            return False
+
 
 def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
     return {
@@ -514,6 +576,15 @@ def _embedding_configuration_changed(current: MemoryConfig, candidate: MemoryCon
     return (
         current_embedding.base_url != candidate_embedding.base_url
         or current_embedding.model != candidate_embedding.model
+    )
+
+
+def _same_memory_configuration(current: MemoryConfig, candidate: MemoryConfig) -> bool:
+    """Compare persisted candidates while ignoring their settlement marker."""
+
+    return (
+        replace(current, embedding_change_pending=False)
+        == replace(candidate, embedding_change_pending=False)
     )
 
 

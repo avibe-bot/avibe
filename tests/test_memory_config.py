@@ -28,13 +28,22 @@ def _complete_processing(*, llm_url: str = "https://llm.example.test/v1") -> dic
 
 
 def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
-    config = V2Config.from_payload(_payload({"enabled": True, "processing": _complete_processing()}))
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": True,
+                "processing": _complete_processing(),
+                "embedding_change_pending": True,
+            }
+        )
+    )
     config.save(tmp_path / "config.json")
 
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     projected = config_to_payload(config)
 
     assert stored["memory"]["processing"]["llm"]["api_key"] == "llm-key"
+    assert stored["memory"]["embedding_change_pending"] is True
     assert projected["memory"]["processing"]["llm"] == {
         "base_url": "https://llm.example.test/v1",
         "model": "chat",
@@ -42,6 +51,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
         "has_api_key": True,
     }
     assert "embed-key" not in json.dumps(projected)
+    assert "embedding_change_pending" not in projected["memory"]
 
 
 @pytest.mark.parametrize(
@@ -102,7 +112,15 @@ def test_memory_config_defaults_disabled_for_legacy_payload() -> None:
 
 def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    original = V2Config.from_payload(_payload({"enabled": True, "processing": _complete_processing()}))
+    original = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": True,
+                "processing": _complete_processing(),
+                "embedding_change_pending": True,
+            }
+        )
+    )
     original.save()
 
     saved = api.save_config({"runtime": {"log_level": "DEBUG"}})
@@ -110,6 +128,7 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
     assert saved.runtime.log_level == "DEBUG"
     assert saved.memory.processing.llm.api_key == "llm-key"
     assert saved.memory.processing.embedding.api_key == "embed-key"
+    assert saved.memory.embedding_change_pending is True
 
 
 def test_memory_save_uses_dedicated_config_writer(monkeypatch, tmp_path) -> None:

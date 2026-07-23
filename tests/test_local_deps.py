@@ -15,6 +15,7 @@ import os
 import subprocess
 import tarfile
 import urllib.error
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -824,6 +825,11 @@ def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
 
 def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=True))),
+    )
+    monkeypatch.setattr(
         api,
         "askill_update_status",
         lambda **_: {
@@ -873,7 +879,7 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["memory-runtime"] == {
         "id": "memory-runtime",
         "kind": "runtime",
-        "required": False,
+        "required": True,
         "installed": False,
         "version": "1.1.3",
         "status": "missing",
@@ -882,6 +888,19 @@ def test_dependencies_status_shape(monkeypatch):
         "download_error": None,
     }
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+@pytest.mark.parametrize(
+    ("runtime", "expected"),
+    [
+        ({"installed": False, "reason": "memory_runtime_platform_unsupported"}, "unsupported"),
+        ({"installed": False, "reason": "memory_runtime_install_failed"}, "error"),
+        ({"installed": False, "status": "error", "reason": None}, "error"),
+        ({"installed": False, "reason": "memory_runtime_unpublished"}, "missing"),
+    ],
+)
+def test_memory_runtime_dependency_status_maps_closed_failures(runtime, expected) -> None:
+    assert api._memory_runtime_dependency_status(runtime) == expected
 
 
 def test_memory_runtime_dependency_job_uses_controller_lifecycle(monkeypatch):
