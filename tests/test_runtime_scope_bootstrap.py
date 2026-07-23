@@ -2,7 +2,7 @@ import sys
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -155,11 +155,16 @@ class AdoptScopedServiceOwnerTests(unittest.TestCase):
             stack.enter_context(patch("vibe.runtime.resolve_service_owner_pid", return_value=4321))
             stack.enter_context(patch("vibe.runtime.pid_alive", return_value=True))
             rec = stack.enter_context(patch("vibe.runtime._record_service_pid_reservation"))
+            reap = stack.enter_context(
+                patch(
+                    "vibe.runtime._reap_service_start_process",
+                    side_effect=lambda pid: runtime._SERVICE_START_PROCESSES.pop(pid, None),
+                )
+            )
             stack.enter_context(patch.dict("vibe.runtime._SERVICE_START_PROCESSES", {1234: proc}, clear=True))
             self.assertEqual(runtime._adopt_scoped_service_owner(1234), 4321)
             rec.assert_called_once_with(4321)
-            # Shim handle dropped; adopted owner is NOT tracked via the shim's Popen,
-            # so its exit code can never be misattributed from process.poll().
+            reap.assert_called_once_with(1234)
             self.assertNotIn(1234, runtime._SERVICE_START_PROCESSES)
             self.assertNotIn(4321, runtime._SERVICE_START_PROCESSES)
 
@@ -181,6 +186,22 @@ class AdoptScopedServiceOwnerTests(unittest.TestCase):
         with patch("vibe.runtime.resolve_service_owner_pid", return_value=4321):
             with patch("vibe.runtime.pid_alive", return_value=False):
                 self.assertIsNone(runtime._adopt_scoped_service_owner(1234))
+
+
+class ReapServiceStartProcessTests(unittest.TestCase):
+    def test_reaps_tracked_process_in_daemon_thread(self):
+        process = Mock()
+        thread = Mock()
+        with patch.dict(runtime._SERVICE_START_PROCESSES, {1234: process}, clear=True):
+            with patch("vibe.runtime.threading.Thread", return_value=thread) as thread_factory:
+                runtime._reap_service_start_process(1234)
+
+        self.assertNotIn(1234, runtime._SERVICE_START_PROCESSES)
+        thread_factory.assert_called_once()
+        self.assertTrue(thread_factory.call_args.kwargs["daemon"])
+        thread_factory.call_args.kwargs["target"]()
+        process.wait.assert_called_once_with()
+        thread.start.assert_called_once_with()
 
 
 class WaitForScopedServicePidTests(unittest.TestCase):

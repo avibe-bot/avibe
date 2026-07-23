@@ -244,6 +244,34 @@ class RuntimeServiceLockTests(unittest.TestCase):
             self.assertEqual(pid, 67890)
             spawn_background.assert_not_called()
 
+    def test_start_service_reuses_scoped_wrapper_reservation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "service.pid"
+            pid_path.write_text("67890", encoding="utf-8")
+            command = runtime.shlex.join(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    "-q",
+                    "-p",
+                    "Delegate=yes",
+                    "--",
+                    sys.executable,
+                    str(runtime.get_service_main_path()),
+                ]
+            )
+
+            with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                with patch("vibe.runtime.pid_alive", return_value=True):
+                    with patch("vibe.runtime.get_process_command", return_value=command):
+                        with patch("vibe.runtime.service_pid_recorded", return_value=False):
+                            with patch("vibe.runtime.spawn_service_background_process") as spawn_background:
+                                pid = runtime.start_service(wait_for_ready=False)
+
+            self.assertEqual(pid, 67890)
+            spawn_background.assert_not_called()
+
     def test_stop_service_stops_pending_pid_reservation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             pid_path = Path(tmpdir) / "service.pid"

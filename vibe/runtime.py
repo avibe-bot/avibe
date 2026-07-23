@@ -578,6 +578,14 @@ def _service_entry_arg_from_argv(args: list[str]) -> str | None:
     if not args:
         return None
     executable_name = Path(args[0].strip("\"'")).name.lower()
+    if executable_name == "systemd-run":
+        if "--scope" not in args:
+            return None
+        try:
+            separator = args.index("--")
+        except ValueError:
+            return None
+        return _service_entry_arg_from_argv(args[separator + 1 :])
     if executable_name.startswith("python"):
         for arg in args[1:]:
             cleaned_arg = arg.strip("\"'")
@@ -887,8 +895,27 @@ def _record_service_pid_reservation(pid: int) -> None:
     pid_path.write_text(str(pid), encoding="utf-8")
 
 
+def _reap_service_start_process(pid: int) -> None:
+    process = _SERVICE_START_PROCESSES.pop(pid, None)
+    wait = getattr(process, "wait", None)
+    if not callable(wait):
+        return
+
+    def _wait() -> None:
+        try:
+            wait()
+        except Exception:
+            logger.debug("Failed to reap service launcher pid=%s", pid, exc_info=True)
+
+    threading.Thread(
+        target=_wait,
+        name=f"vibe-service-launcher-reaper-{pid}",
+        daemon=True,
+    ).start()
+
+
 def _clear_service_pid_reservation(pid: int) -> None:
-    _SERVICE_START_PROCESSES.pop(pid, None)
+    _reap_service_start_process(pid)
     pid_path = paths.get_runtime_pid_path()
     try:
         recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
@@ -980,7 +1007,7 @@ def wait_for_service_pid(pid: int, timeout: float = SERVICE_LOCK_READY_TIMEOUT_S
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if service_pid_recorded(pid):
-            _SERVICE_START_PROCESSES.pop(pid, None)
+            _reap_service_start_process(pid)
             return True
         if _service_start_exit_code(pid) is not None:
             return False
@@ -990,7 +1017,7 @@ def wait_for_service_pid(pid: int, timeout: float = SERVICE_LOCK_READY_TIMEOUT_S
         time.sleep(0.1)
     ready = service_pid_recorded(pid)
     if ready:
-        _SERVICE_START_PROCESSES.pop(pid, None)
+        _reap_service_start_process(pid)
     elif _service_start_exit_code(pid) is not None:
         return False
     return ready
@@ -1289,12 +1316,9 @@ def _adopt_scoped_service_owner(prev_pid: int) -> int | None:
     """
     owner = resolve_service_owner_pid(include_starting=False)
     if owner and owner != prev_pid and pid_alive(owner):
-        # Stop tracking the shim's Popen: it is a handle on the shim, not on
-        # `owner`, so its exit code must never be attributed to the adopted
-        # service. Owner liveness is instead governed by pid_alive() /
-        # service_pid_recorded() inside wait_for_service_pid (an untracked pid
-        # yields exit_code=None from _service_start_exit_code).
-        _SERVICE_START_PROCESSES.pop(prev_pid, None)
+        # The shim's Popen must not be attributed to `owner`, but a long-lived
+        # caller still needs to wait() it after the service exits.
+        _reap_service_start_process(prev_pid)
         _record_service_pid_reservation(owner)
         logger.info(
             "cgroup scope bootstrap: adopting lock-holder pid=%s as the service owner (shim pid=%s)",
@@ -1319,7 +1343,7 @@ def _wait_for_scoped_service_pid(spawn_pid: int, timeout: float) -> int | None:
     deadline = time.monotonic() + timeout
     while True:
         if service_pid_recorded(pid):
-            _SERVICE_START_PROCESSES.pop(pid, None)
+            _reap_service_start_process(pid)
             return pid
         adopted = _adopt_scoped_service_owner(pid)
         if adopted is not None:
