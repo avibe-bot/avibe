@@ -2769,6 +2769,7 @@
       "apiKeyPlaceholder": "sk-…",
       "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
       "embeddingLocked": "Changing the embedding endpoint or model is disabled while memory data exists. Run Clear all first.",
+      "embeddingStatusPending": "Confirming Memory state… the embedding endpoint unlocks once it's confirmed no data exists.",
       "save": "Save settings",
       "saving": "Saving…",
       "saveFailed": "Couldn't save Memory settings.",

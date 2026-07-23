@@ -2769,6 +2769,7 @@
       "apiKeyPlaceholder": "sk-…",
       "apiKeyClearHint": "密钥仅可写入——Avibe 不会把已保存的密钥回显给你。",
       "embeddingLocked": "已有记忆数据时无法更改 Embedding 端点或模型，请先执行「清除全部」。",
+      "embeddingStatusPending": "正在确认记忆状态……确认没有数据后，Embedding 端点将解锁。",
       "save": "保存设置",
       "saving": "保存中…",
       "saveFailed": "无法保存记忆设置。",

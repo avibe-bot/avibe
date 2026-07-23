@@ -163,7 +163,7 @@ const EndpointFields: React.FC<{
           </Badge>
         ) : null}
       </div>
-      {locked && lockedHint ? <p className="text-[11.5px] leading-snug text-muted">{lockedHint}</p> : null}
+      {lockedHint ? <p className="text-[11.5px] leading-snug text-muted">{lockedHint}</p> : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1.5">
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
@@ -506,10 +506,16 @@ const SettingsPanel: React.FC<{
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
   }, [settings]);
 
+  // `data_exists` is only known once status resolves. Settings can render first (the two loads run
+  // concurrently), so until status is known we must NOT let the embedding endpoint be edited: a
+  // change made in that window would be silently discarded once the lock activates yet still report
+  // success. Fail closed — treat the embedding endpoint as locked while status is unknown, and only
+  // unlock it after a resolved status reports data_exists=false.
+  const statusKnown = status != null;
   // Data already exists in the local Memory root: changing the embedding endpoint/model would mix
-  // vector spaces, so the backend rejects it (plan §7) — lock those two fields here too, as a
-  // proactive UI guard rather than only surfacing the 409 after the fact.
-  const embeddingLocked = !!status?.data_exists;
+  // vector spaces, so the backend rejects it (plan §7) — lock those fields here too, proactively.
+  const embeddingDataLock = !!status?.data_exists;
+  const embeddingLocked = !statusKnown || embeddingDataLock;
   const canClearKeys = !enabledDraft;
 
   const save = async () => {
@@ -521,6 +527,8 @@ const SettingsPanel: React.FC<{
       // A key clear is accepted only while the resulting state stays disabled (Slice 2).
       const allowClear = !enabledDraft;
       const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
+      // Never build an embedding patch while the endpoint is locked (data exists OR status not yet
+      // resolved) — otherwise a change would be dropped here while the save still reports success.
       const embeddingPatch = embeddingLocked
         ? undefined
         : buildEndpointPatch(embeddingDraft, settings.processing.embedding, allowClear);
@@ -597,7 +605,15 @@ const SettingsPanel: React.FC<{
         onChange={setEmbeddingDraft}
         disabled={saving}
         locked={embeddingLocked}
-        lockedHint={embeddingLocked ? t('memory.settings.embeddingLocked') : undefined}
+        // Distinguish the two lock reasons: data-exists (permanent until Clear all) vs status not
+        // yet resolved (transient — re-enables once status confirms no data exists).
+        lockedHint={
+          embeddingDataLock
+            ? t('memory.settings.embeddingLocked')
+            : !statusKnown
+              ? t('memory.settings.embeddingStatusPending')
+              : undefined
+        }
         canClearKey={canClearKeys}
       />
 
