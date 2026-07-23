@@ -10,7 +10,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional, cast
+from typing import Any, Callable, Literal, Mapping, Optional, cast
 
 from config import paths
 from config.v2_config import ModelHubConfig
@@ -85,6 +85,56 @@ def bind_launch(context: Any, launch: ModelHubLaunch) -> None:
 def launch_for_context(context: Any) -> ModelHubLaunch | None:
     value = getattr(context, _CONTEXT_LAUNCH_ATTR, None)
     return value if isinstance(value, ModelHubLaunch) else None
+
+
+def persisted_launch_identity(launch: ModelHubLaunch | None) -> dict[str, str] | None:
+    """Return the non-secret source identity needed to restore failure routing."""
+
+    if launch is None or launch.channel == "direct" or not launch.source_id:
+        return None
+    return {
+        "backend": launch.backend,
+        "channel": launch.channel,
+        "source_id": launch.source_id,
+        "target_model": launch.target_model,
+    }
+
+
+def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | None:
+    if not isinstance(payload, Mapping):
+        return None
+    backend = payload.get("backend")
+    channel = payload.get("channel")
+    source_id = payload.get("source_id")
+    target_model = payload.get("target_model")
+    if (
+        backend not in {"claude", "codex", "opencode"}
+        or channel not in {"native_cli", "hub"}
+        or not isinstance(source_id, str)
+        or not source_id
+        or not isinstance(target_model, str)
+        or not target_model
+    ):
+        return None
+    launch = ModelHubLaunch(
+        backend=cast(BackendName, backend),
+        channel=cast(LaunchChannel, channel),
+        requested_model=target_model,
+        target_model=target_model,
+        runtime_model=target_model,
+        source_id=source_id,
+    )
+    bind_launch(context, launch)
+    return launch
+
+
+def claude_setting_sources_for_launch(launch: ModelHubLaunch | None) -> list[str]:
+    if launch is not None and launch.channel == "hub":
+        # ~/.claude/settings.json env values override subprocess env. Keep
+        # project/local CLAUDE.md loading, but mask the user settings source so
+        # persisted native auth cannot bypass the ephemeral gateway injection.
+        return ["project", "local"]
+    return ["user", "project", "local"]
 
 
 async def resolve_model_hub_launch(
@@ -190,6 +240,7 @@ class ModelHubRuntimeRouter:
         *,
         service: ModelHubService | None = None,
         overlay_path: Path | None = None,
+        native_cli_ready: Callable[[BackendName], bool] | None = None,
     ) -> None:
         if service is None:
             from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -197,9 +248,44 @@ class ModelHubRuntimeRouter:
             service = create_default_service(adapter=get_model_hub_engine_adapter())
         self.service = service
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
+        self.native_cli_ready = native_cli_ready or self._default_native_cli_ready
         self._last_launch: dict[tuple[BackendName, str], ModelHubLaunch] = {}
         self._pending_switch_reason: dict[tuple[BackendName, str], EventReason] = {}
         self._pending_source_failure: dict[tuple[BackendName, str], tuple[str, EventReason]] = {}
+
+    @staticmethod
+    def _default_native_cli_ready(backend: BackendName) -> bool:
+        if backend == "claude":
+            from vibe.claude_config import read_claude_settings_env
+
+            conflicts = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}
+            settings_env = read_claude_settings_env()
+            return not any(key in settings_env or os.environ.get(key) for key in conflicts)
+        if backend != "codex":
+            return False
+
+        from vibe.codex_config import get_codex_config_paths, read_codex_auth_state
+
+        conflicts = {"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"}
+        if any(os.environ.get(key) for key in conflicts):
+            return False
+        state = read_codex_auth_state()
+        if state.get("has_api_key") or not state.get("has_chatgpt_tokens") or state.get("base_url"):
+            return False
+        config_path, _ = get_codex_config_paths()
+        try:
+            if config_path.exists():
+                try:
+                    import tomllib  # type: ignore[attr-defined]
+                except ImportError:  # pragma: no cover - Python < 3.11
+                    import tomli as tomllib  # type: ignore[no-redef]
+                config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            else:
+                config = {}
+        except (OSError, ValueError):
+            return False
+        provider = config.get("model_provider") if isinstance(config, dict) else None
+        return provider is None or provider == "openai"
 
     @staticmethod
     def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
@@ -361,7 +447,16 @@ class ModelHubRuntimeRouter:
         candidates = await self.service._resolution_candidates(backend, target_model, provider=provider)
         if not candidates:
             raise ModelHubError("mapping_target_unavailable", status=409)
-        source = candidates[0]
+        source = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.supply_channel != "native_cli" or self.native_cli_ready(backend)
+            ),
+            None,
+        )
+        if source is None:
+            raise ModelHubError("mapping_target_unavailable", status=409)
         if source.supply_channel == "native_cli":
             if self.service.revocations.list():
                 try:

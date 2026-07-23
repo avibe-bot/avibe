@@ -21,9 +21,11 @@ from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
+    ModelHubLaunch,
     OpenCodeOverlay,
     bind_launch,
     opencode_model_for_overlay,
+    persisted_launch_identity,
     resolve_model_hub_launch,
 )
 
@@ -196,6 +198,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def _process_message(self, request: AgentRequest) -> None:
         run_registered = False
         model_hub_overlay: OpenCodeOverlay | None = None
+        model_hub_launch: ModelHubLaunch | None = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
         # session_id (a transient server error now that get_session raises on
         # non-404), and the error-cleanup paths reference session_id — keep it
@@ -310,12 +313,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_str = getattr(opencode_cfg, "default_model", None)
             model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
             if model_hub_runtime is not None and model_str:
-                launch = await resolve_model_hub_launch(
+                model_hub_launch = await resolve_model_hub_launch(
                     self.controller,
                     "opencode",
                     model_str,
                 )
-                bind_launch(request.context, launch)
+                bind_launch(request.context, model_hub_launch)
             # Bare model id (no ``provider/`` prefix): only inject ``providerID``
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
@@ -417,6 +420,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # scoped key so restored polls remain attached to typed scopes.
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
+            processing_indicator = self.controller.processing_indicator.snapshot_request(request)
+            launch_identity = persisted_launch_identity(model_hub_launch)
+            if launch_identity is not None:
+                processing_indicator["model_hub_launch"] = launch_identity
 
             self.sessions.add_active_poll(
                 opencode_session_id=session_id,
@@ -430,7 +437,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 ack_reaction_emoji=request.ack_reaction_emoji,
                 typing_indicator_active=request.typing_indicator_active,
                 context_token=str(platform_payload.get("context_token") or ""),
-                processing_indicator=self.controller.processing_indicator.snapshot_request(request),
+                processing_indicator=processing_indicator,
                 user_id=request.context.user_id or "",
                 platform=request.context.platform or platform_payload.get("platform") or "",
                 prompt_started_at=prompt_started_at,

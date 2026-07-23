@@ -890,7 +890,11 @@ class SessionHandler(BaseHandler):
 
         # Determine final model: explicit override > agent frontmatter > global default
         effective_model = explicit_model or agent_model or self.config.claude.default_model
-        from modules.agents.model_hub import build_claude_hub_env, launch_for_context
+        from modules.agents.model_hub import (
+            build_claude_hub_env,
+            claude_setting_sources_for_launch,
+            launch_for_context,
+        )
 
         model_hub_launch = launch_for_context(context)
         runtime_model = (
@@ -961,7 +965,7 @@ class SessionHandler(BaseHandler):
             "resume": stored_claude_session_id if stored_claude_session_id else None,
             "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
-            "setting_sources": ["user", "project", "local"],  # Load all setting sources (user, project CLAUDE.md, local overrides)
+            "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
             # cannot answer programmatically.
