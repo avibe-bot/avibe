@@ -8691,7 +8691,10 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
         return transcript_text
     lines = [transcript_text, "", f"Show event id: {event_id}"]
     payload = event_payload.get("payload")
-    if isinstance(payload, dict) and payload.get("intent") in {"question", "comment"}:
+    intent = "comment"
+    if isinstance(payload, dict):
+        intent = str(payload.get("intent") or "").strip() or "comment"
+    if intent in {"question", "comment"}:
         lines.extend(
             [
                 "",

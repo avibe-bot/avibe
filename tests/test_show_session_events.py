@@ -770,6 +770,7 @@ def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeyp
     [
         ("question", True),
         ("comment", True),
+        (None, True),
         ("fix", False),
         ("change", False),
         ("approve", False),
@@ -788,19 +789,20 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monk
             yield None
 
     monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
+    label = intent or "comment"
     event = {
         "id": "show_evt_1a2b3c4d",
         "type": "human.annotation.created",
         "session_id": "ses_show",
         "scope_id": "scope1",
-        "payload": {"intent": intent},
-        "transcript_text": f"[show-annotation] {intent}\n\nReview this.",
+        "payload": {"intent": intent} if intent is not None else {},
+        "transcript_text": f"[show-annotation] {label}\n\nReview this.",
         "message_id": "m1",
     }
 
     asyncio.run(ui_server._run_show_event_dispatch(event))
 
-    assert event["transcript_text"] == f"[show-annotation] {intent}\n\nReview this."
+    assert event["transcript_text"] == f"[show-annotation] {label}\n\nReview this."
     assert "Show event id: show_evt_1a2b3c4d" in captured[0]["text"]
     guidance = (
         "如需在页面上原位回应，可执行：\n"
