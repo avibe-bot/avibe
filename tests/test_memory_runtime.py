@@ -941,6 +941,56 @@ def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact
     assert runtime._process is None
 
 
+def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: Path) -> None:
+    """A healthy running sidecar must not be force-stopped/replaced via Repair.
+
+    Only a retained down supervisor (no live child) may be stopped for Repair; a
+    live sidecar requires a coordinated disable first (tech §12.2).
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    events: list[str] = []
+
+    class _Artifact:
+        def provider_root_format(self) -> None:
+            return None
+
+        def artifact_fingerprint(self) -> None:
+            return None
+
+        def ensure(self, *, force: bool) -> dict:
+            events.append("ensure")
+            return {"ok": True}
+
+    class _LiveProcess:
+        running = True  # healthy sidecar with a live child
+        consecutive_failures = 0
+        down = False
+
+        async def stop(self) -> None:
+            events.append("stop")  # must NOT be called
+
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+    )
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=processing),
+        artifact_manager=_Artifact(),
+        effective_home=tmp_path,
+    )
+    runtime._process = _LiveProcess()
+
+    result = asyncio.run(runtime.install_artifact())
+    assert result == {
+        "ok": False,
+        "reason": "memory_runtime_install_requires_disabled_memory",
+        "download_error": None,
+    }
+    # The healthy sidecar was neither stopped nor replaced.
+    assert events == []
+    assert runtime._process is not None
+
+
 def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
     class _Loop:
         def is_closed(self) -> bool:

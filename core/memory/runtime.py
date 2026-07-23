@@ -283,6 +283,16 @@ class MemoryRuntime:
             # including its terminal "down" state, while claims are fenced so a
             # repair can safely replace the executable it might otherwise relaunch.
             supervisor = self._process
+            # A HEALTHY running sidecar must not be force-stopped/replaced through
+            # Repair — that requires a coordinated disable first. Only a retained
+            # supervisor in its terminal "down" state (no live child) may be stopped
+            # here so Repair can recover enabled/down Memory.
+            if supervisor is not None and supervisor.running:
+                return {
+                    "ok": False,
+                    "reason": "memory_runtime_install_requires_disabled_memory",
+                    "download_error": None,
+                }
             if supervisor is not None:
                 async with self.module._lifecycle_lock:
                     try:
