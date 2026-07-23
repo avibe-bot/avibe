@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft7Validator, FormatChecker
 
 from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
@@ -17,7 +18,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
-from core.handlers.model_hub.service import ModelHubService, UnavailableEngineAdapter
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, UnavailableEngineAdapter
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
 from vibe.ui_server import app
@@ -72,6 +73,7 @@ class FakeAdapter:
         self.cancelled = []
         self.synced = []
         self.flows = {}
+        self.fail_sync = False
 
     async def ensure_installed(self):
         return await self.status()
@@ -104,6 +106,8 @@ class FakeAdapter:
 
     async def sync_sources(self, bindings):
         self.synced.append(tuple(bindings))
+        if self.fail_sync:
+            raise RuntimeError("upstream failure with sk-secret-material")
 
     async def discover_models(self, vendor, protocol, base_url, credential_ref):
         return ("claude-opus-4-6", "claude-sonnet-4-6")
@@ -401,6 +405,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     consented_source = response.get_json()["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
+    assert service.oauth_flows.channel(hub_flow["flow_id"]) is None
 
     scan = client.post("/api/models/migration/scan", headers=headers, base_url=base_url).get_json()
     _assert_valid("migration-scan.schema.json", {"items": scan["items"]})
@@ -415,6 +420,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
 
     runtime = client.get("/api/models/runtime/status", base_url=base_url).get_json()["runtime"]
     _assert_valid("runtime-dependency.schema.json", runtime)
+    assert all("<" not in asset["url"] for asset in runtime["manifest"]["assets"])
 
     response = client.delete(
         "/api/models/custom-models",
@@ -454,6 +460,43 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     _assert_envelope(response.get_json())
     assert adapter.revoked == ["cred_test123"]
+
+
+def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start(
+            {"vendor": "anthropic", "channel": "hub", "experimental_consent": True}
+        )
+    )
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_rollback",
+        }
+    )
+    adapter.fail_sync = True
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Rollback subscription",
+                    "supply_channel": "hub",
+                    "oauth_flow_ref": flow["flow_id"],
+                    "experimental_consent": True,
+                }
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert exc_info.value.__cause__ is None
+    assert adapter.revoked == ["cred_oauth_rollback"]
+    assert store.config.sources == []
+    assert service.oauth_flows.channel(flow["flow_id"]) is None
 
 
 def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tmp_path):

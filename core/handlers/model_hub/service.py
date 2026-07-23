@@ -52,13 +52,13 @@ _RUNTIME_MANIFEST = {
     "assets": [
         {
             "platform": "darwin-arm64",
-            "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/<darwin-arm64-asset>",
+            "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_aarch64.tar.gz",
             "size_bytes": 14384655,
             "sha256": "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
         },
         {
             "platform": "linux-amd64",
-            "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/<linux-amd64-asset>",
+            "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_amd64.tar.gz",
             "size_bytes": 15401775,
             "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
         },
@@ -178,6 +178,10 @@ def _source_id() -> str:
     return f"src_{uuid.uuid4().hex[:12]}"
 
 
+def _parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def _mask_credential(value: str) -> str:
     """Create the one-way display mask frozen by the source contract."""
     normalized = value.strip()
@@ -292,31 +296,31 @@ class ModelHubService:
     async def _engine_call(self, awaitable):
         try:
             return await awaitable
-        except OriginNotAllowedError as exc:
-            raise ModelHubError("mode_switch_blocked", status=409) from exc
-        except EngineUnavailableError as exc:
-            raise ModelHubError("engine_down", status=503) from exc
-        except NativeOAuthUnavailableError as exc:
-            raise ModelHubError("engine_down", status=503) from exc
+        except OriginNotAllowedError:
+            raise ModelHubError("mode_switch_blocked", status=409) from None
+        except EngineUnavailableError:
+            raise ModelHubError("engine_down", status=503) from None
+        except NativeOAuthUnavailableError:
+            raise ModelHubError("engine_down", status=503) from None
         except ModelHubError:
             raise
-        except Exception as exc:
+        except Exception:
             # Engine failures may carry upstream context. Never expose or log it.
-            raise ModelHubError("engine_down", status=503) from exc
+            raise ModelHubError("engine_down", status=503) from None
 
     async def _oauth_call(self, awaitable, *, flow_id: Optional[str] = None):
         try:
             return await awaitable
-        except KeyError as exc:
+        except KeyError:
             if flow_id is not None:
                 self.oauth_flows.forget(flow_id)
-            raise ModelHubError("flow_not_found", status=404) from exc
-        except (EngineUnavailableError, NativeOAuthUnavailableError) as exc:
-            raise ModelHubError("engine_down", status=503) from exc
+            raise ModelHubError("flow_not_found", status=404) from None
+        except (EngineUnavailableError, NativeOAuthUnavailableError):
+            raise ModelHubError("engine_down", status=503) from None
         except ModelHubError:
             raise
-        except Exception as exc:
-            raise ModelHubError("engine_down", status=503) from exc
+        except Exception:
+            raise ModelHubError("engine_down", status=503) from None
 
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:
         return [_binding(source) for source in config.sources if source.supply_channel == "hub"]
@@ -434,8 +438,8 @@ class ModelHubService:
                 models=manual_models,
             )
             source = ModelHubSourceConfig.from_payload(source.to_payload())
-        except (TypeError, ValueError) as exc:
-            raise ModelHubError("discovery_failed") from exc
+        except (TypeError, ValueError):
+            raise ModelHubError("discovery_failed") from None
 
         credential_value = payload.get("key")
         oauth_ref = payload.get("oauth_flow_ref")
@@ -450,14 +454,14 @@ class ModelHubService:
         if kind == "api_key" and not credential_value:
             raise ModelHubError("discovery_failed")
 
-        provisioned_ref: Optional[str] = None
+        rollback_credential_ref: Optional[str] = None
         persisted = False
         try:
             if credential_value:
-                provisioned_ref = await self._engine_call(
+                rollback_credential_ref = await self._engine_call(
                     self.adapter.provision_credential(vendor, protocol, credential_value, source.base_url)
                 )
-                source.credential_ref = provisioned_ref
+                source.credential_ref = rollback_credential_ref
                 source.masked_credential = _mask_credential(credential_value)
             elif oauth_ref:
                 flow_channel = self._oauth_channel(oauth_ref)
@@ -474,6 +478,9 @@ class ModelHubService:
                 source.id = flow.source_id
                 if channel == "hub":
                     source.credential_ref = flow.credential_ref
+                    if any(item.id == source.id for item in self.store.load().sources):
+                        raise ModelHubError("migration_item_conflict", status=409)
+                    rollback_credential_ref = flow.credential_ref
             elif kind == "subscription":
                 raise ModelHubError("flow_not_found", status=404)
 
@@ -493,13 +500,24 @@ class ModelHubService:
                 config.subscription_hub_experimental = True
             await self._commit_synced(previous, config)
             persisted = True
+            if oauth_ref:
+                try:
+                    self.oauth_flows.forget(oauth_ref)
+                except OSError:
+                    pass
             return source.to_payload()
         except Exception:
-            if provisioned_ref is not None and not persisted:
+            if rollback_credential_ref is not None and not persisted:
                 try:
-                    await self.adapter.revoke_credential(provisioned_ref)
+                    await self.adapter.revoke_credential(rollback_credential_ref)
                 except Exception:
                     pass
+                else:
+                    if oauth_ref:
+                        try:
+                            self.oauth_flows.forget(oauth_ref)
+                        except OSError:
+                            pass
             raise
 
     async def patch_source(self, source_id: str, payload: dict) -> dict:
@@ -630,7 +648,7 @@ class ModelHubService:
         if source.state.status != "cooldown":
             return True
         try:
-            return datetime.fromisoformat(source.state.retry_at or "") <= self.now()
+            return _parse_datetime(source.state.retry_at or "") <= self.now()
         except ValueError:
             return False
 
@@ -782,7 +800,7 @@ class ModelHubService:
         flow = await self._oauth_status(flow_id, channel)
         if flow.expires_at_iso and flow.state not in {"success", "failed", "cancelled"}:
             try:
-                expired = datetime.fromisoformat(flow.expires_at_iso) <= self.now()
+                expired = _parse_datetime(flow.expires_at_iso) <= self.now()
             except ValueError:
                 expired = False
             if expired:
@@ -841,7 +859,7 @@ class ModelHubService:
             source = by_id[source_id]
             if source.state.status == "cooldown":
                 try:
-                    retry_at = datetime.fromisoformat(source.state.retry_at or "")
+                    retry_at = _parse_datetime(source.state.retry_at or "")
                 except ValueError:
                     retry_at = self.now() + timedelta(days=1)
                 if retry_at > self.now():

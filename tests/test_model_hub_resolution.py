@@ -366,7 +366,7 @@ def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
     config = service.store.load()
     config.sources[0].state = ModelHubSourceStateConfig(
         status="cooldown",
-        retry_at="2026-07-23T03:05:00+00:00",
+        retry_at="2026-07-23T03:05:00Z",
     )
 
     claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
@@ -410,6 +410,8 @@ def test_source_creation_is_not_persisted_when_engine_sync_fails(tmp_path):
         )
 
     assert exc_info.value.code == "engine_down"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
     assert [source.id for source in service.store.load().sources] == original_ids
     assert adapter.revoked == ["cred_test"]
 
