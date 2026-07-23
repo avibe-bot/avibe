@@ -1,4 +1,16 @@
-"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.1 (2026-07-23 11:05 +08:00).
+"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.2 (2026-07-23 11:12 +08:00).
+
+v1.2 changelog (L1 implementation findings — credential & model lifecycle):
+- Secret provisioning path closed: ``provision_credential`` moves an API-key
+  secret (transient parameter, never logged, never persisted by L2) into the
+  ENGINE-OWNED store and returns the opaque ``credential_ref``;
+  ``revoke_credential`` releases it on source deletion. L2's config persists
+  refs only. Flow: provision → discover (probe) → persist Source → sync.
+- ``SourceBinding.model_ids`` added: the declared supply list (discovered +
+  manual custom entries) — required by the engine's generic/API-key config.
+- ``discover_models`` re-signed as a PROBE (vendor/protocol/base_url/
+  credential_ref) so discovery works BEFORE registration; it no longer takes
+  a ``source_id``.
 
 v1.1 changelog (L1 review findings, routed via orchestrator):
 - OAuth surface added with DETERMINISTIC source binding: ``start_oauth`` takes
@@ -63,6 +75,9 @@ class SourceBinding:
     # source. Empty tuple = unrestricted (api_key default). Subscription
     # sources MUST be non-empty (README invariant 3); L2 populates, L1
     # enforces as backstop.
+    model_ids: tuple[str, ...]  # declared supply list (discovered + manual
+    # custom entries); required by the engine's generic/API-key config. Bare
+    # model ids, no provider prefix.
 
 
 class OriginNotAllowedError(Exception):
@@ -148,11 +163,40 @@ class EngineAdapter(Protocol):
         backends ever receive)."""
         ...
 
+    # --- credential provisioning (engine-owned store) ---------------------
+    async def provision_credential(
+        self,
+        vendor: str,
+        protocol: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        """Store an API-key secret in the ENGINE-OWNED credential store and
+        return the opaque ``credential_ref``.
+
+        ``secret`` is transient: the adapter must never log it; L2 must never
+        persist it (config stores refs only). OAuth credentials never pass
+        through here — they are created engine-side by the OAuth flow and
+        surfaced via ``OAuthFlowState.credential_ref``."""
+        ...
+
+    async def revoke_credential(self, credential_ref: str) -> None:
+        """Release the stored credential (source deletion / key replacement)."""
+        ...
+
     # --- source registry (L2 calls on every config change) ---------------
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None: ...
 
-    async def discover_models(self, source_id: str) -> Sequence[str]:
-        """Model ids the source can supply (for supply lists / test-and-add)."""
+    async def discover_models(
+        self,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+        credential_ref: str,
+    ) -> Sequence[str]:
+        """PROBE the upstream for supplyable model ids. Works before any
+        registration (test-and-add flow: provision → discover → persist →
+        sync); does not require or create a source binding."""
         ...
 
     # --- engine-held subscription OAuth (experimental flag only) ----------
