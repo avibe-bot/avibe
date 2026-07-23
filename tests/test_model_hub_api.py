@@ -18,6 +18,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
+from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, UnavailableEngineAdapter
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
@@ -171,6 +172,7 @@ def _service(tmp_path):
         events=BoundedEventLog(tmp_path / "events.json"),
         native_oauth_adapter=adapter,
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
     return service, store, adapter
@@ -338,6 +340,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         events=BoundedEventLog(tmp_path / "events.json"),
         native_oauth_adapter=adapter,
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
     assert asyncio.run(restarted.oauth_status(flow["flow_id"]))["channel"] == "native_cli"
@@ -527,6 +530,7 @@ def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_pat
             adapter=adapter,
             events=BoundedEventLog(tmp_path / "events.json"),
             oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         )
         flow = await service.oauth_start(
             {"vendor": "anthropic", "channel": "hub", "experimental_consent": True}
@@ -645,6 +649,7 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
         events=BoundedEventLog(tmp_path / "events.json"),
         native_oauth_adapter=native,
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
 
@@ -703,6 +708,7 @@ def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
             adapter=adapter,
             events=BoundedEventLog(tmp_path / "events.json"),
             oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         )
         created = await asyncio.gather(
             service.create_source(
@@ -819,6 +825,49 @@ def test_source_display_names_reject_credential_material(tmp_path):
         asyncio.run(service.patch_source(source["id"], {"display_name": pasted_key}))
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].display_name == "Safe source"
+    assert pasted_key not in json.dumps(store.config.to_payload())
+
+
+def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    pasted_key = "sk-model-never-persist-this"
+
+    for payload in (
+        {
+            "kind": "api_key",
+            "vendor": pasted_key,
+            "display_name": "Safe source",
+            "key": "sk-test-transient-only",
+        },
+        {
+            "kind": "api_key",
+            "vendor": "anthropic",
+            "display_name": "Safe source",
+            "key": "sk-test-transient-only",
+            "models": [{"id": pasted_key, "provenance": "manual"}],
+        },
+    ):
+        with pytest.raises(ModelHubError) as exc_info:
+            asyncio.run(service.create_source(payload))
+        assert exc_info.value.code == "discovery_failed"
+
+    assert store.config.sources == []
+    assert adapter.secret_lengths == []
+
+    source = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Safe source",
+                "key": "sk-test-transient-only",
+            }
+        )
+    )
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.add_custom_model({"source_id": source["id"], "model_id": pasted_key}))
+
+    assert exc_info.value.code == "mapping_target_unavailable"
     assert pasted_key not in json.dumps(store.config.to_payload())
 
 

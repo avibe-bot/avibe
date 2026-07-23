@@ -52,6 +52,7 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .revocations import CredentialRevocationJournal
 
 CONTRACT_VERSION = 1
 logger = logging.getLogger(__name__)
@@ -337,6 +338,7 @@ class ModelHubService:
         events: BoundedEventLog,
         native_oauth_adapter: Optional[OAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
+        revocations: Optional[CredentialRevocationJournal] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -344,8 +346,12 @@ class ModelHubService:
         self.events = events
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json")
+        self.revocations = revocations or CredentialRevocationJournal(
+            paths.get_state_dir() / "model_hub_pending_revocations.json"
+        )
         self.now = now
         self._mutation_lock = asyncio.Lock()
+        self._engine_synced = False
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -406,6 +412,7 @@ class ModelHubService:
     async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
         """Register the new projection before making it authoritative on disk."""
 
+        self._engine_synced = False
         await self._sync_sources(updated)
         try:
             self.store.save(updated)
@@ -413,8 +420,28 @@ class ModelHubService:
             try:
                 await self._sync_sources(previous)
             except ModelHubError:
-                pass
+                self._engine_synced = False
+            else:
+                self._engine_synced = True
             raise
+        self._engine_synced = True
+
+    async def _ensure_engine_synced(self) -> None:
+        if self._engine_synced and not self.revocations.list():
+            return
+        async with self._mutation_lock:
+            if self._engine_synced and not self.revocations.list():
+                return
+            config = self.store.load()
+            await self._sync_sources(config)
+            active_source_ids = {source.id for source in config.sources}
+            for pending in self.revocations.list():
+                if pending.source_id in active_source_ids:
+                    self.revocations.remove(pending.source_id)
+                    continue
+                await self._engine_call(self.adapter.revoke_credential(pending.credential_ref))
+                self.revocations.remove(pending.source_id)
+            self._engine_synced = True
 
     def _oauth_adapter(self, channel: OAuthChannel) -> OAuthAdapter:
         if channel == "hub":
@@ -471,6 +498,13 @@ class ModelHubService:
         manual_models: list[ModelHubModelConfig],
         discovered: list[str],
     ) -> None:
+        if any(
+            not isinstance(model_id, str)
+            or not model_id
+            or contains_credential_material(model_id)
+            for model_id in discovered
+        ):
+            raise ModelHubError("discovery_failed")
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         source.models = [
@@ -584,7 +618,12 @@ class ModelHubService:
         kind = payload.get("kind")
         vendor = payload.get("vendor")
         display_name = payload.get("display_name") or vendor
-        if kind not in {"subscription", "api_key"} or not isinstance(vendor, str) or not vendor:
+        if (
+            kind not in {"subscription", "api_key"}
+            or not isinstance(vendor, str)
+            or not vendor
+            or contains_credential_material(vendor)
+        ):
             raise ModelHubError("discovery_failed")
         if (
             not isinstance(display_name, str)
@@ -608,13 +647,18 @@ class ModelHubService:
 
         protocol = payload.get("protocol") or _default_protocol(vendor)
         billing = payload.get("billing") or ("monthly" if kind == "subscription" else "metered")
-        models_payload = payload.get("models") or []
+        models_payload = payload.get("models", [])
+        if not isinstance(models_payload, list):
+            raise ModelHubError("discovery_failed")
         base_url = _validated_base_url(payload.get("base_url"))
         if kind == "subscription" and base_url is not None:
             raise ModelHubError("discovery_failed")
         try:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
-            if any(model.provenance != "manual" for model in manual_models):
+            if any(
+                model.provenance != "manual" or contains_credential_material(model.id)
+                for model in manual_models
+            ):
                 raise ValueError("Client-declared source models must use manual provenance")
             source = ModelHubSourceConfig(
                 id=_source_id(),
@@ -769,17 +813,29 @@ class ModelHubService:
                 raise ModelHubError("mode_switch_blocked", status=409)
             config.sources = [item for item in config.sources if item.id != source_id]
             config.priority_order = [item for item in config.priority_order if item != source_id]
-            await self._commit_synced(previous, config)
+            if source.credential_ref:
+                self.revocations.add(source.id, source.credential_ref)
+            try:
+                await self._commit_synced(previous, config)
+            except Exception:
+                self.revocations.remove(source.id)
+                raise
             try:
                 if source.credential_ref:
                     await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
             except ModelHubError:
-                self.store.save(previous)
+                restored = False
                 try:
+                    self.store.save(previous)
+                    restored = True
+                    self._engine_synced = False
                     await self._sync_sources(previous)
-                except ModelHubError:
-                    pass
+                    self._engine_synced = True
+                finally:
+                    if restored:
+                        self.revocations.remove(source.id)
                 raise
+            self.revocations.remove(source.id)
 
     async def test_source(self, source_id: str) -> tuple[dict, int]:
         async with self._mutation_lock:
@@ -788,16 +844,7 @@ class ModelHubService:
             source = self._source(config, source_id)
             model_ids = await self._discover(source)
             manual = [model for model in source.models if model.provenance == "manual"]
-            manual_ids = {model.id for model in manual}
-            source.models = [
-                ModelHubModelConfig(
-                    id=model_id,
-                    provenance="discovered",
-                    discovered_at=self.now().isoformat(),
-                )
-                for model_id in model_ids
-                if model_id not in manual_ids
-            ] + manual
+            self._apply_discovered_models(source, manual, model_ids)
             source.state = ModelHubSourceStateConfig(status="standby")
             await self._commit_synced(previous, config)
             return source.to_payload(), len(model_ids)
@@ -839,6 +886,8 @@ class ModelHubService:
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         current = None
         if agent.mode == "hub":
+            if agent.backend == "opencode" and (agent.menu is None or not agent.menu.checked):
+                return {**agent.to_payload(), "current": None}
             provider = None
             target = next((mapping.target_model_id for mapping in agent.mappings if mapping.enabled), None)
             if target is None and agent.menu and agent.menu.checked:
@@ -922,7 +971,11 @@ class ModelHubService:
             raise ModelHubError("source_not_found", status=404)
         model_id = payload.get("model_id")
         display_name = payload.get("display_name")
-        if not isinstance(model_id, str) or not model_id:
+        if (
+            not isinstance(model_id, str)
+            or not model_id
+            or contains_credential_material(model_id)
+        ):
             raise ModelHubError("mapping_target_unavailable")
         if display_name is not None and (
             not isinstance(display_name, str) or contains_credential_material(display_name)
@@ -1220,6 +1273,7 @@ class ModelHubService:
                     None,
                     supply_channel="native_cli",
                 )
+            await self._ensure_engine_synced()
             handle, outcome = await self._invoke(
                 source=source,
                 model_id=target_model,
@@ -1286,4 +1340,5 @@ def create_default_service(
         events=BoundedEventLog(paths.get_state_dir() / "model_hub_resolution_events.json"),
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
+        revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
     )

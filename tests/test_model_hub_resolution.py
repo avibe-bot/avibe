@@ -23,6 +23,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.events import BoundedEventLog, build_resolution_event
+from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
 from vibe.i18n import t as i18n_t
 
@@ -151,6 +152,7 @@ def _source(source_id: str, display_name: str, *, billing: str = "metered") -> M
         billing=billing,
         state=ModelHubSourceStateConfig(status="standby"),
         models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        credential_ref=f"cred_{source_id}",
     )
 
 
@@ -172,6 +174,7 @@ def _service(tmp_path, adapter, *, agents=None, now=None):
         store=MemoryStore(config),
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json", max_entries=5),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=now or (lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)),
     )
 
@@ -398,6 +401,8 @@ def test_opencode_resolution_rejects_models_outside_checked_menu(tmp_path):
     service = _service(tmp_path, adapter)
     service.store.load().agents["opencode"].menu.checked = []
 
+    current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
+
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
             service.resolve(
@@ -408,7 +413,36 @@ def test_opencode_resolution_rejects_models_outside_checked_menu(tmp_path):
         )
 
     assert exc_info.value.code == "mapping_target_unavailable"
+    assert current is None
     assert adapter.invocations == []
+
+
+def test_persisted_hub_sources_sync_before_first_resolution(tmp_path):
+    class RegistrationRequiredAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+            self.registered = set()
+
+        async def sync_sources(self, bindings):
+            await super().sync_sources(bindings)
+            self.registered = {binding.source_id for binding in bindings}
+
+        async def invoke(self, source_id, model_id, request, stream, origin):
+            assert source_id in self.registered
+            return await super().invoke(source_id, model_id, request, stream, origin)
+
+    adapter = RegistrationRequiredAdapter()
+    service = _service(tmp_path, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert [binding.source_id for binding in adapter.synced[0]] == [
+        "src_primary01",
+        "src_backup001",
+    ]
 
 
 def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
@@ -545,6 +579,42 @@ def test_source_reference_survives_failed_credential_revoke(tmp_path):
         ("src_backup001",),
         ("src_primary01", "src_backup001"),
     ]
+
+
+def test_restart_replays_credential_revoke_after_delete_commit(tmp_path):
+    class SimulatedProcessExit(BaseException):
+        pass
+
+    class CrashingAdapter(FakeAdapter):
+        async def revoke_credential(self, credential_ref):
+            raise SimulatedProcessExit
+
+    journal = CredentialRevocationJournal(tmp_path / "revocations.json")
+    crashing = CrashingAdapter([])
+    service = _service(tmp_path, crashing)
+    service.revocations = journal
+
+    with pytest.raises(SimulatedProcessExit):
+        asyncio.run(service.delete_source("src_primary01", force=True))
+
+    assert [source.id for source in service.store.load().sources] == ["src_backup001"]
+    assert journal.list()[0].credential_ref == "cred_src_primary01"
+
+    recovered = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    restarted = ModelHubService(
+        store=service.store,
+        adapter=recovered,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        revocations=journal,
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+    resolved = asyncio.run(
+        restarted.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert resolved.source_id == "src_backup001"
+    assert recovered.revoked == ["cred_src_primary01"]
+    assert journal.list() == []
 
 
 def test_selected_custom_model_cannot_be_deleted(tmp_path):
