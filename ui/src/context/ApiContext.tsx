@@ -939,6 +939,9 @@ export type WorkbenchEventHandlers = {
     event: string;
     title?: string | null;
     visibility?: 'foreground' | 'background';
+    // Client-synthesized marker (never on a real backend event): a foreground
+    // restore, so the projects tree grows its window to bring the row back.
+    restored?: boolean;
   }) => void;
   onInboxUnreadChanged?: (data: {
     session_id?: string;
