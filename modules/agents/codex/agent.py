@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
 _CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
+_CODEX_DEFAULT_PROVIDER_ID = "openai"
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 
 
@@ -184,6 +185,7 @@ class CodexAgent(BaseAgent):
                         requested_model or "",
                     )
                     bind_launch(request.context, launch)
+                    await self._interrupt_active_turn_before_runtime_change(request, launch)
                     transport = await self._get_or_create_transport(request.working_path, launch)
                 else:
                     transport = await self._get_or_create_transport(request.working_path)
@@ -824,6 +826,30 @@ class CodexAgent(BaseAgent):
             if wait_for_active_turns:
                 await asyncio.sleep(0.05)
 
+    async def _interrupt_active_turn_before_runtime_change(
+        self,
+        request: AgentRequest,
+        launch: "ModelHubLaunch",
+    ) -> None:
+        """Let a replacement prompt interrupt its own stale-runtime turn."""
+
+        transport = self._transports.get(request.working_path)
+        if transport is None or not transport.is_initialized:
+            return
+        if getattr(transport, "runtime_fingerprint", "direct") == launch.fingerprint:
+            return
+        thread_id = self._session_mgr.get_thread_id(request.base_session_id)
+        active_turn = self._turn_registry.get_active_turn(request.base_session_id)
+        if not thread_id or not active_turn:
+            return
+        await transport.send_request(
+            "turn/interrupt",
+            {"threadId": thread_id, "turnId": active_turn},
+        )
+        interrupted_request = self._event_handler.clear_pending(active_turn)
+        if interrupted_request:
+            await self._remove_ack_reaction(interrupted_request)
+
     # ------------------------------------------------------------------
     # Thread management
     # ------------------------------------------------------------------
@@ -1279,7 +1305,10 @@ class CodexAgent(BaseAgent):
         model_provider = config_obj.get("model_provider")
         if isinstance(model_provider, str) and model_provider.strip():
             return model_provider.strip()
-        return None
+        # Codex omits the built-in provider from config/read when no explicit
+        # model_provider is configured. Make that default concrete so a thread
+        # created under the ephemeral Hub provider can resume in Direct mode.
+        return _CODEX_DEFAULT_PROVIDER_ID
 
     def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
         """Build Codex thread-level developer instructions for start/resume.

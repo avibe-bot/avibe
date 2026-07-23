@@ -229,6 +229,47 @@ def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path)
     assert [event["kind"] for event in reversed(service.events.list(limit=10))] == ["cooldown", "switch"]
 
 
+def test_mh_chan_001_hub_to_native_switch_keeps_failure_reason(tmp_path: Path) -> None:
+    hub = _source(
+        "src_hub_reason",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    native = _source(
+        "src_native_reason",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        ModelHubConfig(
+            sources=[hub, native],
+            priority_order=[hub.id, native.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({hub.id: "route-hub"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = ModelHubRuntimeRouter(service=service)
+    initial = asyncio.run(router.resolve("codex", "gpt-5"))
+    context = SimpleNamespace()
+    bind_launch(context, initial)
+
+    assert asyncio.run(router.record_native_failure(context, "usage quota exceeded")) is True
+    assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "native_cli"
+
+    channel_switch = next(
+        event for event in service.events.list(limit=10) if event["kind"] == "channel_switch"
+    )
+    assert channel_switch["reason"] == "quota_exhausted"
+
+
 def test_mh_chan_001_native_launch_replays_pending_revocations(tmp_path: Path) -> None:
     native = _source(
         "src_native11",
@@ -306,6 +347,31 @@ def test_mh_chan_001_unconfigured_fresh_hub_preserves_native_launch(tmp_path: Pa
     assert service.events.list(limit=10) == []
 
 
+def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) -> None:
+    codex_native = _source(
+        "src_native_other",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        ModelHubConfig(
+            sources=[codex_native],
+            priority_order=[codex_native.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+
+    launch = asyncio.run(ModelHubRuntimeRouter(service=service).resolve("claude", "claude-opus"))
+
+    assert launch.channel == "direct"
+
+
 def test_mh_chan_001_configured_hub_stays_fail_closed_for_unavailable_model(tmp_path: Path) -> None:
     hub = _source(
         "src_hub0099",
@@ -315,9 +381,13 @@ def test_mh_chan_001_configured_hub_stays_fail_closed_for_unavailable_model(tmp_
         channel="hub",
         model_ids=("gpt-5",),
     )
+    agents = _agents()
+    agents["codex"].mappings = [
+        ModelHubMappingConfig("unavailable-model", "configured-but-missing", True)
+    ]
     service = _service(
         tmp_path,
-        ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=_agents()),
+        ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=agents),
         LaunchAdapter({hub.id: "route-hub"}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
@@ -483,6 +553,45 @@ def test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations(tmp_path: P
     assert payload["provider"]["anthropic"]["npm"] == "@ai-sdk/anthropic"
     assert payload["provider"]["custom"]["npm"] == "@ai-sdk/openai-compatible"
     assert stat.S_IMODE(router.overlay_path.stat().st_mode) == 0o600
+
+
+def test_mh_ovl_001_unavailable_menu_entry_does_not_block_healthy_model(tmp_path: Path) -> None:
+    config = _opencode_config()
+    anthropic = config.sources[0]
+    anthropic.state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at=datetime(2026, 7, 24, tzinfo=timezone.utc).isoformat(),
+    )
+    adapter = LaunchAdapter(
+        {
+            "src_hub0004": "route-anthropic",
+            "src_hub0005": "route-custom",
+        }
+    )
+    service = _service(
+        tmp_path,
+        config,
+        adapter,
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = ModelHubRuntimeRouter(service=service, overlay_path=tmp_path / "overlay.json")
+
+    cooling_overlay = asyncio.run(router.prepare_opencode_overlay())
+    assert cooling_overlay is not None
+    assert json.loads(overlay_identifier_bytes(cooling_overlay.content)) == [
+        "anthropic/claude-opus",
+        "custom/local-model",
+    ]
+    assert opencode_model_for_overlay("custom/local-model", cooling_overlay) == "custom/local-model"
+    with pytest.raises(ModelHubError):
+        asyncio.run(router.resolve("opencode", "anthropic/claude-opus"))
+
+    config.sources.remove(anthropic)
+    config.priority_order.remove(anthropic.id)
+    reduced_overlay = asyncio.run(router.prepare_opencode_overlay())
+    assert reduced_overlay is not None
+    assert reduced_overlay.checked_identifiers == ("custom/local-model",)
+    assert opencode_model_for_overlay("custom/local-model", reduced_overlay) == "custom/local-model"
 
 
 def test_mh_chan_001_switch_telemetry_is_isolated_per_model_route(tmp_path: Path) -> None:
@@ -735,6 +844,78 @@ def test_mh_inj_codex_runtime_change_waits_for_shared_active_turn(tmp_path: Path
 
         old_transport.stop.assert_awaited_once()
         new_transport.start.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_mh_inj_codex_runtime_change_interrupts_current_session_first() -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        active = {"turn": "turn-current"}
+        transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="direct",
+            send_request=AsyncMock(return_value={}),
+        )
+        interrupted_request = SimpleNamespace()
+
+        def clear_pending(turn_id: str):
+            assert turn_id == "turn-current"
+            active["turn"] = None
+            return interrupted_request
+
+        agent._transports = {"/work": transport}
+        agent._session_mgr = SimpleNamespace(get_thread_id=Mock(return_value="thread-current"))
+        agent._turn_registry = SimpleNamespace(get_active_turn=lambda _base: active["turn"])
+        agent._event_handler = SimpleNamespace(clear_pending=Mock(side_effect=clear_pending))
+        agent._remove_ack_reaction = AsyncMock()
+        request = SimpleNamespace(
+            working_path="/work",
+            base_session_id="session-current",
+        )
+        launch = ModelHubLaunch(
+            "codex",
+            "hub",
+            "gpt-5",
+            "gpt-5",
+            "route/gpt-5",
+            "src_hub",
+            "http://127.0.0.1:18443",
+            "token",
+        )
+
+        await agent._interrupt_active_turn_before_runtime_change(request, launch)
+
+        transport.send_request.assert_awaited_once_with(
+            "turn/interrupt",
+            {"threadId": "thread-current", "turnId": "turn-current"},
+        )
+        assert active["turn"] is None
+        agent._remove_ack_reaction.assert_awaited_once_with(interrupted_request)
+
+    asyncio.run(exercise())
+
+
+def test_mh_inj_codex_direct_resume_clears_implicit_hub_provider() -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        transport = SimpleNamespace(
+            send_request=AsyncMock(
+                side_effect=[
+                    {"config": {}},
+                    {"thread": {"id": "thread-existing", "modelProvider": "avibe_model_hub"}},
+                ]
+            )
+        )
+        request = SimpleNamespace(working_path="/work")
+
+        provider = await agent._resolve_resume_model_provider_override(
+            transport,
+            request,
+            "thread-existing",
+        )
+
+        assert provider == "openai"
 
     asyncio.run(exercise())
 

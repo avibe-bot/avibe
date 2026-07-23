@@ -16,7 +16,7 @@ from config import paths
 from config.v2_config import ModelHubConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import EventAgent, EventReason
-from core.handlers.model_hub.identifiers import parse_opencode_model_id
+from core.handlers.model_hub.identifiers import opencode_provider_id, parse_opencode_model_id
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
 
 
@@ -206,13 +206,31 @@ class ModelHubRuntimeRouter:
         return launch.backend, launch.target_model
 
     @staticmethod
-    def _is_bootstrap_unconfigured(config: ModelHubConfig, backend: BackendName) -> bool:
-        if not config.sources:
-            return True
-        if backend != "opencode":
+    def _is_bootstrap_unconfigured(
+        config: ModelHubConfig,
+        backend: BackendName,
+        requested_model: str = "",
+    ) -> bool:
+        agent = config.agents[backend]
+        if backend == "opencode":
+            return agent.menu is None or not agent.menu.checked
+
+        explicit_mapping = any(
+            mapping.enabled and mapping.builtin_id == requested_model
+            for mapping in agent.mappings
+        )
+        if explicit_mapping:
             return False
-        menu = config.agents[backend].menu
-        return menu is None or not menu.checked
+        target_model = ModelHubRuntimeRouter._target_model(config, backend, requested_model)
+        for source in config.sources:
+            if not any(model.id == target_model for model in source.models):
+                continue
+            if source.supply_channel == "hub":
+                return False
+            sanctioned_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
+            if source.kind == "subscription" and sanctioned_backend == backend:
+                return False
+        return True
 
     @staticmethod
     def _direct_launch(backend: BackendName, requested_model: str) -> ModelHubLaunch:
@@ -266,11 +284,11 @@ class ModelHubRuntimeRouter:
         route_key = self._route_key(current)
         previous = self._last_launch.get(route_key)
         self._last_launch[route_key] = current
+        reason = self._pending_switch_reason.pop(route_key, None)
         if previous is None or previous.channel == current.channel:
             return
         if {previous.channel, current.channel} != {"native_cli", "hub"}:
             return
-        reason = self._pending_switch_reason.pop(route_key, None)
         if reason is None:
             reason = "recovery" if current.channel == "native_cli" else "manual"
         self.service._record_event(
@@ -314,10 +332,10 @@ class ModelHubRuntimeRouter:
             launch = self._direct_launch(backend, requested_model)
             self._emit_channel_switch(launch)
             return launch
-        # Fresh installs seed Hub mode before setup/migration has supplied any
-        # usable source or OpenCode menu. Until that bootstrap state is complete,
-        # preserve the native launch path; once configured, Hub remains fail-closed.
-        if self._is_bootstrap_unconfigured(config, backend):
+        # Fresh installs seed Hub mode before setup/migration has configured
+        # every backend/model route. Preserve native launch only for an
+        # unconfigured route; explicitly configured Hub routes remain fail-closed.
+        if self._is_bootstrap_unconfigured(config, backend, requested_model):
             return self._direct_launch(backend, requested_model)
         if not requested_model:
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -412,8 +430,7 @@ class ModelHubRuntimeRouter:
         reason = cast(EventReason, decision.reason)
         route_key = self._route_key(launch)
         self._pending_source_failure[route_key] = (launch.source_id, reason)
-        if launch.channel == "native_cli":
-            self._pending_switch_reason[route_key] = reason
+        self._pending_switch_reason[route_key] = reason
         return True
 
     async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:
@@ -429,6 +446,8 @@ class ModelHubRuntimeRouter:
 
         gateway_base_url, gateway_token = await self._gateway_credentials()
         providers: dict[str, dict[str, Any]] = {}
+        available_identifiers: list[str] = []
+        sources_by_id = {source.id: source for source in config.sources}
         for identifier in sorted(checked):
             try:
                 provider_id, model_id = parse_opencode_model_id(identifier)
@@ -441,7 +460,22 @@ class ModelHubRuntimeRouter:
             )
             source = next((candidate for candidate in candidates if candidate.supply_channel == "hub"), None)
             if source is None:
-                raise ModelHubError("mapping_target_unavailable", status=409)
+                # Keep a cooling/error route's public identifier stable in the
+                # overlay. Per-turn resolution still rejects that requested
+                # route, while unrelated checked models remain usable.
+                source = next(
+                    (
+                        candidate
+                        for source_id in config.priority_order
+                        if (candidate := sources_by_id.get(source_id)) is not None
+                        and candidate.supply_channel == "hub"
+                        and opencode_provider_id(candidate.vendor) == provider_id
+                        and any(model.id == model_id for model in candidate.models)
+                    ),
+                    None,
+                )
+            if source is None:
+                continue
             prefix = await self._source_prefix(source.id)
             package = _provider_package(source.protocol)
             base_url = _provider_base_url(gateway_base_url, source.protocol)
@@ -461,6 +495,10 @@ class ModelHubRuntimeRouter:
                 "id": f"{prefix}/{model_id}",
                 "name": model.display_name or model_id,
             }
+            available_identifiers.append(identifier)
+
+        if not available_identifiers:
+            raise ModelHubError("mapping_target_unavailable", status=409)
 
         content = (
             json.dumps(
@@ -477,7 +515,7 @@ class ModelHubRuntimeRouter:
             path=self.overlay_path,
             content_hash=content_hash,
             content=content,
-            checked_identifiers=checked,
+            checked_identifiers=tuple(available_identifiers),
         )
 
     def _secure_write_overlay(self, content: bytes) -> None:
