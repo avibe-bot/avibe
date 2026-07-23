@@ -94,13 +94,7 @@ class OpenCodeSessionManager:
         request.context.platform_specific = payload
 
     def _reserved_agent_session_id(self, request: AgentRequest) -> Optional[str]:
-        payload = request.context.platform_specific or {}
-        session_target = payload.get("agent_session_target")
-        if isinstance(session_target, dict):
-            target_id = str(session_target.get("id") or "").strip()
-            if target_id:
-                return target_id
-        return None
+        return BaseAgent._reserved_agent_session_id(request.context)
 
     async def _resolve_running_fork_point(
         self,

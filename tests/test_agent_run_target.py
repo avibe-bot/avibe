@@ -315,8 +315,8 @@ def test_telegram_general_topic_fallback_anchor_reuses_session(tmp_path):
     first = resolve_agent_run_target(general_context("100"), controller=controller)
     follow_up = resolve_agent_run_target(general_context("101"), controller=controller)
 
-    assert first.session_anchor == "telegram_1"
-    assert follow_up.session_anchor == "telegram_1"
+    assert first.session_anchor == "telegram_-1001_1"
+    assert follow_up.session_anchor == "telegram_-1001_1"
     assert follow_up.agent_session_id == first.agent_session_id
 
 

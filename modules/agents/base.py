@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
+from core.agent_session_context import resolve_context_agent_session_target
 from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
 
@@ -211,40 +212,34 @@ class BaseAgent(ABC):
 
     @staticmethod
     def _reserved_agent_session_id(context: Any) -> Optional[str]:
-        """The open Chat session's ``agent_sessions`` PK reserved for an avibe turn.
+        """Return the persisted ``agent_sessions`` row selected for this turn.
 
-        avibe dispatch stamps ``platform_specific['agent_session_target']['id']``;
-        IM/CLI turns have no target. Used to keep Claude/Codex replies attributed to
-        the open Chat session instead of a freshly-minted hidden row (Codex P1)."""
-        payload = getattr(context, "platform_specific", None) or {}
-        target = payload.get("agent_session_target")
-        if isinstance(target, dict) and target.get("id"):
+        Workbench dispatch carries an explicit ``agent_session_target`` while
+        ordinary IM turns carry the row selected by ``agent_run_target``. Both
+        must bind by primary key so backend state and mirrored replies stay on
+        the same row."""
+        target = resolve_context_agent_session_target(context)
+        if target and target.get("id"):
             reserved = str(target["id"]).strip()
             return reserved or None
         return None
 
     @staticmethod
     def _reserved_native_session_id(context: Any, backend: Optional[str] = None) -> Optional[str]:
-        """The backend-native session id last bound to the RESERVED workbench row.
+        """The backend-native session id last bound to the selected session row.
 
-        avibe dispatch carries it in
-        ``platform_specific['agent_session_target']['native_session_id']`` (read
-        from the ``agent_sessions`` row by its PK). Resuming from THIS — rather
-        than the ``(session_key, anchor)`` projection — keeps the resume READ on
-        the same key as the by-PK bind WRITE (``_bind_reserved_workbench_session``),
-        so a controller restart resumes the SAME native session instead of forking
-        a fresh one and losing context. Empty until the first turn captures a
-        native; ``None`` for IM/CLI turns (no reserved target). Mirrors
-        ``_reserved_agent_session_id``.
+        The selected row may be an explicit Workbench target or an IM/CLI run
+        target. Resuming from its native id keeps the resume read on the same key
+        as the by-PK bind write, so a controller restart does not fork a fresh
+        backend session.
 
         ``backend``: when given, only return the native if the reserved row's
         ``agent_backend`` matches — after a header backend switch the row still
         carries the previous backend's native, and handing e.g. a Claude id to
         Codex would fail to resume; in that case return ``None`` so the newly
         selected backend starts its own first thread for this Chat."""
-        payload = getattr(context, "platform_specific", None) or {}
-        target = payload.get("agent_session_target")
-        if not isinstance(target, dict):
+        target = resolve_context_agent_session_target(context)
+        if not target:
             return None
         native = str(target.get("native_session_id") or "").strip()
         if not native:
@@ -282,15 +277,11 @@ class BaseAgent(ABC):
         vibe_agent_name: Optional[str] = None,
         vibe_agent_backend: Optional[str] = None,
     ) -> Optional[str]:
-        """Bind the backend-native id to the RESERVED workbench session row, by id.
+        """Bind the backend-native id to the selected persisted session row.
 
-        Claude/Codex must bind the native session to the reserved workbench row
-        (like OpenCode's ``bind_agent_session_by_id``) instead of letting the
-        generic ``bind_agent_session`` mint a fresh row and overwrite
-        ``agent_session_id`` — otherwise ``persist_agent_message`` would publish
-        ``message.new`` under the new hidden id and the reply would never reach the
-        open Chat page (Codex P1). Returns the reserved id when this is an avibe
-        turn (so the caller skips its normal binder), else ``None``.
+        Claude/Codex use the same by-ID binding path for explicit Workbench
+        targets and resolved IM run targets. This prevents the generic
+        ``(session_key, anchor)`` binder from creating a second row.
         """
         if self._uses_namespaced_backend_session(context):
             return None

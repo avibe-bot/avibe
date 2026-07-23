@@ -1,10 +1,9 @@
-"""Contract for the reserved-native resume helper across backends.
+"""Contract for the selected-row native resume helper across backends.
 
 Claude (``SessionHandler``) and Codex (``BaseAgent``) resume from the native
-session bound to the RESERVED workbench row (by PK) via
-``_reserved_native_session_id``. This pins the helper's behavior so the resume
-READ stays on the same key as the by-PK bind WRITE — the fix for "restart loses
-context". Both are static, so no heavy SDK/controller setup is needed.
+session bound to the selected persisted row (by PK), whether selected explicitly
+by Workbench or resolved for an IM run. Both helpers are static, so no heavy
+SDK/controller setup is needed.
 """
 
 from __future__ import annotations
@@ -35,6 +34,20 @@ def test_returns_reserved_native_when_present(helper):
 
 
 @pytest.mark.parametrize("helper", HELPERS)
+def test_returns_resolved_im_run_native_when_present(helper):
+    ctx = _ctx(
+        {
+            "agent_run_target": {
+                "agent_session_id": "ses-topic",
+                "native_session_id": "native-topic",
+                "agent_backend": "claude",
+            }
+        }
+    )
+    assert helper(ctx) == "native-topic"
+
+
+@pytest.mark.parametrize("helper", HELPERS)
 def test_strips_whitespace(helper):
     ctx = _ctx({"agent_session_target": {"id": "ses-1", "native_session_id": "  native-abc  "}})
     assert helper(ctx) == "native-abc"
@@ -42,7 +55,7 @@ def test_strips_whitespace(helper):
 
 @pytest.mark.parametrize("helper", HELPERS)
 def test_none_when_no_reserved_target(helper):
-    # IM/CLI turns carry no reserved target → fall back to the projection lookup.
+    # A context with no selected row falls back to the projection lookup.
     assert helper(_ctx({})) is None
     assert helper(_ctx(None)) is None
     assert helper(SimpleNamespace(platform_specific=None)) is None

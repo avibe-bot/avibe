@@ -366,6 +366,8 @@ def _fallback_anchor(context: MessageContext, platform: str) -> str:
     if isinstance(target, dict) and target.get("session_anchor"):
         return str(target["session_anchor"])
     thread_id = resolve_context_thread_id(context) or context.thread_id
+    if platform == "telegram" and thread_id:
+        return f"{platform}_{context.channel_id}_{thread_id}"
     return f"{platform}_{thread_id or context.message_id or context.channel_id or context.user_id}"
 
 

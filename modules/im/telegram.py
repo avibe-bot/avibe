@@ -425,15 +425,7 @@ class TelegramBot(BaseIMClient):
 
         explicitly_addressed = self._is_explicitly_addressed(message, text)
 
-        effective_require_mention = self.config.require_mention
-        if self.settings_manager is not None and not context.platform_specific.get("is_dm", False):
-            try:
-                effective_require_mention = self.settings_manager.get_require_mention(
-                    resolve_context_scope_settings_key(context),
-                    global_default=self.config.require_mention,
-                )
-            except Exception:
-                logger.debug("Failed to resolve Telegram effective require_mention", exc_info=True)
+        effective_require_mention = self._effective_require_mention(context)
 
         text = self._strip_leading_bot_mention(message, text)
 
@@ -469,6 +461,12 @@ class TelegramBot(BaseIMClient):
         original_thread_id = resolve_context_thread_id(context)
         context = await self._maybe_route_to_forum_topic(context, message, text)
         if resolve_context_thread_id(context) != original_thread_id:
+            if (
+                self._effective_require_mention(context)
+                and not context.platform_specific.get("is_dm", False)
+                and not explicitly_addressed
+            ):
+                return
             denial = self.check_authorization(
                 user_id=context.user_id,
                 channel_id=context.channel_id,
@@ -484,6 +482,21 @@ class TelegramBot(BaseIMClient):
                 return
 
         await self._spawn_message_callback_task(context, text)
+
+    def _effective_require_mention(self, context: MessageContext) -> bool:
+        effective = self.config.require_mention
+        if self.settings_manager is None or context.platform_specific.get("is_dm", False):
+            return bool(effective)
+        try:
+            return bool(
+                self.settings_manager.get_require_mention(
+                    resolve_context_scope_settings_key(context),
+                    global_default=self.config.require_mention,
+                )
+            )
+        except Exception:
+            logger.debug("Failed to resolve Telegram effective require_mention", exc_info=True)
+            return bool(effective)
 
     async def _maybe_route_to_forum_topic(
         self,

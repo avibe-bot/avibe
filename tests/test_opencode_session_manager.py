@@ -126,6 +126,34 @@ def test_opencode_reused_session_attaches_agent_session_id() -> None:
     )
 
 
+def test_opencode_topic_run_target_binds_by_resolved_row_id() -> None:
+    sessions = SimpleNamespace(
+        bind_agent_session_by_id=Mock(return_value="ses-topic"),
+        bind_agent_session=Mock(return_value="ses-parent"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    request = _request()
+    request.context.platform_specific = {
+        "agent_run_target": {
+            "agent_session_id": "ses-topic",
+            "workdir": "/repo",
+        }
+    }
+
+    result = manager.bind_agent_session_id(request, "base-1", "oc-topic")
+
+    assert result == "ses-topic"
+    sessions.bind_agent_session_by_id.assert_called_once_with(
+        "ses-topic",
+        "oc-topic",
+        workdir="/repo",
+        vibe_agent_id=None,
+        vibe_agent_name=None,
+        vibe_agent_backend=None,
+    )
+    sessions.bind_agent_session.assert_not_called()
+
+
 def test_opencode_create_session_does_not_pass_vibe_title() -> None:
     sessions = SimpleNamespace(
         get_agent_session_id=Mock(return_value=None),
