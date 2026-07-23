@@ -276,7 +276,7 @@ def build_graph(
                 for row in _load_sessions(conn, extra):
                     session_by_id.setdefault(row["id"], row)
             session_rows = list(session_by_id.values())
-            edges, trigger_ids = _build_edges(runs_by_session, loaded_ids)
+            edges, trigger_ids = _build_edges(runs_by_session, loaded_ids, cutoff)
             trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
     finally:
         if owned_engine:
@@ -461,8 +461,16 @@ def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:
 def _build_edges(
     runs_by_session: dict[str, list[dict[str, Any]]],
     candidate_ids: set[str],
+    cutoff: datetime,
 ) -> tuple[list[dict[str, Any]], set[str]]:
-    """Aggregate spawn / callback / trigger edges from the candidate runs."""
+    """Aggregate spawn / callback / trigger edges from the candidate runs.
+
+    Trigger edges are window-scoped (contract A10): a candidate session can carry
+    OLD trigger runs (it stays in scope via other in-window activity or lineage),
+    but a definition only earns a ``trigger`` edge — and thus a chip — from a run
+    that fired within the window. Spawn/callback stay full-lineage so an older
+    delegation's endpoints survive.
+    """
     spawn: dict[tuple[str, str], dict[str, Any]] = {}
     callback: dict[tuple[str, str], dict[str, Any]] = {}
     trigger: dict[tuple[str, str], dict[str, Any]] = {}
@@ -515,8 +523,18 @@ def _build_edges(
                     agg["last_at"] = created
                     agg["last_run_id"] = run.get("callback_run_id") or run.get("id")
                     agg["status"] = run.get("callback_status")
-            # trigger: definition → this session
-            if run.get("run_type") in _TRIGGER_RUN_TYPES and run.get("definition_id"):
+            # trigger: definition → this session. A10: only an IN-WINDOW trigger
+            # run earns a chip. A candidate session can carry old trigger runs (it
+            # stays in scope via other in-window activity or lineage); a historical
+            # or since-disabled definition must not resurface just because its old
+            # session lingers.
+            run_at = _parse_iso(created)
+            if (
+                run.get("run_type") in _TRIGGER_RUN_TYPES
+                and run.get("definition_id")
+                and run_at is not None
+                and run_at >= cutoff
+            ):
                 definition_id = run["definition_id"]
                 trigger_ids.add(definition_id)
                 key = (definition_id, session_id)

@@ -787,3 +787,86 @@ def test_liveness_elapsed_from_winning_state_row():
     ])
     assert indexed["s"]["state"] == "active"
     assert indexed["s"]["elapsed_seconds"] == 42.0
+
+
+# ── A10: trigger chips are edge-derived (only definitions that fired in-window) ──
+
+
+@pytest.fixture()
+def a10_seeded(isolated_state):
+    """Four definitions to probe A10: enabled-with-run, enabled-idle,
+    disabled-no-run, disabled-with-in-window-run."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_scope(conn)
+        _insert_session(conn, "ses_run", scope_id=PROJECT_SCOPE, backend="claude", title="fired")
+        _insert_session(conn, "ses_dr", scope_id=PROJECT_SCOPE, backend="claude", title="disabled-fired")
+        _insert_definition(conn, "def_run", name="Enabled fired", cron="0 9 * * *", enabled=1)
+        _insert_definition(conn, "def_idle", name="Enabled idle", cron="0 9 * * *", enabled=1)
+        _insert_definition(conn, "def_dis_norun", name="Disabled idle", cron="0 9 * * *", enabled=0)
+        _insert_definition(conn, "def_dis_run", name="Disabled fired", cron="0 9 * * *", enabled=0)
+        _insert_run(conn, "run_dr_enabled", session_id="ses_run", run_type="scheduled",
+                    definition_id="def_run", created=NOW - timedelta(hours=2))
+        _insert_run(conn, "run_dr_disabled", session_id="ses_dr", run_type="scheduled",
+                    definition_id="def_dis_run", created=NOW - timedelta(hours=2))
+    return engine
+
+
+def _triggers_by_id(payload):
+    return {t["definition_id"]: t for t in payload["trigger_nodes"]}
+
+
+def test_a10_enabled_but_idle_definition_has_no_chip(a10_seeded):
+    triggers = _triggers_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=a10_seeded, window="24h"))
+    assert "def_idle" not in triggers  # enabled but never triggered a session in-window
+
+
+def test_a10_disabled_definition_without_runs_has_no_chip(a10_seeded):
+    triggers = _triggers_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=a10_seeded, window="24h"))
+    assert "def_dis_norun" not in triggers
+
+
+def test_a10_disabled_definition_that_fired_in_window_keeps_a_dimmable_chip(a10_seeded):
+    triggers = _triggers_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=a10_seeded, window="24h"))
+    # It explains lineage, so the chip stays — flagged disabled for the client to dim.
+    assert "def_dis_run" in triggers
+    assert triggers["def_dis_run"]["enabled"] is False
+    # positive control: an enabled definition that fired is present and enabled.
+    assert triggers["def_run"]["enabled"] is True
+
+
+def test_a10_session_with_only_out_of_window_runs_has_no_chip(isolated_state):
+    """A session whose only run is outside the window is not a candidate, so its
+    (disabled) definition earns no chip — A10 ①."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_scope(conn)
+        # recent activity → session is an in-window candidate…
+        _insert_session(conn, "ses_hist", scope_id=PROJECT_SCOPE, backend="claude", title="long-lived",
+                        created=NOW - timedelta(days=3), last_active=NOW - timedelta(minutes=30))
+        _insert_definition(conn, "def_hist", name="Historical watch", definition_type="watch", enabled=0)
+        # …but its trigger run is 3 days old (out of the 24h window)
+        _insert_run(conn, "run_hist", session_id="ses_hist", run_type="watch",
+                    definition_id="def_hist", created=NOW - timedelta(days=3))
+    triggers = _triggers_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=engine, window="24h"))
+    assert "def_hist" not in triggers, "out-of-window trigger run must NOT yield a chip (A10)"
+
+
+def test_a10_in_window_session_with_old_trigger_run_has_no_chip(isolated_state):
+    """The core A10 guard: a session stays in scope via an in-window agent run,
+    but its only trigger run is out-of-window — the definition triggered nothing
+    within the window, so no chip (this was the owner-reported explosion:
+    disabled/historical watch+task chips lingering on still-active sessions)."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_scope(conn)
+        _insert_session(conn, "ses_mix", scope_id=PROJECT_SCOPE, backend="claude", title="mixed")
+        _insert_definition(conn, "def_mix", name="Old watch", definition_type="watch", enabled=0)
+        # in-window agent run → ses_mix is a candidate
+        _insert_run(conn, "run_recent", session_id="ses_mix", status="succeeded",
+                    created=NOW - timedelta(hours=1))
+        # out-of-window trigger run from the disabled def
+        _insert_run(conn, "run_oldtrig", session_id="ses_mix", run_type="watch",
+                    definition_id="def_mix", created=NOW - timedelta(days=3))
+    triggers = _triggers_by_id(agent_graph.build_graph(live_agents=[], now=NOW, engine=engine, window="24h"))
+    assert "def_mix" not in triggers, "out-of-window trigger run on a candidate session must NOT chip (A10)"

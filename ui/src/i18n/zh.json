@@ -2135,7 +2135,8 @@
       },
       "trigger": {
         "task": "TASK",
-        "watch": "WATCH"
+        "watch": "WATCH",
+        "disabled": "已禁用"
       },
       "legend": {
         "spawn": "启动",

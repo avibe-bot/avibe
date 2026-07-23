@@ -2135,7 +2135,8 @@
       },
       "trigger": {
         "task": "Task",
-        "watch": "Watch"
+        "watch": "Watch",
+        "disabled": "Disabled"
       },
       "legend": {
         "spawn": "Spawn",
