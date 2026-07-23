@@ -19,7 +19,6 @@ from core.memory.everos import (
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
-    MemoryProviderMessageFailure,
     MemoryProviderSystemFailure,
 )
 from core.memory.module import (
@@ -200,7 +199,7 @@ async def test_provider_timestamp_is_allocated_once_and_reused_after_restart(tmp
     retry_module, retry_store, retry_provider = _module(tmp_path / "retry")
     assert await retry_module.capture(_request(source="retry", occurred_at_ms=8_000)) == CaptureAccepted()
     original = retry_store.list_queue_rows()[0].provider_timestamp_ms
-    retry_provider.ingest_failures.append(MemoryProviderMessageFailure())
+    retry_provider.ingest_failures.append(MemoryProviderFailure())
     current = datetime(2026, 1, 1, tzinfo=UTC)
     first_worker = MemoryWorker(
         store=retry_store,
@@ -474,9 +473,9 @@ async def test_worker_retries_message_failures_then_marks_dead_and_scrubs(tmp_pa
     assert await module.capture(_request()) == CaptureAccepted()
     provider.ingest_failures.extend(
         [
-            MemoryProviderMessageFailure(),
-            MemoryProviderMessageFailure(),
-            MemoryProviderMessageFailure(),
+            MemoryProviderFailure(),
+            MemoryProviderFailure(),
+            MemoryProviderFailure(),
         ]
     )
     current = datetime(2026, 1, 1, tzinfo=UTC)
@@ -570,7 +569,7 @@ async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path:
     """
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="one")) == CaptureAccepted()
-    provider.ingest_failures.append(MemoryProviderMessageFailure("memory_processing_failed"))
+    provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
 
     await worker.drain_once()
@@ -727,9 +726,9 @@ async def test_latest_flush_success_closes_stale_timeout_but_keeps_dead_history(
     assert await module.capture(_request(source="failed", text="failed delivery")) == CaptureAccepted()
     provider.ingest_failures.extend(
         [
-            MemoryProviderMessageFailure("memory_provider_timeout"),
-            MemoryProviderMessageFailure("memory_provider_timeout"),
-            MemoryProviderMessageFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_provider_timeout"),
         ]
     )
     current = datetime(2026, 1, 1, tzinfo=UTC)
@@ -814,7 +813,7 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="failed")) == CaptureAccepted()
     provider.ingest_failures.extend(
-        [MemoryProviderMessageFailure("memory_provider_timeout")] * 3
+        [MemoryProviderFailure("memory_provider_timeout")] * 3
     )
     current = datetime.now(UTC).replace(microsecond=0)
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
@@ -854,9 +853,9 @@ async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> 
     assert await module.capture(_request(source="failed", session="private-session", text="private text")) == CaptureAccepted()
     provider.ingest_failures.extend(
         [
-            MemoryProviderMessageFailure("memory_provider_timeout"),
-            MemoryProviderMessageFailure("memory_provider_timeout"),
-            MemoryProviderMessageFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_provider_timeout"),
         ]
     )
     current = datetime.now(UTC).replace(microsecond=0)
@@ -1059,7 +1058,7 @@ async def test_provider_failures_are_closed_codes_and_never_persist_provider_tex
     assert result.error in CLOSED_MEMORY_ERROR_CODES
     assert canary not in repr(result)
 
-    provider.ingest_failures.append(MemoryProviderMessageFailure(canary))  # type: ignore[arg-type]
+    provider.ingest_failures.append(MemoryProviderFailure(canary))  # type: ignore[arg-type]
     assert await module.capture(_request()) == CaptureAccepted()
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
     assert await worker.drain_once() == 1

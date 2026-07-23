@@ -135,6 +135,44 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
 
         bot.on_message_callback.assert_not_awaited()
 
+    async def test_denied_memory_command_reaches_only_safe_handler(self):
+        bot = object.__new__(DiscordBot)
+        bot.config = DiscordConfig(require_mention=False)
+        bot._controller = None
+        bot.client = SimpleNamespace(user=None)
+        bot.sessions = None
+        bot.settings_manager = None
+        bot.check_authorization = lambda **kwargs: AuthResult(
+            allowed=False,
+            denial="unbound_dm",
+            is_dm=False,
+            dispatch_to_safe_handler=True,
+        )
+        bot.dispatch_text_command = AsyncMock(return_value=True)
+        bot.on_message_callback = AsyncMock()
+        bot._send_auth_denial = AsyncMock()
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=456, bot=False),
+            content="/memory status",
+            channel=SimpleNamespace(id=123),
+            guild=SimpleNamespace(id=999),
+            attachments=[],
+            embeds=[],
+            flags=SimpleNamespace(forwarded=False),
+            message_snapshots=(),
+            edited_at=None,
+            mentions=[],
+            id=888,
+            reference=None,
+            is_system=lambda: False,
+        )
+
+        await DiscordBot._on_message_event(bot, message)
+
+        bot.dispatch_text_command.assert_awaited_once()
+        bot._send_auth_denial.assert_not_awaited()
+        bot.on_message_callback.assert_not_awaited()
+
     async def test_scheduled_active_thread_bypasses_mention_requirement(self):
         import modules.im.discord as discord_module
 
@@ -179,6 +217,7 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
             discord_module.discord.Thread = original_thread
 
         bot.on_message_callback.assert_awaited_once()
+        self.assertTrue(bot.on_message_callback.await_args.args[0].is_ordinary_text)
         self.assertEqual(bot.on_message_callback.await_args.args[1], "scheduled follow-up context")
 
     async def test_send_auth_denial_acknowledges_silent_interaction_denial(self):

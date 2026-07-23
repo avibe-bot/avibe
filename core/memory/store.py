@@ -169,11 +169,6 @@ class MemoryStore:
         meta = self.get_meta()
         return bool(meta and meta.clear_in_progress)
 
-    def increment_missed(self) -> None:
-        """Record one validation or capacity rejection without retaining input."""
-
-        self.record_capture_skip(None)
-
     def record_capture_skip(self, error: MemoryErrorCode | None) -> None:
         """Record a closed admission skip without retaining rejected input."""
 
@@ -195,9 +190,7 @@ class MemoryStore:
         """Admit one validated capture in a single local queue transaction.
 
         Raw source identifiers are transformed only inside this transaction and
-        never written to SQLite.  This is the capture-path entry point; the
-        lower-level ``enqueue_capture`` remains for focused store maintenance
-        tests that already hold keyed identifiers.
+        never written to SQLite.
         """
 
         now = utc_now_iso()
@@ -288,94 +281,6 @@ class MemoryStore:
                     completed_at=None,
                 ),
             )
-
-    def enqueue_capture(
-        self,
-        *,
-        source_message_digest: str,
-        session_ref: str,
-        payload_text: str,
-        occurred_at_ms: int,
-        max_provider_timestamp_ms: int,
-        nonterminal_limit: int = MAX_NONTERMINAL_QUEUE_ROWS,
-    ) -> EnqueueResult:
-        """Atomically deduplicate, allocate a provider timestamp, and queue a capture."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            existing = conn.execute(
-                """
-                SELECT * FROM memory_capture_queue
-                WHERE source_message_digest = ?
-                """,
-                (source_message_digest,),
-            ).fetchone()
-            if existing is not None:
-                return EnqueueResult(outcome="duplicate", row=_queue_from_row(existing))
-            if meta.clear_in_progress:
-                return EnqueueResult(outcome="clearing")
-
-            pending_count = int(
-                conn.execute(
-                    """
-                    SELECT COUNT(*) FROM memory_capture_queue
-                    WHERE epoch = ? AND state IN ('pending', 'processing')
-                    """,
-                    (meta.epoch,),
-                ).fetchone()[0]
-            )
-            if pending_count >= nonterminal_limit:
-                return EnqueueResult(outcome="queue_full")
-
-            provider_timestamp_ms = max(occurred_at_ms, meta.last_provider_timestamp_ms + 1)
-            if provider_timestamp_ms > max_provider_timestamp_ms:
-                return EnqueueResult(outcome="timestamp_invalid")
-
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET last_provider_timestamp_ms = ?, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (provider_timestamp_ms, now),
-            )
-            conn.execute(
-                """
-                INSERT INTO memory_capture_queue (
-                    source_message_digest, epoch, session_id, payload_text,
-                    occurred_at_ms, provider_timestamp_ms, state, attempts,
-                    next_retry_at, lease_owner, lease_at, last_error,
-                    created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
-                """,
-                (
-                    source_message_digest,
-                    meta.epoch,
-                    session_ref,
-                    payload_text,
-                    occurred_at_ms,
-                    provider_timestamp_ms,
-                    now,
-                ),
-            )
-            row = QueueRow(
-                source_message_digest=source_message_digest,
-                epoch=meta.epoch,
-                session_id=session_ref,
-                payload_text=payload_text,
-                occurred_at_ms=occurred_at_ms,
-                provider_timestamp_ms=provider_timestamp_ms,
-                state="pending",
-                attempts=0,
-                next_retry_at=None,
-                lease_owner=None,
-                lease_at=None,
-                last_error=None,
-                created_at=now,
-                completed_at=None,
-            )
-            return EnqueueResult(outcome="accepted", row=row)
 
     def claim_due(self, *, lease_owner: str, now: str) -> QueueRow | None:
         """Fence one due pending row for a worker without holding a provider call transaction."""

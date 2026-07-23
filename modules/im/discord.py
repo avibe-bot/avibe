@@ -18,6 +18,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
+from .message_facts import is_ordinary_discord_text
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -1058,7 +1059,7 @@ class DiscordBot(BaseIMClient):
             text=content,
             settings_manager=self.settings_manager,
         )
-        if not auth_result.allowed:
+        if not auth_result.allowed and not auth_result.dispatch_to_safe_handler:
             await self._send_auth_denial(channel_id, str(message.author.id), auth_result)
             return
 
@@ -1102,6 +1103,7 @@ class DiscordBot(BaseIMClient):
                 message_id=str(message.id),
                 platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                 files=files,
+                is_ordinary_text=is_ordinary_discord_text(message, files),
             )
             if await self.dispatch_text_command(command_context, content, allow_plain_bind=allow_plain_bind):
                 return
@@ -1116,6 +1118,7 @@ class DiscordBot(BaseIMClient):
                     message_id=str(message.id),
                     platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                     files=files,
+                    is_ordinary_text=is_ordinary_discord_text(message, files),
                 )
                 await self.on_message_callback(context, "")
             return
@@ -1128,6 +1131,7 @@ class DiscordBot(BaseIMClient):
             message_id=str(message.id),
             platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
             files=files,
+            is_ordinary_text=is_ordinary_discord_text(message, files),
         )
 
         if self.on_message_callback:

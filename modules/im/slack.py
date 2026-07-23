@@ -21,6 +21,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
+from .message_facts import is_ordinary_slack_text
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import SlackFormatter
@@ -1965,7 +1966,7 @@ class SlackBot(BaseIMClient):
                 text=route_text,
                 settings_manager=self.settings_manager,
             )
-            if not auth.allowed:
+            if not auth.allowed and not auth.dispatch_to_safe_handler:
                 await self._send_auth_denial(channel_id, user_id, auth)
                 return
 
@@ -2000,6 +2001,7 @@ class SlackBot(BaseIMClient):
                     "control_text": route_text,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
             )
 
             if handled_bot_mention_in_message_event and self.settings_manager and thread_id:
@@ -2061,7 +2063,7 @@ class SlackBot(BaseIMClient):
                 action=auth_action,
                 settings_manager=self.settings_manager,
             )
-            if not auth.allowed:
+            if not auth.allowed and not auth.dispatch_to_safe_handler:
                 await self._send_auth_denial(channel_id, user_id_mention or "", auth)
                 return
 
@@ -2093,6 +2095,7 @@ class SlackBot(BaseIMClient):
                     "control_text": route_text,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),
             )
 
             # Mark thread as active only when the mention carries actionable content.
@@ -2144,7 +2147,7 @@ class SlackBot(BaseIMClient):
             action=command,
             settings_manager=self.settings_manager,
         )
-        if not auth.allowed:
+        if not auth.allowed and not auth.dispatch_to_safe_handler:
             await self._send_auth_denial(channel_id, user_id, auth, response_url=response_url)
             return
 
@@ -2169,6 +2172,7 @@ class SlackBot(BaseIMClient):
                 "payload": payload,
                 "is_dm": is_dm,
             },
+            is_ordinary_text=True,
         )
 
         # Send immediate acknowledgment to Slack

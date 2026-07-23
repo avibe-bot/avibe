@@ -15,6 +15,7 @@ from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
     TERMINAL_TOMBSTONE_RETENTION,
+    _keyed_digest,
 )
 
 
@@ -23,23 +24,29 @@ def _store_path(scope: Path, filename: str = "memory.sqlite") -> Path:
 
 
 def _enqueue(store: MemoryStore, digest: str, *, occurred_at_ms: int = 1_000):
-    return store.enqueue_capture(
-        source_message_digest=digest,
-        session_ref="src--digest--e0",
+    return store.enqueue_request(
+        source_message_id=digest,
+        session_id="session",
         payload_text="queued payload",
         occurred_at_ms=occurred_at_ms,
         max_provider_timestamp_ms=4_102_444_800_000,
     )
 
 
-def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-session") -> None:
-    store.enqueue_capture(
-        source_message_digest=digest,
-        session_ref=session_ref,
+def _row_for_source(store: MemoryStore, source_message_id: str):
+    meta = store.ensure_meta()
+    return store.get_queue_row(_keyed_digest(meta.scope_key, source_message_id))
+
+
+def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-session") -> str:
+    result = store.enqueue_request(
+        source_message_id=digest,
+        session_id=session_ref,
         payload_text="queued payload",
         occurred_at_ms=1_000,
         max_provider_timestamp_ms=4_102_444_800_000,
     )
+    assert result.row is not None
     row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
     assert row is not None
     assert store.mark_delivered(
@@ -48,6 +55,7 @@ def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-sess
         now="2026-01-01T00:00:01.000Z",
         add_request_id=f"add-{digest}",
     )
+    return result.row.session_id
 
 
 def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None:
@@ -107,7 +115,7 @@ def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: 
         add_request_id="add-request-1",
     )
 
-    delivered = store.get_queue_row("observed")
+    delivered = _row_for_source(store, "observed")
     assert delivered is not None
     assert delivered.add_request_id == "add-request-1"
     assert delivered.flush_observation == "not_attempted"
@@ -163,14 +171,14 @@ def test_v1_store_migrates_once_and_projects_legacy_delivery_as_unknown(tmp_path
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    _deliver(store, "one")
-    _deliver(store, "two")
+    session_ref = _deliver(store, "one")
+    assert _deliver(store, "two") == session_ref
 
-    assert store.mark_flush_in_flight("shared-session") == 2
+    assert store.mark_flush_in_flight(session_ref) == 2
     assert [row.flush_observation for row in store.list_queue_rows()] == ["in_flight", "in_flight"]
 
     assert store.record_flush_verdict(
-        "shared-session",
+        session_ref,
         FlushSucceeded(request_id="flush-request", status="extracted"),
         now="2026-01-01T00:00:03.000Z",
     ) == 2
@@ -191,10 +199,10 @@ def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path
 
 def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    _deliver(store, "rejected", session_ref="rejected-session")
-    assert store.mark_flush_in_flight("rejected-session") == 1
+    rejected_session = _deliver(store, "rejected", session_ref="rejected-session")
+    assert store.mark_flush_in_flight(rejected_session) == 1
     assert store.record_flush_verdict(
-        "rejected-session",
+        rejected_session,
         FlushRejected(
             request_id="reject-request",
             error_code="INTERNAL_ERROR",
@@ -203,10 +211,10 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
         now="2026-01-01T00:00:03.000Z",
     ) == 1
 
-    _deliver(store, "unknown", session_ref="unknown-session")
-    assert store.mark_flush_in_flight("unknown-session") == 1
+    unknown_session = _deliver(store, "unknown", session_ref="unknown-session")
+    assert store.mark_flush_in_flight(unknown_session) == 1
     assert store.record_flush_verdict(
-        "unknown-session",
+        unknown_session,
         FlushUnknown(reason="timeout"),
         now="2026-01-01T00:00:04.000Z",
     ) == 1
@@ -216,20 +224,20 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     assert stats.receipt_unknown == 1
     assert stats.distill_failed == 1
     assert stats.last_flush_observation == "unknown"
-    assert store.get_queue_row("rejected").flush_error_code == "INTERNAL_ERROR"
+    assert _row_for_source(store, "rejected").flush_error_code == "INTERNAL_ERROR"
 
 
 def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted_sessions(
     tmp_path: Path,
 ) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    _deliver(store, "in-flight", session_ref="in-flight-session")
-    _deliver(store, "not-attempted", session_ref="not-attempted-session")
-    assert store.mark_flush_in_flight("in-flight-session") == 1
+    in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
+    not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
+    assert store.mark_flush_in_flight(in_flight_session) == 1
 
     assert store.recover_in_flight_flushes(now="2026-01-01T00:00:05.000Z") == 1
-    assert store.get_queue_row("in-flight").flush_observation == "unknown"
-    assert store.list_not_attempted_sessions() == ("not-attempted-session",)
+    assert _row_for_source(store, "in-flight").flush_observation == "unknown"
+    assert store.list_not_attempted_sessions() == (not_attempted_session,)
 
 
 def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) -> None:
@@ -287,17 +295,17 @@ def test_concurrent_duplicate_enqueue_has_one_row(tmp_path: Path) -> None:
 
 def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    accepted = store.enqueue_capture(
-        source_message_digest="one",
-        session_ref="src--one--e0",
+    accepted = store.enqueue_request(
+        source_message_id="one",
+        session_id="one",
         payload_text="payload",
         occurred_at_ms=1,
         max_provider_timestamp_ms=100,
         nonterminal_limit=1,
     )
-    full = store.enqueue_capture(
-        source_message_digest="two",
-        session_ref="src--two--e0",
+    full = store.enqueue_request(
+        source_message_id="two",
+        session_id="two",
         payload_text="payload",
         occurred_at_ms=2,
         max_provider_timestamp_ms=100,
@@ -310,7 +318,7 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
     assert row is not None and row.state == "processing"
     assert store.mark_delivered(row, lease_owner="boot-b", now="2026-01-01T00:00:01.000Z") is False
     assert store.mark_delivered(row, lease_owner="boot-a", now="2026-01-01T00:00:01.000Z") is True
-    delivered = store.get_queue_row("one")
+    delivered = _row_for_source(store, "one")
     assert delivered is not None
     assert delivered.state == "delivered"
     assert delivered.payload_text is None
@@ -323,7 +331,7 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert claimed is not None
 
     assert store.reclaim_processing(lease_owner="new-boot") == 1
-    reclaimed = store.get_queue_row("queued")
+    reclaimed = _row_for_source(store, "queued")
     assert reclaimed is not None
     assert reclaimed.state == "pending"
     assert reclaimed.attempts == 0
@@ -354,7 +362,7 @@ def test_terminal_tombstones_compact_by_retention(tmp_path: Path) -> None:
         )
 
     assert store.compact_terminal_tombstones(now=reference) == 1
-    assert store.get_queue_row("terminal") is None
+    assert _row_for_source(store, "terminal") is None
 
 
 def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

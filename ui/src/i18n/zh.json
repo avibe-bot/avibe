@@ -2770,7 +2770,6 @@
       "storageUsed": "本地已用存储",
       "lastSuccess": "最近提炼成功时间",
       "lastSuccessNever": "从未",
-      "lastError": "上次错误",
       "failureLog": {
         "title": "失败日志",
         "subtitle": "保留最近 {{days}} 天的脱敏投递与提炼失败记录。",

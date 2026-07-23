@@ -180,14 +180,27 @@ class MemoryModule:
             self._provider_root.lstat()
         except FileNotFoundError:
             return False
-        self._verify_owned_provider_root(meta, require_empty=False)
+        self._verify_owned_provider_root(meta, require_empty=True, allow_format_mismatch=True)
         sentinel = _read_root_sentinel(self._provider_root / ROOT_SENTINEL_FILENAME)
         current_format = sentinel.get("provider_root_format") if isinstance(sentinel, dict) else None
         if current_format == self._provider_root_format:
             return False
-        self._verify_owned_provider_root(meta, require_empty=True)
-        self._write_root_sentinel(meta)
-        self._verify_owned_provider_root(meta, require_empty=True)
+        previous_fingerprint = sentinel.get("created_by_artifact_fingerprint")
+        try:
+            self._write_root_sentinel(meta)
+            self._verify_owned_provider_root(meta, require_empty=True)
+        except Exception:
+            self._write_root_sentinel(
+                meta,
+                provider_root_format=current_format,
+                artifact_fingerprint=previous_fingerprint,
+            )
+            self._verify_owned_provider_root(
+                meta,
+                require_empty=True,
+                allow_format_mismatch=True,
+            )
+            raise
         return True
 
     async def capture(self, request: CaptureRequest) -> CaptureReceipt:
@@ -658,7 +671,13 @@ class MemoryModule:
         if inspect.isawaitable(result):
             await result
 
-    def _verify_owned_provider_root(self, meta: MemoryMeta, *, require_empty: bool) -> None:
+    def _verify_owned_provider_root(
+        self,
+        meta: MemoryMeta,
+        *,
+        require_empty: bool,
+        allow_format_mismatch: bool = False,
+    ) -> None:
         _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
         root_info = _lstat_or_clear_failure(self._provider_root, "provider root")
         _require_owned_directory(root_info, "provider root", private=True)
@@ -684,7 +703,10 @@ class MemoryModule:
             raise _ClearStepFailure("provider root id does not match")
         if sentinel.get("provider_id") != ROOT_PROVIDER_ID:
             raise _ClearStepFailure("provider root owner does not match")
-        if sentinel.get("provider_root_format") not in self._compatible_provider_root_formats:
+        if (
+            not allow_format_mismatch
+            and sentinel.get("provider_root_format") not in self._compatible_provider_root_formats
+        ):
             raise _ClearStepFailure("provider root format does not match")
         if not _is_root_metadata_value(sentinel.get("created_by_artifact_fingerprint")):
             raise _ClearStepFailure("provider root sentinel is invalid")
@@ -713,14 +735,20 @@ class MemoryModule:
         self._write_root_sentinel(meta)
         self._verify_owned_provider_root(meta, require_empty=True)
 
-    def _write_root_sentinel(self, meta: MemoryMeta) -> None:
+    def _write_root_sentinel(
+        self,
+        meta: MemoryMeta,
+        *,
+        provider_root_format: str | None = None,
+        artifact_fingerprint: str | None = None,
+    ) -> None:
         payload = json.dumps(
             {
                 "schema_version": ROOT_SENTINEL_SCHEMA_VERSION,
                 "provider_root_id": meta.provider_root_id,
                 "provider_id": ROOT_PROVIDER_ID,
-                "provider_root_format": self._provider_root_format,
-                "created_by_artifact_fingerprint": self._artifact_fingerprint,
+                "provider_root_format": provider_root_format or self._provider_root_format,
+                "created_by_artifact_fingerprint": artifact_fingerprint or self._artifact_fingerprint,
             },
             separators=(",", ":"),
             sort_keys=True,

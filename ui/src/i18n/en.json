@@ -2770,7 +2770,6 @@
       "storageUsed": "Local storage used",
       "lastSuccess": "Last successful distillation",
       "lastSuccessNever": "Never",
-      "lastError": "Last error",
       "failureLog": {
         "title": "Failure log",
         "subtitle": "Sanitized delivery and distillation failures retained for {{days}} days.",

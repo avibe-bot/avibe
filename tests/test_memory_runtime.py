@@ -325,6 +325,46 @@ def test_memory_artifact_rejects_incompatible_nonempty_root_before_pointer_activ
     assert not (tmp_path / "runtime" / "current.json").exists()
 
 
+def test_memory_artifact_routes_incompatible_empty_root_through_activation_coordinator(tmp_path: Path) -> None:
+    provider_root = tmp_path / "memory" / "everos-root"
+    provider_root.mkdir(parents=True, mode=0o700)
+    sentinel = provider_root / ".avibe-memory-root.json"
+    sentinel.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider_root_id": "root-id",
+                "provider_id": "everos",
+                "provider_root_format": "everos-1.0",
+                "created_by_artifact_fingerprint": "old-artifact",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(sentinel, 0o600)
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=provider_root,
+    )
+    observed: list[MemoryProviderRootState] = []
+
+    def coordinate(candidate, root_state, commit, _rollback) -> None:
+        assert candidate.provider_root_format == "everos-2.0"
+        observed.append(root_state)
+        commit()
+
+    manager.set_activation_coordinator(coordinate)
+    manager._write_current_pointer(
+        tmp_path / "runtime" / "versions" / "candidate",
+        _artifact_manifest("everos-2.0", compatible_formats=[]),
+        _artifact_archive(),
+    )
+
+    assert observed == [MemoryProviderRootState(exists=True, provider_root_format="everos-1.0", empty=True)]
+    assert manager.provider_root_format() == "everos-2.0"
+
+
 def test_memory_artifact_accepts_declared_compatible_nonempty_root(tmp_path: Path) -> None:
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True, mode=0o700)
@@ -1409,28 +1449,28 @@ def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch,
 
 def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tmp_path: Path) -> None:
     instances: list[object] = []
-    active = {
-        "format": "everos-1.0",
-        "fingerprint": "old-artifact",
-        "compatible": frozenset({"everos-1.0"}),
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=tmp_path / "memory" / "everos-root",
+    )
+    manager.runtime_dir.mkdir(parents=True)
+    previous_pointer = {
+        "provider": "manifest",
+        "runtime_id": "memory-runtime",
+        "runtime_version": "1.0",
+        "platform": "darwin-arm64",
+        "install_dir": str(manager.runtime_dir / "versions" / "old"),
+        "manifest_sha256": "a" * 64,
+        "archive_sha256": "b" * 64,
+        "bin_path": "bin/python",
+        "provider_root_format": "everos-1.0",
+        "compatible_provider_root_formats": [],
+        "artifact_fingerprint": "old-artifact",
     }
-    lifecycle: list[str] = []
-
-    class _Artifact:
-        def resolve_python(self) -> Path:
-            return Path(sys.executable)
-
-        def provider_root_format(self) -> str:
-            return active["format"]
-
-        def compatible_provider_root_formats(self) -> frozenset[str]:
-            return active["compatible"]
-
-        def artifact_fingerprint(self) -> str:
-            return active["fingerprint"]
-
-        def status(self) -> dict:
-            return {"reason": None}
+    manager._restore_current_pointer(previous_pointer)
+    monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(manager, "status", lambda: {"reason": None})
 
     class _Process:
         starting = False
@@ -1449,7 +1489,7 @@ def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tm
             return True
 
         async def start(self) -> bool:
-            if self.index == 1:
+            if manager.provider_root_format() == "everos-2.0":
                 return False
             assert self._on_ready is not None
             await self._on_ready()
@@ -1470,53 +1510,222 @@ def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tm
     async def run() -> None:
         runtime = MemoryRuntime(
             initial,
-            store=MemoryStore(),
-            artifact_manager=_Artifact(),
+            store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+            artifact_manager=manager,
         )
         assert (await runtime.reconcile(initial))["ok"] is True
-        candidate = MemoryArtifactCandidate(
-            provider_root_format="everos-2.0",
-            compatible_provider_root_formats=frozenset({"everos-1.0", "everos-2.0"}),
-            artifact_fingerprint="candidate-artifact",
-        )
-
-        def commit() -> None:
-            lifecycle.append("commit")
-            active.update(
-                {
-                    "format": "everos-2.0",
-                    "fingerprint": "candidate-artifact",
-                    "compatible": frozenset({"everos-1.0", "everos-2.0"}),
-                }
-            )
-
-        def rollback() -> None:
-            lifecycle.append("rollback")
-            active.update(
-                {
-                    "format": "everos-1.0",
-                    "fingerprint": "old-artifact",
-                    "compatible": frozenset({"everos-1.0"}),
-                }
-            )
 
         with pytest.raises(MemoryRuntimeActivationError):
-            await runtime._activate_artifact_candidate(
-                candidate,
-                MemoryProviderRootState(exists=True, provider_root_format="everos-1.0", empty=True),
-                commit,
-                rollback,
+            await asyncio.to_thread(
+                manager._write_current_pointer,
+                manager.runtime_dir / "versions" / "candidate",
+                _artifact_manifest("everos-2.0", compatible_formats=[]),
+                _artifact_archive(),
             )
 
         sentinel = json.loads((tmp_path / "memory" / "everos-root" / ".avibe-memory-root.json").read_text())
-        assert lifecycle == ["commit", "rollback"]
         assert sentinel["provider_root_format"] == "everos-1.0"
         assert sentinel["created_by_artifact_fingerprint"] == "old-artifact"
-        assert active["format"] == "everos-1.0"
+        assert manager._active_pointer() == previous_pointer
+        assert manager.provider_root_format() == "everos-1.0"
+        assert runtime.module._provider_root_format == "everos-1.0"
+        assert runtime.module._artifact_fingerprint == "old-artifact"
         assert len(instances) == 3
         assert instances[0].stopped is True
         assert instances[1].stopped is True
         assert instances[2].stopped is False
+        assert runtime.module._worker._claims_paused is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatch, tmp_path: Path) -> None:
+    instances: list[object] = []
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=tmp_path / "memory" / "everos-root",
+    )
+    manager.runtime_dir.mkdir(parents=True)
+    manager._restore_current_pointer(
+        {
+            "provider": "manifest",
+            "runtime_id": "memory-runtime",
+            "runtime_version": "1.0",
+            "platform": "darwin-arm64",
+            "install_dir": str(manager.runtime_dir / "versions" / "old"),
+            "manifest_sha256": "a" * 64,
+            "archive_sha256": "b" * 64,
+            "bin_path": "bin/python",
+            "provider_root_format": "everos-1.0",
+            "compatible_provider_root_formats": [],
+            "artifact_fingerprint": "old-artifact",
+        }
+    )
+    monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(manager, "status", lambda: {"reason": None})
+
+    class _Process:
+        starting = False
+        running = True
+
+        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
+            self.stopped = False
+            self._on_ready = on_ready
+            if on_ready is not None:
+                instances.append(self)
+
+        async def processing_healthy(self) -> bool:
+            return True
+
+        async def start(self) -> bool:
+            assert self._on_ready is not None
+            await self._on_ready()
+            return True
+
+        async def stop(self) -> None:
+            self.stopped = True
+            self.running = False
+
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+    )
+    initial = MemoryConfig(enabled=True, processing=processing)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            initial,
+            store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+            artifact_manager=manager,
+        )
+        assert (await runtime.reconcile(initial))["ok"] is True
+
+        await asyncio.to_thread(
+            manager._write_current_pointer,
+            manager.runtime_dir / "versions" / "candidate",
+            _artifact_manifest("everos-2.0", compatible_formats=[]),
+            _artifact_archive(),
+        )
+
+        sentinel = json.loads((tmp_path / "memory" / "everos-root" / ".avibe-memory-root.json").read_text())
+        assert sentinel["provider_root_format"] == "everos-2.0"
+        assert manager.provider_root_format() == "everos-2.0"
+        assert runtime.module._provider_root_format == "everos-2.0"
+        assert len(instances) == 2
+        assert instances[0].stopped is True
+        assert instances[1].stopped is False
+        assert runtime.module._worker._claims_paused is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_artifact_activation_rolls_back_after_sentinel_postwrite_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    instances: list[object] = []
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=tmp_path / "memory" / "everos-root",
+    )
+    manager.runtime_dir.mkdir(parents=True)
+    previous_pointer = {
+        "provider": "manifest",
+        "runtime_id": "memory-runtime",
+        "runtime_version": "1.0",
+        "platform": "darwin-arm64",
+        "install_dir": str(manager.runtime_dir / "versions" / "old"),
+        "manifest_sha256": "a" * 64,
+        "archive_sha256": "b" * 64,
+        "bin_path": "bin/python",
+        "provider_root_format": "everos-1.0",
+        "compatible_provider_root_formats": [],
+        "artifact_fingerprint": "old-artifact",
+    }
+    manager._restore_current_pointer(previous_pointer)
+    monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(manager, "status", lambda: {"reason": None})
+
+    class _Process:
+        starting = False
+        running = True
+
+        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
+            self.stopped = False
+            self._on_ready = on_ready
+            if on_ready is not None:
+                instances.append(self)
+
+        async def processing_healthy(self) -> bool:
+            return True
+
+        async def start(self) -> bool:
+            assert self._on_ready is not None
+            await self._on_ready()
+            return True
+
+        async def stop(self) -> None:
+            self.stopped = True
+            self.running = False
+
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+    )
+    initial = MemoryConfig(enabled=True, processing=processing)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            initial,
+            store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+            artifact_manager=manager,
+        )
+        assert (await runtime.reconcile(initial))["ok"] is True
+        original_verify = runtime.module._verify_owned_provider_root
+        failed_once = False
+
+        def fail_candidate_postwrite(meta, *, require_empty, allow_format_mismatch=False):
+            nonlocal failed_once
+            original_verify(
+                meta,
+                require_empty=require_empty,
+                allow_format_mismatch=allow_format_mismatch,
+            )
+            sentinel = json.loads(
+                (tmp_path / "memory" / "everos-root" / ".avibe-memory-root.json").read_text()
+            )
+            if sentinel["provider_root_format"] == "everos-2.0" and not failed_once:
+                failed_once = True
+                raise RuntimeError("injected post-write verification failure")
+
+        monkeypatch.setattr(runtime.module, "_verify_owned_provider_root", fail_candidate_postwrite)
+
+        with pytest.raises(MemoryRuntimeActivationError):
+            await asyncio.to_thread(
+                manager._write_current_pointer,
+                manager.runtime_dir / "versions" / "candidate",
+                _artifact_manifest("everos-2.0", compatible_formats=[]),
+                _artifact_archive(),
+            )
+
+        sentinel = json.loads((tmp_path / "memory" / "everos-root" / ".avibe-memory-root.json").read_text())
+        assert failed_once is True
+        assert sentinel["provider_root_format"] == "everos-1.0"
+        assert sentinel["created_by_artifact_fingerprint"] == "old-artifact"
+        assert manager._active_pointer() == previous_pointer
+        assert runtime.module._provider_root_format == "everos-1.0"
+        assert runtime.module._artifact_fingerprint == "old-artifact"
+        assert len(instances) == 2
+        assert instances[0].stopped is True
+        assert instances[1].stopped is False
         assert runtime.module._worker._claims_paused is False
         await runtime.close()
 

@@ -20,6 +20,7 @@ from modules.agents.opencode.utils import format_claude_model_label
 
 from .base import BaseIMClient, FileAttachment, MessageContext, InlineButton, InlineKeyboard
 from .formatters import TelegramFormatter
+from .message_facts import is_ordinary_telegram_text
 from . import telegram_api
 
 logger = logging.getLogger(__name__)
@@ -447,7 +448,7 @@ class TelegramBot(BaseIMClient):
             text=text,
             settings_manager=self.settings_manager,
         )
-        if not denial.allowed:
+        if not denial.allowed and not denial.dispatch_to_safe_handler:
             denial_text = self.build_auth_denial_text(denial.denial, context.channel_id)
             if denial_text:
                 await self.send_message(context, denial_text)
@@ -558,6 +559,7 @@ class TelegramBot(BaseIMClient):
             message_id=context.message_id,
             platform="telegram",
             files=context.files,
+            is_ordinary_text=context.is_ordinary_text,
             platform_specific={
                 **payload,
                 "is_topic_message": True,
@@ -684,6 +686,7 @@ class TelegramBot(BaseIMClient):
             thread_id=str(thread_id) if thread_id is not None else None,
             message_id=str(message.get("message_id")),
             files=files,
+            is_ordinary_text=is_ordinary_telegram_text(message, files),
             platform="telegram",
             platform_specific={
                 "is_dm": chat.get("type") == "private",

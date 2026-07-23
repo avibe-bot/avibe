@@ -14,6 +14,13 @@ from core.memory import CaptureAccepted, CaptureDuplicate
 from core.memory.commands import MAX_INERT_MEMORY_REPLY_BYTES, bounded_inert_text, parse_memory_command
 from modules.im.discord import _escape_inert_discord_text
 from modules.im.base import MessageContext
+from modules.im.message_facts import (
+    is_ordinary_discord_text,
+    is_ordinary_feishu_text,
+    is_ordinary_slack_text,
+    is_ordinary_telegram_text,
+    is_ordinary_wechat_text,
+)
 
 
 class _Store:
@@ -95,7 +102,7 @@ def _controller(*, user=_DEFAULT_USER):
     return controller
 
 
-def _context(platform: str, **payload) -> MessageContext:
+def _context(platform: str, *, is_ordinary_text: bool | None = True, **payload) -> MessageContext:
     return MessageContext(
         user_id="user-1",
         channel_id="dm-1",
@@ -103,6 +110,7 @@ def _context(platform: str, **payload) -> MessageContext:
         message_id="native-1",
         platform_specific={"platform": platform, "is_dm": True, **payload},
         files=[],
+        is_ordinary_text=is_ordinary_text,
     )
 
 
@@ -136,22 +144,18 @@ def test_private_memory_contract_requires_dm_admin_and_bounds_reply(platform: st
 
 
 @pytest.mark.parametrize(
-    "payload,files,text",
+    "payload,files,text,is_ordinary_text",
     [
-        ({"is_dm": False}, [], "normal"),
-        ({"is_forwarded": True}, [], "normal"),
-        ({"edited": True}, [], "normal"),
-        ({"is_rich": True}, [], "normal"),
-        ({}, [object()], "normal"),
-        ({"scheduled": True}, [], "normal"),
-        ({"is_system": True}, [], "normal"),
-        ({"event": {"type": "system"}}, [], "normal"),
-        ({}, [], "/memory status"),
+        ({"is_dm": False}, [], "normal", True),
+        ({}, [], "normal", False),
+        ({}, [], "normal", None),
+        ({}, [object()], "normal", True),
+        ({}, [], "/memory status", True),
     ],
 )
-def test_private_memory_capture_rejects_ineligible_input(payload, files, text) -> None:
+def test_private_memory_capture_rejects_ineligible_input(payload, files, text, is_ordinary_text) -> None:
     controller = _controller()
-    context = _context("slack", **payload)
+    context = _context("slack", is_ordinary_text=is_ordinary_text, **payload)
     context.files = files
 
     asyncio.run(controller.capture_memory_from_im(context, text, "stable-session"))
@@ -173,19 +177,16 @@ def test_private_memory_capture_uses_platform_native_dedup_key_once() -> None:
 
 
 @pytest.mark.parametrize(
-    "payload,files",
+    "is_ordinary_text,files",
     [
-        ({}, [object()]),
-        ({"is_forwarded": True}, []),
-        ({"edited": True}, []),
-        ({"is_rich": True}, []),
-        ({"is_system": True}, []),
-        ({"event": {"type": "system"}}, []),
+        (True, [object()]),
+        (False, []),
+        (None, []),
     ],
 )
-def test_private_memory_command_rejects_nonordinary_human_input(payload, files) -> None:
+def test_private_memory_command_rejects_nonordinary_human_input(is_ordinary_text, files) -> None:
     controller = _controller()
-    context = _context("discord", **payload)
+    context = _context("discord", is_ordinary_text=is_ordinary_text)
     context.files = files
 
     asyncio.run(controller.handle_memory_command(context, "profile"))
@@ -194,44 +195,34 @@ def test_private_memory_command_rejects_nonordinary_human_input(payload, files) 
     assert controller.client.replies == ["memory.command.unavailable"]
 
 
-@pytest.mark.parametrize(
-    "raw_message",
-    [
-        SimpleNamespace(
-            author=SimpleNamespace(bot=False),
-            edited_at=None,
-            attachments=[],
-            embeds=[],
-            flags=SimpleNamespace(forwarded=True),
-            message_snapshots=(),
-        ),
-        SimpleNamespace(
-            author=SimpleNamespace(bot=False),
-            edited_at=None,
-            attachments=[],
-            embeds=[],
-            flags=SimpleNamespace(forwarded=False),
-            message_snapshots=[object()],
-        ),
-        SimpleNamespace(
-            author=SimpleNamespace(bot=False),
-            edited_at=None,
-            attachments=[],
-            embeds=[],
-            flags=SimpleNamespace(forwarded=False),
-            message_snapshots=(),
-            is_system=lambda: True,
-        ),
-    ],
-)
-def test_private_memory_command_rejects_nonordinary_discord_messages(raw_message) -> None:
-    controller = _controller()
-    context = _context("discord", message=raw_message)
+def test_im_adapters_normalize_native_ordinary_text_facts() -> None:
+    discord_message = SimpleNamespace(
+        author=SimpleNamespace(bot=False),
+        edited_at=None,
+        attachments=[],
+        embeds=[],
+        flags=SimpleNamespace(forwarded=False),
+        message_snapshots=(),
+        is_system=lambda: False,
+    )
+    assert is_ordinary_discord_text(discord_message, None) is True
+    discord_message.flags.forwarded = True
+    assert is_ordinary_discord_text(discord_message, None) is False
 
-    asyncio.run(controller.handle_memory_command(context, "profile"))
+    assert is_ordinary_slack_text({"text": "hello"}, None) is True
+    assert is_ordinary_slack_text({"text": "hello", "subtype": "message_changed"}, None) is False
 
-    assert controller.memory_runtime.calls == []
-    assert controller.client.replies == ["memory.command.unavailable"]
+    assert is_ordinary_telegram_text({"from": {"is_bot": False}, "text": "hello"}, []) is True
+    assert is_ordinary_telegram_text({"from": {"is_bot": False}, "forward_origin": {"type": "user"}}, []) is False
+
+    feishu_event = {"sender": {"sender_type": "user"}, "message": {"message_type": "text"}}
+    assert is_ordinary_feishu_text(feishu_event, None, shared_text=None) is True
+    feishu_event["message"]["message_type"] = "post"
+    assert is_ordinary_feishu_text(feishu_event, None, shared_text=None) is False
+
+    assert is_ordinary_wechat_text({"item_list": [{"type": "TEXT"}]}, None) is True
+    assert is_ordinary_wechat_text({"item_list": [{"type": 1}, {"type": 2}]}, None) is False
+    assert is_ordinary_wechat_text({"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]}, None) is False
 
 
 def test_private_memory_command_hides_disabled_memory_as_unavailable() -> None:

@@ -79,21 +79,6 @@ class MemoryProviderSystemFailure(MemoryProviderFailure):
         super().__init__(closed_error, retryable=True)
 
 
-class MemoryProviderMessageFailure(MemoryProviderFailure):
-    """A healthy provider could not process one capture."""
-
-    def __init__(
-        self,
-        error: MemoryErrorCode = "memory_processing_failed",
-        *,
-        retryable: bool = True,
-    ) -> None:
-        closed_error: MemoryErrorCode = (
-            error if is_memory_error_code(error) else "memory_processing_failed"
-        )
-        super().__init__(closed_error, retryable=retryable)
-
-
 class EverOSPort:
     """Private HTTP adapter for the pinned EverOS sidecar.
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from config.v2_config import SlackConfig
+from core.auth import AuthResult
 
 
 def _install_slack_stubs() -> None:
@@ -122,6 +123,7 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
             received["thread_id"] = context.thread_id
             received["text"] = text
             received["control_text"] = (context.platform_specific or {}).get("control_text")
+            received["is_ordinary_text"] = context.is_ordinary_text
 
         slack.register_callbacks(on_message=_on_message)
         slack.settings_manager = object()
@@ -151,9 +153,38 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
                 "thread_id": "1710000000.000700",
                 "text": "",
                 "control_text": "",
+                "is_ordinary_text": True,
             },
         )
         slack.sessions.mark_thread_active.assert_called_once_with("U123", "C123", "1710000000.000700")
+
+    async def test_denied_memory_slash_command_reaches_only_safe_handler(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        handler = AsyncMock()
+        slack.on_command_callbacks["memory"] = handler
+        slack.on_message_callback = AsyncMock()
+        slack.settings_manager = None
+        slack.check_authorization = lambda **kwargs: AuthResult(
+            allowed=False,
+            denial="unbound_dm",
+            is_dm=True,
+            dispatch_to_safe_handler=True,
+        )
+        slack._send_auth_denial = AsyncMock()
+
+        await slack._handle_slash_command(
+            {
+                "command": "/memory",
+                "channel_id": "D123",
+                "user_id": "U123",
+                "trigger_id": "trigger-1",
+                "text": "status",
+            }
+        )
+
+        handler.assert_awaited_once()
+        slack._send_auth_denial.assert_not_awaited()
+        slack.on_message_callback.assert_not_awaited()
 
 
 class SlackFileAttachmentTests(unittest.IsolatedAsyncioTestCase):

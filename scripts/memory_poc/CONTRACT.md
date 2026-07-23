@@ -1,4 +1,8 @@
-# Memory POC Harness Contract (frozen v1)
+# Memory POC Harness Contract (archived, frozen v1)
+
+The harness is retained as evidence tooling, not as an actively maintained
+production suite. Rerun it only when the provider, provider version, LLM, or
+embedding model changes, or when a release decision requires new evidence.
 
 This file freezes the data shapes shared by the two POC lanes. Lane P1
 (harness/) and Lane P2 (corpus/) both cite this file. Neither lane changes it;

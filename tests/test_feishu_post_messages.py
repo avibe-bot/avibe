@@ -127,10 +127,39 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         args = bot.on_message_callback.await_args.args
         context, text = args
         self.assertEqual(text, "日报\nhello\n[image]")
+        self.assertFalse(context.is_ordinary_text)
         self.assertIsNotNone(context.files)
         assert context.files is not None
         self.assertEqual(len(context.files), 1)
         self.assertEqual(context.files[0].name, "img_123.image")
+
+    async def test_denied_memory_command_reaches_only_safe_handler(self):
+        bot = self._make_bot()
+        bot.check_authorization = lambda **kwargs: AuthResult(
+            allowed=False,
+            denial="unbound_dm",
+            is_dm=True,
+            dispatch_to_safe_handler=True,
+        )
+        bot.dispatch_text_command = AsyncMock(return_value=True)
+        bot.on_message_callback = AsyncMock()
+        bot._send_auth_denial = AsyncMock()
+        event_data = {
+            "sender": {"sender_type": "user", "sender_id": {"open_id": "ou_user"}},
+            "message": {
+                "chat_id": "oc_chat",
+                "chat_type": "p2p",
+                "message_id": "om_memory",
+                "message_type": "text",
+                "content": json.dumps({"text": "/memory status"}),
+            },
+        }
+
+        await bot._async_handle_message(event_data)
+
+        bot.dispatch_text_command.assert_awaited_once()
+        bot._send_auth_denial.assert_not_awaited()
+        bot.on_message_callback.assert_not_awaited()
 
     async def test_active_thread_requires_fresh_mention_when_require_mention_enabled(self):
         bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret", require_mention=True))

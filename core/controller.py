@@ -1239,7 +1239,7 @@ class Controller:
         *,
         allow_memory_command: bool = False,
     ) -> bool:
-        """Reject non-human, rich, mutated, or attachment-bearing input facts."""
+        """Accept only adapter-normalized ordinary human text."""
 
         if not isinstance(text, str) or not text.strip():
             return False
@@ -1247,96 +1247,7 @@ class Controller:
             return False
         if getattr(context, "files", None):
             return False
-        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
-        if any(
-            payload.get(key) is True
-            for key in (
-                "scheduled",
-                "is_scheduled",
-                "is_bot",
-                "is_self",
-                "is_system",
-                "system",
-                "is_forwarded",
-                "forwarded",
-                "is_edited",
-                "edited",
-                "is_rich",
-                "rich_text",
-                "has_attachments",
-            )
-        ):
-            return False
-        if payload.get("turn_source") == "scheduled":
-            return False
-
-        raw_message = payload.get("event") or payload.get("message") or payload.get("raw_message")
-        if isinstance(raw_message, dict):
-            if raw_message.get("is_system") or raw_message.get("system"):
-                return False
-            if any(
-                raw_message.get(key)
-                for key in (
-                    "files",
-                    "attachments",
-                    "edited",
-                    "edit_date",
-                    "is_bot",
-                    "bot_id",
-                    "forward_origin",
-                    "forward_from",
-                    "forwarded",
-                )
-            ):
-                return False
-            if raw_message.get("type") in {"system", "system_message"}:
-                return False
-            subtype = raw_message.get("subtype")
-            if subtype in {
-                "bot_message",
-                "file_share",
-                "message_changed",
-                "message_deleted",
-                "message_replied",
-                "channel_join",
-                "channel_leave",
-            }:
-                return False
-            if raw_message.get("blocks") or raw_message.get("rich_text") or raw_message.get("forwarded"):
-                return False
-            sender = raw_message.get("from")
-            if isinstance(sender, dict) and sender.get("is_bot") is True:
-                return False
-            event_sender = raw_message.get("sender")
-            if isinstance(event_sender, dict) and event_sender.get("sender_type") == "app":
-                return False
-            nested_message = raw_message.get("message")
-            if isinstance(nested_message, dict):
-                message_type = nested_message.get("message_type")
-                if message_type not in {None, "text"}:
-                    return False
-                if any(nested_message.get(key) for key in ("file", "image", "media", "edited", "forwarded")):
-                    return False
-        elif raw_message is not None:
-            author = getattr(raw_message, "author", None)
-            if bool(getattr(author, "bot", False)):
-                return False
-            if getattr(raw_message, "edited_at", None) is not None:
-                return False
-            if getattr(raw_message, "attachments", None) or getattr(raw_message, "embeds", None):
-                return False
-            flags = getattr(raw_message, "flags", None)
-            if bool(getattr(flags, "forwarded", False)) or getattr(raw_message, "message_snapshots", None):
-                return False
-            is_system = getattr(raw_message, "is_system", False)
-            if callable(is_system):
-                try:
-                    is_system = is_system()
-                except Exception:
-                    return False
-            if bool(is_system):
-                return False
-        return True
+        return context.is_ordinary_text is True
 
     async def capture_memory_from_im(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit eligible private-IM text after native dedup/session resolution.

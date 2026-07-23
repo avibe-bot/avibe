@@ -41,6 +41,9 @@ class MessageContext:
     message_id: Optional[str] = None
     platform_specific: Optional[Dict[str, Any]] = None
     files: Optional[List[FileAttachment]] = None  # List of file attachments
+    # Inbound adapters set this only after classifying their native event.
+    # None is intentionally fail-closed for Memory capture and commands.
+    is_ordinary_text: Optional[bool] = None
 
 
 @dataclass
@@ -300,7 +303,12 @@ class BaseIMClient(ABC):
         # registered handler so a partially initialized adapter cannot fall through
         # to an ordinary agent turn.
         if resolved_action == "memory" and not result.allowed and "memory" in self.on_command_callbacks:
-            return AuthResult(allowed=True, is_dm=result.is_dm)
+            return AuthResult(
+                allowed=False,
+                denial=result.denial,
+                is_dm=result.is_dm,
+                dispatch_to_safe_handler=True,
+            )
         return result
 
     def build_auth_denial_text(self, denial: str, channel_id: Optional[str] = None) -> Optional[str]:

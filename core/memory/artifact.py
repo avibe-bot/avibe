@@ -364,7 +364,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         )
 
     def _inspect_provider_root(self, candidate: MemoryArtifactCandidate) -> MemoryProviderRootState:
-        """Fail closed unless an existing root has an owned compatible sentinel."""
+        """Allow only compatible data or an owned empty root to reach activation."""
 
         try:
             root_info = self._provider_root.lstat()
@@ -392,13 +392,13 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         provider_root_format = sentinel["provider_root_format"]
         if not _safe_metadata_value(provider_root_format):
             raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
-        if provider_root_format not in candidate.compatible_provider_root_formats:
-            raise MemoryRuntimeActivationError("memory provider root format is incompatible")
         try:
             with os.scandir(self._provider_root) as entries:
                 empty = all(entry.name == sentinel_path.name for entry in entries)
         except OSError as exc:
             raise MemoryRuntimeActivationError("memory provider root cannot be inspected") from exc
+        if not empty and provider_root_format not in candidate.compatible_provider_root_formats:
+            raise MemoryRuntimeActivationError("memory provider root format is incompatible")
         return MemoryProviderRootState(
             exists=True,
             provider_root_format=provider_root_format,

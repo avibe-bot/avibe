@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from core import chat_discovery
+from core.auth import AuthResult
 from modules.agents.native_sessions import NativeResumeSession
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from modules.im.multi import MultiIMClient
@@ -80,7 +81,36 @@ def test_group_message_uses_channel_require_mention_override() -> None:
     )
 
     bot.on_message_callback.assert_awaited_once()
+    assert bot.on_message_callback.await_args.args[0].is_ordinary_text is True
     assert bot.on_message_callback.await_args.args[1] == "hello team"
+
+
+def test_denied_memory_command_reaches_only_safe_handler() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    bot.check_authorization = lambda **kwargs: AuthResult(
+        allowed=False,
+        denial="unbound_dm",
+        is_dm=True,
+        dispatch_to_safe_handler=True,
+    )
+    bot.dispatch_text_command = AsyncMock(return_value=True)
+    bot.on_message_callback = AsyncMock()
+    bot.send_message = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 77,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 42},
+                "text": "/memory status",
+            }
+        )
+    )
+
+    bot.dispatch_text_command.assert_awaited_once()
+    bot.send_message.assert_not_awaited()
+    bot.on_message_callback.assert_not_awaited()
 
 
 def test_inbound_message_refreshes_config_before_reading_options() -> None:

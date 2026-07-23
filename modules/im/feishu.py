@@ -20,6 +20,7 @@ from .base import (
     MessageContext,
 )
 from .formatters import FeishuFormatter
+from .message_facts import is_ordinary_feishu_text
 from config.v2_config import LarkConfig
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
@@ -36,6 +37,7 @@ from modules.agents.native_sessions.display import format_display_summary, forma
 from modules.agents.native_sessions.types import NativeResumeSession
 
 logger = logging.getLogger(__name__)
+
 
 # Feishu emoji name mapping (common reactions)
 # See: https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
@@ -1697,7 +1699,7 @@ class FeishuBot(BaseIMClient):
                 text=text,
                 settings_manager=self.settings_manager,
             )
-            if not auth_result.allowed:
+            if not auth_result.allowed and not auth_result.dispatch_to_safe_handler:
                 try:
                     await self._send_auth_denial(chat_id, user_id, auth_result)
                 except Exception as exc:
@@ -1721,6 +1723,11 @@ class FeishuBot(BaseIMClient):
                     "is_dm": is_p2p,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_feishu_text(
+                    event_data,
+                    file_attachments,
+                    shared_text=shared_text,
+                ),
             )
 
             # Handle commands (messages starting with /)

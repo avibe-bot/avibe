@@ -119,8 +119,10 @@ def test_memory_auth_denial_reaches_the_shared_generic_handler():
         settings_manager=manager,
     )
 
-    assert result.allowed is True
+    assert result.allowed is False
     assert result.is_dm is True
+    assert result.denial == "unbound_dm"
+    assert result.dispatch_to_safe_handler is True
 
 
 def test_dispatch_text_command_executes_handler():

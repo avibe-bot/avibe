@@ -1,10 +1,13 @@
 # Memory Phase 0: EverOS Provider POC
 
-> Status: not run
+> Status: executed and archived 2026-07-23; 5 of 6 Stage-2 probes ran with real
+> data, the quality gate failed, and decision A remains owner-locked
 >
 > Provider under test: official `everos==1.1.3`, no fork
 >
 > Decision source: `docs/plans/memory-mvp/memory-plugin-product-research.md`
+>
+> Evidence report: `docs/plans/memory-mvp/poc-stage2-report.md`
 
 ## 1. Purpose
 
@@ -13,7 +16,7 @@ MVP. The surrounding documents describe an implementation candidate; this POC
 produces provider evidence before its production migrations, worker, UI, and
 runtime integration are implemented or frozen.
 
-The POC answers six questions:
+The POC answered six questions:
 
 1. Is the generated personal memory useful for realistic Chinese and
    mixed-language queries?
@@ -292,24 +295,20 @@ Each run writes a redacted `report.json` and a short Markdown summary containing
 The report may not claim production readiness. Production acceptance belongs to
 the technical design and tests built after this provider decision.
 
-## 8. Work list
+## 8. Archived outcome
 
-- [ ] Create the hermetic Python 3.12 environment and exact dependency lock.
-- [ ] Prototype the relocatable managed artifact and verify it on a clean host
-  without Python 3.12 or user site packages.
-- [ ] Package it in the existing `ManagedRuntimeManager` manifest/archive shape
-  and verify install, resolve, reuse, failed-staging cleanup, and `current.json`.
-- [ ] Implement the process-owning harness with fresh roots and redacted output.
-- [ ] Add the versioned synthetic corpus and predeclared expected results.
-- [ ] Implement launcher-owned UDS-only API/storage sanity and restart probes.
-- [ ] Implement quality and cross-session personal-pool probes.
-- [ ] Implement buffer/flush/duplicate characterization.
-- [ ] Record the public error shapes for system and message failures and test
-  which ambiguous cases need sidecar and model-endpoint probes to classify them.
-- [ ] Implement retention and full-root-clear inspection.
-- [ ] Add RSS, disk, latency, request-count, and destination recording.
-- [ ] Run three clean quality trials plus one all-loopback egress trial.
-- [ ] Publish the report and make the provider decision before production work.
+- Completed: hermetic Python 3.12 environment and lock, process-owning harness,
+  versioned corpus, UDS/restart probes, quality probes, error-shape recording,
+  resource/latency/request/egress measurements, and the evidence report.
+- Partial: duplicate, personal-pool, retention/full-clear, and full-footprint
+  characterization. The provider failed before these probes completed.
+- Not completed: a relocatable managed artifact, clean-host verification, and
+  packaging in the `ManagedRuntimeManager` archive shape. These remain release
+  work rather than evidence supplied by this POC.
+
+This harness is archived rather than maintained as a standing test suite. Rerun
+it when the provider, provider version, LLM, or embedding model changes, or when
+a release decision explicitly asks for refreshed evidence.
 
 ## 9. Explicit non-goals
 

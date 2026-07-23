@@ -71,6 +71,7 @@ class AuthResult:
     allowed: bool
     denial: str = ""  # "" | "unbound_dm" | "unauthorized_channel" | "not_admin"
     is_dm: bool = False
+    dispatch_to_safe_handler: bool = False
 
 
 def check_auth(

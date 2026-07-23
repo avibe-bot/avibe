@@ -45,10 +45,8 @@ behind that managed dependency. Its artifact installation extends Avibe's
 existing managed-runtime Module; EverOS process ownership remains private to
 Memory rather than being part of the Dependencies Interface.
 
-The original rev37 documents remain at their existing top-level paths under
-`docs/plans/`. They are restored byte-for-byte from commit `5dbf01aa` so
-reviewers can compare the 36-round design with the smaller proposal without
-using Git history.
+The retired rev37 comparison documents are available from Git history at commit
+`5dbf01aa`. The files in this directory are the active design sources.
 
 ## Review order
 
@@ -58,14 +56,10 @@ using Git history.
 3. `memory-poc-everos.md` - evidence required before production integration
 4. `memory-plugin-everos-phase1.md` - user-visible MVP contract
 5. `memory-plugin-everos-phase1-tech.md` - implementation boundary and tests
+6. `memory-architecture-followups.md` - accepted architecture-review fixes and
+   release gates
 
-## Version map
-
-| Version | Location | Purpose |
-|---|---|---|
-| Original rev37 | `docs/plans/memory-*.md` | Full pre-convergence design baseline |
-| Converged MVP | `docs/plans/memory-mvp/` | Review candidate with deferred capabilities removed |
-
-The MVP POC is still marked `not run`. Review should distinguish agreement on
-the product/technical boundary from evidence that EverOS passes the provider
-gate.
+The POC ran against official EverOS 1.1.3 and DashScope. Decision A (official
+EverOS with a thin adapter) is owner-locked, while the measured top-8 quality
+gate failed at 61.8%-76.5% versus the 90% target. See `poc-stage2-report.md` for
+the complete evidence and known provider instability.

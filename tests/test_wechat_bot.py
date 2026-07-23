@@ -442,7 +442,58 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         bot.on_message_callback.assert_awaited_once()
         args = bot.on_message_callback.await_args.args  # type: ignore[union-attr]
         self.assertEqual(args[0].user_id, "user-1")
+        self.assertTrue(args[0].is_ordinary_text)
         self.assertEqual(args[1], "hi")
+
+    async def test_process_inbound_message_marks_quoted_text_nonordinary(self):
+        bot = self._make_bot()
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=True)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        bot._process_media_items = AsyncMock(return_value=None)
+        bot.on_message_callback = AsyncMock()
+
+        await bot._process_inbound_message(
+            {
+                "message_id": "mid-quoted",
+                "from_user_id": "user-1",
+                "item_list": [
+                    {
+                        "type": "TEXT",
+                        "text_item": {"text": "reply"},
+                        "ref_msg": {"title": "quoted"},
+                    }
+                ],
+            }
+        )
+        await asyncio.gather(*tuple(bot._message_callback_tasks))
+
+        context = bot.on_message_callback.await_args.args[0]  # type: ignore[union-attr]
+        self.assertFalse(context.is_ordinary_text)
+
+    async def test_denied_memory_command_reaches_only_safe_handler(self):
+        bot = self._make_bot()
+        bot.check_authorization = lambda **kwargs: AuthResult(
+            allowed=False,
+            denial="unbound_dm",
+            is_dm=True,
+            dispatch_to_safe_handler=True,
+        )
+        bot.dispatch_text_command = AsyncMock(return_value=True)
+        bot._process_media_items = AsyncMock(return_value=None)
+        bot.on_message_callback = AsyncMock()
+        bot.send_message = AsyncMock()
+
+        await bot._process_inbound_message(
+            {
+                "message_id": "mid-memory",
+                "from_user_id": "user-1",
+                "item_list": [{"type": 1, "text_item": {"text": "/memory status"}}],
+            }
+        )
+
+        bot.dispatch_text_command.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+        bot.on_message_callback.assert_not_awaited()
 
     async def test_process_inbound_message_sends_pending_bind_menu_hint_once(self):
         SettingsStore.reset_instance()
