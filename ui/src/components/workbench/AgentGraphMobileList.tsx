@@ -45,9 +45,14 @@ export const AgentGraphMobileList: React.FC<AgentGraphMobileListProps> = ({
             </span>
           )}
           {trigger && (
-            <span className="inline-flex w-fit items-center gap-1 rounded-md border border-violet/40 bg-violet-soft px-1.5 py-0.5 text-[10px] font-medium text-violet">
+            <span
+              className={`inline-flex w-fit items-center gap-1 rounded-md border border-violet/40 bg-violet-soft px-1.5 py-0.5 text-[10px] font-medium text-violet${
+                trigger.enabled ? '' : ' opacity-60'
+              }`}
+            >
               {trigger.definition_type === 'watch' ? <Eye className="size-2.5" /> : <CalendarClock className="size-2.5" />}
               {trigger.name ?? trigger.definition_id}
+              {!trigger.enabled && <span className="text-muted"> · {t('agents.graph.trigger.disabled')}</span>}
             </span>
           )}
           <div className="h-[92px]">

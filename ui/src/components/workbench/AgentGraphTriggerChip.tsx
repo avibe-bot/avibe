@@ -25,6 +25,11 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
   const Icon = isWatch ? Eye : CalendarClock;
   const kindLabel = isWatch ? t('agents.graph.trigger.watch') : t('agents.graph.trigger.task');
   const name = trigger.name?.trim() || trigger.definition_id;
+  // A10: a disabled definition keeps its chip only because it fired in-window
+  // (it explains lineage) — dim it and tag it so it reads as historical. The
+  // interaction fade (hover de-emphasis) takes precedence so exactly one opacity
+  // applies.
+  const disabled = !trigger.enabled;
 
   return (
     <button
@@ -33,7 +38,7 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
       title={name}
       className={clsx(
         'flex h-full w-full items-center gap-2 rounded-xl border border-violet/40 bg-violet-soft px-3 py-2 text-left transition hover:brightness-110',
-        faded && 'opacity-25',
+        faded ? 'opacity-25' : disabled && 'opacity-60',
         className,
       )}
     >
@@ -44,6 +49,7 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
         <span className="truncate text-[12px] font-semibold text-foreground">{name}</span>
         <span className="truncate font-mono text-[10px] uppercase tracking-wide text-violet">
           {kindLabel}
+          {disabled && <span className="text-muted"> · {t('agents.graph.trigger.disabled')}</span>}
           {trigger.schedule_label && <span className="text-muted"> · {trigger.schedule_label}</span>}
         </span>
       </div>
