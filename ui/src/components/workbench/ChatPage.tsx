@@ -24,7 +24,7 @@ import {
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
-import { chatTriggerLink, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
+import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -3040,23 +3040,6 @@ const ThinkingBubble: React.FC<{ session: WorkbenchSession }> = ({ session }) =>
   );
 };
 
-// Maps a harness trigger kind (the ``author_name`` on a source='harness' row)
-// to a friendly provenance label. Distinguishes Task vs Watch per the spec; a
-// finer kind (webhook) gets its own label, anything else falls back.
-const harnessLabel = (kind: string | null | undefined, t: (k: string) => string): string => {
-  switch (kind) {
-    case 'watch':
-      return t('chat.source.watch');
-    case 'webhook':
-      return t('chat.source.webhook');
-    case 'scheduled':
-    case 'task_run':
-      return t('chat.source.scheduled');
-    default:
-      return t('chat.source.harness');
-  }
-};
-
 type MessageRowProps = {
   message: WorkbenchMessage;
   session: WorkbenchSession;
@@ -3236,11 +3219,11 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
                 onClick={() => navigate(triggerLink.to)}
                 className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
               >
-                {harnessLabel(message.author_name, t)}
+                {t(harnessChipLabelKey(message))}
                 <ArrowUpRight className="size-3 shrink-0" />
               </button>
             ) : (
-              <span className="text-[11px] font-medium text-cyan">{harnessLabel(message.author_name, t)}</span>
+              <span className="text-[11px] font-medium text-cyan">{t(harnessChipLabelKey(message))}</span>
             )}
             {triggerLink?.kind === 'source' && (
               // A9a: agent-callback shows the SOURCE session + links to its chat.

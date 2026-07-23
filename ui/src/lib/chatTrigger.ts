@@ -78,3 +78,20 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
   }
   return null;
 }
+
+// i18n key for a harness chip's leading label. Branches on source presence:
+//  - a resolved agent callback (source_session_id set) uses the "From" PREFIX
+//    (chat.source.from) that leads into the source-session link → "From · <title>↗".
+//  - an unresolved one (source deleted, or a pre-enrichment live row) falls back to
+//    the SELF-CONTAINED "From agent" (chat.source.harness) — still source semantics,
+//    never the mechanism-flavored "Automated" that read as system-triggered.
+//  - Task / Watch / Webhook keep their own self-contained labels.
+// Pure so the branch is unit-tested alongside chatTriggerLink.
+export function harnessChipLabelKey(message: TriggerFields): string {
+  if (message.source === 'harness' && message.source_session_id) return 'chat.source.from';
+  const kind = message.author_name;
+  if (kind === 'watch') return 'chat.source.watch';
+  if (kind === 'webhook') return 'chat.source.webhook';
+  if (TASK_KINDS.has(kind ?? '')) return 'chat.source.scheduled';
+  return 'chat.source.harness';
+}
