@@ -287,6 +287,25 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
     ]
 
 
+def test_memory_sync_read_helper_sends_agent_capability_headers(socket_path):
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(200, json={"state": "ready"})
+
+    with patch("vibe.internal_client.httpx.HTTPTransport", return_value=httpx.MockTransport(handler)):
+        result = internal_client.memory_status_sync(
+            caller_session_id="ses-admin",
+            capability="cap-admin",
+            socket_path=socket_path,
+        )
+
+    assert result["body"] == {"state": "ready"}
+    assert captured["x-avibe-caller-session"] == "ses-admin"
+    assert captured["x-avibe-memory-capability"] == "cap-admin"
+
+
 def test_notify_vault_request_created_round_trip(tmp_path, socket_path):
     app = FastAPI()
     captured: dict = {}

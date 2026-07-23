@@ -296,6 +296,7 @@ def cmd_memory(args) -> int:
     """Present direct Memory reads from the controller's verified UDS only."""
 
     from vibe import internal_client
+    from core.caller_context import caller_context_from_env
 
     operation = args.memory_command
     as_json = bool(getattr(args, "json", False))
@@ -314,12 +315,21 @@ def cmd_memory(args) -> int:
         ):
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
+        caller = caller_context_from_env()
+        access = (
+            {
+                "caller_session_id": caller.session_id,
+                "capability": caller.memory_cli_capability,
+            }
+            if caller is not None
+            else {}
+        )
         if operation == "status":
-            response = internal_client.memory_status_sync()
+            response = internal_client.memory_status_sync(**access)
         elif operation == "profile":
-            response = internal_client.memory_profile_sync()
+            response = internal_client.memory_profile_sync(**access)
         else:
-            response = internal_client.memory_search_sync(query, args.limit)
+            response = internal_client.memory_search_sync(query, args.limit, **access)
     except internal_client.InternalServerUnavailable:
         return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
 

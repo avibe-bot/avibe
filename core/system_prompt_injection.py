@@ -137,28 +137,31 @@ def memory_cli_prompt_admitted(controller: Any, context: MessageContext) -> bool
     """Advertise local Memory reads only on an eligible interactive owner turn."""
 
     config = getattr(controller, "config", None)
-    if not bool(getattr(getattr(config, "memory", None), "enabled", False)):
-        return False
-
     payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
     turn_source = str(payload.get("turn_source") or "human").strip()
-    if turn_source != "human" or payload.get("task_trigger_kind"):
-        return False
+    admitted = bool(getattr(getattr(config, "memory", None), "enabled", False))
+    admitted = admitted and turn_source == "human" and not payload.get("task_trigger_kind")
+    if admitted:
+        platform = resolve_context_platform(
+            context,
+            fallback_platform=getattr(config, "platform", None),
+        )
+        if platform == "avibe":
+            admitted = payload.get("memory_cli_admitted") is True
+        else:
+            admit = getattr(controller, "memory_im_admitted", None)
+            try:
+                admitted = bool(admit(context)) if callable(admit) else False
+            except Exception:
+                admitted = False
 
-    platform = resolve_context_platform(
-        context,
-        fallback_platform=getattr(config, "platform", None),
-    )
-    if platform == "avibe":
-        return payload.get("memory_cli_admitted") is True
-
-    admit = getattr(controller, "memory_im_admitted", None)
-    if not callable(admit):
-        return False
-    try:
-        return bool(admit(context))
-    except Exception:
-        return False
+    configure_access = getattr(controller, "configure_memory_cli_access", None)
+    if callable(configure_access):
+        try:
+            return bool(configure_access(context, admitted=admitted))
+        except Exception:
+            return False
+    return admitted
 
 
 _QUICK_REPLIES_PROMPT = """\

@@ -8,6 +8,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.controller import Controller
+from core.memory.cli_access import MemoryCliAccessRegistry
 from core.reply_enhancer import process_reply
 from core.system_prompt_injection import build_system_prompt_injection, memory_cli_prompt_admitted
 from config import paths
@@ -288,6 +290,31 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         controller.config.memory.enabled = False
         self.assertFalse(memory_cli_prompt_admitted(controller, workbench))
+
+    def test_memory_cli_prompt_admission_grants_and_revokes_execution_capability(self):
+        controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
+            memory_cli_access=MemoryCliAccessRegistry(),
+        )
+        controller.configure_memory_cli_access = Controller.configure_memory_cli_access.__get__(controller)
+        context = MessageContext(
+            user_id="owner",
+            channel_id="session",
+            platform="avibe",
+            platform_specific={
+                "memory_cli_admitted": True,
+                "agent_session_target": {"id": "ses-owner", "agent_backend": "codex"},
+            },
+        )
+
+        self.assertTrue(memory_cli_prompt_admitted(controller, context))
+        capability = context.platform_specific["memory_cli_capability"]
+        self.assertTrue(controller.memory_cli_access.validate("ses-owner", capability))
+
+        context.platform_specific["memory_cli_admitted"] = False
+        self.assertFalse(memory_cli_prompt_admitted(controller, context))
+        self.assertNotIn("memory_cli_capability", context.platform_specific)
+        self.assertFalse(controller.memory_cli_access.validate("ses-owner", capability))
 
     def test_process_reply_strips_silent_blocks_before_enhancements(self):
         reply = process_reply(

@@ -3030,7 +3030,9 @@ def config_get():
     # default is never mistaken for a completed setup. The write side
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
-    return jsonify(api.config_to_payload(config))
+    payload = api.config_to_payload(config)
+    payload.pop("memory", None)
+    return jsonify(payload)
 
 
 _MODEL_HUB_ENGINE_ADAPTER = None
@@ -4513,6 +4515,7 @@ async def config_post():
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
     response_payload = api.config_to_payload(config)
+    response_payload.pop("memory", None)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:

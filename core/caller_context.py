@@ -11,6 +11,7 @@ AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
 AVIBE_CALLER_SOURCE_ENV = "AVIBE_CALLER_SOURCE"
 AVIBE_CALLER_BACKEND_ENV = "AVIBE_CALLER_BACKEND"
 AVIBE_NATIVE_SESSION_ID_ENV = "AVIBE_NATIVE_SESSION_ID"
+AVIBE_MEMORY_CLI_CAPABILITY_ENV = "AVIBE_MEMORY_CLI_CAPABILITY"
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class CallerContext:
     source: Optional[str] = None
     backend: Optional[str] = None
     native_session_id: Optional[str] = None
+    memory_cli_capability: Optional[str] = None
 
     def to_env(self) -> dict[str, str]:
         env = {AVIBE_SESSION_ID_ENV: self.session_id}
@@ -33,6 +35,8 @@ class CallerContext:
             env[AVIBE_CALLER_BACKEND_ENV] = self.backend
         if self.native_session_id:
             env[AVIBE_NATIVE_SESSION_ID_ENV] = self.native_session_id
+        if self.memory_cli_capability:
+            env[AVIBE_MEMORY_CLI_CAPABILITY_ENV] = self.memory_cli_capability
         return env
 
     def to_metadata(self) -> dict[str, str]:
@@ -70,6 +74,7 @@ def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[Ca
         source=_clean(source.get(AVIBE_CALLER_SOURCE_ENV)) or None,
         backend=_clean(source.get(AVIBE_CALLER_BACKEND_ENV)) or None,
         native_session_id=_clean(source.get(AVIBE_NATIVE_SESSION_ID_ENV)) or None,
+        memory_cli_capability=_clean(source.get(AVIBE_MEMORY_CLI_CAPABILITY_ENV)) or None,
     )
 
 
@@ -100,6 +105,7 @@ def caller_context_from_platform_payload(payload: Mapping[str, object] | None) -
         source=source or None,
         backend=backend or None,
         native_session_id=native_session_id or None,
+        memory_cli_capability=_clean(payload.get("memory_cli_capability")) or None,
     )
 
 

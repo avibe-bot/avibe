@@ -15,6 +15,7 @@ MemoryFailureKind = Literal[
 MemoryErrorCode = Literal[
     "memory_disabled",
     "memory_invalid_input",
+    "memory_access_denied",
     "memory_input_too_large",
     "memory_queue_full",
     "memory_low_disk_space",
@@ -33,6 +34,7 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
     {
         "memory_disabled",
         "memory_invalid_input",
+        "memory_access_denied",
         "memory_input_too_large",
         "memory_queue_full",
         "memory_low_disk_space",

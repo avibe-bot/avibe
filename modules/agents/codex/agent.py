@@ -1284,8 +1284,10 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh thread-level instructions for already-cached Codex threads."""
         self.ensure_agent_session_id(request)
-        caller_env = self._caller_env_for_request(request)
         developer_instructions = self._build_thread_developer_instructions(request)
+        # Building the instructions also grants/revokes the per-turn Memory CLI
+        # capability, so resolve the caller environment only after that decision.
+        caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 
         if not hasattr(self, "_thread_developer_instructions"):

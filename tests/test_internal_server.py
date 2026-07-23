@@ -298,6 +298,66 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     assert captured_request.session_id == "session-1"
 
 
+def test_memory_internal_reads_reject_an_unverified_agent_capability():
+    controller = _build_controller_double()
+    calls: list[str] = []
+
+    class _Runtime:
+        async def profile_payload(self):
+            calls.append("profile")
+            return {"status": "ok", "items": []}
+
+    controller.memory_runtime = _Runtime()
+    controller.memory_cli_access = types.SimpleNamespace(validate=lambda _session_id, _capability: False)
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    "X-Avibe-Caller-Session": "ses-non-admin",
+                    "X-Avibe-Memory-Capability": "forged",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 403
+    assert response.json() == {"status": "failed", "error": "memory_access_denied"}
+    assert calls == []
+
+
+def test_memory_internal_reads_accept_a_session_bound_agent_capability():
+    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER, MemoryCliAccessRegistry
+
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []})
+    )
+    controller.memory_cli_access = MemoryCliAccessRegistry()
+    capability = controller.memory_cli_access.grant("ses-admin")
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    CALLER_SESSION_HEADER: "ses-admin",
+                    MEMORY_CAPABILITY_HEADER: capability,
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
+    controller.memory_runtime.profile_payload.assert_awaited_once_with()
+
+
 def test_memory_capture_endpoint_returns_after_durable_capture_handoff():
     controller = _build_controller_double()
     capture_started = asyncio.Event()

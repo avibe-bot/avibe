@@ -457,8 +457,21 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.warning("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
+    def _memory_read_denied(request: Request) -> bool:
+        from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        capability = str(request.headers.get(MEMORY_CAPABILITY_HEADER) or "").strip()
+        if not session_id and not capability:
+            return False
+        registry = getattr(controller, "memory_cli_access", None)
+        validate = getattr(registry, "validate", None)
+        return not callable(validate) or not bool(validate(session_id, capability))
+
     @app.get("/internal/memory/status")
-    async def _memory_status() -> Any:
+    async def _memory_status(request: Request) -> Any:
+        if _memory_read_denied(request):
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
@@ -480,7 +493,9 @@ def create_app(controller: "Controller") -> FastAPI:
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
     @app.get("/internal/memory/profile")
-    async def _memory_profile() -> Any:
+    async def _memory_profile(request: Request) -> Any:
+        if _memory_read_denied(request):
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
@@ -492,6 +507,8 @@ def create_app(controller: "Controller") -> FastAPI:
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
+        if _memory_read_denied(request):
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})

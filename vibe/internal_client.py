@@ -448,24 +448,42 @@ async def memory_clear(
 
 def memory_status_sync(
     *,
+    caller_session_id: str | None = None,
+    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    return _memory_request_sync("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
+    return _memory_request_sync(
+        "GET",
+        "/internal/memory/status",
+        headers=_memory_cli_access_headers(caller_session_id, capability),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
 
 
 def memory_profile_sync(
     *,
+    caller_session_id: str | None = None,
+    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
-    return _memory_request_sync("GET", "/internal/memory/profile", socket_path=socket_path, timeout=timeout)
+    return _memory_request_sync(
+        "GET",
+        "/internal/memory/profile",
+        headers=_memory_cli_access_headers(caller_session_id, capability),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
 
 
 def memory_search_sync(
     query: str,
     limit: int,
     *,
+    caller_session_id: str | None = None,
+    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
@@ -473,6 +491,7 @@ def memory_search_sync(
         "POST",
         "/internal/memory/search",
         payload={"query": query, "limit": limit},
+        headers=_memory_cli_access_headers(caller_session_id, capability),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -509,6 +528,7 @@ def _memory_request_sync(
     route: str,
     *,
     payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
     socket_path: Optional[Path] = None,
     timeout: float,
 ) -> dict[str, Any]:
@@ -520,7 +540,7 @@ def _memory_request_sync(
             base_url="http://localhost",
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
-            response = client.request(method, route, json=payload)
+            response = client.request(method, route, json=payload, headers=headers)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     try:
@@ -528,6 +548,19 @@ def _memory_request_sync(
     except ValueError:
         body = {"status": "failed", "error": "memory_provider_response_invalid"}
     return {"status_code": response.status_code, "body": body}
+
+
+def _memory_cli_access_headers(session_id: str | None, capability: str | None) -> dict[str, str] | None:
+    session_id = str(session_id or "").strip()
+    capability = str(capability or "").strip()
+    if not session_id:
+        return None
+    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
+
+    headers = {CALLER_SESSION_HEADER: session_id}
+    if capability:
+        headers[MEMORY_CAPABILITY_HEADER] = capability
+    return headers
 
 
 async def notify_vault_request_created(

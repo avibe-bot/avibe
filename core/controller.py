@@ -198,6 +198,9 @@ class Controller:
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
+        from core.memory.cli_access import MemoryCliAccessRegistry
+
+        self.memory_cli_access = MemoryCliAccessRegistry()
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -1235,6 +1238,22 @@ class Controller:
             # Direct Memory reads and capture must never turn a settings read
             # failure into an implicit authorization grant.
             return False
+
+    def configure_memory_cli_access(self, context: MessageContext, *, admitted: bool) -> bool:
+        """Publish or revoke the CLI capability for this Agent session."""
+
+        from core.caller_context import caller_context_from_platform_payload
+
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        caller = caller_context_from_platform_payload(payload)
+        if caller is None:
+            return False
+        if not admitted:
+            self.memory_cli_access.revoke(caller.session_id)
+            payload.pop("memory_cli_capability", None)
+            return False
+        payload["memory_cli_capability"] = self.memory_cli_access.grant(caller.session_id)
+        return True
 
     def _memory_feature_enabled(self) -> bool:
         memory_config = getattr(getattr(self, "config", None), "memory", None)

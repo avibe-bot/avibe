@@ -32,7 +32,6 @@ import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
 import type {
   MemoryEndpointConfig,
-  MemoryEndpointPatch,
   MemoryFailureLogEntry,
   MemoryItem,
   MemorySettings,
@@ -41,6 +40,8 @@ import type {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { memoryStatusBuckets } from '../../lib/memoryStatus';
+import { buildEndpointPatch, draftFromConfig } from '../../lib/memorySettings';
+import type { EndpointDraft } from '../../lib/memorySettings';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
 
@@ -97,46 +98,6 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-type EndpointDraft = { baseUrl: string; model: string; apiKey: string; clearKey: boolean };
-
-const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
-  baseUrl: config.base_url ?? '',
-  model: config.model ?? '',
-  apiKey: '',
-  clearKey: false,
-});
-
-// `allowClear` gates the explicit `api_key: null` clear. Slice 2 rejects a null-key patch when the
-// resulting state is enabled (memory_key_clear_while_enabled), so the caller only allows a clear
-// while Memory stays disabled — a cleared-then-enabled combo in one save simply keeps the key.
-function buildEndpointPatch(
-  draft: EndpointDraft,
-  original: MemoryEndpointConfig,
-  allowClear: boolean,
-): MemoryEndpointPatch | undefined {
-  const patch: MemoryEndpointPatch = {};
-  let changed = false;
-  const baseUrl = draft.baseUrl.trim() || null;
-  if (baseUrl !== (original.base_url ?? null)) {
-    patch.base_url = baseUrl;
-    changed = true;
-  }
-  const model = draft.model.trim() || null;
-  if (model !== (original.model ?? null)) {
-    patch.model = model;
-    changed = true;
-  }
-  const trimmedKey = draft.apiKey.trim();
-  if (trimmedKey) {
-    patch.api_key = trimmedKey;
-    changed = true;
-  } else if (draft.clearKey && allowClear) {
-    patch.api_key = null;
-    changed = true;
-  }
-  return changed ? patch : undefined;
-}
-
 // One LLM/embedding endpoint's fields. `locked` disables base_url/model edits — used for the
 // embedding endpoint once memory data exists (plan §7: changing it would mix vector spaces).
 const EndpointFields: React.FC<{
@@ -150,7 +111,7 @@ const EndpointFields: React.FC<{
   canClearKey: boolean;
 }> = ({ title, draft, original, onChange, disabled, locked, lockedHint, canClearKey }) => {
   const { t } = useTranslation();
-  const fieldsDisabled = disabled || locked;
+  const identityFieldsDisabled = disabled || locked;
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
@@ -173,7 +134,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
             value={draft.baseUrl}
-            disabled={fieldsDisabled}
+            disabled={identityFieldsDisabled}
             placeholder={t('memory.settings.baseUrlPlaceholder')}
             onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
             className="text-[13px]"
@@ -183,7 +144,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
             value={draft.model}
-            disabled={fieldsDisabled}
+            disabled={identityFieldsDisabled}
             placeholder={t('memory.settings.modelPlaceholder')}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
             className="text-[13px]"
@@ -196,15 +157,13 @@ const EndpointFields: React.FC<{
           type="password"
           autoComplete="off"
           value={draft.apiKey}
-          // Locked (embedding + data exists) disables the key field too: the whole embedding
-          // patch is discarded on save, so an editable key would falsely report a saved change.
-          disabled={fieldsDisabled || draft.clearKey}
+          disabled={disabled || draft.clearKey}
           placeholder={t('memory.settings.apiKeyPlaceholder')}
           onChange={(e) => onChange({ ...draft, apiKey: e.target.value, clearKey: false })}
           className="text-[13px]"
         />
         <p className="text-[11px] text-muted">{t('memory.settings.apiKeyClearHint')}</p>
-        {canClearKey && original.has_api_key && !locked ? (
+        {canClearKey && original.has_api_key ? (
           <button
             type="button"
             role="checkbox"
@@ -707,7 +666,11 @@ const SettingsPanel: React.FC<{
   // drop the embedding patch (locked) yet report success — a silent discard.
   useEffect(() => {
     if (embeddingDataLock) {
-      setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
+      setEmbeddingDraft((draft) => ({
+        ...draftFromConfig(settings.processing.embedding),
+        apiKey: draft.apiKey,
+        clearKey: draft.clearKey,
+      }));
     }
   }, [embeddingDataLock, settings]);
 
@@ -720,11 +683,12 @@ const SettingsPanel: React.FC<{
       // A key clear is accepted only while the resulting state stays disabled (Slice 2).
       const allowClear = !enabledDraft;
       const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
-      // Never build an embedding patch while the endpoint is locked (data exists OR status not yet
-      // resolved) — otherwise a change would be dropped here while the save still reports success.
-      const embeddingPatch = embeddingLocked
-        ? undefined
-        : buildEndpointPatch(embeddingDraft, settings.processing.embedding, allowClear);
+      const embeddingPatch = buildEndpointPatch(
+        embeddingDraft,
+        settings.processing.embedding,
+        allowClear,
+        embeddingLocked,
+      );
       if (llmPatch || embeddingPatch) {
         patch.processing = {};
         if (llmPatch) patch.processing.llm = llmPatch;

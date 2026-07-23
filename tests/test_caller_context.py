@@ -3,6 +3,7 @@ from __future__ import annotations
 from core.caller_context import (
     AVIBE_CALLER_BACKEND_ENV,
     AVIBE_CALLER_SOURCE_ENV,
+    AVIBE_MEMORY_CLI_CAPABILITY_ENV,
     AVIBE_NATIVE_SESSION_ID_ENV,
     AVIBE_RUN_ID_ENV,
     AVIBE_SESSION_ID_ENV,
@@ -23,6 +24,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
             AVIBE_CALLER_SOURCE_ENV: "agent_run",
             AVIBE_CALLER_BACKEND_ENV: "codex",
             AVIBE_NATIVE_SESSION_ID_ENV: "thread789",
+            AVIBE_MEMORY_CLI_CAPABILITY_ENV: "memory-capability",
         }
     )
 
@@ -36,6 +38,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
     }
     caller_env = context.to_env()
     assert caller_env[AVIBE_SESSION_ID_ENV] == "ses123"
+    assert caller_env[AVIBE_MEMORY_CLI_CAPABILITY_ENV] == "memory-capability"
     assert "PATH" not in caller_env
 
 
@@ -50,6 +53,7 @@ def test_caller_context_from_platform_payload_prefers_agent_session_target() -> 
                 "agent_backend": "opencode",
                 "native_session_id": "oc-session",
             },
+            "memory_cli_capability": "memory-capability",
         }
     )
 
@@ -62,6 +66,7 @@ def test_caller_context_from_platform_payload_prefers_agent_session_target() -> 
         "native_session_id": "oc-session",
     }
     assert context.to_env()[AVIBE_NATIVE_SESSION_ID_ENV] == "oc-session"
+    assert context.to_env()[AVIBE_MEMORY_CLI_CAPABILITY_ENV] == "memory-capability"
 
 
 def test_caller_context_from_platform_payload_preserves_callback_source() -> None:
