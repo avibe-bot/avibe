@@ -34,10 +34,6 @@ class MigrationConflictError(ValueError):
     pass
 
 
-class MigrationConsentRequiredError(ValueError):
-    pass
-
-
 class MigrationHost(Protocol):
     store: Any
     adapter: Any
@@ -257,30 +253,19 @@ def _codex_items(
     tokens = auth_data.get("tokens") if isinstance(auth_data, dict) else None
     if not isinstance(tokens, dict):
         return items
-    access_token = tokens.get("access_token")
-    if not isinstance(access_token, str) or not access_token.strip():
-        return items
-    access_token = access_token.strip()
 
-    action: MigrationAction = (
-        "controlled_import"
-        if config.subscription_hub_experimental
-        else "keep_native"
-    )
+    action: MigrationAction = "keep_native"
     item_id, source_id = _ids(
         "codex",
         "oauth_native",
         "auth-json",
         action,
-        _stable_suffix(access_token),
     )
     account = state.get("chatgpt_account")
     account_label = _safe_account_label(
         account.get("email") if isinstance(account, dict) else None
     )
     detail = account_label or "Codex auth.json"
-    if action == "controlled_import":
-        detail = f"{detail} · {mask_credential(access_token)}"
     items.append(
         NativeMigrationItem(
             id=item_id,
@@ -291,14 +276,13 @@ def _codex_items(
             proposed_action=action,
             selected=True,
             notes_key=(
-                "models.migration.controlled_import.experimental"
-                if action == "controlled_import"
+                "models.migration.keep_native.reauthorize_in_hub"
+                if config.subscription_hub_experimental
                 else "models.migration.keep_native.sanctioned"
             ),
             vendor="openai",
             protocol="openai_responses",
             display_name="ChatGPT",
-            secret=access_token,
             account_label=account_label,
         )
     )
@@ -484,20 +468,6 @@ async def apply_native_migration(
         )
         by_id = {item.id: item for item in available}
         missing = [item_id for item_id in item_ids if item_id not in by_id]
-        if missing and not previous.subscription_hub_experimental:
-            enabled = host._clone_config(previous)
-            enabled.subscription_hub_experimental = True
-            controlled_ids = {
-                item.id
-                for item in scan_native_configs(
-                    enabled,
-                    mask_credential=mask_credential,
-                    claude_oauth_probe=host.migration_claude_oauth_probe,
-                )
-                if item.proposed_action == "controlled_import"
-            }
-            if any(item_id in controlled_ids for item_id in missing):
-                raise MigrationConsentRequiredError
         if missing:
             raise MigrationConflictError
 
@@ -516,7 +486,9 @@ async def apply_native_migration(
                     now=host.now(),
                     validate_base_url=validate_base_url,
                 )
-                if item.proposed_action in {"import", "controlled_import"}:
+                if item.proposed_action == "controlled_import":
+                    raise MigrationConflictError
+                if item.proposed_action == "import":
                     if not item.secret:
                         raise MigrationConflictError
                     credential_ref = await host._engine_call(

@@ -47,11 +47,11 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
   - id: MH-MIG-003
-    name: Codex controlled import requires the experimental flag
+    name: Experimental mode keeps native OAuth files in their CLI stores
     status: covered
     kind: migration
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_controlled_import_is_flag_gated
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_experimental_flag_keeps_oauth_native
   - id: MH-OAUTH-A-001
     name: Paste-code OAuth happy path
     status: partial

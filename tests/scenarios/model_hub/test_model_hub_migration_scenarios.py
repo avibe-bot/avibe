@@ -335,7 +335,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     assert adapter.provisioned == []
 
 
-def test_mh_mig_003_controlled_import_is_flag_gated(
+def test_mh_mig_003_experimental_flag_keeps_oauth_native(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -346,19 +346,19 @@ def test_mh_mig_003_controlled_import_is_flag_gated(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     store.config.subscription_hub_experimental = True
-    controlled = next(
+    oauth_item = next(
         item
         for item in service.migration_scan()["items"]
-        if item["proposed_action"] == "controlled_import"
+        if item["kind"] == "oauth_native"
     )
-    assert controlled["proposed_action"] == "controlled_import"
+    assert oauth_item["proposed_action"] == "keep_native"
+    assert oauth_item["notes_key"] == "models.migration.keep_native.reauthorize_in_hub"
 
-    store.config.subscription_hub_experimental = False
-    with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply([controlled["id"]]))
-    assert error.value.code == "consent_required"
+    result = asyncio.run(service.migration_apply([oauth_item["id"]]))
+    assert result["applied"] == 1
     assert adapter.provisioned == []
-    assert store.config.sources == []
+    assert len(store.config.sources) == 1
+    assert store.config.sources[0].supply_channel == "native_cli"
 
 
 def test_opencode_auth_only_custom_provider_without_base_url_is_not_importable(

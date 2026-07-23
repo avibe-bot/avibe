@@ -47,7 +47,6 @@ from .events import (
 from .identifiers import opencode_model_id, opencode_provider_id, parse_opencode_model_id
 from .migration import (
     MigrationConflictError,
-    MigrationConsentRequiredError,
     apply_native_migration,
     scan_native_configs,
 )
@@ -1140,8 +1139,6 @@ class ModelHubService:
                 mask_credential=_mask_credential,
                 validate_base_url=_validated_base_url,
             )
-        except MigrationConsentRequiredError:
-            raise ModelHubError("consent_required", status=409) from None
         except MigrationConflictError:
             raise ModelHubError("migration_item_conflict", status=409)
         return {"applied": applied, "sources": self.list_sources()}
