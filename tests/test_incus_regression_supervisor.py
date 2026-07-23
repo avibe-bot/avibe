@@ -155,3 +155,44 @@ def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
 
     assert "restarting" in statuses
     assert "error" not in statuses
+
+
+def test_main_adopts_scoped_service_lock_holder(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
+    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True: 100)
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(runtime, "start_ui", lambda host, port: 333)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 200)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {200, 333})
+
+    waited: list[tuple[int, float]] = []
+
+    def wait_for_ready(pid, timeout):
+        waited.append((pid, timeout))
+        return 200
+
+    monkeypatch.setattr(runtime, "wait_for_service_ready", wait_for_ready)
+
+    statuses: list[tuple[str, int | None, int | None]] = []
+    monkeypatch.setattr(
+        runtime,
+        "write_status",
+        lambda state, _message, service_pid=None, ui_pid=None: statuses.append((state, service_pid, ui_pid)),
+    )
+
+    class _Stop(Exception):
+        pass
+
+    def stop_on_sleep(_seconds):
+        raise _Stop()
+
+    monkeypatch.setattr(supervisor.time, "sleep", stop_on_sleep)
+
+    with pytest.raises(_Stop):
+        supervisor.main()
+
+    assert waited == [(100, runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)]
+    assert statuses[0] == ("running", 200, 333)
