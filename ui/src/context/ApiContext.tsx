@@ -4,6 +4,7 @@ import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
   WorkbenchEventReconnectLoop,
@@ -1907,6 +1908,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Feed a locally-synthesized session.activity event through the SAME handler
+  // set + read-cache invalidation the SSE 'session.activity' listener uses, so a
+  // client-originated change (e.g. a visibility PATCH) reconciles every workbench
+  // cache via its own reducer even when the SSE stream is down. Idempotent with a
+  // later real SSE event carrying the same change.
+  const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
+    if (data.session_id) clearSessionReadCache(data.session_id);
+    dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
+  };
+
   const setWorkbenchEventConnectionState = (state: WorkbenchEventConnectionState) => {
     if (eventConnectionStateRef.current === state) return;
     eventConnectionStateRef.current = state;
@@ -2881,8 +2892,26 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getJson(qs ? `/api/agents-graph?${qs}` : '/api/agents-graph');
     },
-    setSessionVisibility: (sessionId, visibility) =>
-      patchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { visibility }),
+    setSessionVisibility: async (sessionId, visibility) => {
+      const session = (await patchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        visibility,
+      })) as WorkbenchSession;
+      // Single chokepoint: replay the committed PATCH as the same session.activity
+      // event sequence the backend emits, through the existing workbench-event
+      // pipeline, so the projects tree AND the inbox reconcile via their own
+      // reducers even when the SSE stream is down (remote/mobile). Any caller
+      // (sidebar hide, graph toggle) inherits this; a real SSE event arriving
+      // later is an idempotent no-op.
+      for (const event of visibilityActivityEvents({
+        sessionId,
+        scopeId: session.scope_id,
+        title: session.title,
+        visibility,
+      })) {
+        emitLocalSessionActivity(event);
+      }
+      return session;
+    },
     getRunningAgents: async () => {
       const res = await apiFetch('/api/running-agents');
       // 503/504 means controller is down; surface as unreachable instead of throwing.

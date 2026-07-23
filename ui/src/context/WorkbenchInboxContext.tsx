@@ -26,12 +26,6 @@ interface InboxState {
   refresh: () => Promise<void>;
   loadMore: () => Promise<void>;
   markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
-  /** Drop a session's card + unread entry now (used when it's hidden to the
-   *  background so the Inbox reflects it without waiting for the SSE event). */
-  dropSession: (sessionId: string) => void;
-  /** Re-fetch one session and upsert its card if it still belongs in the Inbox
-   *  (foreground + unread); used to restore it after an Undo. */
-  reconcileSession: (sessionId: string) => Promise<void>;
 }
 
 const WorkbenchInboxContext = createContext<InboxState | undefined>(undefined);
@@ -219,20 +213,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     [api, applyUnreadMap],
   );
 
-  // Drop a session's inbox card + unread entry immediately. Shared by the SSE
-  // 'drop' branch and the Hide-to-background PATCH-response path, so a now-hidden
-  // session leaves the Inbox feed + badge without waiting for a reconnect/refresh
-  // to filter it (single source for both). No-op if the session isn't tracked.
-  const dropSession = useCallback((sessionId: string) => {
-    setInboxSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
-    setUnreadBySession((prev) => {
-      if (!(sessionId in prev)) return prev;
-      const next = { ...prev };
-      delete next[sessionId];
-      return next;
-    });
-  }, []);
-
   useEffect(() => {
     // First mount loads page one; every later rerun reconciles the loaded window
     // instead when an ``api`` identity change rebuilds the value — so
@@ -276,7 +256,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         if (action === 'ignore') return;
         // action === 'drop': remove the card + its unread live, instead of
         // waiting for the next reconnect/refresh to filter it.
-        dropSession(data.session_id);
+        setInboxSessions((prev) => prev.filter((s) => s.session_id !== data.session_id));
+        setUnreadBySession((prev) => {
+          if (!(data.session_id in prev)) return prev;
+          const next = { ...prev };
+          delete next[data.session_id];
+          return next;
+        });
       },
       onError: (err) => {
         // ApiContext owns the explicit reconnect loop. Keep this a log, not a
@@ -285,7 +271,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       },
     });
     return disconnect;
-  }, [api, refresh, reconcile, reconcileSession, dropSession, applyUnreadMap]);
+  }, [api, refresh, reconcile, reconcileSession, applyUnreadMap]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
   // frozen and its SSE socket dropped, and the broker never replays the gap;
@@ -349,8 +335,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       refresh,
       loadMore,
       markRead,
-      dropSession,
-      reconcileSession,
     }),
     [
       inboxSessions,
@@ -363,8 +347,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       refresh,
       loadMore,
       markRead,
-      dropSession,
-      reconcileSession,
     ],
   );
 
