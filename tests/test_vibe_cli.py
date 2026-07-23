@@ -626,7 +626,7 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: calls.append(("start_ui", host, port)) or 5678)
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
-    monkeypatch.setattr(cli.runtime, "wait_for_service_pid", lambda pid, timeout: False)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 1234)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
@@ -651,7 +651,7 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: 5678)
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
-    monkeypatch.setattr(cli.runtime, "wait_for_service_pid", lambda pid, timeout: False)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
 

@@ -220,6 +220,30 @@ class StartScopedServiceResultTests(unittest.TestCase):
                 runtime._start_scoped_service_result(111, initial_ready_timeout=5.0, wait_for_ready=True)
 
 
+class WaitForServiceReadyTests(unittest.TestCase):
+    """Public wait that resolves the authoritative owner for any caller."""
+
+    def test_returns_resolved_owner_when_spawn_pid_is_a_wrapper(self):
+        # spawn pid never records itself; the lock holder is a different pid.
+        with ExitStack() as stack:
+            stack.enter_context(patch("vibe.runtime.service_pid_recorded", side_effect=[False, True]))
+            stack.enter_context(patch("vibe.runtime._adopt_scoped_service_owner", return_value=999))
+            stack.enter_context(patch("vibe.runtime.time.sleep"))
+            self.assertEqual(runtime.wait_for_service_ready(111, 5.0), 999)
+
+    def test_returns_none_when_no_owner_appears(self):
+        times = iter([0.0, 0.0, 10.0])
+        with ExitStack() as stack:
+            stack.enter_context(patch("vibe.runtime.service_pid_recorded", return_value=False))
+            stack.enter_context(patch("vibe.runtime._adopt_scoped_service_owner", return_value=None))
+            stack.enter_context(patch("vibe.runtime._service_start_exit_code", return_value=None))
+            stack.enter_context(patch("vibe.runtime.pid_alive", return_value=True))
+            stack.enter_context(patch("vibe.runtime.resolve_service_owner_pid", return_value=None))
+            stack.enter_context(patch("vibe.runtime.time.sleep"))
+            stack.enter_context(patch("vibe.runtime.time.monotonic", side_effect=lambda: next(times)))
+            self.assertIsNone(runtime.wait_for_service_ready(111, 5.0))
+
+
 class _StopSpawn(Exception):
     pass
 

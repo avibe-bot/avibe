@@ -9585,10 +9585,17 @@ def cmd_start():
     service_ready = runtime.service_pid_recorded(service_pid)
     if not service_ready:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
-        service_ready = runtime.wait_for_service_pid(
+        # Resolve the authoritative service.lock holder rather than waiting on the
+        # raw pid start_service handed back: under a delegated user scope that pid
+        # can be a launcher that never takes the lock, so wait_for_service_ready
+        # adopts and returns the real owner instead of stalling the full timeout.
+        resolved_pid = runtime.wait_for_service_ready(
             service_pid,
             timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
         )
+        if resolved_pid is not None:
+            service_pid = resolved_pid
+            service_ready = True
     if service_ready:
         runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
     elif runtime.pid_alive(service_pid):

@@ -1333,6 +1333,23 @@ def _wait_for_scoped_service_pid(spawn_pid: int, timeout: float) -> int | None:
         time.sleep(0.05)
 
 
+def wait_for_service_ready(
+    spawn_pid: int, timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS
+) -> int | None:
+    """Wait until the service is lock-verified and return the authoritative owner pid.
+
+    Unlike ``wait_for_service_pid()``, which only confirms a *specific* pid, this
+    resolves the real ``service.lock`` holder: if the pid handed back by
+    ``start_service()`` was a launcher/wrapper that never takes the lock (e.g. a
+    surviving ``systemd-run`` parent under some host configuration), this adopts
+    and returns the live lock holder instead of waiting forever on a pid that can
+    never be recorded. Returns the resolved owner pid, or ``None`` if no owner
+    became ready within ``timeout``. In the common case ``spawn_pid`` already IS
+    the owner and this behaves like ``wait_for_service_pid`` returning that pid.
+    """
+    return _wait_for_scoped_service_pid(spawn_pid, timeout)
+
+
 def _start_scoped_service_result(
     spawn_pid: int,
     *,
