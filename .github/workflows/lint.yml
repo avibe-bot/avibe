@@ -107,7 +107,7 @@ jobs:
             uv.lock
 
       - name: Install package and test deps
-        run: uv pip install --system -e . pytest
+        run: uv pip install --system -e . pytest jsonschema
 
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
         run: bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"
