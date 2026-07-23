@@ -45,6 +45,12 @@ from .events import (
     contains_credential_material,
 )
 from .identifiers import opencode_model_id, opencode_provider_id, parse_opencode_model_id
+from .migration import (
+    MigrationConflictError,
+    MigrationConsentRequiredError,
+    apply_native_migration,
+    scan_native_configs,
+)
 from .oauth import (
     NativeOAuthUnavailableError,
     OAuthAdapter,
@@ -350,6 +356,7 @@ class ModelHubService:
         native_oauth_adapter: Optional[OAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
+        migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -360,6 +367,7 @@ class ModelHubService:
         self.revocations = revocations or CredentialRevocationJournal(
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
+        self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.now = now
         self._mutation_lock = asyncio.Lock()
         self._engine_synced = False
@@ -1112,13 +1120,31 @@ class ModelHubService:
         return _runtime_payload(await self._engine_call(self.adapter.status()))
 
     def migration_scan(self) -> dict:
-        # L6 supplies the native-config scanner. Empty is valid and read-only.
-        return {"items": []}
+        config = self.store.load()
+        return {
+            "items": [
+                item.to_payload()
+                for item in scan_native_configs(
+                    config,
+                    mask_credential=_mask_credential,
+                    claude_oauth_probe=self.migration_claude_oauth_probe,
+                )
+            ]
+        }
 
-    def migration_apply(self, item_ids: object) -> dict:
-        if not isinstance(item_ids, list) or item_ids:
+    async def migration_apply(self, item_ids: object) -> dict:
+        try:
+            applied = await apply_native_migration(
+                self,
+                item_ids,
+                mask_credential=_mask_credential,
+                validate_base_url=_validated_base_url,
+            )
+        except MigrationConsentRequiredError:
+            raise ModelHubError("consent_required", status=409) from None
+        except MigrationConflictError:
             raise ModelHubError("migration_item_conflict", status=409)
-        return {"applied": 0, "sources": self.list_sources()}
+        return {"applied": applied, "sources": self.list_sources()}
 
     async def _resolution_candidates(
         self,
@@ -1369,6 +1395,26 @@ def create_default_service(
     adapter: Optional[EngineAdapter] = None,
     native_oauth_adapter: Optional[OAuthAdapter] = None,
 ) -> ModelHubService:
+    def claude_oauth_probe() -> bool:
+        from vibe.api import (
+            _build_claude_status_probe_env,
+            _read_claude_cli_oauth_signed_in,
+        )
+        from vibe.claude_config import build_claude_subprocess_env
+
+        try:
+            config = V2Config.load()
+        except FileNotFoundError:
+            config = default_config()
+        claude = config.agents.claude
+        env = _build_claude_status_probe_env(
+            build_claude_subprocess_env(claude, force_oauth=True)
+        )
+        return _read_claude_cli_oauth_signed_in(
+            claude.cli_path,
+            env=env,
+        ) is True
+
     return ModelHubService(
         store=V2ModelHubConfigStore(),
         adapter=adapter or UnavailableEngineAdapter(),
@@ -1376,4 +1422,5 @@ def create_default_service(
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
+        migration_claude_oauth_probe=claude_oauth_probe,
     )

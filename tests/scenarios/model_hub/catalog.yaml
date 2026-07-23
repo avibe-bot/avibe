@@ -36,9 +36,22 @@ scenarios:
     layer: scenario
   - id: MH-MIG-001
     name: Migration copies without modifying native configuration
-    status: gap
+    status: covered
     kind: migration
     layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_001_api_apply_keeps_native_tree_byte_identical
+  - id: MH-MIG-002
+    name: Native OAuth subscriptions remain in sanctioned CLI stores
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
+  - id: MH-MIG-003
+    name: Codex controlled import requires the experimental flag
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_controlled_import_is_flag_gated
   - id: MH-OAUTH-A-001
     name: Paste-code OAuth happy path
     status: partial

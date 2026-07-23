@@ -3261,11 +3261,11 @@ def model_hub_migration_scan():
 
 
 @app.route("/api/models/migration/apply", methods=["POST"])
-def model_hub_migration_apply():
+async def model_hub_migration_apply():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        result = _model_hub_service().migration_apply(
+        result = await _model_hub_service().migration_apply(
             _model_hub_json_object("migration_item_conflict", status=409).get("item_ids")
         )
         return _model_hub_success(**result)
