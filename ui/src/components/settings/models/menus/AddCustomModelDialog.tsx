@@ -21,7 +21,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from '../modelsApi';
-import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from '../vendorMeta';
+import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from '../vendorMeta';
 import type { Source } from '../types';
 import { buildIdentifier } from './identifiers';
 
@@ -40,7 +40,9 @@ const useEndpointSuffix = () => {
   const { t } = useTranslation();
   return (source: Source): string => {
     if (source.kind === 'subscription') return ''; // subscriptions carry no endpoint suffix
-    return source.base_url && source.vendor === 'custom'
+    // Reuse the 来源-list rule (base URL differs from the vendor's official one),
+    // so an official vendor edited to a relay reads as 自定义地址, not 官方地址.
+    return isCustomEndpoint(source)
       ? (t('settings.models.source.customEndpoint') as string)
       : (t('settings.models.source.officialEndpoint') as string);
   };
@@ -178,7 +180,7 @@ export const AddCustomModelDialog: React.FC<{
           <Input
             value={modelId}
             onChange={(e) => setModelId(e.target.value)}
-            placeholder="glm-5.2-air"
+            placeholder={t('settings.models.menus.custom.modelIdPlaceholder') as string}
             autoComplete="off"
             spellCheck={false}
             disabled={Boolean(edit)}
@@ -191,7 +193,7 @@ export const AddCustomModelDialog: React.FC<{
           <Input
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="GLM 5.2 Air"
+            placeholder={t('settings.models.menus.custom.displayNamePlaceholder') as string}
             autoComplete="off"
             className="h-11 text-[14px]"
           />

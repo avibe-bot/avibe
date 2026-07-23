@@ -102,3 +102,13 @@ export const VENDOR_OPTIONS: VendorOption[] = [
 ];
 
 export const DEFAULT_VENDOR = VENDOR_OPTIONS[0];
+
+// An api_key points at a custom endpoint when its base URL is set and differs
+// from the vendor's official one — covers both vendor='custom' (official = null)
+// and an official vendor whose prefilled Base URL was edited to a relay. Shared
+// by the 来源 list (SourceRow) and the custom-model source picker.
+export function isCustomEndpoint(source: Pick<Source, 'vendor' | 'base_url'>): boolean {
+  if (!source.base_url) return false;
+  const official = VENDOR_OPTIONS.find((v) => v.value === source.vendor)?.base_url ?? null;
+  return source.base_url !== official;
+}
