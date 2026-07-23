@@ -138,6 +138,46 @@ def test_memory_artifact_refuses_dev_runtime_without_importable_everos(monkeypat
     assert "refusing DEV RUNTIME bypass" in caplog.text
 
 
+def test_memory_artifact_dev_runtime_retries_after_failure_at_same_path(monkeypatch, tmp_path: Path) -> None:
+    """A failed dev-runtime probe must not be cached as a permanent failure.
+
+    A developer who starts Vibe before everos is importable, then installs/fixes
+    everos at the same path and hits Repair, must see it resolve without a restart
+    or env-string change. Only successful probes are cached.
+    """
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+
+    # The developer hasn't installed everos yet; once they do (flipped to True),
+    # every subsequent probe at the same path succeeds.
+    everos_installed = {"installed": False}
+
+    def smoke_then_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        if not everos_installed["installed"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="ModuleNotFoundError")
+        return subprocess.CompletedProcess(command, 0, stdout=memory_artifact.EVEROS_VERSION, stderr="")
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_then_succeeds)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    # First probe fails (everos not yet importable at this path).
+    assert manager.resolve_binary() is None
+    assert manager.status()["status"] == "error"
+
+    # Developer installs everos at the same path, then hits Repair.
+    everos_installed["installed"] = True
+
+    # Same path, same env value — developer fixed everos and hit Repair.
+    # The failed probe must NOT be cached; this call retries and succeeds.
+    resolved = manager.resolve_binary()
+    assert resolved is not None
+    assert resolved == dev_python
+    assert manager.status()["installed"] is True
+
+
 def test_memory_artifact_dev_runtime_bypass_is_off_by_default(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)

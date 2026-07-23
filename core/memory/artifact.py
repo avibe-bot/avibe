@@ -235,8 +235,12 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             self._dev_runtime_cached_python = None
             return None
         if self._dev_runtime_checked and configured == self._dev_runtime_checked_value:
-            return self._dev_runtime_cached_python
-        self._dev_runtime_checked = True
+            # Cache only SUCCESSFUL probes. A failed probe (cached_python is None
+            # despite a prior check at this value) must retry on the next call so
+            # that a developer who fixes/installs everos at the same path and hits
+            # Repair sees it resolve without a restart or env-string change.
+            if self._dev_runtime_cached_python is not None:
+                return self._dev_runtime_cached_python
         self._dev_runtime_checked_value = configured
         self._dev_runtime_cached_python = None
         self._dev_runtime_warning_logged = False
@@ -259,6 +263,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 f"the configured Python cannot import compatible everos {EVEROS_VERSION} and uvicorn"
             )
             return None
+        self._dev_runtime_checked = True
         self._dev_runtime_cached_python = python
         if not self._dev_runtime_warning_logged:
             logger.warning(
