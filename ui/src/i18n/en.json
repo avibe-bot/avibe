@@ -1959,9 +1959,9 @@
       },
       "legend": {
         "spawn": "Spawn",
-        "callback": "Callback",
         "trigger": "Task / Watch",
-        "background": "Background"
+        "background": "Background",
+        "callbackNote": "Reports-to only in detail panel"
       },
       "status": {
         "active": "running",

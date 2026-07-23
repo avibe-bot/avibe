@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -40,29 +40,35 @@ import { AgentGraphTriggerChip } from './AgentGraphTriggerChip';
 
 type SessionNodeData = {
   node: AgentGraphNode;
-  selected: boolean;
-  faded: boolean;
   onSelect: (id: string) => void;
   onOpenChat: (id: string) => void;
 };
 type TriggerNodeData = {
   trigger: AgentGraphTriggerNode;
-  faded: boolean;
   onSelect: (definitionId: string) => void;
 };
+
+// Hover-highlight + selection live in context, NOT in each node's `data`, so a
+// mouse-enter never rebuilds the RF node array. Rebuilding it re-measures every
+// node, shifts it under the cursor, and fires a spurious mouseleave→mouseenter
+// oscillation (the reported flicker). Custom nodes read this and toggle their
+// own classes; the node array changes only on real data changes.
+type CanvasInteraction = { highlighted: Set<string> | null; selectedId: string | null };
+const InteractionContext = createContext<CanvasInteraction>({ highlighted: null, selectedId: null });
 
 // Hidden handles anchor the edges; the card/chip fills the sized RF node box.
 const HANDLE_CLASS = '!h-1 !w-1 !min-w-0 !border-0 !bg-transparent';
 
-const SessionRFNode: React.FC<NodeProps> = ({ data }) => {
+const SessionRFNode: React.FC<NodeProps> = ({ id, data }) => {
   const d = data as unknown as SessionNodeData;
+  const { highlighted, selectedId } = useContext(InteractionContext);
   return (
     <>
       <Handle type="target" position={Position.Left} className={HANDLE_CLASS} isConnectable={false} />
       <AgentGraphNodeCard
         node={d.node}
-        selected={d.selected}
-        faded={d.faded}
+        selected={id === selectedId}
+        faded={!!highlighted && !highlighted.has(id)}
         onClick={() => d.onSelect(d.node.session_id)}
         // Double-click opens the chat only for openable sessions (internal
         // private-agent-run nodes have none).
@@ -73,11 +79,16 @@ const SessionRFNode: React.FC<NodeProps> = ({ data }) => {
   );
 };
 
-const TriggerRFNode: React.FC<NodeProps> = ({ data }) => {
+const TriggerRFNode: React.FC<NodeProps> = ({ id, data }) => {
   const d = data as unknown as TriggerNodeData;
+  const { highlighted } = useContext(InteractionContext);
   return (
     <>
-      <AgentGraphTriggerChip trigger={d.trigger} faded={d.faded} onClick={() => d.onSelect(d.trigger.definition_id)} />
+      <AgentGraphTriggerChip
+        trigger={d.trigger}
+        faded={!!highlighted && !highlighted.has(id)}
+        onClick={() => d.onSelect(d.trigger.definition_id)}
+      />
       <Handle type="source" position={Position.Right} className={HANDLE_CLASS} isConnectable={false} />
     </>
   );
@@ -88,9 +99,11 @@ const NODE_TYPES = { session: SessionRFNode, trigger: TriggerRFNode };
 
 // ── edge styling ─────────────────────────────────────────────────────────────
 
+// Callback edges are no longer drawn on the canvas (contract A8 — the detail
+// panel's "REPORTS TO · callback status" is the only callback surface), so the
+// canvas renders spawn + trigger only.
 function edgeVars(kind: AgentGraphEdge['kind']): { color: string; dashed: boolean } {
   if (kind === 'spawn') return { color: 'var(--mint)', dashed: false };
-  if (kind === 'callback') return { color: 'var(--cyan)', dashed: true };
   return { color: 'var(--violet)', dashed: true }; // trigger
 }
 
@@ -164,14 +177,26 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   const reactFlow = useReactFlow();
   const fittedRef = useRef(false);
 
-  const adjacency = useMemo(() => buildAdjacency(edges), [edges]);
+  // Only spawn + trigger edges are drawn (contract A8 drops callback edges from
+  // the canvas). Derive the rendered set once and drive both the hover
+  // adjacency and the edge list from it, so hover chains follow what's visible.
+  const renderedEdges = useMemo(() => edges.filter((e) => e.kind !== 'callback'), [edges]);
+
+  const adjacency = useMemo(() => buildAdjacency(renderedEdges), [renderedEdges]);
   const highlighted = useMemo(
     () => (hoveredId ? reachable(hoveredId, adjacency) : null),
     [hoveredId, adjacency],
   );
+  // Interaction state (hover highlight + selection) handed to custom nodes via
+  // context so it never rebuilds the node array (see InteractionContext).
+  const interaction = useMemo<CanvasInteraction>(
+    () => ({ highlighted, selectedId }),
+    [highlighted, selectedId],
+  );
 
-  // Layout only ranks along the call tree (spawn + trigger). Callback edges are
-  // drawn but excluded from ranking so they don't fight the left→right layers.
+  // Layout ranks along the call tree (spawn + trigger). Memoized on the rendered
+  // edges + node identity only — NOT on hover/selection — so pointer moves never
+  // trigger a dagre pass.
   const layout = useMemo(() => {
     const layoutNodes = [
       ...nodes.map((n) => ({ id: n.session_id, width: SESSION_NODE_WIDTH, height: SESSION_NODE_HEIGHT })),
@@ -181,13 +206,14 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
         height: TRIGGER_NODE_HEIGHT,
       })),
     ];
-    const layoutEdges = edges
-      .filter((e) => e.kind === 'spawn' || e.kind === 'trigger')
-      .map((e) => ({ source: e.from, target: e.to }));
+    const layoutEdges = renderedEdges.map((e) => ({ source: e.from, target: e.to }));
     return layoutLR(layoutNodes, layoutEdges);
-  }, [nodes, triggerNodes, edges]);
+  }, [nodes, triggerNodes, renderedEdges]);
 
-  // Compose the React Flow node list (sessions + trigger chips).
+  // Compose the React Flow node list (sessions + trigger chips). Deliberately
+  // independent of hover/selection — those are read from context by the custom
+  // nodes — so this array (and thus node measurement) is stable across pointer
+  // moves and only rebuilds when the underlying data/layout changes.
   const computedNodes = useMemo<Node[]>(() => {
     const out: Node[] = [];
     for (const node of nodes) {
@@ -200,8 +226,6 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
         style: { width: SESSION_NODE_WIDTH, height: SESSION_NODE_HEIGHT },
         data: {
           node,
-          selected: node.session_id === selectedId,
-          faded: !!highlighted && !highlighted.has(node.session_id),
           onSelect: onSelectNode,
           onOpenChat,
         } as unknown as Record<string, unknown>,
@@ -218,16 +242,15 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
         style: { width: TRIGGER_NODE_WIDTH, height: TRIGGER_NODE_HEIGHT },
         data: {
           trigger,
-          faded: !!highlighted && !highlighted.has(id),
           onSelect: onSelectTrigger,
         } as unknown as Record<string, unknown>,
       });
     }
     return out;
-  }, [nodes, triggerNodes, layout, selectedId, highlighted, onSelectNode, onSelectTrigger, onOpenChat]);
+  }, [nodes, triggerNodes, layout, onSelectNode, onSelectTrigger, onOpenChat]);
 
   const computedEdges = useMemo<Edge[]>(() => {
-    return edges.map((edge) => {
+    return renderedEdges.map((edge) => {
       const { color, dashed } = edgeVars(edge.kind);
       const dim = !!highlighted && !(highlighted.has(edge.from) && highlighted.has(edge.to));
       return {
@@ -244,7 +267,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
         markerEnd: { type: MarkerType.ArrowClosed, color, width: 13, height: 13 },
       } satisfies Edge;
     });
-  }, [edges, highlighted]);
+  }, [renderedEdges, highlighted]);
 
   useEffect(() => setRfNodes(computedNodes), [computedNodes, setRfNodes]);
   useEffect(() => setRfEdges(computedEdges), [computedEdges, setRfEdges]);
@@ -266,32 +289,34 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
 
   return (
     <div className="h-[600px] max-h-[72vh] w-full overflow-hidden rounded-2xl border border-border-strong bg-surface-3/60">
-      <ReactFlow
-        nodes={rfNodes}
-        edges={rfEdges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        nodeTypes={NODE_TYPES}
-        colorMode={resolvedTheme}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable
-        // Read-only graph: keep click selection but disable Delete/Backspace, or
-        // the change handlers would drop a selected node/edge until next refresh.
-        deleteKeyCode={null}
-        proOptions={{ hideAttribution: true }}
-        minZoom={0.2}
-        maxZoom={1.75}
-        onNodeMouseEnter={(_e, node) => setHoveredId(node.id)}
-        onNodeMouseLeave={() => setHoveredId(null)}
-        onPaneClick={() => setHoveredId(null)}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={22} size={1} className="opacity-40" />
-        <Controls showInteractive={false} position="bottom-right" />
-        <Panel position="bottom-left">
-          <Legend t={t} />
-        </Panel>
-      </ReactFlow>
+      <InteractionContext.Provider value={interaction}>
+        <ReactFlow
+          nodes={rfNodes}
+          edges={rfEdges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          nodeTypes={NODE_TYPES}
+          colorMode={resolvedTheme}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable
+          // Read-only graph: keep click selection but disable Delete/Backspace, or
+          // the change handlers would drop a selected node/edge until next refresh.
+          deleteKeyCode={null}
+          proOptions={{ hideAttribution: true }}
+          minZoom={0.2}
+          maxZoom={1.75}
+          onNodeMouseEnter={(_e, node) => setHoveredId(node.id)}
+          onNodeMouseLeave={() => setHoveredId(null)}
+          onPaneClick={() => setHoveredId(null)}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1} className="opacity-40" />
+          <Controls showInteractive={false} position="bottom-right" />
+          <Panel position="bottom-left">
+            <Legend t={t} />
+          </Panel>
+        </ReactFlow>
+      </InteractionContext.Provider>
     </div>
   );
 };
@@ -301,15 +326,14 @@ const Legend: React.FC<{ t: (k: string) => string }> = ({ t }) => (
     <LegendItem label={t('agents.graph.legend.spawn')}>
       <span className="h-[2px] w-5" style={{ background: 'var(--mint)' }} />
     </LegendItem>
-    <LegendItem label={t('agents.graph.legend.callback')}>
-      <span className="h-0 w-5 border-t-2 border-dashed" style={{ borderColor: 'var(--cyan)' }} />
-    </LegendItem>
     <LegendItem label={t('agents.graph.legend.trigger')}>
       <span className="h-0 w-5 border-t-2 border-dashed" style={{ borderColor: 'var(--violet)' }} />
     </LegendItem>
     <LegendItem label={t('agents.graph.legend.background')}>
       <span className="text-muted">◎</span>
     </LegendItem>
+    {/* A8: callback edges are no longer drawn; the detail panel owns them. */}
+    <span className="text-muted/70">{t('agents.graph.legend.callbackNote')}</span>
   </div>
 );
 

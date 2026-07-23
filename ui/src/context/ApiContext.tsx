@@ -1000,6 +1000,13 @@ export type WorkbenchMessage = {
   source: 'user' | 'agent' | 'harness' | string | null;
   author_id: string | null;
   author_name: string | null;
+  // Read-side provenance for an agent-callback ("自动触发") harness message (A9a):
+  // the session that triggered the run, resolved from the run's source_actor.
+  // Present only on agent_run harness messages; enables the source-session chip
+  // + /chat/<source_session_id> deep-link.
+  source_session_id?: string | null;
+  source_session_title?: string | null;
+  source_session_agent_name?: string | null;
   native_message_id: string | null;
   parent_native_message_id: string | null;
   text: string;

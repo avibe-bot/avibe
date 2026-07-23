@@ -1959,9 +1959,9 @@
       },
       "legend": {
         "spawn": "启动",
-        "callback": "汇报 / callback",
         "trigger": "Task / Watch 触发",
-        "background": "后台会话"
+        "background": "后台会话",
+        "callbackNote": "汇报关系只在详情面板"
       },
       "status": {
         "active": "运行中",

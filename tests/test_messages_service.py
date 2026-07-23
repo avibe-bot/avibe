@@ -16,8 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages, scopes
+from storage.models import agent_runs, agent_sessions, messages, scopes
 from storage.settings_service import upsert_scope
+from vibe.message_identity import HARNESS_TYPE
 
 
 @pytest.fixture()
@@ -49,6 +50,63 @@ def _seed_session(conn, scope_id: str, session_id: str) -> None:
             last_active_at=now,
         )
     )
+
+
+def _insert_harness_msg(conn, scope_id, session_id, *, author_name, native_message_id,
+                        author_id=None, msg_id, created_at):
+    conn.execute(
+        messages.insert().values(
+            id=msg_id, scope_id=scope_id, session_id=session_id, platform="avibe",
+            author="harness", type=HARNESS_TYPE, source="harness",
+            author_name=author_name, author_id=author_id,
+            native_message_id=native_message_id,
+            content_text="prompt", content_json="{}", metadata_json="{}",
+            created_at=created_at, updated_at=created_at,
+        )
+    )
+
+
+def test_agent_run_message_provenance_enrichment(isolated_state):
+    # A9a: an agent-callback ("自动触发") harness message is enriched read-side with
+    # the source session's id/title/agent_name — resolved from the run's
+    # source_actor via native_message_id ("agent_run:<exec>") → agent_runs. A
+    # task-trigger harness message (no agent_run linkage) is left untouched.
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_source", scope_id=scope_id, agent_name="pm",
+                agent_backend="claude", agent_variant="default",
+                session_anchor="anchor_src", native_session_id="",
+                status="active", title="Vaults 总控", metadata_json="{}",
+                created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id="execA9", run_type="agent_run", status="succeeded", cancel_requested=0,
+                source_kind="callback", source_actor="ses_source", session_id="ses_target",
+                created_at=now, updated_at=now, metadata_json="{}",
+            )
+        )
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="agent_run",
+                            native_message_id="agent_run:execA9", msg_id="msg_hn",
+                            created_at="2026-05-30T10:00:00Z")
+        _insert_harness_msg(conn, scope_id, "ses_target", author_name="scheduled",
+                            author_id="def_1", native_message_id="scheduled:def_1:execB",
+                            msg_id="msg_task", created_at="2026-05-30T10:00:01Z")
+
+    with engine.connect() as conn:
+        result = messages_service.list_session_messages(conn, session_id="ses_target")
+    by_id = {m["id"]: m for m in result["messages"]}
+    assert by_id["msg_hn"]["source_session_id"] == "ses_source"
+    assert by_id["msg_hn"]["source_session_title"] == "Vaults 总控"
+    assert by_id["msg_hn"]["source_session_agent_name"] == "pm"
+    # A non-agent_run harness message gets no source fields.
+    assert "source_session_id" not in by_id["msg_task"]
 
 
 def test_mark_session_read_ties_break_on_id(isolated_state):
