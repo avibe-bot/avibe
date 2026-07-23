@@ -315,6 +315,63 @@ def test_start_new_topic_session_allows_forum_context_without_thread_id() -> Non
     assert send_mock.await_args.args[0] == context
 
 
+def test_auto_topic_handoff_rechecks_authorization_before_dispatch() -> None:
+    bot = TelegramBot(
+        TelegramConfig(
+            bot_token="123456:test-token",
+            forum_auto_topic=True,
+            require_mention=False,
+        )
+    )
+    auth_thread_ids: list[str | None] = []
+
+    def check_authorization(**kwargs):
+        auth_thread_ids.append(kwargs.get("thread_id"))
+        if len(auth_thread_ids) == 1:
+            return SimpleNamespace(allowed=True, denial="")
+        return SimpleNamespace(allowed=False, denial="unauthorized_channel")
+
+    bot.check_authorization = check_authorization
+    bot.build_auth_denial_text = lambda denial, channel_id=None: None
+    bot._maybe_route_to_forum_topic = AsyncMock(
+        return_value=MessageContext(
+            user_id="42",
+            channel_id="-100123",
+            thread_id="88",
+            message_id="77",
+            platform="telegram",
+            platform_specific={
+                "is_dm": False,
+                "chat_type": "supergroup",
+                "is_forum": True,
+                "is_topic_message": True,
+            },
+        )
+    )
+    bot._spawn_message_callback_task = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 77,
+                "message_thread_id": 1,
+                "is_topic_message": True,
+                "chat": {
+                    "id": -100123,
+                    "type": "supergroup",
+                    "title": "Core Forum",
+                    "is_forum": True,
+                },
+                "from": {"id": 42},
+                "text": "start a session",
+            }
+        )
+    )
+
+    assert auth_thread_ids == ["1", "88"]
+    bot._spawn_message_callback_task.assert_not_awaited()
+
+
 def test_build_message_context_records_discovered_chat(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
@@ -1017,6 +1074,7 @@ def test_resume_menu_uses_short_callback_ids() -> None:
     assert keyboard.buttons[0][0].callback_data == "tg_resume:0"
     state = bot._resume_states[bot._interaction_scope_key(context)]
     assert state.options == [("codex", "session_abcdefghijklmnopqrstuvwxyz")]
+    assert state.thread_id == "1"
     assert "cx...Latest answer" in text
 
 
@@ -1025,15 +1083,15 @@ def test_resume_callback_submits_selected_session() -> None:
     context = MessageContext(
         user_id="42",
         channel_id="-100123",
-        thread_id="1",
         message_id="55",
         platform="telegram",
-        platform_specific={"is_dm": False},
+        platform_specific={"is_dm": False, "is_forum": True},
     )
     bot._resume_states[bot._interaction_scope_key(context)] = SimpleNamespace(
         message_id="55",
         options=[("claude", "sess_123")],
         is_dm=False,
+        thread_id="1",
     )
     bot._controller = SimpleNamespace(
         session_handler=SimpleNamespace(handle_resume_session_submission=AsyncMock()),
@@ -1042,7 +1100,15 @@ def test_resume_callback_submits_selected_session() -> None:
     with patch.object(bot, "edit_message", new=AsyncMock(return_value=True)):
         asyncio.run(bot._handle_resume_callback(context, "tg_resume:0"))
 
-    bot._controller.session_handler.handle_resume_session_submission.assert_awaited_once()
+    bot._controller.session_handler.handle_resume_session_submission.assert_awaited_once_with(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="1",
+        agent="claude",
+        session_id="sess_123",
+        is_dm=False,
+        platform="telegram",
+    )
 
 
 def test_routing_callback_save_persists_selected_backend() -> None:

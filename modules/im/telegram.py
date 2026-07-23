@@ -37,6 +37,7 @@ class _TelegramResumeSessionState:
     message_id: str
     options: list[tuple[str, str]]
     is_dm: bool
+    thread_id: Optional[str]
 
 
 @dataclass
@@ -465,7 +466,22 @@ class TelegramBot(BaseIMClient):
         if await self.dispatch_text_command(context, text, allow_plain_bind=allow_plain_bind):
             return
 
+        original_thread_id = resolve_context_thread_id(context)
         context = await self._maybe_route_to_forum_topic(context, message, text)
+        if resolve_context_thread_id(context) != original_thread_id:
+            denial = self.check_authorization(
+                user_id=context.user_id,
+                channel_id=context.channel_id,
+                thread_id=resolve_context_thread_id(context),
+                is_dm=bool(context.platform_specific.get("is_dm")),
+                text=text,
+                settings_manager=self.settings_manager,
+            )
+            if not denial.allowed:
+                denial_text = self.build_auth_denial_text(denial.denial, context.channel_id)
+                if denial_text:
+                    await self.send_message(context, denial_text)
+                return
 
         await self._spawn_message_callback_task(context, text)
 
@@ -1531,6 +1547,7 @@ class TelegramBot(BaseIMClient):
             message_id=message_id,
             options=options,
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
+            thread_id=resolve_context_thread_id(context),
         )
 
     async def _handle_resume_callback(self, context: MessageContext, callback_data: str) -> None:
@@ -1559,7 +1576,7 @@ class TelegramBot(BaseIMClient):
         await self._controller.session_handler.handle_resume_session_submission(
             user_id=context.user_id,
             channel_id=context.channel_id,
-            thread_id=context.thread_id,
+            thread_id=getattr(state, "thread_id", resolve_context_thread_id(context)),
             agent=agent,
             session_id=session_id,
             is_dm=state.is_dm,

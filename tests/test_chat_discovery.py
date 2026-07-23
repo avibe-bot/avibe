@@ -892,29 +892,63 @@ def test_delete_scope_preserves_child_thread_history(tmp_path: Path) -> None:
         chat_discovery.THREAD_SCOPE_TYPE,
         "-1001/42",
     )
+    parent_scope_id = chat_discovery.make_scope_id(
+        "telegram",
+        chat_discovery.CHANNEL_SCOPE_TYPE,
+        "-1001",
+    )
     now = datetime.now(timezone.utc).isoformat()
     engine = chat_discovery._engine(db_path)
     try:
         with engine.begin() as conn:
             conn.execute(
-                messages.insert().values(
-                    id="topic-message",
-                    scope_id=thread_scope_id,
-                    platform="telegram",
-                    author="user",
-                    type="user",
-                    content_json="{}",
-                    metadata_json="{}",
-                    created_at=now,
-                    updated_at=now,
-                )
+                messages.insert(),
+                [
+                    {
+                        "id": "parent-message",
+                        "scope_id": parent_scope_id,
+                        "platform": "telegram",
+                        "author": "user",
+                        "type": "user",
+                        "content_json": "{}",
+                        "metadata_json": "{}",
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                    {
+                        "id": "topic-message",
+                        "scope_id": thread_scope_id,
+                        "platform": "telegram",
+                        "author": "user",
+                        "type": "user",
+                        "content_json": "{}",
+                        "metadata_json": "{}",
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ],
             )
     finally:
         engine.dispose()
 
     outcome = chat_discovery.delete_scope("telegram", "-1001", db_path=db_path)
 
-    assert outcome == {"removed": True, "dismissed": False}
+    assert outcome == {"removed": False, "dismissed": True}
+    assert chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path) == []
+    chat_discovery.remember_chat("telegram", "-1001", name="Forum", db_path=db_path)
+    assert chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path) == []
+    chat_discovery.remember_thread(
+        "telegram",
+        "-1001",
+        "42",
+        name="Releases",
+        native_type="forum_topic",
+        db_path=db_path,
+    )
+    assert [
+        topic["id"]
+        for topic in chat_discovery.list_thread_payloads("telegram", "-1001", db_path=db_path)
+    ] == ["42"]
     engine = chat_discovery._engine(db_path)
     try:
         with engine.connect() as conn:

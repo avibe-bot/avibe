@@ -150,6 +150,7 @@ def test_im_channel_scope_workdir_creates_session_snapshot(tmp_path):
 
 
 def test_telegram_topic_scope_workdir_wins_over_group(tmp_path):
+    # Scenario: TELEGRAM-TOPIC-003
     controller = _controller(tmp_path)
     group_workdir = tmp_path / "group"
     topic_workdir = tmp_path / "topic"

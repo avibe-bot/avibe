@@ -379,6 +379,9 @@ def remember_thread(
     normalized_metadata = normalize_metadata(metadata)
     normalized_metadata.update({"channel_id": channel_id, "thread_id": thread_id})
     normalized_metadata.setdefault(METADATA_VISIBILITY_STATUS, VISIBILITY_VISIBLE)
+    # A newly observed topic is active again even if its scope row was retained
+    # only to preserve history after the parent forum was removed.
+    normalized_metadata.setdefault(METADATA_DISMISSED_AT, None)
     debounce_payload = (name, native_type, tuple(sorted(normalized_metadata.items())))
     debounce_key = (str(_db_path(db_path)), platform, f"thread:{native_id}")
     monotonic_now = time.monotonic()
@@ -453,6 +456,8 @@ def list_thread_payloads(
                 except ValueError:
                     continue
                 metadata = _json_loads(row["metadata_json"], {})
+                if metadata.get(METADATA_DISMISSED_AT):
+                    continue
                 result.append(
                     {
                         "id": thread_id,
@@ -995,6 +1000,18 @@ def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) 
     return {"removed": bool(result.rowcount), "dismissed": False}
 
 
+def _clear_scope_debounce_entries(db_path: Path | None, rows: list[dict[str, Any]]) -> None:
+    """Allow deleted or dismissed scopes to be persisted on rediscovery."""
+    database_key = str(_db_path(db_path))
+    with _debounce_lock:
+        for row in rows:
+            scope_type = str(row["scope_type"])
+            native_id = str(row["native_id"])
+            if scope_type == THREAD_SCOPE_TYPE:
+                native_id = f"thread:{native_id}"
+            _debounce_cache.pop((database_key, str(row["platform"]), native_id), None)
+
+
 def delete_scope(
     platform: str,
     native_id: str,
@@ -1028,7 +1045,9 @@ def delete_scope(
             descendants = _descendant_scope_rows(conn, scope_id)
             for descendant in reversed(descendants):
                 _remove_scope_row_preserving_history(conn, descendant)
-            return _remove_scope_row_preserving_history(conn, dict(row))
+            outcome = _remove_scope_row_preserving_history(conn, dict(row))
+            _clear_scope_debounce_entries(db_path, [dict(row), *descendants])
+            return outcome
     finally:
         engine.dispose()
 

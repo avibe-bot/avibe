@@ -2698,6 +2698,7 @@ def test_telegram_list_chats_returns_discovered_groups(tmp_path, monkeypatch):
 
 
 def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch):
+    # Scenario: TELEGRAM-TOPIC-001
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     SettingsStore.reset_instance()
     try:
