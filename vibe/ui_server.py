@@ -1281,7 +1281,7 @@ def is_direct_loopback_memory_request() -> bool:
 
     if _has_forwarded_metadata() or not _is_loopback_peer() or not _is_loopback_host(request.host):
         return False
-    origin = _request_origin(request.headers.get("Origin"))
+    origin = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
@@ -4955,7 +4955,7 @@ def backend_restart(name):
     return jsonify(api.restart_backend(name, metadata=metadata))
 
 
-_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "tmux"}
+_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
 
 
 @app.route("/api/dependencies")
@@ -6460,8 +6460,8 @@ def _memory_settings_payload() -> dict:
     return memory_config_to_payload(V2Config.load().memory)
 
 
-def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[dict, bool]:
-    """Merge one write-only Memory settings PATCH and report embedding changes."""
+def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
+    """Merge one write-only Memory settings PATCH."""
 
     from config.v2_config import memory_config_to_payload
 
@@ -6493,13 +6493,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
     )
     if explicit_key_clear and target["enabled"]:
         raise ValueError("memory_key_clear_while_enabled")
-    previous_embedding = current.memory.processing.embedding
-    next_embedding = target["processing"]["embedding"]
-    embedding_changed = (
-        previous_embedding.base_url != next_embedding.get("base_url")
-        or previous_embedding.model != next_embedding.get("model")
-    )
-    return target, embedding_changed
+    return target
 
 
 def _memory_candidate_config(current: V2Config, memory_payload: dict) -> V2Config:
@@ -6538,20 +6532,12 @@ async def memory_settings_patch(starlette_request: FastAPIRequest):
         try:
             patch_payload = await starlette_request.json()
             current = await asyncio.to_thread(V2Config.load)
-            target_payload, embedding_changed = _memory_settings_patch(current, patch_payload)
-            candidate = _memory_candidate_config(current, target_payload)
+            target_payload = _memory_settings_patch(current, patch_payload)
+            _memory_candidate_config(current, target_payload)
         except (TypeError, ValueError):
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
 
         from vibe import internal_client
-
-        if embedding_changed:
-            status_response = await _memory_internal_response(internal_client.memory_status)
-            if status_response.status_code != 200:
-                return status_response
-            status_payload = _memory_response_body(status_response)
-            if status_payload.get("data_exists") is True:
-                return _memory_response({"status": "failed", "error": "memory_clear_failed"}, status_code=409)
 
         from vibe import api
 
@@ -6563,11 +6549,9 @@ async def memory_settings_patch(starlette_request: FastAPIRequest):
             return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
         response = await _memory_internal_response(internal_client.reconcile_memory)
         runtime_payload = _memory_response_body(response)
-        if candidate.memory.enabled and (
-            response.status_code != 200 or runtime_payload.get("ok") is not True
-        ):
-            # Enabling is atomic from the owner's perspective. A failed sidecar
-            # launch must not leave desired state enabled with unverified keys.
+        if response.status_code != 200 or runtime_payload.get("ok") is not True:
+            # Persisted settings must not outrun the controller's closed
+            # compatibility decision, including while memory is disabled.
             try:
                 from config.v2_config import memory_config_to_payload
 

@@ -16,7 +16,9 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
+import stat
 import sys
 import tempfile
 import types
@@ -139,13 +141,35 @@ def test_bind_socket_prebinds_unix_listener():
         listener, bound = internal_server._bind_socket(target)
 
         try:
-            assert bound == target.resolve()
+            assert bound == target
             assert target.exists()
             assert listener.family == socket.AF_UNIX
             assert listener.type == socket.SOCK_STREAM
+            info = target.lstat()
+            assert stat.S_ISSOCK(info.st_mode)
+            assert stat.S_IMODE(info.st_mode) == 0o600
+            assert info.st_uid == os.getuid()
         finally:
             listener.close()
             target.unlink(missing_ok=True)
+
+
+def test_bind_socket_rejects_chmod_failure(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+
+        def chmod_failure(*_args, **_kwargs) -> None:
+            raise OSError("chmod denied")
+
+        monkeypatch.setattr(internal_server.os, "chmod", chmod_failure)
+        try:
+            internal_server._bind_socket(target)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("bind accepted a socket whose mode could not be hardened")
+
+        assert not target.exists()
 
 
 def test_create_app_exposes_minimal_endpoints():
@@ -164,6 +188,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/events", ("GET",)) in routes
     assert ("/internal/events", ("POST",)) in routes
     assert ("/internal/reconcile-memory", ("POST",)) in routes
+    assert ("/internal/memory/install-runtime", ("POST",)) in routes
     assert ("/internal/memory/status", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
@@ -191,6 +216,10 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
             calls.append(("clear", None))
             return {"status": "completed", "epoch": 2}
 
+        async def install_artifact(self):
+            calls.append(("install", None))
+            return {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
+
     async def reconcile_memory(config):
         calls.append(("reconcile", config))
         return {"ok": True, "state": "ready"}
@@ -208,16 +237,18 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.get("/internal/memory/profile"),
                 await client.post("/internal/memory/search", json={"query": "safe query", "limit": 3}),
                 await client.post("/internal/memory/clear", json={"confirm": True}),
+                await client.post("/internal/memory/install-runtime"),
                 await client.post("/internal/reconcile-memory"),
                 await client.post("/internal/memory/search", json=[]),
             )
 
-    status, profile, search, clear, reconcile, invalid = asyncio.run(_go())
+    status, profile, search, clear, install, reconcile, invalid = asyncio.run(_go())
 
     assert status.json() == {"state": "ready", "data_exists": True}
     assert profile.json() == {"status": "ok", "items": []}
     assert search.json() == {"status": "ok", "items": []}
     assert clear.json() == {"status": "completed", "epoch": 2}
+    assert install.json() == {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
     assert reconcile.json() == {"ok": True, "state": "ready"}
     assert invalid.status_code == 400
     assert calls == [
@@ -225,6 +256,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         ("profile", None),
         ("search", ("safe query", 3)),
         ("clear", None),
+        ("install", None),
         ("reconcile", "configured-memory"),
     ]
 

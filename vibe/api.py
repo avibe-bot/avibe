@@ -7254,7 +7254,7 @@ def reconcile_askill_auto_update() -> dict:
 # Dependencies aggregate + manual install jobs (askill / show runtime)
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "tmux"}
+_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
@@ -7262,7 +7262,7 @@ _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 
 def dependencies_status(*, offline: bool = False) -> dict:
     """Status of the required local runtime dependencies for the Dependencies
-    settings page: askill, the Show Page runtime, and the shared Node.js
+    settings page: askill, local managed runtimes, and the shared Node.js
     prerequisite. (Agent backend CLIs are managed on the Backends tab.)
 
     Returns stable ids + machine-readable status only — display copy (label /
@@ -7317,6 +7317,34 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "status": "ready" if srt_installed else "missing",
             "reason": srt.get("reason"),
             "download_error": srt.get("download_error"),
+        }
+    )
+
+    try:
+        from core.memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
+
+        memory_manager = MemoryArtifactManager(offline=True) if offline else get_memory_artifact_manager()
+        memory_runtime = memory_manager.status()
+    except Exception:  # noqa: BLE001
+        memory_runtime = {
+            "installed": False,
+            "status": "missing",
+            "manifest": None,
+            "reason": "memory_runtime_install_failed",
+        }
+    memory_manifest = memory_runtime.get("manifest") if isinstance(memory_runtime.get("manifest"), dict) else {}
+    release_state = memory_manifest.get("release_state")
+    deps.append(
+        {
+            "id": "memory-runtime",
+            "kind": "runtime",
+            "required": False,
+            "installed": bool(memory_runtime.get("installed")),
+            "version": memory_manifest.get("everos_version"),
+            "status": "ready" if memory_runtime.get("installed") else "missing",
+            "reason": memory_runtime.get("reason"),
+            "release_state": release_state if release_state in {"published", "unavailable"} else None,
+            "download_error": memory_runtime.get("download_error"),
         }
     )
 
@@ -7377,6 +7405,43 @@ def _prepare_show_runtime_job() -> dict:
         return result
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc), "output": None}
+
+
+def _prepare_memory_runtime_job() -> dict:
+    """Install EverOS through the controller-owned activation lifecycle."""
+
+    try:
+        from vibe import internal_client
+
+        response = internal_client.memory_install_runtime_sync()
+    except Exception:  # noqa: BLE001
+        return {
+            "ok": False,
+            "message": "memory_runtime_install_failed",
+            "output": None,
+            "reason": "memory_runtime_install_failed",
+            "download_error": None,
+        }
+    payload = response.get("body") if isinstance(response.get("body"), dict) else {}
+    if response.get("status_code") != 200:
+        payload = {
+            "ok": False,
+            "reason": (
+                payload.get("reason")
+                if isinstance(payload.get("reason"), str)
+                else "memory_runtime_install_failed"
+            ),
+            "download_error": payload.get("download_error") if isinstance(payload.get("download_error"), dict) else None,
+        }
+    ok = bool(payload.get("ok"))
+    reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
+    return {
+        "ok": ok,
+        "message": "memory_runtime_ready" if ok else (reason or "memory_runtime_install_failed"),
+        "output": None,
+        "reason": None if ok else (reason or "memory_runtime_install_failed"),
+        "download_error": payload.get("download_error"),
+    }
 
 
 def _prepare_tmux_job() -> dict:
@@ -7590,6 +7655,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_avault_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
+            elif dep == "memory-runtime":
+                result = _prepare_memory_runtime_job()
             elif dep == "tmux":
                 result = _prepare_tmux_job()
             else:

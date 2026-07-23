@@ -38,6 +38,7 @@ _PROCESSING_PROBE_TIMEOUT_SECONDS = 20.0
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
 _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
+_HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class EverOSProcess:
         self._down = False
         self._consecutive_failures = 0
         self._started_at: float | None = None
+        self._healthy_since: float | None = None
         self._last_error: MemoryErrorCode | None = None
 
     @property
@@ -144,11 +146,10 @@ class EverOSProcess:
                 self._last_error = "memory_sidecar_unavailable"
                 return False
             if self._down:
-                # An explicit enable/retry begins a fresh supervised run; an
-                # automatic restart never gets this reset before five healthy
-                # minutes have elapsed.
+                # A caller can explicitly retry a down sidecar, but that must
+                # not erase the crash budget. Only observed health earns that
+                # reset, otherwise repeated settings saves could restart forever.
                 self._down = False
-                self._consecutive_failures = 0
             return await self._start_locked()
 
     async def stop(self) -> None:
@@ -175,6 +176,8 @@ class EverOSProcess:
             self._process = None
             self._process_group = None
             self._owned_processes = {}
+            self._started_at = None
+            self._healthy_since = None
             self._watch_task = None
             self._monitor_task = None
             if watch_task is not None and watch_task is not asyncio.current_task():
@@ -274,7 +277,10 @@ class EverOSProcess:
             self._process = process
             self._process_group = _isolated_process_group(process.pid)
             self._owned_processes = _snapshot_owned_processes(process.pid, self._process_group)
+            if not _owned_process_identity_is_live(process.pid, self._owned_processes):
+                raise RuntimeError("could not establish sidecar process ownership")
             self._started_at = time.monotonic()
+            self._healthy_since = None
             await self._wait_for_ready(process)
             self._secure_socket()
             self._assert_no_tcp_listener(process.pid)
@@ -309,6 +315,8 @@ class EverOSProcess:
             self._process = None
             self._process_group = None
             self._owned_processes = {}
+            self._started_at = None
+            self._healthy_since = None
             watch_task = self._watch_task
             self._watch_task = None
             monitor_task = self._monitor_task
@@ -328,10 +336,16 @@ class EverOSProcess:
         while time.monotonic() < deadline:
             if process.returncode is not None:
                 raise RuntimeError("sidecar exited before readiness")
-            self._owned_processes.update(_snapshot_owned_processes(process.pid, self._process_group))
+            if not _owned_process_identity_is_live(process.pid, self._owned_processes):
+                raise RuntimeError("sidecar ownership changed before readiness")
+            _merge_owned_processes(
+                self._owned_processes,
+                _snapshot_owned_processes(process.pid, self._process_group),
+            )
             if self._socket_path.exists():
                 self._secure_socket()
                 if await client.health():
+                    self._record_health_observation(True)
                     return
             await asyncio.sleep(0.05)
         raise RuntimeError("sidecar readiness timed out")
@@ -341,7 +355,7 @@ class EverOSProcess:
         async with self._lifecycle_lock:
             if process is not self._process:
                 return
-            started_at = self._started_at
+            healthy_since = self._healthy_since
             process_group = self._process_group
             owned_processes = dict(self._owned_processes)
             monitor_task = self._monitor_task
@@ -362,12 +376,14 @@ class EverOSProcess:
             self._process = None
             self._process_group = None
             self._owned_processes = {}
+            self._started_at = None
+            self._healthy_since = None
             self._monitor_task = None
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
             self._starting = False
-            if started_at is not None and time.monotonic() - started_at >= _HEALTHY_RESET_SECONDS:
+            if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
                 self._consecutive_failures = 0
             if not self._desired_running:
                 return
@@ -377,9 +393,20 @@ class EverOSProcess:
         """Keep tracking descendants and reject any later TCP listener."""
 
         try:
+            client = EverOSPort(self._socket_path, sidecar_timeout_seconds=2.0)
+            next_health_observation = time.monotonic()
             while process is self._process and process.returncode is None:
-                self._owned_processes.update(_snapshot_owned_processes(process.pid, self._process_group))
+                if not _owned_process_identity_is_live(process.pid, self._owned_processes):
+                    raise RuntimeError("sidecar ownership changed during monitoring")
+                _merge_owned_processes(
+                    self._owned_processes,
+                    _snapshot_owned_processes(process.pid, self._process_group),
+                )
                 self._assert_no_tcp_listener(process.pid)
+                observed_at = time.monotonic()
+                if observed_at >= next_health_observation:
+                    self._record_health_observation(await client.health(), observed_at=observed_at)
+                    next_health_observation = observed_at + _HEALTH_OBSERVATION_INTERVAL_SECONDS
                 await asyncio.sleep(_SAFETY_MONITOR_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             return
@@ -403,6 +430,8 @@ class EverOSProcess:
                 self._process = None
                 self._process_group = None
                 self._owned_processes = {}
+                self._started_at = None
+                self._healthy_since = None
                 self._monitor_task = None
                 self._remove_owned_socket()
 
@@ -546,7 +575,12 @@ class EverOSProcess:
             return
 
     def _assert_no_tcp_listener(self, pid: int) -> None:
-        self._owned_processes.update(_snapshot_owned_processes(pid, self._process_group))
+        if not _owned_process_identity_is_live(pid, self._owned_processes):
+            raise RuntimeError("sidecar ownership changed during listener inspection")
+        _merge_owned_processes(
+            self._owned_processes,
+            _snapshot_owned_processes(pid, self._process_group),
+        )
         for process_id in _live_owned_processes(self._owned_processes):
             try:
                 connections = psutil.Process(process_id).net_connections(kind="inet")
@@ -565,7 +599,8 @@ class EverOSProcess:
         owned_processes: Mapping[int, float] | None = None,
     ) -> None:
         identities = dict(owned_processes or {})
-        identities.update(_snapshot_owned_processes(process.pid, process_group))
+        if _owned_process_identity_is_live(process.pid, identities):
+            _merge_owned_processes(identities, _snapshot_owned_processes(process.pid, process_group))
         _signal_owned_group_or_process(process, process_group, identities, signal.SIGTERM)
         _signal_owned_processes(identities, signal.SIGTERM)
         if await _wait_for_owned_exit(
@@ -577,7 +612,8 @@ class EverOSProcess:
             return
 
         kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-        identities.update(_snapshot_owned_processes(process.pid, process_group))
+        if _owned_process_identity_is_live(process.pid, identities):
+            _merge_owned_processes(identities, _snapshot_owned_processes(process.pid, process_group))
         _signal_owned_group_or_process(process, process_group, identities, kill_signal)
         _signal_owned_processes(identities, kill_signal)
         if await _wait_for_owned_exit(
@@ -588,6 +624,19 @@ class EverOSProcess:
         ):
             return
         raise RuntimeError("sidecar process tree did not exit")
+
+    def _record_health_observation(self, healthy: bool, *, observed_at: float | None = None) -> None:
+        """Track continuous, observed health before resetting crash supervision."""
+
+        now = time.monotonic() if observed_at is None else observed_at
+        if not healthy:
+            self._healthy_since = None
+            return
+        if self._healthy_since is None:
+            self._healthy_since = now
+            return
+        if now - self._healthy_since >= _HEALTHY_RESET_SECONDS:
+            self._consecutive_failures = 0
 
     async def _notify_ready(self) -> None:
         callback = self._on_ready
@@ -667,6 +716,20 @@ def _snapshot_process_group(process_group: int | None) -> dict[int, float]:
     return identities
 
 
+def _merge_owned_processes(identities: dict[int, float], discovered: Mapping[int, float]) -> None:
+    """Add newly seen children without changing a captured process identity."""
+
+    for process_id, created_at in discovered.items():
+        identities.setdefault(process_id, created_at)
+
+
+def _owned_process_identity_is_live(process_id: int, identities: Mapping[int, float]) -> bool:
+    created_at = identities.get(process_id)
+    if created_at is None:
+        return False
+    return process_id in _live_owned_processes({process_id: created_at})
+
+
 def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
     live: dict[int, float] = {}
     for process_id, created_at in identities.items():
@@ -715,6 +778,9 @@ def _signal_owned_group_or_process(
             pass
     if process.returncode is not None:
         return
+    created_at = identities.get(process.pid)
+    if created_at is None or process.pid not in _live_owned_processes({process.pid: created_at}):
+        return
     try:
         process.send_signal(signum)
     except ProcessLookupError:
@@ -747,7 +813,8 @@ async def _wait_for_owned_exit(
     waiter = asyncio.create_task(process.wait(), name="memory-everos-reap")
     try:
         while time.monotonic() < deadline:
-            identities.update(_snapshot_owned_processes(process.pid, process_group))
+            if _owned_process_identity_is_live(process.pid, identities):
+                _merge_owned_processes(identities, _snapshot_owned_processes(process.pid, process_group))
             if waiter.done() and not _live_owned_processes(identities):
                 await waiter
                 return True

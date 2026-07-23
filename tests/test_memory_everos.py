@@ -192,6 +192,29 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     assert all(request.headers["authorization"].startswith("Bearer ") for request in requests)
 
 
+def test_processing_health_rejects_llm_probe_without_completion_content() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{}]})
+        return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+    async def run() -> bool:
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat-model",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embedding-model",
+            embedding_api_key="embedding-secret",
+        ).processing_healthy()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(transport=httpx.MockTransport(handler), **kwargs)
+        assert asyncio.run(run()) is False
+
+
 def test_processing_health_uses_owned_child_callback_when_present() -> None:
     calls: list[None] = []
 

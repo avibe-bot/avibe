@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+from config.v2_config import (
+    AgentsConfig,
+    MemoryConfig,
+    MemoryEndpointConfig,
+    MemoryProcessingConfig,
+    RuntimeConfig,
+    SlackConfig,
+    V2Config,
+)
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import internal_client, ui_server
 from vibe.ui_server import app
@@ -36,6 +44,21 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert response.headers["cache-control"] == "no-store"
     assert response.get_json()["processing"]["llm"]["api_key"] is None
     assert response.get_json()["processing"]["llm"]["has_api_key"] is False
+
+
+def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/api/memory/settings",
+        headers={"Referer": "http://127.0.0.1:15131/settings"},
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_memory_direct_loopback_predicate_rejects_forwarding(monkeypatch) -> None:
@@ -178,6 +201,42 @@ def test_memory_enable_rolls_back_when_live_sidecar_reconciliation_fails(monkeyp
     assert response.get_json() == {"status": "failed", "error": "memory_sidecar_unavailable"}
     assert calls == [True, True]
     assert V2Config.load().memory.enabled is False
+
+
+def test_memory_embedding_change_rolls_back_when_controller_rejects_it(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    current.save()
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        if len(calls) == 1:
+            return {"status_code": 200, "body": {"ok": False, "error": "memory_clear_failed"}}
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"embedding": {"model": "embed-v2"}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {"status": "failed", "error": "memory_clear_failed"}
+    assert calls == [True, True]
+    assert V2Config.load().memory.processing.embedding.model == "embed-v1"
 
 
 def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> None:

@@ -10,7 +10,7 @@ import secrets
 import shutil
 import stat
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -83,6 +83,7 @@ class MemoryModule:
         clear_provider_data: Callable[[], Awaitable[None] | None] | None = None,
         provider_root_format: str = SLICE1_PROVIDER_ROOT_FORMAT,
         artifact_fingerprint: str = SLICE1_ARTIFACT_FINGERPRINT,
+        compatible_provider_root_formats: Iterable[str] = (),
         clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
         clear_cleanup_timeout_seconds: float = CLEAR_CLEANUP_TIMEOUT_SECONDS,
         worker: MemoryWorker | None = None,
@@ -103,6 +104,16 @@ class MemoryModule:
         self._artifact_fingerprint = _root_metadata_value(
             artifact_fingerprint,
             fallback=SLICE1_ARTIFACT_FINGERPRINT,
+        )
+        self._compatible_provider_root_formats = frozenset(
+            {
+                self._provider_root_format,
+                *(
+                    value
+                    for value in compatible_provider_root_formats
+                    if _is_root_metadata_value(value)
+                ),
+            }
         )
         self._clear_provider_data = clear_provider_data
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
@@ -125,6 +136,56 @@ class MemoryModule:
 
         self._provider = provider
         self._worker._provider = provider
+
+    def _set_runtime_artifact_metadata(
+        self,
+        *,
+        provider_root_format: str,
+        artifact_fingerprint: str,
+        compatible_provider_root_formats: Iterable[str],
+    ) -> tuple[str, str, frozenset[str]]:
+        """Switch active artifact metadata while the runtime lifecycle is fenced."""
+
+        previous = (
+            self._provider_root_format,
+            self._artifact_fingerprint,
+            self._compatible_provider_root_formats,
+        )
+        self._provider_root_format = _root_metadata_value(
+            provider_root_format,
+            fallback=SLICE1_PROVIDER_ROOT_FORMAT,
+        )
+        self._artifact_fingerprint = _root_metadata_value(
+            artifact_fingerprint,
+            fallback=SLICE1_ARTIFACT_FINGERPRINT,
+        )
+        self._compatible_provider_root_formats = frozenset(
+            {
+                self._provider_root_format,
+                *(value for value in compatible_provider_root_formats if _is_root_metadata_value(value)),
+            }
+        )
+        return previous
+
+    def _restore_runtime_artifact_metadata(self, previous: tuple[str, str, frozenset[str]]) -> None:
+        self._provider_root_format, self._artifact_fingerprint, self._compatible_provider_root_formats = previous
+
+    def _activate_empty_provider_root_format(self, meta: MemoryMeta) -> bool:
+        """Rewrite only a verified empty sentinel when an artifact format changes."""
+
+        try:
+            self._provider_root.lstat()
+        except FileNotFoundError:
+            return False
+        self._verify_owned_provider_root(meta, require_empty=False)
+        sentinel = _read_root_sentinel(self._provider_root / ROOT_SENTINEL_FILENAME)
+        current_format = sentinel.get("provider_root_format") if isinstance(sentinel, dict) else None
+        if current_format == self._provider_root_format:
+            return False
+        self._verify_owned_provider_root(meta, require_empty=True)
+        self._write_root_sentinel(meta)
+        self._verify_owned_provider_root(meta, require_empty=True)
+        return True
 
     async def capture(self, request: CaptureRequest) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
@@ -577,7 +638,7 @@ class MemoryModule:
             raise _ClearStepFailure("provider root id does not match")
         if sentinel.get("provider_id") != ROOT_PROVIDER_ID:
             raise _ClearStepFailure("provider root owner does not match")
-        if sentinel.get("provider_root_format") != self._provider_root_format:
+        if sentinel.get("provider_root_format") not in self._compatible_provider_root_formats:
             raise _ClearStepFailure("provider root format does not match")
         if not _is_root_metadata_value(sentinel.get("created_by_artifact_fingerprint")):
             raise _ClearStepFailure("provider root sentinel is invalid")

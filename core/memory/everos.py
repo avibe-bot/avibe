@@ -495,7 +495,11 @@ def _valid_chat_probe_response(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     choices = value.get("choices")
-    return isinstance(choices, list) and bool(choices) and isinstance(choices[0], dict)
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    message = choices[0].get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return isinstance(content, str) and bool(content.strip())
 
 
 def _valid_embedding_probe_response(value: Any) -> bool:

@@ -134,6 +134,25 @@ def test_dependency_install_route_allows_avault(monkeypatch, tmp_path):
     assert response.get_json()["backend"] == "avault"
 
 
+def test_dependency_install_route_allows_memory_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        api,
+        "start_dependency_install_job",
+        lambda dep: {"ok": True, "job_id": "job-memory", "backend": dep, "status": "running"},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/dependencies/memory-runtime/install",
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["backend"] == "memory-runtime"
+
+
 def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
     monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "codex")
     monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "codex")
