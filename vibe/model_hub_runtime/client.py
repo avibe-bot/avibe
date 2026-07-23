@@ -157,13 +157,18 @@ class EngineClient:
             sock_connect=self.timeout,
             sock_read=None,
         )
-        session = aiohttp.ClientSession(timeout=timeout)
+        session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         try:
             response = await asyncio.wait_for(
-                session.post(self._url(endpoint), json=body, headers=headers),
+                session.post(
+                    self._url(endpoint),
+                    json=body,
+                    headers=headers,
+                    allow_redirects=False,
+                ),
                 timeout=self.timeout,
             )
-            if response.status >= 400:
+            if response.status >= 300:
                 try:
                     payload = await asyncio.wait_for(
                         _read_limited(response.content, _MAX_RESPONSE_BYTES),
@@ -283,7 +288,11 @@ class EngineClient:
             request_headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                _NoRedirectHandler(),
+            )
+            with opener.open(request, timeout=timeout or self.timeout) as response:
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raw = exc.read(_MAX_RESPONSE_BYTES)
@@ -373,6 +382,11 @@ async def probe_models(
         if isinstance(value, str) and value and value not in model_ids:
             model_ids.append(value)
     return tuple(model_ids)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
 
 
 async def _read_limited(

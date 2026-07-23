@@ -14,6 +14,7 @@ from core.managed_runtime import (
     env_flag_enabled,
 )
 from core.process_isolation import isolated_subprocess_kwargs
+from vibe.model_hub_runtime.environment import engine_subprocess_environment
 
 
 _ENGINE_VERSION_RE = re.compile(r"CLIProxyAPI Version:\s*([\w.-]+)")
@@ -94,6 +95,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 text=True,
                 timeout=10,
                 check=False,
+                env=engine_subprocess_environment(),
                 **isolated_subprocess_kwargs(),
             )
         except Exception:  # noqa: BLE001

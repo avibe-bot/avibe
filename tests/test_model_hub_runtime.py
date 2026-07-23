@@ -29,6 +29,7 @@ from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
+from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
 
@@ -163,6 +164,27 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     ).ensure()
     assert rejected["ok"] is False
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
+
+
+def test_engine_version_check_uses_minimal_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_env: dict[str, str] = {}
+
+    def run(*args, **kwargs):
+        captured_env.update(kwargs["env"])
+        return subprocess.CompletedProcess(args[0], 0, "", "CLIProxyAPI Version: 7.2.95")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "unrelated-github-secret")
+    monkeypatch.setattr("vibe.model_hub_runtime.installer.subprocess.run", run)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    assert manager._binary_version(tmp_path / "cli-proxy-api") == "v7.2.95"
+    assert "OPENAI_API_KEY" not in captured_env
+    assert "GITHUB_TOKEN" not in captured_env
+    assert captured_env == engine_subprocess_environment()
 
 
 def test_config_generation_is_private_and_never_logs_secrets(
@@ -467,6 +489,12 @@ class Handler(BaseHTTPRequestHandler):
         if payload['model'].endswith('/unsafe-error-code'):
             self._json(400, {{'error': {{'type': 'invalid_key_upstream-secret'}}}})
             return
+        if payload['model'].endswith('/redirected'):
+            self.send_response(307)
+            self.send_header('Location', 'https://example.test/credential-leak')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         if payload['model'].endswith('/stalled-first-byte'):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -581,13 +609,20 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
         return subprocess.Popen(*args, **kwargs)
 
     monkeypatch.setenv("MANAGEMENT_PASSWORD", "untrusted-management-secret")
-    monkeypatch.setenv("MODEL_HUB_TEST_KEEP", "kept")
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "unrelated-github-secret")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
 
     first = supervisor.ensure_running()
     assert first.base_url.startswith("http://127.0.0.1:")
     assert "MANAGEMENT_PASSWORD" not in captured_env
-    assert captured_env["MODEL_HUB_TEST_KEEP"] == "kept"
+    assert "OPENAI_API_KEY" not in captured_env
+    assert "GITHUB_TOKEN" not in captured_env
+    assert "HTTP_PROXY" not in captured_env
+    assert captured_env == engine_subprocess_environment()
     assert supervisor.status()["status"]["health"] == "ok"
     config_path = store.root / "instances" / "install-1" / "config.yaml"
     first_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -617,7 +652,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
                 _binding(
                     credential_ref,
                     allowed_origins=("codex",),
-                    model_ids=("model-a", "rate-limited", "unsafe-error-code"),
+                    model_ids=("model-a", "rate-limited", "unsafe-error-code", "redirected"),
                 )
             ]
         )
@@ -647,6 +682,10 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         assert "upstream-secret" not in (failure.redacted_message or "")
         unsafe_code = await adapter.invoke("src_fixture123", "unsafe-error-code", {}, False, "codex")
         assert (await unsafe_code.outcome()).error_code is None
+        redirected = await adapter.invoke("src_fixture123", "redirected", {}, False, "codex")
+        redirect_outcome = await redirected.outcome()
+        assert redirect_outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert redirect_outcome.http_status == 307
         await adapter.stop()
         with pytest.raises(EngineStateError, match="still bound"):
             await adapter.revoke_credential(credential_ref)
