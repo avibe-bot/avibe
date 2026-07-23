@@ -213,6 +213,7 @@ def _allocate_loopback_port() -> int:
 
 def _engine_environment() -> dict[str, str]:
     environment = dict(os.environ)
+    # CLIProxyAPI treats this as an additional plaintext management credential.
     environment.pop("MANAGEMENT_PASSWORD", None)
     return environment
 
