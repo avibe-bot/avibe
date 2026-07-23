@@ -78,6 +78,7 @@
     "copy": "复制",
     "copied": "已复制",
     "copyFailed": "复制失败，请手动复制",
+    "localLinkUnavailable": "这个本机链接只能在运行 Avibe 的电脑上打开。",
     "remove": "移除",
     "removing": "移除中…",
     "delete": "删除",

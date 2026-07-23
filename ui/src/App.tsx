@@ -45,6 +45,7 @@ import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
 import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
 import { UnsavedChangesProvider } from './context/UnsavedChangesProvider';
 import { AgentationToggle } from './components/AgentationToggle';
+import { PwaLoopbackLinkGuard } from './components/PwaLoopbackLinkGuard';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
@@ -454,6 +455,7 @@ function RouterRoot() {
       <DocumentTitle />
       <WebPushNotificationNavigator />
       <PwaRouteMemory />
+      <PwaLoopbackLinkGuard />
       <Outlet />
     </UnsavedChangesProvider>
   );

@@ -78,6 +78,7 @@
     "copy": "Copy",
     "copied": "Copied",
     "copyFailed": "Copy failed, please copy it manually",
+    "localLinkUnavailable": "This local link only opens on the computer running Avibe.",
     "remove": "Remove",
     "removing": "Removing…",
     "delete": "Delete",
