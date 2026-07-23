@@ -106,7 +106,7 @@ class MemoryStatus:
         "disabled",
         "starting",
         "ready",
-        "indexing",
+        "syncing",
         "degraded",
         "down",
         "clearing",
@@ -114,11 +114,23 @@ class MemoryStatus:
     ]
     pending: int = 0
     processing: int = 0
+    awaiting_receipt: int = 0
+    succeeded: int = 0
+    receipt_unknown: int = 0
+    distill_failed: int = 0
     dead: int = 0
     missed: int = 0
     queue_plaintext_bytes: int = 0
     provider_disk_bytes: int = 0
     last_success_at: str | None = None
+    last_flush_observation: Literal["succeeded", "rejected", "unknown"] | None = None
+    last_flush_status: Literal["extracted", "no_extraction"] | None = None
+    last_flush_error_code: str | None = None
+    last_flush_request_id: str | None = None
+    last_flush_at: str | None = None
+    processing_fault_kind: Literal["credential", "engine"] | None = None
+    processing_fault_since: str | None = None
+    processing_alert_active: bool = False
     error: MemoryErrorCode | None = None
 
 

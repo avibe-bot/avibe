@@ -448,7 +448,11 @@
       "unavailable": "此对话中无法使用记忆功能。",
       "usage": "记忆命令：/memory status、/memory profile、/memory search <查询>",
       "status": "记忆状态：{state}",
-      "counts": "待处理：{pending}；处理中：{processing}；遗漏：{missed}",
+      "counts": "处理中：{syncing}；成功：{succeeded}；结果未知：{unknown}；失败：{failed}；已放弃：{dead}；已跳过：{missed}",
+      "fault": {
+        "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
+        "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
+      },
       "profileWarning": "档案警告：{warning}",
       "profile": "记忆档案：",
       "search": "记忆搜索：",
@@ -457,9 +461,18 @@
     "cli": {
       "error": "记忆 {operation} 失败：{code}",
       "status": "记忆状态：{state}",
-      "counts": "待处理：{pending}；处理中：{processing}；遗漏：{missed}",
+      "counts": "处理中：{syncing}；成功：{succeeded}；结果未知：{unknown}；失败：{failed}；已放弃：{dead}；已跳过：{missed}",
+      "fault": {
+        "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
+        "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
+      },
       "profileWarning": "档案警告：{warning}",
       "empty": "未找到记忆条目。"
+    },
+    "alert": {
+      "credential": "记忆处理已于 {occurred_at} 暂停：无法调用已配置的模型接口，请检查 API Key 余额/权限。排队捕获：{queued} 条。",
+      "engine": "记忆处理已于 {occurred_at} 暂停：记忆引擎内部错误，可尝试修复记忆运行时。排队捕获：{queued} 条。",
+      "recovered": "记忆处理已于 {occurred_at} 恢复。排队捕获：{queued} 条。"
     }
   },
   "language": {

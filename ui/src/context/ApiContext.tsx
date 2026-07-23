@@ -1474,7 +1474,7 @@ export type MemoryStatusState =
   | 'disabled'
   | 'starting'
   | 'ready'
-  | 'indexing'
+  | 'syncing'
   | 'degraded'
   | 'down'
   | 'clearing'
@@ -1484,11 +1484,23 @@ export type MemoryStatus = {
   state: MemoryStatusState;
   pending: number;
   processing: number;
+  awaiting_receipt: number;
+  succeeded: number;
+  receipt_unknown: number;
+  distill_failed: number;
   dead: number;
   missed: number;
   queue_plaintext_bytes: number;
   provider_disk_bytes: number;
   last_success_at: string | null;
+  last_flush_observation: 'succeeded' | 'rejected' | 'unknown' | null;
+  last_flush_status: 'extracted' | 'no_extraction' | null;
+  last_flush_error_code: string | null;
+  last_flush_request_id: string | null;
+  last_flush_at: string | null;
+  processing_fault_kind: 'credential' | 'engine' | null;
+  processing_fault_since: string | null;
+  processing_alert_active: boolean;
   error: string | null;
   profile_warning: 'empty' | null;
   data_exists: boolean;

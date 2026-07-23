@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import stat
 from concurrent.futures import CancelledError as FutureCancelledError
@@ -26,6 +27,10 @@ from core.memory.module import MemoryModule
 from core.memory.process import EverOSProcess, EverOSProcessSettings
 from core.memory.store import MemoryStore
 from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
+from core.memory.worker import ProcessingEvent
+
+
+logger = logging.getLogger(__name__)
 
 
 _PROVIDER_ROOT_CONTROL_FILES = frozenset({".avibe-memory-root.json", "everos.toml", "ome.toml"})
@@ -41,6 +46,7 @@ class MemoryRuntime:
         store: MemoryStore | None = None,
         artifact_manager: MemoryArtifactManager | None = None,
         effective_home: Path | None = None,
+        processing_event: ProcessingEvent | None = None,
     ) -> None:
         self._config = config
         self._effective_home = effective_home or paths.get_vibe_remote_dir()
@@ -70,6 +76,7 @@ class MemoryRuntime:
             provider_root_format=self._artifact_manager.provider_root_format() or "everos-1.1.3",
             artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
             compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
+            processing_event=processing_event,
         )
         set_activation_coordinator = getattr(self._artifact_manager, "set_activation_coordinator", None)
         if callable(set_activation_coordinator):
@@ -514,6 +521,7 @@ class MemoryRuntime:
 
     def _ensure_worker(self) -> None:
         if self._worker_task is None or self._worker_task.done():
+            self.module._worker.begin_activation()
             self._worker_task = asyncio.create_task(self._drain_loop(), name="memory-drain")
 
     async def _stop_worker(self) -> None:
@@ -528,12 +536,15 @@ class MemoryRuntime:
             pass
 
     async def _drain_loop(self) -> None:
-        try:
-            while self._config.enabled:
+        while self._config.enabled:
+            try:
                 await self.module._worker.drain()
-                await asyncio.sleep(1.0)
-        except asyncio.CancelledError:
-            raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Memory drain activation failed; retrying recovery")
+                self.module._worker.begin_activation()
+            await asyncio.sleep(1.0)
 
     def _data_exists(self) -> bool:
         """Return a conservative status projection of provider/queue state."""

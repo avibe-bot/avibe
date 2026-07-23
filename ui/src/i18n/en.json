@@ -2423,7 +2423,11 @@
       "help": "Memory commands: /memory status, /memory profile, /memory search <query>",
       "unavailable": "Memory is unavailable.",
       "status": "Memory status: {{state}}",
-      "counts": "Pending: {{pending}}; processing: {{processing}}; missed: {{missed}}",
+      "counts": "Syncing: {{syncing}}; succeeded: {{succeeded}}; result unknown: {{unknown}}; failed: {{failed}}; dead: {{dead}}; missed: {{missed}}",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
       "profileWarning": "Profile warning: {{warning}}",
       "profile": "Memory profile",
       "search": "Memory search",
@@ -2725,19 +2729,46 @@
         "disabled": "Disabled",
         "starting": "Starting",
         "ready": "Ready",
-        "indexing": "Indexing",
+        "syncing": "Syncing",
         "degraded": "Degraded",
         "down": "Down",
         "clearing": "Clearing",
         "error": "Error"
       },
-      "pending": "Pending",
-      "processingCount": "Processing",
+      "syncing": "Syncing",
+      "succeeded": "Succeeded",
+      "receiptUnknown": "Result unknown",
+      "receiptUnknownHint": "Delivered, but the distillation receipt was lost.",
+      "distillFailed": "Failed",
       "dead": "Dead",
+      "deadHint": "Delivery was not acknowledged by the Memory engine.",
       "missed": "Missed",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
+      "faultAction": {
+        "credential": "Open credential settings",
+        "engine": "Repair Memory runtime"
+      },
+      "dismissFault": "Dismiss processing alert",
+      "repairStarted": "Memory runtime repair started.",
+      "repairFailed": "Memory runtime repair failed.",
+      "providerTitle": "Memory engine (EverOS)",
+      "providerSubtitle": "Latest provider observation",
+      "observation": {
+        "succeeded": "Succeeded",
+        "rejected": "Rejected",
+        "unknown": "Unknown"
+      },
+      "flushStatus": "Provider status",
+      "flushError": "Error code",
+      "flushAt": "Observed at",
+      "requestId": "Request ID",
+      "copyRequestId": "Copy request ID",
       "queueBytes": "Queued text",
       "storageUsed": "Local storage used",
-      "lastSuccess": "Last successful processing",
+      "lastSuccess": "Last successful distillation",
       "lastSuccessNever": "Never",
       "lastError": "Last error"
     },

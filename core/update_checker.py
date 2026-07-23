@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from config import paths
 from config.v2_config import UpdateConfig
 from config.v2_settings import _infer_channel_platform, _infer_user_platform, _split_scoped_key
+from core.handlers.admin_notifications import delivery_succeeded, send_admin_text
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.build_identity import get_build_identity
 from vibe.i18n import t as i18n_t
@@ -837,27 +838,11 @@ class UpdateChecker:
             return False
 
     async def _send_admin_text(self, admin_ids: list, text: str, *, log_label: str) -> set[str]:
-        delivered_platforms: set[str] = set()
-        for uid in admin_ids:
-            try:
-                admin_client, raw_user_id, user_platform = self._get_im_client_for_user(uid)
-                result = await admin_client.send_dm(raw_user_id, text)
-                if self._delivery_succeeded(result):
-                    delivered_platforms.add(user_platform)
-                    logger.info("Sent %s to admin %s", log_label, uid)
-            except Exception as e:
-                logger.error("Failed to send %s to admin %s: %s", log_label, uid, e)
-        return delivered_platforms
+        return await send_admin_text(self.controller, admin_ids, text, log_label=log_label)
 
     @staticmethod
     def _delivery_succeeded(result: Any) -> bool:
-        if result is None:
-            return False
-        if isinstance(result, bool):
-            return result
-        if isinstance(result, dict) and "ok" in result:
-            return bool(result["ok"])
-        return True
+        return delivery_succeeded(result)
 
     async def _send_notification_to_admins(self, admin_ids: list, current: str, latest: str, platform: str) -> bool:
         """Send update notification DM to each admin user."""

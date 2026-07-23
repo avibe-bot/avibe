@@ -448,7 +448,11 @@
       "unavailable": "Memory is unavailable in this conversation.",
       "usage": "Memory commands: /memory status, /memory profile, /memory search <query>",
       "status": "Memory status: {state}",
-      "counts": "Pending: {pending}; processing: {processing}; missed: {missed}",
+      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
       "profileWarning": "Profile warning: {warning}",
       "profile": "Memory profile:",
       "search": "Memory search:",
@@ -457,9 +461,18 @@
     "cli": {
       "error": "Memory {operation} failed: {code}",
       "status": "Memory status: {state}",
-      "counts": "Pending: {pending}; processing: {processing}; missed: {missed}",
+      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
       "profileWarning": "Profile warning: {warning}",
       "empty": "No memory items found."
+    },
+    "alert": {
+      "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",
+      "engine": "Memory processing paused at {occurred_at}: the Memory engine reported an internal error. Try repairing the Memory runtime. Queued captures: {queued}.",
+      "recovered": "Memory processing recovered at {occurred_at}. Queued captures: {queued}."
     }
   },
   "language": {

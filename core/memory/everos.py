@@ -12,11 +12,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Deque, Protocol, runtime_checkable
+from typing import Any, Deque, Literal, Protocol, runtime_checkable
 
 import httpx
 
 from core.memory.types import MemoryErrorCode, MemoryItem, is_memory_error_code
+from core.memory.observations import (
+    AddAck,
+    FlushRejected,
+    FlushResult,
+    FlushSucceeded,
+    FlushUnknown,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +35,8 @@ _MAX_ITEM_BYTES = 64 * 1024
 _MAX_RESPONSE_DEPTH = 8
 _MAX_RESPONSE_COLLECTION = 200
 _SIDECAR_TIMEOUT_SECONDS = 20.0
+_ADD_TIMEOUT_SECONDS = 30.0
+_FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PROFILE_QUERY = "profile"
 
@@ -105,6 +114,8 @@ class EverOSPort:
         embedding_api_key: str | None = None,
         processing_health_check: Callable[[], Awaitable[bool]] | None = None,
         sidecar_timeout_seconds: float = _SIDECAR_TIMEOUT_SECONDS,
+        add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
+        flush_timeout_seconds: float = _FLUSH_TIMEOUT_SECONDS,
         processing_timeout_seconds: float = _PROCESSING_TIMEOUT_SECONDS,
     ) -> None:
         self._socket_path = Path(socket_path)
@@ -116,6 +127,8 @@ class EverOSPort:
         self._embedding_api_key = _optional_string(embedding_api_key)
         self._processing_health_check = processing_health_check
         self._sidecar_timeout_seconds = _positive_timeout(sidecar_timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
+        self._add_timeout_seconds = _positive_timeout(add_timeout_seconds, _ADD_TIMEOUT_SECONDS)
+        self._flush_timeout_seconds = _positive_timeout(flush_timeout_seconds, _FLUSH_TIMEOUT_SECONDS)
         self._processing_timeout_seconds = _positive_timeout(
             processing_timeout_seconds,
             _PROCESSING_TIMEOUT_SECONDS,
@@ -135,10 +148,10 @@ class EverOSPort:
 
         return self._profile_empty_warning
 
-    async def ingest(self, capture: ProviderCapture) -> None:
-        """Submit one capture and explicitly flush its provider session."""
+    async def add(self, capture: ProviderCapture) -> AddAck:
+        """Durably hand one capture to EverOS and return its acknowledgement."""
 
-        await self._sidecar_request(
+        status_code, raw = await self._sidecar_write(
             "POST",
             "/api/v1/memory/add",
             {
@@ -154,18 +167,104 @@ class EverOSPort:
                     }
                 ],
             },
-            require_json=False,
+            timeout_seconds=self._add_timeout_seconds,
         )
-        await self._sidecar_request(
-            "POST",
-            "/api/v1/memory/flush",
-            {
-                "session_id": capture.session_ref,
-                "app_id": _APP_ID,
-                "project_id": _PROJECT_ID,
-            },
-            require_json=False,
+        if not 200 <= status_code < 300:
+            logger.warning("EverOS add rejected status=%s", status_code)
+            raise MemoryProviderFailure("memory_processing_failed")
+        envelope = _optional_json_object(raw)
+        data = envelope.get("data") if envelope is not None else None
+        status = data.get("status") if isinstance(data, dict) else None
+        if envelope is None:
+            logger.warning("EverOS add returned 2xx with an unusable response body")
+        elif status is not None and status not in {"accumulated", "extracted"}:
+            logger.warning("EverOS add returned an unsupported status value")
+        return AddAck(
+            request_id=_bounded_opaque_string(envelope.get("request_id") if envelope else None),
+            status=status if status in {"accumulated", "extracted"} else None,
         )
+
+    async def flush(self, session_ref: str) -> FlushResult:
+        """Trigger distillation and return a total provider outcome."""
+
+        try:
+            status_code, raw = await self._sidecar_write(
+                "POST",
+                "/api/v1/memory/flush",
+                {
+                    "session_id": session_ref,
+                    "app_id": _APP_ID,
+                    "project_id": _PROJECT_ID,
+                },
+                timeout_seconds=self._flush_timeout_seconds,
+            )
+        except MemoryProviderSystemFailure:
+            return FlushUnknown(reason="transport")
+        except MemoryProviderFailure as failure:
+            reason: Literal["timeout", "transport"] = (
+                "timeout" if failure.error == "memory_provider_timeout" else "transport"
+            )
+            return FlushUnknown(reason=reason)
+
+        envelope = _optional_json_object(raw)
+        request_id = _bounded_opaque_string(envelope.get("request_id") if envelope else None)
+        if 200 <= status_code < 300:
+            data = envelope.get("data") if envelope is not None else None
+            status = data.get("status") if isinstance(data, dict) else None
+            if envelope is None:
+                logger.warning("EverOS flush returned 2xx with an unusable response body")
+            elif status is not None and status not in {"extracted", "no_extraction"}:
+                logger.warning("EverOS flush returned an unsupported status value")
+            return FlushSucceeded(
+                request_id=request_id,
+                status=status if status in {"extracted", "no_extraction"} else None,
+            )
+        error = envelope.get("error") if envelope is not None else None
+        error_code = error.get("code") if isinstance(error, dict) else None
+        return FlushRejected(
+            request_id=request_id,
+            error_code=_bounded_opaque_string(error_code),
+            server_fault=status_code >= 500,
+        )
+
+    async def _sidecar_write(
+        self,
+        method: str,
+        route: str,
+        payload: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, bytes | None]:
+        """Return the HTTP verdict even when its bounded body is unusable."""
+
+        started = time.monotonic()
+        transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
+        try:
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://memory-sidecar",
+                timeout=httpx.Timeout(timeout_seconds or self._sidecar_timeout_seconds, connect=3.0),
+                trust_env=False,
+            ) as client:
+                async with client.stream(method, route, json=payload) as response:
+                    try:
+                        raw = await _read_bounded_response(response)
+                    except MemoryProviderFailure:
+                        raw = None
+                    status_code = response.status_code
+        except httpx.TimeoutException as exc:
+            logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
+            raise MemoryProviderFailure("memory_provider_timeout") from exc
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
+            raise MemoryProviderSystemFailure() from exc
+        logger.debug(
+            "EverOS sidecar write complete route=%s status=%s latency_ms=%s",
+            route,
+            status_code,
+            _elapsed_ms(started),
+        )
+        return status_code, raw
 
     async def search(
         self,
@@ -523,6 +622,25 @@ def _optional_string(value: str | None) -> str | None:
     return value.strip() or None
 
 
+def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return value
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) and _is_bounded_json_value(value) else None
+
+
 def _normalized_endpoint_url(value: str | None) -> str | None:
     normalized = _optional_string(value)
     return normalized.rstrip("/") if normalized else None
@@ -542,7 +660,9 @@ def _elapsed_ms(started: float) -> int:
 
 @runtime_checkable
 class MemoryProviderPort(Protocol):
-    async def ingest(self, capture: ProviderCapture) -> None: ...
+    async def add(self, capture: ProviderCapture) -> AddAck: ...
+
+    async def flush(self, session_ref: str) -> FlushResult: ...
 
     async def search(
         self,
@@ -567,16 +687,25 @@ class FakeMemoryProvider:
     search_items: tuple[MemoryItem, ...] = ()
     profile_items: tuple[MemoryItem, ...] = ()
     captures: list[ProviderCapture] = field(default_factory=list)
+    flushes: list[str] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
+    flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
     health_failure: BaseException | None = None
     processing_health_failure: BaseException | None = None
 
-    async def ingest(self, capture: ProviderCapture) -> None:
+    async def add(self, capture: ProviderCapture) -> AddAck:
         if self.ingest_failures:
             raise self.ingest_failures.popleft()
         self.captures.append(capture)
+        return AddAck(request_id=None, status="accumulated")
+
+    async def flush(self, session_ref: str) -> FlushResult:
+        self.flushes.append(session_ref)
+        if self.flush_results:
+            return self.flush_results.popleft()
+        return FlushSucceeded(request_id=None, status="extracted")
 
     async def search(
         self,

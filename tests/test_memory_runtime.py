@@ -46,6 +46,49 @@ from config.v2_config import (
 )
 
 
+def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
+        effective_home=tmp_path,
+    )
+    activation_calls = 0
+    drain_calls = 0
+
+    def begin_activation() -> None:
+        nonlocal activation_calls
+        activation_calls += 1
+
+    async def drain() -> int:
+        nonlocal drain_calls
+        drain_calls += 1
+        if drain_calls == 1:
+            raise RuntimeError("transient drain failure")
+        runtime._config = replace(runtime._config, enabled=False)
+        return 0
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(runtime.module._worker, "begin_activation", begin_activation)
+    monkeypatch.setattr(runtime.module._worker, "drain", drain)
+    monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
+
+    async def run() -> None:
+        runtime._ensure_worker()
+        assert runtime._worker_task is not None
+        await runtime._worker_task
+
+    asyncio.run(run())
+    assert drain_calls == 2
+    assert activation_calls == 2
+
+
 def _settings() -> EverOSProcessSettings:
     return EverOSProcessSettings(
         llm_base_url="https://llm.example.test/v1",

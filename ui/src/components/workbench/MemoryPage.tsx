@@ -7,6 +7,7 @@ import {
   ArrowUpRight,
   Brain,
   Clock,
+  Copy,
   Database,
   Loader2,
   Lock,
@@ -14,6 +15,7 @@ import {
   Search as SearchIcon,
   ShieldAlert,
   Trash2,
+  X,
 } from 'lucide-react';
 
 import { CapabilityTabs } from './CapabilityTabs';
@@ -37,6 +39,7 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { memoryStatusBuckets } from '../../lib/memoryStatus';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
 
@@ -46,7 +49,7 @@ const STATE_BADGE_VARIANT: Record<MemoryStatus['state'], 'success' | 'warning' |
   disabled: 'secondary',
   starting: 'info',
   ready: 'success',
-  indexing: 'info',
+  syncing: 'info',
   degraded: 'warning',
   down: 'destructive',
   clearing: 'warning',
@@ -229,8 +232,15 @@ const StatusPanel: React.FC<{
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
-}> = ({ status, loading, error, onRefresh }) => {
+  onOpenSettings: () => void;
+  onRepair: () => void;
+  repairing: boolean;
+}> = ({ status, loading, error, onRefresh, onOpenSettings, onRepair, repairing }) => {
   const { t } = useTranslation();
+  const faultKey = status?.processing_fault_kind
+    ? `${status.processing_fault_kind}:${status.processing_fault_since ?? ''}`
+    : null;
+  const [dismissedFault, setDismissedFault] = useState<string | null>(null);
 
   if (loading && !status) {
     return (
@@ -249,15 +259,63 @@ const StatusPanel: React.FC<{
   }
   if (!status) return null;
 
-  const stats: Array<{ key: string; label: string; value: React.ReactNode }> = [
-    { key: 'pending', label: t('memory.status.pending'), value: status.pending },
-    { key: 'processing', label: t('memory.status.processingCount'), value: status.processing },
-    { key: 'dead', label: t('memory.status.dead'), value: status.dead },
-    { key: 'missed', label: t('memory.status.missed'), value: status.missed },
+  const buckets = memoryStatusBuckets(status);
+  const stats: Array<{ key: string; label: string; value: React.ReactNode; description?: string }> = [
+    {
+      key: 'syncing',
+      label: t('memory.status.syncing'),
+      value: buckets.syncing,
+    },
+    { key: 'succeeded', label: t('memory.status.succeeded'), value: buckets.succeeded },
+    {
+      key: 'unknown',
+      label: t('memory.status.receiptUnknown'),
+      value: buckets.unknown,
+      description: t('memory.status.receiptUnknownHint'),
+    },
+    { key: 'failed', label: t('memory.status.distillFailed'), value: buckets.failed },
+    {
+      key: 'dead',
+      label: t('memory.status.dead'),
+      value: buckets.dead,
+      description: t('memory.status.deadHint'),
+    },
+    { key: 'missed', label: t('memory.status.missed'), value: buckets.missed },
   ];
+  const showFault = faultKey && faultKey !== dismissedFault;
+  const faultKind = status.processing_fault_kind;
 
   return (
     <div className="flex flex-col gap-3">
+      {showFault && faultKind ? (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] text-foreground">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+            <div className="flex min-w-0 flex-col gap-2">
+              <span>{t(`memory.status.fault.${faultKind}`)}</span>
+              <Button
+                variant="secondary"
+                size="xs"
+                className="w-fit"
+                onClick={faultKind === 'credential' ? onOpenSettings : onRepair}
+                disabled={repairing}
+              >
+                {faultKind === 'engine' && repairing ? <Loader2 className="animate-spin" /> : null}
+                {t(`memory.status.faultAction.${faultKind}`)}
+              </Button>
+            </div>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="-mr-2 -mt-2 size-8"
+            aria-label={t('memory.status.dismissFault')}
+            onClick={() => setDismissedFault(faultKey)}
+          >
+            <X className="size-4" />
+          </Button>
+        </div>
+      ) : null}
       <Card>
         <CardContent className="flex flex-col gap-4 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -278,11 +336,12 @@ const StatusPanel: React.FC<{
             </Button>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {stats.map((s) => (
               <div key={s.key} className="rounded-lg border border-border bg-surface px-3 py-2.5">
                 <div className="text-[10px] uppercase tracking-[0.08em] text-muted">{s.label}</div>
                 <div className="text-[18px] font-semibold text-foreground">{s.value}</div>
+                {s.description ? <div className="mt-1 text-[10.5px] leading-snug text-muted">{s.description}</div> : null}
               </div>
             ))}
           </div>
@@ -311,9 +370,57 @@ const StatusPanel: React.FC<{
           </div>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-3 py-4 text-[12.5px]">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[13px] font-semibold text-foreground">{t('memory.status.providerTitle')}</div>
+              <div className="text-[11px] text-muted">{t('memory.status.providerSubtitle')}</div>
+            </div>
+            <Badge variant="secondary">
+              {status.last_flush_observation
+                ? t(`memory.status.observation.${status.last_flush_observation}`)
+                : '—'}
+            </Badge>
+          </div>
+          <div className="grid gap-2 border-t border-border pt-3 sm:grid-cols-2">
+            <ObservationValue label={t('memory.status.flushStatus')} value={status.last_flush_status} />
+            <ObservationValue label={t('memory.status.flushError')} value={status.last_flush_error_code} />
+            <ObservationValue
+              label={t('memory.status.flushAt')}
+              value={status.last_flush_at ? new Date(status.last_flush_at).toLocaleString() : null}
+            />
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <span className="text-muted">{t('memory.status.requestId')}</span>
+              <div className="flex min-w-0 items-center gap-1">
+                <span className="truncate font-mono text-foreground">{status.last_flush_request_id ?? '—'}</span>
+                {status.last_flush_request_id ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={t('memory.status.copyRequestId')}
+                    onClick={() => void navigator.clipboard.writeText(status.last_flush_request_id ?? '')}
+                  >
+                    <Copy className="size-3.5" />
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 };
+
+const ObservationValue: React.FC<{ label: string; value: string | null }> = ({ label, value }) => (
+  <div className="flex min-w-0 items-center justify-between gap-3">
+    <span className="text-muted">{label}</span>
+    <span className="truncate font-mono text-foreground">{value ?? '—'}</span>
+  </div>
+);
 
 const ProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   const { t } = useTranslation();
@@ -673,6 +780,7 @@ export const MemoryPage: React.FC = () => {
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [dependencyReady, setDependencyReady] = useState(true);
+  const [repairing, setRepairing] = useState(false);
 
   const loadSettings = useCallback(async () => {
     setLoadingSettings(true);
@@ -761,6 +869,23 @@ export const MemoryPage: React.FC = () => {
     }
   };
 
+  const repairRuntime = async () => {
+    setRepairing(true);
+    try {
+      const res = await api.installDependency('memory-runtime');
+      showToast(
+        res.ok ? t('memory.status.repairStarted') : res.message || t('memory.status.repairFailed'),
+        res.ok ? 'success' : 'error',
+      );
+      void loadDependency();
+      void loadStatus();
+    } catch {
+      showToast(t('memory.status.repairFailed'), 'error');
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   const tabs = useMemo(
     () => [
       { id: 'status' as const, label: t('memory.tabs.status') },
@@ -792,7 +917,15 @@ export const MemoryPage: React.FC = () => {
           <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
 
           {tab === 'status' && (
-            <StatusPanel status={status} loading={loadingStatus} error={statusError} onRefresh={() => void loadStatus()} />
+            <StatusPanel
+              status={status}
+              loading={loadingStatus}
+              error={statusError}
+              onRefresh={() => void loadStatus()}
+              onOpenSettings={() => setTab('settings')}
+              onRepair={() => void repairRuntime()}
+              repairing={repairing}
+            />
           )}
 
           {tab === 'profile' && <ProfilePanel enabled={!!settings?.enabled} />}

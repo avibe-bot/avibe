@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
+from core.memory.observations import FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
 from core.memory.types import MemoryErrorCode, is_memory_error_code
 
 
@@ -77,6 +78,9 @@ class MemoryMeta:
     missed_count: int
     last_success_at: str | None
     last_error: MemoryErrorCode | None
+    processing_fault_kind: Literal["credential", "engine"] | None
+    processing_fault_since: str | None
+    processing_alert_active: bool
     updated_at: str
 
 
@@ -96,6 +100,12 @@ class QueueRow:
     last_error: MemoryErrorCode | None
     created_at: str
     completed_at: str | None
+    add_request_id: str | None = None
+    flush_observation: Literal["not_attempted", "in_flight", "succeeded", "rejected", "unknown"] | None = None
+    flush_status: Literal["extracted", "no_extraction"] | None = None
+    flush_error_code: str | None = None
+    flush_request_id: str | None = None
+    flush_observed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +114,15 @@ class QueueStats:
     processing: int = 0
     dead: int = 0
     queue_plaintext_bytes: int = 0
+    awaiting_receipt: int = 0
+    succeeded: int = 0
+    receipt_unknown: int = 0
+    distill_failed: int = 0
+    last_flush_observation: Literal["succeeded", "rejected", "unknown"] | None = None
+    last_flush_status: Literal["extracted", "no_extraction"] | None = None
+    last_flush_error_code: str | None = None
+    last_flush_request_id: str | None = None
+    last_flush_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -389,7 +408,14 @@ class MemoryStore:
             claimed["lease_at"] = now
             return _queue_from_row(claimed)
 
-    def mark_delivered(self, row: QueueRow, *, lease_owner: str, now: str) -> bool:
+    def mark_delivered(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        now: str,
+        add_request_id: str | None = None,
+    ) -> bool:
         """Finalize a fenced provider success and scrub the source payload."""
 
         with self._transaction() as conn:
@@ -398,24 +424,137 @@ class MemoryStore:
                 UPDATE memory_capture_queue
                 SET state = 'delivered', payload_text = NULL, next_retry_at = NULL,
                     lease_owner = NULL, lease_at = NULL, last_error = NULL,
-                    completed_at = ?
+                    completed_at = ?, add_request_id = ?,
+                    flush_observation = 'not_attempted'
                 WHERE source_message_digest = ? AND epoch = ?
                   AND state = 'processing' AND lease_owner = ?
                 """,
-                (now, row.source_message_digest, row.epoch, lease_owner),
+                (
+                    now,
+                    _bounded_opaque_text(add_request_id),
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                ),
             )
             if result.rowcount != 1:
                 return False
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET last_success_at = ?, last_error = NULL, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now, now),
-            )
             self._compact_terminal_tombstones_in_connection(conn, _datetime_from_iso(now))
             return True
+
+    def mark_flush_in_flight(self, session_id: str) -> int:
+        """Freeze the delivered rows consumed by one imminent session flush."""
+
+        with self._transaction() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return 0
+            result = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET flush_observation = 'in_flight', flush_status = NULL,
+                    flush_error_code = NULL, flush_request_id = NULL,
+                    flush_observed_at = NULL
+                WHERE epoch = ? AND session_id = ? AND state = 'delivered'
+                  AND flush_observation = 'not_attempted'
+                """,
+                (meta.epoch, session_id),
+            )
+            return int(result.rowcount)
+
+    def record_flush_verdict(self, session_id: str, result: FlushResult, *, now: str) -> int:
+        """Persist one closed provider verdict for exactly its in-flight group."""
+
+        if isinstance(result, FlushSucceeded):
+            observation = "succeeded"
+            status = result.status if result.status in {"extracted", "no_extraction"} else None
+            error_code = None
+            request_id = result.request_id
+        elif isinstance(result, FlushRejected):
+            observation = "rejected"
+            status = None
+            error_code = result.error_code
+            request_id = result.request_id
+        elif isinstance(result, FlushUnknown):
+            observation = "unknown"
+            status = None
+            error_code = None
+            request_id = None
+        else:
+            raise TypeError("unsupported flush result")
+
+        with self._transaction() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return 0
+            updated = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET flush_observation = ?, flush_status = ?, flush_error_code = ?,
+                    flush_request_id = ?, flush_observed_at = ?
+                WHERE epoch = ? AND session_id = ? AND state = 'delivered'
+                  AND flush_observation = 'in_flight'
+                """,
+                (
+                    observation,
+                    status,
+                    _bounded_opaque_text(error_code),
+                    _bounded_opaque_text(request_id),
+                    now,
+                    meta.epoch,
+                    session_id,
+                ),
+            )
+            if updated.rowcount and observation == "succeeded":
+                conn.execute(
+                    """
+                    UPDATE memory_meta
+                    SET last_success_at = ?, updated_at = ?
+                    WHERE singleton = 1
+                    """,
+                    (now, now),
+                )
+            return int(updated.rowcount)
+
+    def recover_in_flight_flushes(self, *, now: str) -> int:
+        """Turn activation-interrupted flush attempts into terminal unknowns."""
+
+        with self._transaction() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return 0
+            result = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET flush_observation = 'unknown', flush_status = NULL,
+                    flush_error_code = NULL, flush_request_id = NULL,
+                    flush_observed_at = ?
+                WHERE epoch = ? AND state = 'delivered'
+                  AND flush_observation = 'in_flight'
+                """,
+                (now, meta.epoch),
+            )
+            return int(result.rowcount)
+
+    def list_not_attempted_sessions(self) -> tuple[str, ...]:
+        """Return active sessions whose acknowledged buffer still needs a flush."""
+
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return ()
+            rows = conn.execute(
+                """
+                SELECT session_id, MIN(completed_at) AS first_completed_at
+                FROM memory_capture_queue
+                WHERE epoch = ? AND state = 'delivered'
+                  AND flush_observation = 'not_attempted'
+                GROUP BY session_id
+                ORDER BY first_completed_at, session_id
+                """,
+                (meta.epoch,),
+            ).fetchall()
+        return tuple(str(row["session_id"]) for row in rows)
 
     def return_system_failure(
         self,
@@ -543,6 +682,15 @@ class MemoryStore:
                     SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending,
                     SUM(CASE WHEN state = 'processing' THEN 1 ELSE 0 END) AS processing,
                     SUM(CASE WHEN state = 'dead' THEN 1 ELSE 0 END) AS dead,
+                    SUM(CASE WHEN state = 'delivered' AND flush_observation IN
+                        ('not_attempted', 'in_flight') THEN 1 ELSE 0 END) AS awaiting_receipt,
+                    SUM(CASE WHEN state = 'delivered' AND flush_observation = 'succeeded'
+                        THEN 1 ELSE 0 END) AS succeeded,
+                    SUM(CASE WHEN state = 'delivered' AND
+                        (flush_observation = 'unknown' OR flush_observation IS NULL)
+                        THEN 1 ELSE 0 END) AS receipt_unknown,
+                    SUM(CASE WHEN state = 'delivered' AND flush_observation = 'rejected'
+                        THEN 1 ELSE 0 END) AS distill_failed,
                     COALESCE(SUM(
                         CASE WHEN state IN ('pending', 'processing')
                         THEN length(CAST(payload_text AS BLOB)) ELSE 0 END
@@ -552,11 +700,57 @@ class MemoryStore:
                 """,
                 (meta.epoch,),
             ).fetchone()
+            latest = conn.execute(
+                """
+                SELECT flush_observation, flush_status, flush_error_code,
+                       flush_request_id, flush_observed_at
+                FROM memory_capture_queue
+                WHERE epoch = ? AND state = 'delivered'
+                  AND (flush_observation IN ('succeeded', 'rejected', 'unknown')
+                       OR flush_observation IS NULL)
+                ORDER BY COALESCE(flush_observed_at, completed_at, created_at) DESC,
+                         source_message_digest DESC
+                LIMIT 1
+                """,
+                (meta.epoch,),
+            ).fetchone()
         return QueueStats(
             pending=int(row["pending"] or 0),
             processing=int(row["processing"] or 0),
             dead=int(row["dead"] or 0),
             queue_plaintext_bytes=int(row["plaintext_bytes"] or 0),
+            awaiting_receipt=int(row["awaiting_receipt"] or 0),
+            succeeded=int(row["succeeded"] or 0),
+            receipt_unknown=int(row["receipt_unknown"] or 0),
+            distill_failed=int(row["distill_failed"] or 0),
+            last_flush_observation=(
+                (
+                    str(latest["flush_observation"])
+                    if latest["flush_observation"] is not None
+                    else "unknown"
+                )
+                if latest is not None else None
+            ),
+            last_flush_status=(
+                str(latest["flush_status"])
+                if latest is not None and latest["flush_status"] is not None
+                else None
+            ),
+            last_flush_error_code=(
+                str(latest["flush_error_code"])
+                if latest is not None and latest["flush_error_code"] is not None
+                else None
+            ),
+            last_flush_request_id=(
+                str(latest["flush_request_id"])
+                if latest is not None and latest["flush_request_id"] is not None
+                else None
+            ),
+            last_flush_at=(
+                str(latest["flush_observed_at"])
+                if latest is not None and latest["flush_observed_at"] is not None
+                else None
+            ),
         )
 
     def has_provider_data_history(self) -> bool:
@@ -608,7 +802,9 @@ class MemoryStore:
                 """
                 UPDATE memory_meta
                 SET epoch = ?, clear_in_progress = 1, missed_count = 0,
-                    last_success_at = NULL, last_error = NULL, updated_at = ?
+                    last_success_at = NULL, last_error = NULL,
+                    processing_fault_kind = NULL, processing_fault_since = NULL,
+                    processing_alert_active = 0, updated_at = ?
                 WHERE singleton = 1
                 """,
                 (epoch, now),
@@ -623,6 +819,9 @@ class MemoryStore:
                 missed_count=0,
                 last_success_at=None,
                 last_error=None,
+                processing_fault_kind=None,
+                processing_fault_since=None,
+                processing_alert_active=False,
                 updated_at=now,
             )
 
@@ -651,6 +850,9 @@ class MemoryStore:
                 missed_count=meta.missed_count,
                 last_success_at=meta.last_success_at,
                 last_error=None,
+                processing_fault_kind=meta.processing_fault_kind,
+                processing_fault_since=meta.processing_fault_since,
+                processing_alert_active=meta.processing_alert_active,
                 updated_at=now,
             )
 
@@ -666,6 +868,87 @@ class MemoryStore:
                 now,
             )
 
+    def open_processing_fault(self, *, now: str) -> bool:
+        """Persist one OPEN cycle and return whether it starts a new outage."""
+
+        with self._transaction() as conn:
+            meta = self._ensure_meta_in_connection(conn)
+            newly_open = meta.processing_fault_since is None
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_fault_kind = CASE
+                        WHEN processing_fault_since IS NULL THEN NULL
+                        ELSE processing_fault_kind
+                    END,
+                    processing_fault_since = ?,
+                    last_error = 'memory_processing_failed', updated_at = ?
+                WHERE singleton = 1
+                """,
+                (now, now),
+            )
+            return newly_open
+
+    def classify_processing_fault(self, kind: Literal["credential", "engine"]) -> bool:
+        """Store display classification and report whether its alert is pending."""
+
+        if kind not in {"credential", "engine"}:
+            raise ValueError("invalid processing fault kind")
+        now = utc_now_iso()
+        with self._transaction() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None or meta.processing_fault_since is None:
+                return False
+            should_alert = not meta.processing_alert_active
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_fault_kind = ?, updated_at = ?
+                WHERE singleton = 1
+                """,
+                (kind, now),
+            )
+            return should_alert
+
+    def mark_processing_alert_active(self) -> bool:
+        """Persist that the current outage notification was delivered."""
+
+        now = utc_now_iso()
+        with self._transaction() as conn:
+            result = conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_alert_active = 1, updated_at = ?
+                WHERE singleton = 1 AND processing_fault_since IS NOT NULL
+                  AND processing_alert_active = 0
+                """,
+                (now,),
+            )
+            return bool(result.rowcount)
+
+    def close_processing_fault(self, *, now: str) -> bool:
+        """Close an active breaker without clearing unrelated persisted errors."""
+
+        with self._transaction() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None or meta.processing_fault_since is None:
+                return False
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_fault_kind = NULL, processing_fault_since = NULL,
+                    processing_alert_active = 0,
+                    last_error = CASE
+                        WHEN last_error = 'memory_processing_failed' THEN NULL
+                        ELSE last_error
+                    END,
+                    updated_at = ?
+                WHERE singleton = 1
+                """,
+                (now,),
+            )
+            return True
+
     def clear_system_outage_error(self) -> None:
         """Clear only the availability categories resolved by a fresh health probe."""
 
@@ -676,7 +959,10 @@ class MemoryStore:
                 UPDATE memory_meta
                 SET last_error = NULL, updated_at = ?
                 WHERE singleton = 1
-                  AND last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                  AND (
+                    last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                    OR (last_error = 'memory_processing_failed' AND processing_fault_since IS NULL)
+                  )
                 """,
                 (now,),
             )
@@ -689,12 +975,16 @@ class MemoryStore:
             return self._compact_terminal_tombstones_in_connection(conn, reference)
 
     def _initialize(self) -> None:
-        migration_path = Path(__file__).with_name("migrations") / "0001_initial.sql"
+        migrations = Path(__file__).with_name("migrations")
         with self._connection() as conn:
             user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if user_version == 0:
-                conn.executescript(migration_path.read_text(encoding="utf-8"))
+                conn.executescript((migrations / "0001_initial.sql").read_text(encoding="utf-8"))
                 conn.execute("PRAGMA user_version = 1")
+                user_version = 1
+            if user_version == 1:
+                conn.executescript((migrations / "0002_delivery_observation.sql").read_text(encoding="utf-8"))
+                conn.execute("PRAGMA user_version = 2")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -750,6 +1040,9 @@ class MemoryStore:
             missed_count=0,
             last_success_at=None,
             last_error=None,
+            processing_fault_kind=None,
+            processing_fault_since=None,
+            processing_alert_active=False,
             updated_at=now,
         )
 
@@ -880,6 +1173,17 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
         missed_count=int(row["missed_count"]),
         last_success_at=str(row["last_success_at"]) if row["last_success_at"] is not None else None,
         last_error=error,
+        processing_fault_kind=(
+            str(row["processing_fault_kind"])
+            if row["processing_fault_kind"] in {"credential", "engine"}
+            else None
+        ),
+        processing_fault_since=(
+            str(row["processing_fault_since"])
+            if row["processing_fault_since"] is not None
+            else None
+        ),
+        processing_alert_active=bool(row["processing_alert_active"]),
         updated_at=str(row["updated_at"]),
     )
 
@@ -905,6 +1209,32 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         last_error=last_error,
         created_at=str(row["created_at"]),
         completed_at=str(row["completed_at"]) if row["completed_at"] is not None else None,
+        add_request_id=str(row["add_request_id"]) if row["add_request_id"] is not None else None,
+        flush_observation=(
+            str(row["flush_observation"])
+            if row["flush_observation"] in {"not_attempted", "in_flight", "succeeded", "rejected", "unknown"}
+            else None
+        ),
+        flush_status=(
+            str(row["flush_status"])
+            if row["flush_status"] in {"extracted", "no_extraction"}
+            else None
+        ),
+        flush_error_code=(
+            str(row["flush_error_code"])
+            if row["flush_error_code"] is not None
+            else None
+        ),
+        flush_request_id=(
+            str(row["flush_request_id"])
+            if row["flush_request_id"] is not None
+            else None
+        ),
+        flush_observed_at=(
+            str(row["flush_observed_at"])
+            if row["flush_observed_at"] is not None
+            else None
+        ),
     )
 
 
@@ -918,6 +1248,15 @@ def _datetime_from_iso(value: str) -> datetime:
 
 def _closed_error_or(value: object, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return value if is_memory_error_code(value) else fallback
+
+
+def _bounded_opaque_text(value: str | None, *, max_bytes: int = 128) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return value
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _keyed_digest(scope_key: bytes, value: str) -> str:

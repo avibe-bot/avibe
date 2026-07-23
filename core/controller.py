@@ -316,7 +316,10 @@ class Controller:
         # private-IM Memory admission path.
         from core.memory.runtime import MemoryRuntime
 
-        self.memory_runtime = MemoryRuntime(getattr(self.config, "memory", None) or MemoryConfig())
+        self.memory_runtime = MemoryRuntime(
+            getattr(self.config, "memory", None) or MemoryConfig(),
+            processing_event=self._send_memory_processing_event,
+        )
         self.memory_module = self.memory_runtime.module
         self._migrate_discord_guild_scope_from_config()
 
@@ -1411,16 +1414,25 @@ class Controller:
 
     def _memory_command_text(self, action: str, payload: dict[str, Any]) -> str:
         if action == "status":
+            from core.memory.presentation import memory_status_buckets
+
             state = payload.get("state") if isinstance(payload.get("state"), str) else "error"
+            buckets = memory_status_buckets(payload)
             lines = [
                 self._t("memory.command.status", state=state),
                 self._t(
                     "memory.command.counts",
-                    pending=int(payload.get("pending") or 0),
-                    processing=int(payload.get("processing") or 0),
-                    missed=int(payload.get("missed") or 0),
+                    syncing=buckets.syncing,
+                    succeeded=buckets.succeeded,
+                    unknown=buckets.unknown,
+                    failed=buckets.failed,
+                    dead=buckets.dead,
+                    missed=buckets.missed,
                 ),
             ]
+            fault_kind = payload.get("processing_fault_kind")
+            if fault_kind in {"credential", "engine"}:
+                lines.append(self._t(f"memory.command.fault.{fault_kind}"))
             warning = payload.get("profile_warning")
             if isinstance(warning, str) and warning:
                 lines.append(self._t("memory.command.profileWarning", warning=warning))
@@ -1436,6 +1448,32 @@ class Controller:
                 continue
             rendered_items.append(f"- {item['text']}")
         return "\n".join([heading, *rendered_items]) if rendered_items else self._t("memory.command.empty")
+
+    async def _send_memory_processing_event(
+        self,
+        event: str,
+        kind: str | None,
+        occurred_at: str,
+        queued: int,
+    ) -> bool:
+        from core.handlers.admin_notifications import send_admin_text
+
+        store = self.settings_manager.get_store()
+        admin_ids = list(store.get_admins().keys()) if store else []
+        if not admin_ids:
+            return True
+        if event == "recovered":
+            key = "memory.alert.recovered"
+        else:
+            key = "memory.alert.credential" if kind == "credential" else "memory.alert.engine"
+        text = self._t(key, occurred_at=occurred_at, queued=queued)
+        delivered = await send_admin_text(
+            self,
+            admin_ids,
+            text,
+            log_label="Memory processing notification",
+        )
+        return bool(delivered)
 
     async def handle_memory_command(self, context: MessageContext, args: str = "") -> None:
         """Serve the closed read-only private-IM ``/memory`` command surface."""

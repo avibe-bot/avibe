@@ -8,23 +8,39 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from core.memory.everos import EverOSPort, MemoryProviderFailure, ProviderCapture
+from core.memory.everos import (
+    AddAck,
+    EverOSPort,
+    FlushRejected,
+    FlushSucceeded,
+    FlushUnknown,
+    MemoryProviderFailure,
+    ProviderCapture,
+)
 
 
 def _sidecar_transport(handler):
     return patch("core.memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
 
 
-def test_ingest_uses_add_then_flush_and_preserves_provider_timestamp() -> None:
+def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     requests: list[tuple[str, dict]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append((request.url.path, json.loads(request.content)))
-        return httpx.Response(200, json={"data": {}})
+        if request.url.path.endswith("/add"):
+            return httpx.Response(
+                200,
+                json={"request_id": "add-request", "data": {"status": "accumulated"}},
+            )
+        return httpx.Response(
+            200,
+            json={"request_id": "flush-request", "data": {"status": "extracted"}},
+        )
 
-    async def run() -> None:
+    async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
-        await provider.ingest(
+        ack = await provider.add(
             ProviderCapture(
                 principal_id="owner-1",
                 session_ref="src--one--e1",
@@ -32,9 +48,14 @@ def test_ingest_uses_add_then_flush_and_preserves_provider_timestamp() -> None:
                 provider_timestamp_ms=1_725_000_001_234,
             )
         )
+        flushed = await provider.flush("src--one--e1")
+        return ack, flushed
 
     with _sidecar_transport(handler):
-        asyncio.run(run())
+        ack, flushed = asyncio.run(run())
+
+    assert ack == AddAck(request_id="add-request", status="accumulated")
+    assert flushed == FlushSucceeded(request_id="flush-request", status="extracted")
 
     assert requests == [
         (
@@ -58,6 +79,92 @@ def test_ingest_uses_add_then_flush_and_preserves_provider_timestamp() -> None:
             {"session_id": "src--one--e1", "app_id": "avibe", "project_id": "personal"},
         ),
     ]
+
+
+def test_write_routes_degrade_unusable_2xx_bodies_without_replaying_writes(caplog) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, content=b"not-json")
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        ack = await provider.add(ProviderCapture("owner", "session", "capture", 1))
+        result = await provider.flush("session")
+        return ack, result
+
+    with _sidecar_transport(handler):
+        ack, result = asyncio.run(run())
+
+    assert ack == AddAck(request_id=None, status=None)
+    assert result == FlushSucceeded(request_id=None, status=None)
+    assert requests == ["/api/v1/memory/add", "/api/v1/memory/flush"]
+    assert "add returned 2xx with an unusable response body" in caplog.text
+    assert "flush returned 2xx with an unusable response body" in caplog.text
+
+
+def test_write_routes_log_and_drop_unsupported_status_values(caplog) -> None:
+    responses = iter(
+        [
+            httpx.Response(200, json={"data": {"status": "future-add"}}),
+            httpx.Response(200, json={"data": {"status": "future-flush"}}),
+        ]
+    )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        ack = await provider.add(ProviderCapture("owner", "session", "capture", 1))
+        result = await provider.flush("session")
+        return ack, result
+
+    with _sidecar_transport(lambda _request: next(responses)):
+        ack, result = asyncio.run(run())
+
+    assert ack == AddAck(request_id=None, status=None)
+    assert result == FlushSucceeded(request_id=None, status=None)
+    assert "add returned an unsupported status value" in caplog.text
+    assert "flush returned an unsupported status value" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (
+            httpx.Response(400, json={"request_id": "bad-request", "error": {"code": "INVALID_INPUT"}}),
+            FlushRejected("bad-request", "INVALID_INPUT", server_fault=False),
+        ),
+        (
+            httpx.Response(500, json={"request_id": "server-request", "error": {"code": "INTERNAL_ERROR"}}),
+            FlushRejected("server-request", "INTERNAL_ERROR", server_fault=True),
+        ),
+    ],
+)
+def test_flush_maps_non_2xx_envelopes_to_rejected(response: httpx.Response, expected) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush("session"))
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("failure_type", "expected"),
+    [
+        (httpx.ReadTimeout, FlushUnknown("timeout")),
+        (httpx.ConnectError, FlushUnknown("transport")),
+    ],
+)
+def test_flush_maps_timeout_and_transport_to_unknown(failure_type, expected) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure_type("failed", request=request)
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush("session"))
+
+    assert result == expected
 
 
 def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> None:
@@ -236,7 +343,7 @@ def test_sidecar_failure_logs_never_contain_capture_or_response_canaries(caplog)
 
     async def run() -> None:
         with pytest.raises(MemoryProviderFailure):
-            await EverOSPort(Path("/tmp/everos.sock")).ingest(
+            await EverOSPort(Path("/tmp/everos.sock")).add(
                 ProviderCapture("owner-1", "src--one--e1", capture_canary, 1_725_000_001_234)
             )
 

@@ -63,11 +63,29 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
     monkeypatch.setattr(
         internal_client,
         "memory_status_sync",
-        lambda: {"status_code": 200, "body": {"state": "ready", "pending": 1, "processing": 0, "missed": 0}},
+        lambda: {
+            "status_code": 200,
+            "body": {
+                "state": "degraded",
+                "pending": 1,
+                "processing": 0,
+                "awaiting_receipt": 2,
+                "succeeded": 3,
+                "receipt_unknown": 4,
+                "distill_failed": 5,
+                "dead": 6,
+                "missed": 7,
+                "processing_fault_kind": "credential",
+            },
+        },
     )
 
     assert cli.cmd_memory(args) == 0
-    assert capsys.readouterr().out.splitlines() == ["记忆状态：ready", "待处理：1；处理中：0；遗漏：0"]
+    assert capsys.readouterr().out.splitlines() == [
+        "记忆状态：degraded",
+        "处理中：3；成功：3；结果未知：4；失败：5；已放弃：6；已跳过：7",
+        "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
+    ]
 
 
 def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypatch, capsys) -> None:

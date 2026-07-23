@@ -1,5 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { memoryStatusBuckets } from '../../lib/memoryStatus';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -1934,7 +1935,10 @@ const MemoryCommandResultPanel: React.FC<{ result: MemoryCommandResult }> = ({ r
   const status = typeof payload.status === 'string' ? payload.status : '';
   const warning = typeof payload.profile_warning === 'string' ? payload.profile_warning : null;
   const state = typeof payload.state === 'string' ? payload.state : t('common.unknown');
-  const count = (name: string) => (typeof payload[name] === 'number' ? payload[name] : 0);
+  const buckets = memoryStatusBuckets(payload);
+  const faultKind = payload.processing_fault_kind === 'credential' || payload.processing_fault_kind === 'engine'
+    ? payload.processing_fault_kind
+    : null;
   const items = Array.isArray(payload.items)
     ? payload.items
         .map((item) => (typeof item === 'object' && item !== null && typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : null))
@@ -1948,7 +1952,10 @@ const MemoryCommandResultPanel: React.FC<{ result: MemoryCommandResult }> = ({ r
     content = (
       <>
         <div>{t('chat.memory.status', { state })}</div>
-        <div>{t('chat.memory.counts', { pending: count('pending'), processing: count('processing'), missed: count('missed') })}</div>
+        <div>{t('chat.memory.counts', {
+          ...buckets,
+        })}</div>
+        {faultKind && <div>{t(`chat.memory.fault.${faultKind}`)}</div>}
         {warning && <div>{t('chat.memory.profileWarning', { warning })}</div>}
       </>
     );

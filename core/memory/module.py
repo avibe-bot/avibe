@@ -34,7 +34,7 @@ from core.memory.types import (
     OperationFailed,
     is_memory_error_code,
 )
-from core.memory.worker import MemoryWorker
+from core.memory.worker import MemoryWorker, ProcessingEvent
 
 
 MAX_CAPTURE_TEXT_BYTES = 32 * 1024
@@ -86,6 +86,7 @@ class MemoryModule:
         compatible_provider_root_formats: Iterable[str] = (),
         clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
         clear_cleanup_timeout_seconds: float = CLEAR_CLEANUP_TIMEOUT_SECONDS,
+        processing_event: ProcessingEvent | None = None,
         worker: MemoryWorker | None = None,
     ) -> None:
         self._store = store
@@ -124,6 +125,7 @@ class MemoryModule:
             store=store,
             provider=provider,
             enabled=self._is_enabled,
+            processing_event=processing_event,
         )
 
     def _replace_provider(self, provider: MemoryProviderPort) -> None:
@@ -338,8 +340,8 @@ class MemoryModule:
             )
         if active_error is not None or stats.dead:
             return await self._status("degraded", meta=meta, stats=stats, error=active_error)
-        if stats.pending or stats.processing:
-            return await self._status("indexing", meta=meta, stats=stats, error=None)
+        if stats.pending or stats.processing or stats.awaiting_receipt:
+            return await self._status("syncing", meta=meta, stats=stats, error=None)
         return await self._status("ready", meta=meta, stats=stats, error=None)
 
     async def clear(self) -> ClearReceipt:
@@ -469,7 +471,7 @@ class MemoryModule:
             "disabled",
             "starting",
             "ready",
-            "indexing",
+            "syncing",
             "degraded",
             "down",
             "clearing",
@@ -484,11 +486,23 @@ class MemoryModule:
             state=state,
             pending=stats.pending,
             processing=stats.processing,
+            awaiting_receipt=stats.awaiting_receipt,
+            succeeded=stats.succeeded,
+            receipt_unknown=stats.receipt_unknown,
+            distill_failed=stats.distill_failed,
             dead=stats.dead,
             missed=meta.missed_count if meta is not None else 0,
             queue_plaintext_bytes=stats.queue_plaintext_bytes,
             provider_disk_bytes=await asyncio.to_thread(self._provider_disk_bytes),
             last_success_at=meta.last_success_at if meta is not None else None,
+            last_flush_observation=stats.last_flush_observation,
+            last_flush_status=stats.last_flush_status,
+            last_flush_error_code=stats.last_flush_error_code,
+            last_flush_request_id=stats.last_flush_request_id,
+            last_flush_at=stats.last_flush_at,
+            processing_fault_kind=meta.processing_fault_kind if meta is not None else None,
+            processing_fault_since=meta.processing_fault_since if meta is not None else None,
+            processing_alert_active=meta.processing_alert_active if meta is not None else False,
             error=error,
         )
 

@@ -253,16 +253,25 @@ def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, s
 
 def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> None:
     if operation == "status":
+        from core.memory.presentation import memory_status_buckets
+
+        buckets = memory_status_buckets(result)
         print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
         print(
             i18n_t(
                 "memory.cli.counts",
                 language,
-                pending=result.get("pending", 0),
-                processing=result.get("processing", 0),
-                missed=result.get("missed", 0),
+                syncing=buckets.syncing,
+                succeeded=buckets.succeeded,
+                unknown=buckets.unknown,
+                failed=buckets.failed,
+                dead=buckets.dead,
+                missed=buckets.missed,
             )
         )
+        fault_kind = result.get("processing_fault_kind")
+        if fault_kind in {"credential", "engine"}:
+            print(i18n_t(f"memory.cli.fault.{fault_kind}", language))
         warning = result.get("profile_warning")
         if isinstance(warning, str) and warning:
             print(i18n_t("memory.cli.profileWarning", language, warning=warning))

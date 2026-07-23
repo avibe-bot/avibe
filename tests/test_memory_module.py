@@ -15,6 +15,9 @@ import pytest
 from config import paths
 from core.memory.everos import (
     FakeMemoryProvider,
+    FlushRejected,
+    FlushSucceeded,
+    FlushUnknown,
     MemoryProviderFailure,
     MemoryProviderMessageFailure,
     MemoryProviderSystemFailure,
@@ -37,7 +40,7 @@ from core.memory.types import (
     MemoryItems,
     OperationFailed,
 )
-from core.memory.worker import MemoryWorker, SYSTEM_PAUSE_SECONDS
+from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE_SECONDS
 
 
 ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
@@ -228,8 +231,241 @@ async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
 
     assert row.state == "delivered"
     assert row.payload_text is None
+    assert row.flush_observation == "succeeded"
     assert provider.captures[0].text == "secret queue payload"
+    assert provider.flushes == [row.session_id]
     assert store.queue_stats().queue_plaintext_bytes == 0
+    assert store.ensure_meta().last_success_at is not None
+
+
+async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breaker(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="one")) == CaptureAccepted()
+    assert await module.capture(_request(source="two")) == CaptureAccepted()
+    provider.flush_results.append(FlushUnknown("timeout"))
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+    )
+
+    assert await worker.drain(max_rows=2) == 1
+    first, second = store.list_queue_rows()
+    assert (first.state, first.attempts, first.flush_observation) == ("delivered", 0, "unknown")
+    assert second.state == "pending"
+    fault = store.ensure_meta()
+    assert fault.processing_fault_kind == "engine"
+    assert fault.processing_fault_since == "2026-01-01T00:00:00.000Z"
+    assert fault.processing_alert_active is True
+
+
+async def test_processing_breaker_survives_restart_and_half_open_admits_one_capture(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    for source in ("one", "two", "three"):
+        assert await module.capture(_request(source=source)) == CaptureAccepted()
+    provider.flush_results.extend(
+        [
+            FlushRejected("failed", "INTERNAL_ERROR", server_fault=True),
+            FlushSucceeded("recovered", "extracted"),
+            FlushSucceeded("normal", "extracted"),
+        ]
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    first_worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="first",
+        now=lambda: current,
+    )
+    assert await first_worker.drain(max_rows=3) == 1
+
+    restarted = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="second",
+        now=lambda: current,
+    )
+    assert await restarted.drain(max_rows=3) == 0
+    assert len(provider.captures) == 1
+
+    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
+    assert await restarted.drain(max_rows=3) == 1
+    assert len(provider.captures) == 2
+    assert store.ensure_meta().processing_fault_since is None
+    assert store.list_queue_rows()[2].state == "pending"
+
+    assert await restarted.drain(max_rows=3) == 1
+    assert store.list_queue_rows()[2].state == "delivered"
+
+
+async def test_processing_breaker_alerts_once_and_emits_recovery_edge(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    for source in ("one", "two", "three"):
+        assert await module.capture(_request(source=source)) == CaptureAccepted()
+    provider.flush_results.extend(
+        [
+            FlushRejected("first", "INTERNAL_ERROR", server_fault=True),
+            FlushUnknown("transport"),
+            FlushSucceeded("recovered", "extracted"),
+        ]
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    events: list[tuple[str, str | None, str, int]] = []
+
+    async def record_event(event: str, kind: str | None, occurred_at: str, queued: int) -> bool:
+        events.append((event, kind, occurred_at, queued))
+        return True
+
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+        processing_event=record_event,
+    )
+
+    assert await worker.drain(max_rows=3) == 1
+    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
+    assert await worker.drain(max_rows=3) == 1
+    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
+    assert await worker.drain(max_rows=3) == 1
+
+    assert [event[:2] for event in events] == [("fault", "engine"), ("recovered", None)]
+    assert events[0][3] == 2
+    assert events[1][3] == 0
+
+
+async def test_failed_processing_alert_is_retried_on_next_activation(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="one")) == CaptureAccepted()
+    provider.flush_results.append(FlushUnknown("transport"))
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    attempts: list[str] = []
+
+    async def fail_alert(_event: str, _kind: str | None, occurred_at: str, _queued: int) -> bool:
+        attempts.append(occurred_at)
+        return False
+
+    first = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: current,
+        processing_event=fail_alert,
+    )
+    assert await first.drain_once() == 1
+    assert store.ensure_meta().processing_alert_active is False
+
+    async def deliver_alert(_event: str, _kind: str | None, occurred_at: str, _queued: int) -> bool:
+        attempts.append(occurred_at)
+        return True
+
+    restarted = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: current,
+        processing_event=deliver_alert,
+    )
+    assert await restarted.drain_once() == 0
+    assert store.ensure_meta().processing_alert_active is True
+    assert attempts == ["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+
+
+async def test_half_open_4xx_does_not_refresh_breaker_anchor(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="one")) == CaptureAccepted()
+    assert await module.capture(_request(source="two")) == CaptureAccepted()
+    provider.flush_results.extend(
+        [
+            FlushRejected("server", "INTERNAL_ERROR", server_fault=True),
+            FlushRejected("content", "INVALID_INPUT", server_fault=False),
+        ]
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
+
+    assert await worker.drain(max_rows=2) == 1
+    opened_at = store.ensure_meta().processing_fault_since
+    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
+    assert await worker.drain(max_rows=2) == 1
+
+    assert store.ensure_meta().processing_fault_since == opened_at
+    assert store.list_queue_rows()[1].flush_observation == "rejected"
+
+
+async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.mark_delivered(
+        row,
+        lease_owner="old",
+        now="2026-01-01T00:00:01.000Z",
+        add_request_id="ack",
+    )
+
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="new")
+    assert await worker.drain_once() == 0
+    recovered = store.list_queue_rows()[0]
+    assert recovered.flush_observation == "succeeded"
+    assert provider.captures == []
+    assert provider.flushes == [recovered.session_id]
+
+
+async def test_activation_recovery_turns_interrupted_flush_unknown_and_opens_breaker(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.mark_delivered(row, lease_owner="old", now="2026-01-01T00:00:01.000Z")
+    assert store.mark_flush_in_flight(row.session_id) == 1
+
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="new",
+        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert await worker.drain_once() == 0
+    recovered = store.list_queue_rows()[0]
+    assert recovered.flush_observation == "unknown"
+    assert store.ensure_meta().processing_fault_since is not None
+
+
+async def test_activation_finishes_interrupted_breaker_classification_before_claiming(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    opened_at = "2026-01-01T00:00:00.000Z"
+    assert store.open_processing_fault(now=opened_at)
+    events: list[tuple[str, str | None, str, int]] = []
+
+    async def record_event(event: str, kind: str | None, occurred_at: str, queued: int) -> bool:
+        events.append((event, kind, occurred_at, queued))
+        return True
+
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        processing_event=record_event,
+    )
+
+    assert await worker.drain_once() == 0
+    meta = store.ensure_meta()
+    assert meta.processing_fault_kind == "engine"
+    assert meta.processing_alert_active is True
+    assert events == [("fault", "engine", opened_at, 1)]
+    assert provider.captures == []
 
 
 async def test_worker_retries_message_failures_then_marks_dead_and_scrubs(tmp_path: Path) -> None:
@@ -281,7 +517,7 @@ async def test_system_outage_pauses_claims_without_consuming_attempts(tmp_path: 
 
 async def test_ambiguous_failure_uses_health_to_preserve_attempt_budget(tmp_path: Path) -> None:
     class AmbiguousOutage(FakeMemoryProvider):
-        async def ingest(self, capture):
+        async def add(self, capture):
             del capture
             self.healthy = False
             raise RuntimeError("provider-body-canary")
@@ -441,9 +677,25 @@ async def test_status_precedence(tmp_path: Path) -> None:
     ready, _store, _provider = _module(tmp_path / "ready")
     assert (await ready.status()).state == "ready"
 
-    indexing, _store, _provider = _module(tmp_path / "indexing")
-    assert await indexing.capture(_request()) == CaptureAccepted()
-    assert (await indexing.status()).state == "indexing"
+    syncing, syncing_store, _provider = _module(tmp_path / "syncing")
+    assert await syncing.capture(_request()) == CaptureAccepted()
+    syncing_status = await syncing.status()
+    assert syncing_status.state == "syncing"
+    assert syncing_status.pending == 1
+    assert syncing_status.awaiting_receipt == 0
+
+    syncing_worker = MemoryWorker(
+        store=syncing_store,
+        provider=_provider,
+        enabled=lambda: True,
+        boot_id="syncing-worker",
+    )
+    assert await syncing_worker.drain_once() == 1
+    ready_status = await syncing.status()
+    assert ready_status.state == "ready"
+    assert ready_status.succeeded == 1
+    assert ready_status.last_flush_observation == "succeeded"
+    assert ready_status.last_flush_status == "extracted"
 
     degraded, degraded_store, _provider = _module(tmp_path / "degraded")
     degraded_store.set_last_error("memory_processing_failed")
@@ -660,7 +912,7 @@ async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path
     release = asyncio.Event()
 
     class BlockingProvider(FakeMemoryProvider):
-        async def ingest(self, capture):
+        async def add(self, capture):
             del capture
             entered.set()
             await release.wait()
@@ -806,10 +1058,10 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
 
 async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_work(tmp_path: Path) -> None:
     class PoisonProvider(FakeMemoryProvider):
-        async def ingest(self, capture):
+        async def add(self, capture):
             if capture.text == "poison":
                 await asyncio.Event().wait()
-            await super().ingest(capture)
+            return await super().add(capture)
 
     provider = PoisonProvider()
     module, store, _provider = _module(tmp_path, provider=provider)

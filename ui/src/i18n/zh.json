@@ -2423,7 +2423,11 @@
       "help": "记忆命令：/memory status、/memory profile、/memory search <查询>",
       "unavailable": "记忆功能不可用。",
       "status": "记忆状态：{{state}}",
-      "counts": "待处理：{{pending}}；处理中：{{processing}}；遗漏：{{missed}}",
+      "counts": "处理中：{{syncing}}；成功：{{succeeded}}；结果未知：{{unknown}}；失败：{{failed}}；已放弃：{{dead}}；已跳过：{{missed}}",
+      "fault": {
+        "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
+        "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
+      },
       "profileWarning": "档案警告：{{warning}}",
       "profile": "记忆档案",
       "search": "记忆搜索",
@@ -2725,19 +2729,46 @@
         "disabled": "已禁用",
         "starting": "启动中",
         "ready": "就绪",
-        "indexing": "索引中",
+        "syncing": "同步中",
         "degraded": "降级",
         "down": "不可用",
         "clearing": "清除中",
         "error": "错误"
       },
-      "pending": "待处理",
-      "processingCount": "处理中",
+      "syncing": "处理中",
+      "succeeded": "成功",
+      "receiptUnknown": "结果未知",
+      "receiptUnknownHint": "已投递，但无法确认是否已提炼（回执丢失）。",
+      "distillFailed": "失败",
       "dead": "已放弃",
+      "deadHint": "投递未获记忆引擎确认。",
       "missed": "已跳过",
+      "fault": {
+        "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
+        "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
+      },
+      "faultAction": {
+        "credential": "打开凭据设置",
+        "engine": "修复记忆运行时"
+      },
+      "dismissFault": "关闭处理告警",
+      "repairStarted": "已开始修复记忆运行时。",
+      "repairFailed": "记忆运行时修复失败。",
+      "providerTitle": "记忆引擎 (EverOS)",
+      "providerSubtitle": "最近一次提供方回执",
+      "observation": {
+        "succeeded": "成功",
+        "rejected": "拒绝",
+        "unknown": "未知"
+      },
+      "flushStatus": "提供方状态",
+      "flushError": "错误代码",
+      "flushAt": "观察时间",
+      "requestId": "请求 ID",
+      "copyRequestId": "复制请求 ID",
       "queueBytes": "排队文本",
       "storageUsed": "本地已用存储",
-      "lastSuccess": "上次处理成功时间",
+      "lastSuccess": "最近提炼成功时间",
       "lastSuccessNever": "从未",
       "lastError": "上次错误"
     },
