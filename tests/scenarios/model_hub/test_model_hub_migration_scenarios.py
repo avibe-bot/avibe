@@ -169,6 +169,18 @@ wire_api = "chat"
         )
 
 
+def _write_codex_oauth(home: Path) -> None:
+    _write(
+        home / ".codex" / "auth.json",
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "codex-access-123456"},
+            }
+        ),
+    )
+
+
 def _write_opencode(home: Path, *, malformed: bool = False) -> None:
     if malformed:
         _write(home / ".config" / "opencode" / "opencode.json", "{/*")
@@ -250,7 +262,7 @@ def _translation_value(payload: dict, key: str) -> object:
 def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) -> None:
     cases = (
         ("claude", _write_claude, 1),
-        ("codex", _write_codex, 2),
+        ("codex", _write_codex, 1),
         ("opencode", _write_opencode, 2),
     )
     for backend, writer, expected in cases:
@@ -350,6 +362,21 @@ def test_codex_scan_respects_explicit_auth_mode(
     assert [item.kind for item in items] == [expected_kind]
 
 
+def test_codex_scan_treats_tokens_as_stale_when_key_has_no_auth_mode(
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write_codex(native_home)
+
+    items = scan_native_configs(
+        ModelHubConfig(),
+        home=native_home,
+        mask_credential=_mask_credential,
+    )
+
+    assert [item.kind for item in items] == ["api_key"]
+
+
 def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
     native_home = tmp_path / "native-home"
     _write_claude(native_home)
@@ -402,7 +429,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert scan_response.status_code == 200
     scan = scan_response.get_json()
     _validate_scan({"items": scan["items"]})
-    assert len(scan["items"]) == 5
+    assert len(scan["items"]) == 4
 
     apply_response = client.post(
         "/api/models/migration/apply",
@@ -412,15 +439,14 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     )
     assert apply_response.status_code == 200
     body = apply_response.get_json()
-    assert body["applied"] == 5
-    assert len(body["sources"]) == 5
-    assert len(store.config.sources) == 5
+    assert body["applied"] == 4
+    assert len(body["sources"]) == 4
+    assert len(store.config.sources) == 4
     assert len(adapter.provisioned) == 4
     assert adapter.revoked == []
     assert before == _tree_digest(native_home)
     by_id = {source.id: source for source in store.config.sources}
-    assert by_id[store.config.priority_order[0]].billing == "monthly"
-    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order[1:])
+    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order)
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
@@ -453,7 +479,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
 
     native_home = tmp_path / "native-home"
     _write_claude_oauth(native_home)
-    _write_codex(native_home)
+    _write_codex_oauth(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
 
@@ -480,7 +506,7 @@ def test_mh_mig_003_experimental_flag_keeps_oauth_native(
     """Scenario: MH-MIG-003."""
 
     native_home = tmp_path / "native-home"
-    _write_codex(native_home)
+    _write_codex_oauth(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     store.config.subscription_hub_experimental = True

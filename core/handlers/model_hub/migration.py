@@ -263,11 +263,15 @@ def _codex_items(
     items: list[NativeMigrationItem] = []
     raw_auth_mode = auth_data.get("auth_mode")
     auth_mode = raw_auth_mode.strip().lower() if isinstance(raw_auth_mode, str) else None
-    api_key_is_active = auth_mode != "chatgpt"
-    oauth_is_active = auth_mode != "apikey"
 
     api_key = auth_data.get("OPENAI_API_KEY")
-    if api_key_is_active and isinstance(api_key, str) and api_key.strip():
+    has_api_key = isinstance(api_key, str) and bool(api_key.strip())
+    api_key_is_active = auth_mode != "chatgpt" and has_api_key
+    oauth_is_active = auth_mode == "chatgpt" or (
+        auth_mode != "apikey" and not has_api_key
+    )
+    if api_key_is_active:
+        assert isinstance(api_key, str)
         api_key = api_key.strip()
         base_url = state.get("base_url")
         if not isinstance(base_url, str) or not base_url.strip():
