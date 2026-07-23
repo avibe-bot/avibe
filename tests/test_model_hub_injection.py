@@ -410,6 +410,7 @@ def test_mh_inj_opencode_config_env_is_hub_only(tmp_path: Path, monkeypatch) -> 
         manager._clear_pid_file = Mock()
         manager._write_pid_file = Mock()
         manager._apply_resource_governance = Mock()
+        manager._is_healthy = AsyncMock(return_value=True)
         process = SimpleNamespace(pid=4321, returncode=None)
         with (
             patch("modules.agents.opencode.server.server_environment", return_value={"AVIBE_TEST": "1"}),
