@@ -58,6 +58,9 @@ NODE_CAP = 300
 # newest first, capped at 10).
 RUNS_PER_NODE = 10
 
+# Sort sentinel for runs whose created_at is missing/unparseable (oldest).
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
 # Trigger definition types that produce a trigger chip.
 _TRIGGER_RUN_TYPES = {"scheduled", "watch"}
 
@@ -98,21 +101,23 @@ def _iso_z(value: Any) -> Optional[str]:
 
 # ── status resolution ────────────────────────────────────────────────────────
 
-def _node_status(live_state: Optional[str], latest_run_status: Optional[str]) -> tuple[str, bool]:
+def _node_status(live_state: Optional[str], runs: list[dict[str, Any]]) -> tuple[str, bool]:
     """Return ``(status, live)`` for a node.
 
     Live sessions carry the running-agents state (``active``/``idle``/
-    ``orphan``). Otherwise the node reflects its latest run outcome; a stale
-    ``running`` row with no live process is surfaced as ``queued`` (unfinished),
-    never as a live state.
+    ``orphan``). Otherwise the node reflects its runs: any non-terminal run
+    (``queued``/``running`` — including a stale ``running`` with no live process,
+    or an older queued/running run left behind a newer finished one on a reused
+    or stuck session) surfaces as ``queued`` so the Active view keeps its pending
+    work; else the latest run's terminal outcome; else ``idle``.
     """
     if live_state in ("active", "idle", "orphan"):
         return live_state, True
-    if latest_run_status:
-        normalized = normalize_run_status(latest_run_status)
-        if normalized == "running":
+    for run in runs:
+        if normalize_run_status(run["status"]) in ("queued", "running"):
             return "queued", False
-        return normalized, False
+    if runs:
+        return normalize_run_status(runs[0]["status"]), False
     return "idle", False
 
 
@@ -428,6 +433,12 @@ def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]
     for row in conn.execute(stmt).mappings():
         data = dict(row)
         grouped.setdefault(data["session_id"], []).append(data)
+    # Re-sort newest-first in Python: stored run times mix `...Z` (seconds) and
+    # `.isoformat()` (`+00:00`, microseconds), so SQLite's text order_by can rank
+    # two same-second runs wrong and leave a stale run at runs[0] — which drives
+    # the node status, the recent-runs timeline, and the active-view filter.
+    for runs in grouped.values():
+        runs.sort(key=lambda r: (_parse_iso(r.get("created_at")) or _EPOCH, r["id"]), reverse=True)
     return grouped
 
 
@@ -568,9 +579,8 @@ def _build_nodes(
     for row in session_rows:
         session_id = row["id"]
         runs = runs_by_session.get(session_id, [])
-        latest_status = runs[0]["status"] if runs else None
         live = live_by_session.get(session_id)
-        status, is_live = _node_status(live["state"] if live else None, latest_status)
+        status, is_live = _node_status(live["state"] if live else None, runs)
 
         # Hide user-deleted chats (archived session) and sessions under an
         # archived project (avibe project scope with scope_settings.enabled=0) —

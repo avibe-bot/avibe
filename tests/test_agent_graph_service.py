@@ -760,11 +760,16 @@ def test_iso_z_normalizes_both_formats():
 
 
 def test_node_status_resolution():
-    assert agent_graph._node_status("active", None) == ("active", True)
-    assert agent_graph._node_status(None, "completed") == ("succeeded", False)
+    assert agent_graph._node_status("active", []) == ("active", True)
+    assert agent_graph._node_status(None, [{"status": "completed"}]) == ("succeeded", False)
     # a stale running row with no live process is surfaced as queued
-    assert agent_graph._node_status(None, "running") == ("queued", False)
-    assert agent_graph._node_status(None, None) == ("idle", False)
+    assert agent_graph._node_status(None, [{"status": "running"}]) == ("queued", False)
+    assert agent_graph._node_status(None, []) == ("idle", False)
+    # any non-terminal run keeps the node active, even behind a newer finished
+    # run on a reused/stuck session (runs are newest-first)
+    assert agent_graph._node_status(
+        None, [{"status": "succeeded"}, {"status": "queued"}]
+    ) == ("queued", False)
 
 
 def test_merge_live_state_prefers_active():

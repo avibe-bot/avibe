@@ -1249,18 +1249,12 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
                 {run.source_kind}
               </span>
             )}
-            {run.source_actor &&
-              (run.source_kind === 'agent' ? (
-                <Link
-                  to={`/chat/${encodeURIComponent(run.source_actor)}`}
-                  className="inline-flex items-center gap-1 font-mono text-[11px] text-cyan hover:underline"
-                >
-                  {run.source_actor}
-                  <ArrowUpRight className="size-3" />
-                </Link>
-              ) : (
-                <span className="font-mono text-[11px] text-muted">{run.source_actor}</span>
-              ))}
+            {run.source_actor && (
+              // Lineage id only — the run payload carries no openable_in_chat
+              // signal, and a stale/imported or internal (non-openable) session
+              // id would deep-link to a dead /chat target, so render it plain.
+              <span className="font-mono text-[11px] text-muted">{run.source_actor}</span>
+            )}
           </span>
         </DetailField>
       )}
@@ -1278,13 +1272,10 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
       {run.callback_session_id && (
         <DetailField label={t('harness.detail.callback')}>
           <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
-            <Link
-              to={`/chat/${encodeURIComponent(run.callback_session_id)}`}
-              className="inline-flex min-w-0 items-center gap-1 font-mono text-[11px] text-cyan hover:underline"
-            >
-              <span className="min-w-0 truncate">{run.callback_session_id}</span>
-              <ArrowUpRight className="size-3 shrink-0" />
-            </Link>
+            {/* Lineage id only (see source above) — plain text, not a /chat link. */}
+            <span className="min-w-0 truncate font-mono text-[11px] text-muted">
+              {run.callback_session_id}
+            </span>
             {run.callback_status && (
               <span className="rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
                 {run.callback_status}
