@@ -238,7 +238,7 @@ class ManagedRuntimeManager:
     def status(self) -> dict[str, Any]:
         manifest = self._load_manifest(allow_network=False)
         platform_tag = runtime_platform_tag()
-        archive = manifest.archives.get(platform_tag) if manifest else None
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
         install_dir = self._manifest_install_dir(manifest, archive) if manifest and archive else None
         binary = self.resolve_binary() if manifest and archive else None
         return {

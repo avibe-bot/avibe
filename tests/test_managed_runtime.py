@@ -70,3 +70,4 @@ def test_list_asset_manifest_supports_platform_alias_and_url_derived_name(
     assert result["changed"] is True
     assert Path(result["path"]).read_bytes() == binary_payload
     assert manager.ensure()["changed"] is False
+    assert manager.status()["installed"] is True
