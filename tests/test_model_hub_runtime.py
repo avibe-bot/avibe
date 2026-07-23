@@ -174,7 +174,23 @@ def test_config_generation_is_private_and_never_logs_secrets(
         "upstream-secret-value",
         base_url="https://api.example.test/v1",
     )
-    store.sync_sources([_binding(credential_ref)])
+    responses_ref = store.store_api_key(
+        "responses-secret-value",
+        vendor="openai",
+        protocol="openai_responses",
+    )
+    store.sync_sources(
+        [
+            _binding(credential_ref),
+            _binding(
+                responses_ref,
+                source_id="src_responses1",
+                vendor="openai",
+                protocol="openai_responses",
+                base_url=None,
+            ),
+        ]
+    )
     config_path = instance_dir / "config.yaml"
 
     write_engine_config(
@@ -197,6 +213,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
     assert payload["remote-management"]["allow-remote"] is False
     assert payload["remote-management"]["disable-control-panel"] is True
     assert payload["openai-compatibility"][0]["api-key-entries"][0]["api-key"] == ("upstream-secret-value")
+    assert payload["codex-api-key"][0]["base-url"] == "https://api.openai.com/v1"
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
     credential_path = next((store.root / "credentials").iterdir())
@@ -205,6 +222,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
         runtime_secrets.management_key,
         runtime_secrets.gateway_token,
         "upstream-secret-value",
+        "responses-secret-value",
     ):
         assert secret not in caplog.text
 
@@ -616,10 +634,10 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("refresh_existing", [False, True])
-def test_oauth_flow_binds_new_or_refreshed_auth_record(
+@pytest.mark.parametrize("oauth_record_case", ["new", "refresh", "conflict"])
+def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
     tmp_path: Path,
-    refresh_existing: bool,
+    oauth_record_case: str,
 ) -> None:
     class Client:
         def __init__(self) -> None:
@@ -630,7 +648,7 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
             if path == "/auth-files":
                 self.auth_calls += 1
                 if self.auth_calls == 1:
-                    if not refresh_existing:
+                    if oauth_record_case == "new":
                         return {"files": []}
                     return {
                         "files": [
@@ -669,6 +687,12 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
         def client(self):
             return self._client
 
+        def client_if_running(self):
+            return None
+
+        def invalidate_configs(self) -> None:
+            self.state_store.clear_runtime_configs()
+
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
@@ -676,9 +700,9 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
         (store.auth_dir / "claude-account.json").chmod(0o600)
         existing_ref = None
         existing_prefix = None
-        if refresh_existing:
+        if oauth_record_case != "new":
             existing_ref = store.bind_oauth_credential(
-                "src_fixture123",
+                "src_other1234" if oauth_record_case == "conflict" else "src_fixture123",
                 "anthropic",
                 "claude-account.json",
             )
@@ -697,15 +721,24 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
             adapter.oauth_status(flow.flow_id),
         )
 
+        if oauth_record_case == "conflict":
+            assert completed.state == "failed"
+            assert completed.error_key == "models.oauth.binding_failed"
+            assert concurrent.state == "failed"
+            retry = await adapter.start_oauth("src_fixture123", "anthropic")
+            assert retry.state == "awaiting_action"
+            assert not client.patches
+            return
+
         assert completed.state == "success"
         assert completed.source_id == "src_fixture123"
         assert completed.credential_ref and completed.credential_ref.startswith("cred_")
-        if refresh_existing:
+        if oauth_record_case == "refresh":
             assert completed.credential_ref == existing_ref
         assert concurrent.credential_ref == completed.credential_ref
         assert client.patches[0]["name"] == "claude-account.json"
         assert str(client.patches[0]["prefix"]).startswith("avibe-")
-        if refresh_existing:
+        if oauth_record_case == "refresh":
             assert client.patches[0]["prefix"] == existing_prefix
             assert len(list((store.root / "credentials").glob("*.json"))) == 1
         repeated = await adapter.oauth_status(flow.flow_id)
@@ -713,6 +746,10 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
         assert len(client.patches) == 1
         await adapter.cancel_oauth(flow.flow_id)
         assert (await adapter.oauth_status(flow.flow_id)).state == "success"
+        await adapter.revoke_credential(completed.credential_ref)
+        assert not (store.auth_dir / "claude-account.json").exists()
+        with pytest.raises(EngineStateError, match="unavailable"):
+            store.credential_metadata(completed.credential_ref)
 
     asyncio.run(run())
 

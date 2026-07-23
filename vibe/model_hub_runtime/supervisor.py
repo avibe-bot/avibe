@@ -76,12 +76,15 @@ class EngineSupervisor:
     def invalidate_configs(self) -> None:
         """Remove secret-bearing configs and recreate one only for a live engine."""
         with self._lock:
-            was_running = self._is_running_locked()
-            if was_running:
+            should_restart = self._is_running_locked() and self._healthy_locked()
+            if self._is_running_locked():
                 self._stop_locked()
             self.state_store.clear_runtime_configs()
-            if was_running:
-                self._start_locked()
+            if should_restart:
+                try:
+                    self._start_locked()
+                except EngineUnavailableError:
+                    logger.warning("Model Hub engine remains stopped after credential revocation")
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -109,6 +112,13 @@ class EngineSupervisor:
 
     def client(self) -> EngineClient:
         return EngineClient(self.ensure_running())
+
+    def client_if_running(self) -> EngineClient | None:
+        """Return a client for the current process without starting or repairing it."""
+        with self._lock:
+            if not self._is_running_locked() or self._connection is None:
+                return None
+            return EngineClient(self._connection)
 
     def _start_locked(self) -> EngineConnection:
         install = self.installer.ensure()

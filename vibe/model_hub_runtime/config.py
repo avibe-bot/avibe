@@ -80,11 +80,14 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
         payload.setdefault("claude-api-key", []).append(entry)
         return
     if source.protocol == "openai_responses":
-        entry = {"api-key": api_key, "prefix": source.prefix}
+        base_url = source.base_url
+        if not base_url and source.vendor in {"openai", "codex"}:
+            base_url = "https://api.openai.com/v1"
+        if not base_url:
+            raise EngineStateError("Responses API source requires a base URL")
+        entry = {"api-key": api_key, "prefix": source.prefix, "base-url": base_url}
         if models:
             entry["models"] = models
-        if source.base_url:
-            entry["base-url"] = source.base_url
         payload.setdefault("codex-api-key", []).append(entry)
         return
     if source.protocol in {"openai_chat", "openai_compatible"}:

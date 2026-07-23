@@ -161,13 +161,19 @@ class CLIProxyEngineAdapter:
         )
         auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
         if auth_name:
-            client = await asyncio.to_thread(self.supervisor.client)
-            await asyncio.to_thread(
-                client.management_request,
-                "DELETE",
-                "/auth-files",
-                query={"name": str(auth_name)},
-            )
+            client = await asyncio.to_thread(self.supervisor.client_if_running)
+            if client is not None:
+                try:
+                    await asyncio.to_thread(
+                        client.management_request,
+                        "DELETE",
+                        "/auth-files",
+                        query={"name": str(auth_name)},
+                        timeout=1.0,
+                    )
+                except EngineClientError:
+                    pass
+            await asyncio.to_thread(self.state_store.delete_oauth_auth_file, str(auth_name))
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
         await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
         await asyncio.to_thread(self.supervisor.invalidate_configs)
@@ -384,12 +390,16 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
-        credential_ref = await asyncio.to_thread(
-            self.state_store.bind_oauth_credential,
-            flow.source_id,
-            flow.vendor,
-            auth.name,
-        )
+        try:
+            credential_ref = await asyncio.to_thread(
+                self.state_store.bind_oauth_credential,
+                flow.source_id,
+                flow.vendor,
+                auth.name,
+            )
+        except EngineStateError:
+            self._fail_flow(flow, "models.oauth.binding_failed")
+            return
         credential = await asyncio.to_thread(
             self.state_store.credential_metadata,
             credential_ref,
@@ -475,7 +485,7 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
         if not isinstance(item, dict):
             continue
         identity = str(item.get("id") or item.get("auth_index") or item.get("name") or "").strip()
-        name = str(item.get("id") or item.get("name") or "").strip()
+        name = str(item.get("name") or item.get("id") or "").strip()
         provider = str(item.get("provider") or item.get("type") or "").strip().lower()
         if identity and name and provider:
             fingerprint = json.dumps(

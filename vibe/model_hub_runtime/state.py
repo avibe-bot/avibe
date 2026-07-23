@@ -317,6 +317,28 @@ class EngineStateStore:
         value = payload.get("auth_name") if payload.get("kind") == "oauth" else None
         return str(value) if value else None
 
+    def delete_oauth_auth_file(self, auth_name: str) -> None:
+        """Delete one managed OAuth file without requiring a running engine."""
+        normalized = auth_name.strip()
+        if (
+            not normalized
+            or "\x00" in normalized
+            or "\\" in normalized
+            or Path(normalized).name != normalized
+            or not normalized.lower().endswith(".json")
+        ):
+            raise EngineStateError("invalid OAuth auth file name")
+        with self._lock:
+            self.audit_auth_permissions(enforce=True)
+            path = self.auth_dir / normalized
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                return
+            if not stat.S_ISREG(mode):
+                raise EngineStateError("engine auth credential path is unsafe")
+            path.unlink()
+
     def audit_auth_permissions(self, *, enforce: bool = False) -> None:
         self._ensure_private_dir(self.root)
         if not self.auth_dir.exists():
