@@ -1726,6 +1726,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert payload["url_guidance"] is None
     assert "Do not send implementation details such as local paths to the user unless they ask for them." in payload["next_actions"]
     assert "Treat the Show Page as the primary collaboration surface; put meaningful updates there first." in payload["next_actions"]
+    assert "Annotations: users can mark up this page; see vibe show marks / reply / annotate." in payload["next_actions"]
     assert (
         "Use visual thinking: diagrams, timelines, maps, comparisons, dashboards, or small prototypes when they help."
         in payload["next_actions"]
@@ -1734,6 +1735,20 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm"
     assert captured["payload"] == {}
     assert captured["timeout"] == 3
+
+
+def test_show_path_cli_prints_annotation_capabilities(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123"])
+    assert cli.cmd_show_path(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Use it:" in output
+    assert "- Annotations: users can mark up this page; see vibe show marks / reply / annotate." in output
 
 
 def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, capsys):
@@ -2157,7 +2172,7 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    assert payload["event"]["transcript_text"].startswith("[agent-mark:default:created] mark-default-summary")
+    assert payload["event"]["transcript_text"].startswith("[agent-mark] mark-default-summary")
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
@@ -2247,7 +2262,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
                         "scope": "default",
                         "anchor": {},
                         "payload": {},
-                        "transcript_text": "[agent-mark:default] mark-default-summary\n\nReview this summary.",
+                        "transcript_text": "[agent-mark] mark-default-summary\n\nReview this summary.",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",
@@ -2819,7 +2834,7 @@ def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tm
                         "scope": "default",
                         "anchor": {},
                         "payload": {"dispatch": True},
-                        "transcript_text": "[show-annotation:default:created] comment",
+                        "transcript_text": "[show-annotation] comment",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",

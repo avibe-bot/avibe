@@ -1906,7 +1906,7 @@
     "subtitle": "{{count}} agents registered across all backends.",
     "tabs": {
       "definitions": "Definitions",
-      "running": "Running"
+      "running": "Runs"
     },
     "running": {
       "empty": "No agents are currently running.",
@@ -1927,6 +1927,81 @@
       "endedToast": "Ended",
       "endFailedToast": "Couldn't end ({{error}})",
       "pidShared": "(shared)"
+    },
+    "graph": {
+      "subtitle": "Who started whom, who reports back — click a node for details, double-click to open the chat.",
+      "livePill": "{{active}} running · {{queued}} queued",
+      "empty": "No sessions in this view yet.",
+      "error": "Couldn't load the run graph.",
+      "unreachable": "Runtime unreachable — showing history only.",
+      "truncated": "Showing the most recent 300 sessions — narrow the filters to see the rest.",
+      "orphans": {
+        "title": "{{count}} unattributed process(es)",
+        "description": "Live runtimes with no session — not shown as graph nodes. End them here."
+      },
+      "filters": {
+        "modeLabel": "Time range",
+        "active": "Active",
+        "withHistory": "With history",
+        "project": "Project",
+        "projectAll": "All",
+        "showBackground": "Show background sessions"
+      },
+      "window": {
+        "1h": "Last 1h",
+        "6h": "Last 6h",
+        "24h": "Last 24h",
+        "7d": "Last 7d"
+      },
+      "trigger": {
+        "task": "Task",
+        "watch": "Watch"
+      },
+      "legend": {
+        "spawn": "Spawn",
+        "callback": "Callback",
+        "trigger": "Task / Watch",
+        "background": "Background"
+      },
+      "status": {
+        "active": "running",
+        "idle": "idle",
+        "orphan": "orphan",
+        "queued": "queued",
+        "succeeded": "done",
+        "failed": "failed",
+        "canceled": "canceled"
+      },
+      "detail": {
+        "background": "Background",
+        "foreground": "Foreground",
+        "standalone": "Standalone",
+        "project": "Project",
+        "workdir": "Workdir",
+        "visibility": "Visibility",
+        "visibilityForeground": "Foreground",
+        "visibilityBackground": "Background · hidden from lists",
+        "startedBy": "Started by",
+        "reportsTo": "Reports to",
+        "trigger": "Trigger",
+        "triggerAgentRun": "agent · vibe agent run",
+        "triggerHuman": "human",
+        "callback": {
+          "pending": "callback pending",
+          "sent": "callback sent",
+          "failed": "callback failed",
+          "skipped": "callback skipped"
+        },
+        "runsTitle": "Runs · this session",
+        "viewAllInHarness": "View all in Harness",
+        "openChat": "Open chat · view transcript",
+        "toForeground": "Move to foreground",
+        "toBackground": "Hide",
+        "cancelRun": "Cancel run",
+        "movedForeground": "Moved to foreground",
+        "movedBackground": "Moved to background",
+        "endGone": "This session is no longer live."
+      }
     },
     "showDisabled": "Show disabled",
     "statusEnabled": "enabled",
@@ -2206,6 +2281,9 @@
       "openInAgents": "Open in Agents",
       "agentInherit": "Inherits default agent",
       "sessionNone": "No bound session",
+      "source": "Source",
+      "parentRun": "Parent run",
+      "callback": "Callback",
       "effort": "effort {{value}}"
     },
     "sessionPolicy": {

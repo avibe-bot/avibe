@@ -496,13 +496,35 @@ def _event_id(original_payload: dict[str, Any], event_payload: dict[str, Any]) -
     return _text_or_none(original_payload.get("id")) or _new_id("show_evt")
 
 
+def _format_transcript_header(
+    family: str,
+    *,
+    scope: Any,
+    action: str | None = None,
+    default_action: str | None = None,
+) -> str:
+    parts = [family]
+    if action and action != default_action:
+        parts.append(action)
+    normalized_scope = _text_or_none(scope) or DEFAULT_MARK_SCOPE
+    if normalized_scope != DEFAULT_MARK_SCOPE:
+        parts.append(f"scope={normalized_scope}")
+    return f"[{' '.join(parts)}]"
+
+
 def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: dict[str, Any]) -> str:
     if event_type == "system.annotation.control":
         return ""
     if event_type.startswith("assistant.mark."):
         action = event_type.split(".")[-1]
+        header = _format_transcript_header(
+            "agent-mark",
+            scope=payload.get("scope"),
+            action=action,
+            default_action="created",
+        )
         lines = [
-            f"[agent-mark:{payload.get('scope') or DEFAULT_MARK_SCOPE}:{action}] {payload.get('target')}",
+            f"{header} {payload.get('target')}",
             "",
             str(payload.get("body") or "").strip(),
         ]
@@ -517,13 +539,20 @@ def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: di
     if event_type == "human.intent.submitted":
         text = _text_or_none(payload.get("text") or payload.get("comment") or payload.get("value"))
         label = _text_or_none(payload.get("intent") or payload.get("component")) or "intent"
-        return f"[show-intent:{payload.get('scope') or DEFAULT_MARK_SCOPE}] {label}\n\n{text or _json_dumps(payload)}"
+        header = _format_transcript_header("show-intent", scope=payload.get("scope"))
+        return f"{header} {label}\n\n{text or _json_dumps(payload)}"
 
     if event_type in ANNOTATION_EVENT_TYPES:
         action = event_type.split(".")[-1]
         text = _text_or_none(payload.get("text") or payload.get("comment"))
         label = _text_or_none(payload.get("intent")) or "comment"
-        lines = [f"[show-annotation:{payload.get('scope') or DEFAULT_MARK_SCOPE}:{action}] {label}"]
+        header = _format_transcript_header(
+            "show-annotation",
+            scope=payload.get("scope"),
+            action=action,
+            default_action="created",
+        )
+        lines = [f"{header} {label}"]
         if text:
             lines.extend(["", text])
         primary_anchor = _normalize_annotation_primary_anchor(payload.get("primaryAnchor"))

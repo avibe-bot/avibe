@@ -3112,6 +3112,55 @@ async def running_agents_end():
     return jsonify(body), (result.get("status_code") or 200)
 
 
+# Contract A7: the run-graph endpoint lives OUTSIDE the ``/api/agents/<name>``
+# namespace (``/api/agents-graph``). ``<name>`` is a user-creatable agent slug,
+# so a ``/api/agents/graph`` path would be shadowed by — or shadow — an agent
+# literally named ``graph``; a distinct top-level path avoids the collision.
+@app.route("/api/agents-graph", methods=["GET"])
+async def agents_graph_get():
+    """Read-only run-graph payload for the Agents → 运行 tab.
+
+    Assembles ``agent_sessions`` + ``agent_runs`` + ``scopes`` into the frozen
+    contract §3 shape (``docs/plans/agents-run-graph-contract.md``). Liveness is
+    controller-owned, so it is fetched from the internal running-agents snapshot
+    and merged in; when the controller is unreachable the graph still renders
+    from the DB (all nodes non-live) with a ``live_unreachable`` hint so the tab
+    can show a "runtime unreachable — history only" state instead of a
+    misleading empty graph."""
+    from core.services import agent_graph
+    from vibe import internal_client
+
+    def _flag(value, default: bool) -> bool:
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    window = request.args.get("window") or agent_graph.DEFAULT_WINDOW
+    project = request.args.get("project") or "all"
+    include_ended = _flag(request.args.get("include_ended"), True)
+    include_background = _flag(request.args.get("include_background"), True)
+
+    live_agents: list = []
+    live_unreachable = False
+    try:
+        result = await internal_client.list_running_agents()
+        live_agents = (result.get("body") or {}).get("agents") or []
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        # Controller down: fall back to a DB-only graph (history stays visible).
+        live_unreachable = True
+
+    payload = await asyncio.to_thread(
+        agent_graph.build_graph,
+        live_agents=live_agents,
+        window=window,
+        project=project,
+        include_ended=include_ended,
+        include_background=include_background,
+        live_unreachable=live_unreachable,
+    )
+    return jsonify(payload)
+
+
 @app.route("/api/agents/<name>", methods=["GET"])
 def vibe_agent_get(name):
     from vibe import api
@@ -7609,6 +7658,10 @@ def inbox_list():
     except (TypeError, ValueError):
         limit = 30
     before = request.args.get("before") or None
+    # Targeted single-session fetch: lets a client (e.g. the Inbox visibility
+    # reconcile) guarantee one specific session's row is (re)loaded even when its
+    # activity sorts past the paged window.
+    only_session = request.args.get("session") or None
 
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -7618,6 +7671,7 @@ def inbox_list():
             unread_only=unread_only,
             limit=limit,
             before=before,
+            only_session=only_session,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
@@ -8691,12 +8745,16 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
         return transcript_text
     lines = [transcript_text, "", f"Show event id: {event_id}"]
     payload = event_payload.get("payload")
-    if isinstance(payload, dict) and payload.get("intent") == "question":
+    intent = "comment"
+    if isinstance(payload, dict):
+        intent = str(payload.get("intent") or "").strip() or "comment"
+    if intent in {"question", "comment"}:
         lines.extend(
             [
                 "",
-                "用户在页面上提出了疑问。请优先把回答放回页面上用户指的位置（chat 里保留一句简短结论即可）：",
+                "如需在页面上原位回应，可执行：",
                 f"  vibe show reply {event_id} --message '<你的回答>'",
+                "（也可以直接修改页面内容来响应，按场景选择。）",
             ]
         )
     return "\n".join(lines)

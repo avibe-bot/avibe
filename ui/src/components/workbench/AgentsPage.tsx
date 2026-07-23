@@ -23,7 +23,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
-import { RunningAgentsTab } from './RunningAgentsTab';
+import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
 import { RunAgentDialog } from './RunAgentDialog';
@@ -127,7 +127,11 @@ export const AgentsPage: React.FC = () => {
     try {
       const result = await api.getRunningAgents();
       if (result.ok && result.counts) {
-        setRunningActiveCount((result.counts as any).active ?? 0);
+        // Badge = the true live-session count (active + idle + orphan) from the
+        // running-agents snapshot. Deliberately sourced here (not from the graph
+        // tab's counts) so it stays independent of the graph's project/time/
+        // visibility filters — a narrowed graph must not shrink the badge.
+        setRunningActiveCount(result.counts.total ?? 0);
       } else {
         setRunningActiveCount(null);
       }
@@ -136,12 +140,13 @@ export const AgentsPage: React.FC = () => {
     }
   }, [api]);
 
+  // Keep the badge fresh on every tab (including 运行) so it never depends on
+  // the graph view's filters.
   useEffect(() => {
-    if (agentsTab !== 'running') void fetchRunningActiveCount();
-  }, [agentsTab, fetchRunningActiveCount]);
+    void fetchRunningActiveCount();
+  }, [fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (agentsTab === 'running') return;
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
         if (data.source === 'controller') {
@@ -159,10 +164,14 @@ export const AgentsPage: React.FC = () => {
       onTurnEnd: () => fetchRunningActiveCount(),
       onSessionStatus: () => fetchRunningActiveCount(),
     });
-  }, [api, agentsTab, fetchRunningActiveCount]);
+  }, [api, fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (agentsTab === 'running' || eventBridgeConnected) return;
+    // Reconcile the badge even while SSE is connected: process death / orphan /
+    // reap is a sampled snapshot with no run/session SSE event, so a slow
+    // liveness poll keeps the count fresh (30s connected, 8s disconnected),
+    // mirroring the old running list.
+    const intervalMs = eventBridgeConnected ? 30000 : 8000;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -171,7 +180,7 @@ export const AgentsPage: React.FC = () => {
     const tick = async () => {
       if (cancelled) return;
       if (document.visibilityState !== 'visible') {
-        timer = window.setTimeout(tick, 8000);
+        timer = window.setTimeout(tick, intervalMs);
         return;
       }
       if (inFlight) {
@@ -191,14 +200,14 @@ export const AgentsPage: React.FC = () => {
         void tick();
         return;
       }
-      timer = window.setTimeout(tick, 8000);
+      timer = window.setTimeout(tick, intervalMs);
     };
 
     const refreshNow = () => {
       if (document.visibilityState === 'visible') void tick();
     };
 
-    void tick();
+    timer = window.setTimeout(tick, intervalMs);
     document.addEventListener('visibilitychange', refreshNow);
     window.addEventListener('focus', refreshNow);
     return () => {
@@ -207,7 +216,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, agentsTab, fetchRunningActiveCount]);
+  }, [eventBridgeConnected, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -254,9 +263,6 @@ export const AgentsPage: React.FC = () => {
     refresh().then(() => setSelected(agent));
   };
 
-  const handleRunningActiveCountChange = useCallback((count: number | null) => {
-    setRunningActiveCount(count);
-  }, []);
 
   const updateField = async (patch: Partial<VibeAgentFull>) => {
     if (!selected) return;
@@ -395,8 +401,8 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* Running tab body */}
-      {agentsTab === 'running' && <RunningAgentsTab onActiveCountChange={handleRunningActiveCountChange} />}
+      {/* 运行 tab body — the run graph (replaces the old flat running list). */}
+      {agentsTab === 'running' && <AgentGraphTab />}
 
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
       <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>

@@ -252,6 +252,9 @@ agent_runs = Table(
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
     Index("ix_agent_runs_agent_created", "agent_name", "created_at"),
     Index("ix_agent_runs_callback_status", "callback_status", "completed_at"),
+    # Leading-timestamp index for the run-graph window scan: updated_at bumps on
+    # every state change, so it is the single column that scan filters on.
+    Index("ix_agent_runs_updated", "updated_at"),
 )
 
 # Backwards-compatible Python aliases for legacy callers. The physical table

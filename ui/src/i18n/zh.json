@@ -1906,7 +1906,7 @@
     "subtitle": "已登记 {{count}} 个 Agent。",
     "tabs": {
       "definitions": "定义",
-      "running": "运行中"
+      "running": "运行"
     },
     "running": {
       "empty": "当前没有正在运行的 Agent。",
@@ -1927,6 +1927,81 @@
       "endedToast": "已结束",
       "endFailedToast": "无法结束（{{error}}）",
       "pidShared": "（共享）"
+    },
+    "graph": {
+      "subtitle": "谁启动了谁、向谁汇报 — 点节点看详情，双击进入会话。",
+      "livePill": "{{active}} 个运行中 · {{queued}} 排队",
+      "empty": "该视图暂无会话。",
+      "error": "无法加载运行图。",
+      "unreachable": "运行时不可达 — 仅显示历史。",
+      "truncated": "仅显示最近 300 个会话 — 收窄筛选条件可查看其余。",
+      "orphans": {
+        "title": "{{count}} 个会话外进程",
+        "description": "无法归属到会话的运行时,不作为图节点显示,可在此结束。"
+      },
+      "filters": {
+        "modeLabel": "时间范围",
+        "active": "活跃",
+        "withHistory": "含历史",
+        "project": "项目",
+        "projectAll": "全部",
+        "showBackground": "显示后台会话"
+      },
+      "window": {
+        "1h": "近 1 小时",
+        "6h": "近 6 小时",
+        "24h": "近 24 小时",
+        "7d": "近 7 天"
+      },
+      "trigger": {
+        "task": "TASK",
+        "watch": "WATCH"
+      },
+      "legend": {
+        "spawn": "启动",
+        "callback": "汇报 / callback",
+        "trigger": "Task / Watch 触发",
+        "background": "后台会话"
+      },
+      "status": {
+        "active": "运行中",
+        "idle": "空闲",
+        "orphan": "孤儿",
+        "queued": "排队",
+        "succeeded": "已完成",
+        "failed": "失败",
+        "canceled": "已取消"
+      },
+      "detail": {
+        "background": "后台",
+        "foreground": "前台",
+        "standalone": "独立",
+        "project": "项目",
+        "workdir": "工作目录",
+        "visibility": "可见性",
+        "visibilityForeground": "前台",
+        "visibilityBackground": "后台 · 不在会话列表",
+        "startedBy": "启动方",
+        "reportsTo": "汇报到",
+        "trigger": "触发",
+        "triggerAgentRun": "agent · vibe agent run",
+        "triggerHuman": "人工发起",
+        "callback": {
+          "pending": "待回传",
+          "sent": "已回传",
+          "failed": "回传失败",
+          "skipped": "已跳过"
+        },
+        "runsTitle": "RUNS · 本会话",
+        "viewAllInHarness": "在 Harness 查看全部",
+        "openChat": "打开会话 · 查看 Chat 记录",
+        "toForeground": "移到前台",
+        "toBackground": "隐藏",
+        "cancelRun": "取消 Run",
+        "movedForeground": "已移到前台",
+        "movedBackground": "已移到后台",
+        "endGone": "该会话已不在运行。"
+      }
     },
     "showDisabled": "显示已禁用",
     "statusEnabled": "已启用",
@@ -2206,6 +2281,9 @@
       "openInAgents": "在 Agents 打开",
       "agentInherit": "继承默认 Agent",
       "sessionNone": "未绑定会话",
+      "source": "来源",
+      "parentRun": "父 Run",
+      "callback": "回传",
       "effort": "推理 {{value}}"
     },
     "sessionPolicy": {

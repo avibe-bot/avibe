@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
+import { sessionActivityInboxAction } from '../lib/inboxActivity';
 
 const PAGE_SIZE = 30;
 
@@ -187,6 +188,31 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     }
   }, [api, applyUnreadMap]);
 
+  // Targeted reconcile for one session (contract A6 foreground restore): fetch
+  // that exact session by id and upsert its card, so a restored session
+  // reappears even when its activity sorts past the windowed reconcile()'s
+  // newest-N rows. The response still carries the pagination-independent
+  // whole-account unread map, so refresh that too. Never touches the cursor.
+  const reconcileSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        const result = await api.listInbox({
+          platform: 'avibe',
+          onlySession: sessionId,
+          limit: 1,
+          cache: false,
+          handleError: false,
+        });
+        const row = result.sessions.find((s) => s.session_id === sessionId);
+        if (row) setInboxSessions((prev) => upsertSession(prev, row));
+        applyUnreadMap(result.unread_by_session ?? {});
+      } catch (err) {
+        console.error('[inbox] reconcileSession failed', err);
+      }
+    },
+    [api, applyUnreadMap],
+  );
+
   useEffect(() => {
     // First mount loads page one; every later rerun reconciles the loaded window
     // instead when an ``api`` identity change rebuilds the value — so
@@ -217,9 +243,19 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         }
       },
       onSessionActivity: (data) => {
-        // Terminal archive (here or in another tab) — drop the card + its unread
-        // live, instead of waiting for the next reconnect/refresh to filter it.
-        if (data.event !== 'archived') return;
+        // Contract A6: react to visibility/scope changes carried on the event.
+        // background ⇒ drop the card (like an archive); foreground ⇒ fetch that
+        // exact session and upsert its card so it reappears even if it sorts past
+        // the reconcile window; no visibility ⇒ no-op except an explicit archive.
+        // See lib/inboxActivity.
+        const action = sessionActivityInboxAction(data);
+        if (action === 'reconcile') {
+          void reconcileSession(data.session_id);
+          return;
+        }
+        if (action === 'ignore') return;
+        // action === 'drop': remove the card + its unread live, instead of
+        // waiting for the next reconnect/refresh to filter it.
         setInboxSessions((prev) => prev.filter((s) => s.session_id !== data.session_id));
         setUnreadBySession((prev) => {
           if (!(data.session_id in prev)) return prev;
@@ -235,7 +271,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       },
     });
     return disconnect;
-  }, [api, refresh, reconcile, applyUnreadMap]);
+  }, [api, refresh, reconcile, reconcileSession, applyUnreadMap]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
   // frozen and its SSE socket dropped, and the broker never replays the gap;
