@@ -39,6 +39,16 @@ Amendments (orchestrator-approved):
   (and refetches/re-adds on `'foreground'`); absent `visibility` field ⇒
   no-op (defensive pre-M1). M1 does not touch `ui/**` for this; the gap is
   recorded in #957's inventory as assigned to #956.
+- **A8 (2026-07-23, owner regression feedback)**: callback edges are **no
+  longer rendered on the canvas** (visual clutter). The payload keeps emitting
+  them unchanged; the node detail panel ("REPORTS TO · callback status")
+  becomes the only callback surface. Client-side rendering change only.
+- **A9 (2026-07-23, owner regression feedback)**: chat trigger-message
+  provenance: agent-callback ("自动触发") messages render the SOURCE session's
+  title prefix and click through to `/chat/<source_session_id>`; task/watch
+  trigger messages click through to the corresponding Harness filter view
+  (reuse the backgroundActivity deep-link helpers). Read-side message
+  enrichment only if the payload lacks source ids.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —
