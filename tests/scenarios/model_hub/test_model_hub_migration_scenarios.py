@@ -170,6 +170,9 @@ def _write_opencode(home: Path, *, malformed: bool = False) -> None:
   // JSONC is part of the native OpenCode format.
   "provider": {
     "openrouter": {
+      "options": {
+        "apiKey": "{env:OPENROUTER_API_KEY}",
+      },
       "models": {
         "manual-openrouter-model": {"name": "Manual OpenRouter Model"},
       },
@@ -224,6 +227,14 @@ def _tree_digest(root: Path) -> str:
 def _validate_scan(payload: dict) -> None:
     schema = json.loads((CONTRACTS / "migration-scan.schema.json").read_text(encoding="utf-8"))
     Draft7Validator(schema).validate(payload)
+
+
+def _translation_value(payload: dict, key: str) -> object:
+    value: object = payload
+    for part in key.split("."):
+        assert isinstance(value, dict)
+        value = value[part]
+    return value
 
 
 def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) -> None:
@@ -289,6 +300,31 @@ def test_native_config_parsers_cover_valid_malformed_and_absent(tmp_path: Path) 
     ]
 
 
+def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
+    native_home = tmp_path / "native-home"
+    _write_claude(native_home)
+    _write_codex(native_home)
+    _write_opencode(native_home)
+    note_keys = {
+        item.notes_key
+        for item in scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        if item.notes_key is not None
+    }
+
+    for locale in ("en", "zh"):
+        translations = json.loads(
+            Path(f"ui/src/i18n/{locale}.json").read_text(encoding="utf-8")
+        )
+        assert all(
+            isinstance(_translation_value(translations, key), str)
+            for key in note_keys
+        )
+
+
 def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -342,6 +378,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert codex_source.base_url == "https://codex-relay.example/v1"
     openrouter_source = next(source for source in store.config.sources if source.vendor == "openrouter")
     assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
+    assert openrouter_source.masked_credential == _mask_credential("sk-openrouter-123456")
     assert any(
         model.id == "manual-openrouter-model" and model.provenance == "manual" for model in openrouter_source.models
     )
@@ -399,7 +436,7 @@ def test_mh_mig_003_experimental_flag_keeps_oauth_native(
     store.config.subscription_hub_experimental = True
     oauth_item = next(item for item in service.migration_scan()["items"] if item["kind"] == "oauth_native")
     assert oauth_item["proposed_action"] == "keep_native"
-    assert oauth_item["notes_key"] == "models.migration.keep_native.reauthorize_in_hub"
+    assert oauth_item["notes_key"] == "settings.models.source.nativeSupply"
 
     result = asyncio.run(service.migration_apply([oauth_item["id"]]))
     assert result["applied"] == 1
@@ -449,7 +486,7 @@ def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
     [item] = service.migration_scan()["items"]
     assert item["proposed_action"] == "reauth"
     assert item["selected"] is False
-    assert item["notes_key"] == "models.migration.reauth.auth_token_custom_base_url"
+    assert item["notes_key"] == "settings.models.source.customEndpoint"
     assert "bearer-test-123456" not in json.dumps(item)
 
     with pytest.raises(ModelHubError) as error:
@@ -522,6 +559,43 @@ def test_opencode_unsupported_native_sdk_is_not_guessed_as_compatible(tmp_path: 
     _write(
         native_home / ".cache" / "opencode" / "models.json",
         json.dumps({"google": {"id": "google", "npm": "@ai-sdk/google"}}),
+    )
+
+    assert (
+        scan_native_configs(
+            ModelHubConfig(),
+            home=native_home,
+            mask_credential=_mask_credential,
+        )
+        == []
+    )
+
+
+def test_opencode_env_placeholder_without_auth_fallback_is_not_importable(tmp_path: Path) -> None:
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".config" / "opencode" / "opencode.json",
+        json.dumps(
+            {
+                "provider": {
+                    "openrouter": {
+                        "options": {"apiKey": "{env:OPENROUTER_API_KEY}"}
+                    }
+                }
+            }
+        ),
+    )
+    _write(
+        native_home / ".cache" / "opencode" / "models.json",
+        json.dumps(
+            {
+                "openrouter": {
+                    "id": "openrouter",
+                    "npm": "@openrouter/ai-sdk-provider",
+                    "api": "https://openrouter.ai/api/v1",
+                }
+            }
+        ),
     )
 
     assert (

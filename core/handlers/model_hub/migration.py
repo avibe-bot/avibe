@@ -31,7 +31,8 @@ from vibe.opencode_config import (
 
 MigrationAction = Literal["import", "controlled_import", "keep_native", "reauth"]
 MigrationKind = Literal["api_key", "oauth_native", "opencode_provider"]
-_CUSTOM_BASE_URL_NOTE = "models.migration.import.custom_base_url"
+_CUSTOM_ENDPOINT_NOTE = "settings.models.source.customEndpoint"
+_NATIVE_SUPPLY_NOTE = "settings.models.source.nativeSupply"
 
 
 class MigrationConflictError(ValueError):
@@ -171,7 +172,7 @@ def _claude_items(
                 masked_detail=detail,
                 proposed_action=action,
                 selected=True,
-                notes_key=_CUSTOM_BASE_URL_NOTE if base_url else None,
+                notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
                 vendor="anthropic",
                 protocol="anthropic",
                 display_name="Anthropic",
@@ -199,11 +200,7 @@ def _claude_items(
                 masked_detail=detail,
                 proposed_action=action,
                 selected=False,
-                notes_key=(
-                    "models.migration.reauth.auth_token_custom_base_url"
-                    if base_url
-                    else "models.migration.reauth.auth_token"
-                ),
+                notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
                 vendor="anthropic",
                 protocol="anthropic",
                 display_name="Anthropic",
@@ -229,7 +226,7 @@ def _claude_items(
                 masked_detail="",
                 proposed_action=action,
                 selected=True,
-                notes_key="models.migration.keep_native.sanctioned",
+                notes_key=_NATIVE_SUPPLY_NOTE,
                 vendor="anthropic",
                 protocol="anthropic",
                 display_name="Claude",
@@ -239,7 +236,6 @@ def _claude_items(
 
 
 def _codex_items(
-    config: ModelHubConfig,
     *,
     home: Optional[Path],
     mask_credential: Callable[[str], str],
@@ -276,7 +272,7 @@ def _codex_items(
                 masked_detail=detail,
                 proposed_action="import",
                 selected=True,
-                notes_key=_CUSTOM_BASE_URL_NOTE if base_url else None,
+                notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
                 vendor="openai",
                 protocol=protocol,
                 display_name="OpenAI",
@@ -310,11 +306,7 @@ def _codex_items(
             masked_detail=account_label or "",
             proposed_action=action,
             selected=True,
-            notes_key=(
-                "models.migration.keep_native.reauthorize_in_hub"
-                if config.subscription_hub_experimental
-                else "models.migration.keep_native.sanctioned"
-            ),
+            notes_key=_NATIVE_SUPPLY_NOTE,
             vendor="openai",
             protocol="openai_responses",
             display_name="ChatGPT",
@@ -382,6 +374,15 @@ def _opencode_manual_models(provider_config: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _opencode_plaintext_key(value: object) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if re.fullmatch(r"\{env:[^{}]+\}", candidate):
+        return None
+    return candidate
+
+
 def _opencode_items(
     *,
     home: Optional[Path],
@@ -418,13 +419,16 @@ def _opencode_items(
         options = provider_config.get("options")
         if not isinstance(options, dict):
             options = {}
-        config_key = options.get("apiKey")
+        config_key = _opencode_plaintext_key(options.get("apiKey"))
         auth_entry = auth_entries.get(provider_id, {})
-        auth_key = auth_entry.get("key") if auth_entry.get("type") == "api" else None
-        secret = config_key if isinstance(config_key, str) and config_key.strip() else auth_key
-        if not isinstance(secret, str) or not secret.strip():
+        auth_key = (
+            _opencode_plaintext_key(auth_entry.get("key"))
+            if auth_entry.get("type") == "api"
+            else None
+        )
+        secret = config_key or auth_key
+        if secret is None:
             continue
-        secret = secret.strip()
         raw_base_url = options.get("baseURL")
         base_url = raw_base_url.strip() if isinstance(raw_base_url, str) and raw_base_url.strip() else None
         catalog_provider = provider_catalog.get(provider_id, {})
@@ -456,7 +460,7 @@ def _opencode_items(
                 masked_detail=detail,
                 proposed_action=action,
                 selected=True,
-                notes_key=_CUSTOM_BASE_URL_NOTE if base_url else None,
+                notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
                 vendor=provider_id,
                 protocol=protocol,
                 display_name=provider_id,
@@ -483,7 +487,7 @@ def scan_native_configs(
             mask_credential=mask_credential,
             oauth_probe=claude_oauth_probe,
         ),
-        *_codex_items(config, home=home, mask_credential=mask_credential),
+        *_codex_items(home=home, mask_credential=mask_credential),
         *_opencode_items(home=home, mask_credential=mask_credential),
     ]
     existing_source_ids = {source.id for source in config.sources}
