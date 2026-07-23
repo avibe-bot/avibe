@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from config import paths
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -241,6 +243,49 @@ def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
     _seed(engine, "sesaaa", title="Old")
     _, payload = _run(cli.cmd_session_update, ["session", "update", "sesaaa", "--title", ""], capsys)
     assert payload["session"]["title"] is None
+
+
+def test_update_help_teaches_visibility_sugar(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["session", "update", "--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--visible" in help_text
+    assert "--hidden" in help_text
+    assert "--visibility {foreground,background}" in help_text
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [("--visible", "foreground"), ("--hidden", "background")],
+)
+def test_update_visibility_sugar_parses(flag, expected):
+    args = cli.build_parser().parse_args(["session", "update", "sesaaa", flag])
+
+    assert args.visibility == expected
+
+
+@pytest.mark.parametrize(
+    "visibility_args",
+    [
+        ["--visible", "--hidden"],
+        ["--visible", "--visibility", "background"],
+        ["--hidden", "--visibility", "foreground"],
+    ],
+)
+def test_update_visibility_sugar_rejects_conflicts(visibility_args, capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["session", "update", "sesaaa", *visibility_args])
+
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "invalid_arguments"
+    assert "not allowed with argument" in payload["error"]
 
 
 def test_update_visibility_and_make_standalone_keeps_workdir(monkeypatch, tmp_path, capsys):

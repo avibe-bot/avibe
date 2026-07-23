@@ -424,11 +424,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Watches created from an Avibe Agent shell follow up in this conversation by default", prompt)
         self.assertIn("`vibe watch add` creates a managed monitor", prompt)
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
-        self.assertIn("Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work", prompt)
-        self.assertIn("creates a background Session in the caller's scope, returns immediately", prompt)
-        self.assertIn("a caller-less run creates a standalone background Session with its own Show workspace", prompt)
+        delegate_guidance = (
+            "Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. "
+            "By default this creates a background Session in the caller's scope and returns immediately; when the run "
+            "completes, the final result is sent back to this conversation. Background Sessions stay out of the session "
+            "list and never deliver outward, but remain visible in the Agents run graph, where the user can open their "
+            "full chat history or promote them at any time. Pass `--visible` only when the new Session should be "
+            "user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass "
+            "`--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later; "
+            "pass `--callback-session-id <id>` only to route the final result elsewhere. Add `--scope-id <scopes.id>` "
+            "only when placing the new Session in a specific existing scope."
+        )
+        self.assertIn(delegate_guidance, prompt)
+        self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
-        self.assertIn("Add `--same-scope` to require the caller/source scope", prompt)
+        self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)
         self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
         self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)
         self.assertIn("It does not change that Session's cwd, scope, Agent, model, or reasoning settings", prompt)
@@ -452,7 +462,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Use the `Agent Name` value exactly as listed in shell commands", prompt)
         self.assertIn("`--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing", prompt)
         self.assertIn("Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate background Session", prompt)
-        self.assertIn("Use `vibe session update --visibility foreground|background`", prompt)
+        self.assertIn(
+            "Use `vibe session update --visible|--hidden` (`--visibility foreground|background`)",
+            prompt,
+        )
         self.assertIn("`--fork-self` creates a new Agent Session from this current Session's native backend context", prompt)
         self.assertIn("`--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context", prompt)
         self.assertIn("vibe agent run --agent <agent-name> --message ...", prompt)
