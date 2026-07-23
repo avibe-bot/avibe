@@ -289,6 +289,37 @@ def test_telegram_topic_override_removal_reuses_topic_scoped_session(tmp_path):
     assert target.workdir == str(topic_workdir)
 
 
+def test_telegram_general_topic_fallback_anchor_reuses_session(tmp_path):
+    # Scenario: TELEGRAM-TOPIC-003
+    controller = _controller(tmp_path)
+    group_workdir = tmp_path / "group"
+    with controller.sqlite_engine.begin() as conn:
+        group_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="-1001",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, group_scope_id, workdir=str(group_workdir))
+
+    def general_context(message_id: str) -> MessageContext:
+        return MessageContext(
+            user_id="7",
+            channel_id="-1001",
+            message_id=message_id,
+            platform="telegram",
+            platform_specific={"is_forum": True, "is_topic_message": True},
+        )
+
+    first = resolve_agent_run_target(general_context("100"), controller=controller)
+    follow_up = resolve_agent_run_target(general_context("101"), controller=controller)
+
+    assert first.session_anchor == "telegram_1"
+    assert follow_up.session_anchor == "telegram_1"
+    assert follow_up.agent_session_id == first.agent_session_id
+
+
 def test_existing_background_im_target_carries_visibility(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)

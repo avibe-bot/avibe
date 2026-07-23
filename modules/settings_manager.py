@@ -103,6 +103,10 @@ class SettingsManager:
         paths.ensure_data_dirs()
         self.settings_file = Path(settings_file) if settings_file else paths.get_settings_path()
         self.platform = platform
+        # The controller replaces this with the live platform config during
+        # dependency injection. Keep standalone managers aligned with the
+        # built-in defaults before that happens.
+        self.require_mention_default = platform == "telegram"
         self.channel_settings: Dict[str, UserSettings] = {}
         self.dm_user_settings: Dict[str, UserSettings] = {}
         self.store = SettingsStore.get_instance(self.settings_file)
@@ -307,13 +311,16 @@ class SettingsManager:
         thread_ref = split_thread_settings_key(normalized_id)
         if thread_ref is not None:
             channel_id, thread_id = thread_ref
-            existing = self.store.find_thread(channel_id, thread_id, platform=self.platform)
-            if existing is None:
+            existing_thread = self.store.find_thread(channel_id, thread_id, platform=self.platform)
+            existing = existing_thread
+            if existing_thread is None:
                 existing = self.store.find_channel(channel_id, platform=self.platform)
             updated = self._to_channel_settings(settings)
             if existing is not None:
                 updated.require_mention = existing.require_mention
                 updated.require_bind = existing.require_bind
+            if existing_thread is None and updated.require_mention is None:
+                updated.require_mention = self.require_mention_default
             self.store.update_thread(channel_id, thread_id, updated, platform=self.platform)
             self._last_seen_store_mtime = self.store._file_mtime
             return

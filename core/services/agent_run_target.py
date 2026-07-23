@@ -365,7 +365,8 @@ def _fallback_anchor(context: MessageContext, platform: str) -> str:
     target = payload.get("agent_session_target")
     if isinstance(target, dict) and target.get("session_anchor"):
         return str(target["session_anchor"])
-    return f"{platform}_{context.thread_id or context.message_id or context.channel_id or context.user_id}"
+    thread_id = resolve_context_thread_id(context) or context.thread_id
+    return f"{platform}_{thread_id or context.message_id or context.channel_id or context.user_id}"
 
 
 def _target_payload(context: MessageContext) -> dict[str, Any]:

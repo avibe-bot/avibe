@@ -31,6 +31,7 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
+from core.message_context import resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
@@ -323,7 +324,7 @@ class SessionHandler(BaseHandler):
             else:
                 base_id = context.channel_id or context.user_id
         else:
-            base_id = context.thread_id
+            base_id = resolve_context_thread_id(context) or context.thread_id
             if not base_id:
                 use_message_id = True
                 getter = getattr(self.controller, "get_im_client_for_context", None)

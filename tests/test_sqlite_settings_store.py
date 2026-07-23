@@ -261,6 +261,35 @@ def test_settings_manager_runtime_save_preserves_require_bind(tmp_path: Path, mo
         manager.store.close()
 
 
+def test_settings_manager_topic_override_materializes_inherited_mention_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+
+    manager = SettingsManager(settings_file=str(settings_path), platform="telegram")
+    manager.require_mention_default = False
+    try:
+        manager.store.update_channel(
+            "-1001",
+            ChannelSettings(enabled=True, require_mention=None),
+            platform="telegram",
+        )
+        settings_key = v2_settings.make_thread_settings_key("-1001", "42")
+        settings = manager.get_user_settings(settings_key)
+        settings.custom_cwd = "/topic"
+
+        manager.update_user_settings(settings_key, settings)
+
+        topic = manager.store.find_thread("-1001", "42", platform="telegram")
+        assert topic is not None
+        assert topic.custom_cwd == "/topic"
+        assert topic.require_mention is False
+    finally:
+        manager.store.close()
+
+
 def test_settings_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     store = SettingsStore(settings_path)
