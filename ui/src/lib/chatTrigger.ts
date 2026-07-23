@@ -15,7 +15,8 @@ export type ChatTriggerLink =
   | { kind: 'harness'; to: string };
 
 // author_name values that map to the Harness "tasks" tab (watch → "watches").
-const TASK_KINDS = new Set(['scheduled', 'task_run']);
+// Includes the legacy/queued-restore `task` trigger kind alongside scheduled/task_run.
+const TASK_KINDS = new Set(['scheduled', 'task_run', 'task']);
 const TITLE_PREFIX_MAX = 12;
 
 function titlePrefix(title: string): string {
@@ -34,7 +35,9 @@ type TriggerFields = Pick<
   | 'source_session_agent_name'
 >;
 
-export function chatTriggerLink(message: TriggerFields): ChatTriggerLink | null {
+// ``agentFallback`` is the localized word for "agent" (chat.source.agentFallback);
+// passed in so this stays a pure, translation-free mapper.
+export function chatTriggerLink(message: TriggerFields, agentFallback: string): ChatTriggerLink | null {
   if (message.source !== 'harness') return null;
 
   const sourceId = message.source_session_id;
@@ -42,7 +45,7 @@ export function chatTriggerLink(message: TriggerFields): ChatTriggerLink | null 
     const title = message.source_session_title?.trim();
     const label = title
       ? titlePrefix(title)
-      : `${message.source_session_agent_name?.trim() || 'agent'} · ${sourceId.slice(-6)}`;
+      : `${message.source_session_agent_name?.trim() || agentFallback} · ${sourceId.slice(-6)}`;
     return { kind: 'source', to: `/chat/${encodeURIComponent(sourceId)}`, label };
   }
 

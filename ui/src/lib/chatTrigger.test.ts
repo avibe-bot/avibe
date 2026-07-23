@@ -13,58 +13,63 @@ const msg = (over: Partial<Msg>): Msg => ({
   source_session_agent_name: null,
   ...over,
 });
+// Second arg is the localized "agent" fallback word; a fixed literal keeps the
+// mapper translation-free and the test deterministic.
+const link = (over: Partial<Msg>) => chatTriggerLink(msg(over), 'agent');
 
 describe('chatTriggerLink', () => {
   it('returns null for non-harness messages', () => {
-    expect(chatTriggerLink(msg({ source: 'user' }))).toBeNull();
-    expect(chatTriggerLink(msg({ source: 'agent' }))).toBeNull();
+    expect(link({ source: 'user' })).toBeNull();
+    expect(link({ source: 'agent' })).toBeNull();
   });
 
   it('A9a: agent-callback links to the source session chat, labelled by title prefix', () => {
-    const link = chatTriggerLink(
-      msg({ author_name: 'agent_run', source_session_id: 'ses_src_1234', source_session_title: 'Vaults 总控' }),
-    );
-    expect(link).toEqual({ kind: 'source', to: '/chat/ses_src_1234', label: 'Vaults 总控' });
+    expect(link({ author_name: 'agent_run', source_session_id: 'ses_src_1234', source_session_title: 'Vaults 总控' })).toEqual({
+      kind: 'source',
+      to: '/chat/ses_src_1234',
+      label: 'Vaults 总控',
+    });
   });
 
   it('A9a: truncates a long source title to ~12 chars', () => {
-    const link = chatTriggerLink(
-      msg({ source_session_id: 'ses_x', source_session_title: '0123456789ABCDEF' }),
-    );
-    expect(link).toEqual({ kind: 'source', to: '/chat/ses_x', label: '0123456789AB…' });
+    expect(link({ source_session_id: 'ses_x', source_session_title: '0123456789ABCDEF' })).toEqual({
+      kind: 'source',
+      to: '/chat/ses_x',
+      label: '0123456789AB…',
+    });
   });
 
   it('A9a: falls back to agent name + short id when the title is null', () => {
-    const link = chatTriggerLink(
-      msg({ source_session_id: 'ses_abcdef123456', source_session_title: null, source_session_agent_name: 'pm' }),
-    );
-    expect(link).toEqual({ kind: 'source', to: '/chat/ses_abcdef123456', label: 'pm · 123456' });
+    expect(link({ source_session_id: 'ses_abcdef123456', source_session_title: null, source_session_agent_name: 'pm' })).toEqual({
+      kind: 'source',
+      to: '/chat/ses_abcdef123456',
+      label: 'pm · 123456',
+    });
+  });
+
+  it('A9a: uses the localized agent fallback when both title and agent name are null', () => {
+    expect(link({ source_session_id: 'ses_abcdef123456' })?.label).toBe('agent · 123456');
   });
 
   it('A9b: watch trigger links to the Harness watches tab filtered to this session', () => {
-    expect(chatTriggerLink(msg({ author_name: 'watch', author_id: 'def_w', session_id: 'ses_1' }))).toEqual({
+    expect(link({ author_name: 'watch', author_id: 'def_w', session_id: 'ses_1' })).toEqual({
       kind: 'harness',
       to: '/harness?tab=watches&session=ses_1',
     });
   });
 
-  it('A9b: scheduled + task_run link to the Harness tasks tab', () => {
-    expect(chatTriggerLink(msg({ author_name: 'scheduled', session_id: 'ses_1' }))?.to).toBe(
-      '/harness?tab=tasks&session=ses_1',
-    );
-    expect(chatTriggerLink(msg({ author_name: 'task_run', session_id: 'ses_1' }))?.to).toBe(
-      '/harness?tab=tasks&session=ses_1',
-    );
+  it('A9b: scheduled + task_run + legacy task all link to the Harness tasks tab', () => {
+    for (const author_name of ['scheduled', 'task_run', 'task']) {
+      expect(link({ author_name, session_id: 'ses_1' })?.to).toBe('/harness?tab=tasks&session=ses_1');
+    }
   });
 
   it('does not navigate for webhook or unknown harness kinds without a source', () => {
-    expect(chatTriggerLink(msg({ author_name: 'webhook' }))).toBeNull();
-    expect(chatTriggerLink(msg({ author_name: 'agent_run', source_session_id: null }))).toBeNull();
+    expect(link({ author_name: 'webhook' })).toBeNull();
+    expect(link({ author_name: 'agent_run', source_session_id: null })).toBeNull();
   });
 
   it('prefers the source link over the kind link when both could apply', () => {
-    // A resolved source session always wins (agent-callback provenance).
-    const link = chatTriggerLink(msg({ author_name: 'watch', source_session_id: 'ses_src' }));
-    expect(link?.kind).toBe('source');
+    expect(link({ author_name: 'watch', source_session_id: 'ses_src' })?.kind).toBe('source');
   });
 });

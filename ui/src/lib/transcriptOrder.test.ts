@@ -49,6 +49,24 @@ describe('mergeById', () => {
     expect(mergeById([], [])).toEqual([]);
     expect(ids(mergeById([], [mk('a', t(1))]))).toEqual(['a']);
   });
+
+  it('fills late-arriving source-session provenance onto an existing live row (A9a)', () => {
+    const live = { id: 'm1', created_at: t(1), source_session_id: null } as unknown as WorkbenchMessage;
+    const enriched = {
+      id: 'm1', created_at: t(1),
+      source_session_id: 'ses_src', source_session_title: 'Src', source_session_agent_name: 'pm',
+    } as unknown as WorkbenchMessage;
+    const [row] = mergeById([live], [enriched]);
+    expect(row.source_session_id).toBe('ses_src');
+    expect(row.source_session_title).toBe('Src');
+    expect(row.source_session_agent_name).toBe('pm');
+  });
+
+  it('does not overwrite an already-resolved source-session id with a null reconcile', () => {
+    const existing = { id: 'm1', created_at: t(1), source_session_id: 'ses_src' } as unknown as WorkbenchMessage;
+    const incoming = { id: 'm1', created_at: t(1), source_session_id: null } as unknown as WorkbenchMessage;
+    expect(mergeById([existing], [incoming])[0].source_session_id).toBe('ses_src');
+  });
 });
 
 describe('insertMessageOrdered', () => {

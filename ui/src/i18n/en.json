@@ -2388,7 +2388,8 @@
       "scheduled": "Scheduled task",
       "watch": "Watch",
       "webhook": "Webhook",
-      "harness": "Automated"
+      "harness": "Automated",
+      "agentFallback": "agent"
     },
     "picker": {
       "agent": "Agent",

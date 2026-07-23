@@ -27,8 +27,27 @@ export const mergeById = (
   existing: WorkbenchMessage[],
   incoming: WorkbenchMessage[],
 ): WorkbenchMessage[] => {
+  const incomingById = new Map(incoming.map((m) => [m.id, m]));
+  // Fill late-arriving read-side provenance (A9a): the live ``message.new`` row is
+  // published before ``list_session_messages`` resolves ``source_session_*``, so a
+  // plain dedupe-by-id would drop the enriched REST reconcile and the
+  // source-session chip would only appear after a full reload. Merge just those
+  // fields onto an existing row that still lacks them; everything else is
+  // untouched, and unseen incoming ids are appended as before.
+  const patched = existing.map((m) => {
+    const inc = incomingById.get(m.id);
+    if (inc && m.source_session_id == null && inc.source_session_id != null) {
+      return {
+        ...m,
+        source_session_id: inc.source_session_id,
+        source_session_title: inc.source_session_title,
+        source_session_agent_name: inc.source_session_agent_name,
+      };
+    }
+    return m;
+  });
   const seen = new Set(existing.map((m) => m.id));
-  const merged = [...existing, ...incoming.filter((m) => !seen.has(m.id))];
+  const merged = [...patched, ...incoming.filter((m) => !seen.has(m.id))];
   merged.sort(byCreatedThenId);
   return merged;
 };

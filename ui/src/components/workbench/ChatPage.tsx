@@ -3096,7 +3096,7 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   const isUser = !isNotify && !isAgent && !isSystem && !isHarness;
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
-  const triggerLink = isHarness ? chatTriggerLink(message) : null;
+  const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
 
   // User-uploaded attachments ride in ``content.attachments`` (agent-reply media

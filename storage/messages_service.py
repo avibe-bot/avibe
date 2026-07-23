@@ -104,16 +104,45 @@ def _attach_agent_run_provenance(
     if not exec_by_msg:
         return payloads
 
-    # execution_id == agent_runs.id; source_actor is the triggering (source) session.
+    # execution_id == agent_runs.id. The source SESSION differs by run kind:
+    #  - source_kind='agent'   → source_actor IS the caller session id.
+    #  - source_kind='callback'→ source_actor is the parent RUN id (or a decorated
+    #    "<run>:terminal:<status>"), NOT a session; the real source is the parent
+    #    (delegated) run's session_id.
+    runs = {
+        row["id"]: row
+        for row in conn.execute(
+            select(
+                agent_runs.c.id, agent_runs.c.source_kind,
+                agent_runs.c.source_actor, agent_runs.c.parent_run_id,
+            ).where(agent_runs.c.id.in_(set(exec_by_msg.values())))
+        ).mappings()
+    }
+    callback_parents = {
+        run["parent_run_id"] for run in runs.values()
+        if run["source_kind"] == "callback" and run["parent_run_id"]
+    }
+    parent_session: dict[str, str] = {}
+    if callback_parents:
+        for row in conn.execute(
+            select(agent_runs.c.id, agent_runs.c.session_id).where(
+                agent_runs.c.id.in_(callback_parents)
+            )
+        ).mappings():
+            sess = (row["session_id"] or "").strip()
+            if sess:
+                parent_session[row["id"]] = sess
+
     source_by_exec: dict[str, str] = {}
-    for row in conn.execute(
-        select(agent_runs.c.id, agent_runs.c.source_actor).where(
-            agent_runs.c.id.in_(set(exec_by_msg.values()))
-        )
-    ).mappings():
-        actor = (row["source_actor"] or "").strip()
-        if actor:
-            source_by_exec[row["id"]] = actor
+    for exec_id, run in runs.items():
+        if run["source_kind"] == "callback":
+            source_id = parent_session.get(run["parent_run_id"])
+        else:
+            source_id = (run["source_actor"] or "").strip() or None
+        # A session id never contains ':' (decorated run/terminal forms do); guard
+        # so an unexpected source_actor shape can't become a bogus /chat target.
+        if source_id and ":" not in source_id:
+            source_by_exec[exec_id] = source_id
     if not source_by_exec:
         return payloads
 
