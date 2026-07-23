@@ -695,12 +695,12 @@ class SettingsHandler(BaseHandler):
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
 
+            if not is_dm:
+                settings_manager.set_require_mention(settings_key, require_mention)
+
             user_settings = settings_manager.get_user_settings(settings_key)
             user_settings.show_message_types = show_message_types
             settings_manager.update_user_settings(settings_key, user_settings)
-
-            if not is_dm:
-                settings_manager.set_require_mention(settings_key, require_mention)
 
             language_saved = True
             if language is not None and language != self.config.language:

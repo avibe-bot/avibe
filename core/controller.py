@@ -527,7 +527,7 @@ class Controller:
 
     def _inject_runtime_dependencies(self, platform: str, client: BaseIMClient) -> None:
         settings_manager = self.platform_settings_managers[platform]
-        settings_manager.require_mention_default = bool(
+        settings_manager.require_mention_default = lambda: bool(
             getattr(getattr(client, "config", None), "require_mention", False)
         )
         setter = getattr(client, "set_settings_manager", None)

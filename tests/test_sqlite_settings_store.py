@@ -269,7 +269,7 @@ def test_settings_manager_topic_override_materializes_inherited_mention_default(
     monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
 
     manager = SettingsManager(settings_file=str(settings_path), platform="telegram")
-    manager.require_mention_default = False
+    manager.require_mention_default = lambda: False
     try:
         manager.store.update_channel(
             "-1001",
@@ -286,6 +286,35 @@ def test_settings_manager_topic_override_materializes_inherited_mention_default(
         assert topic is not None
         assert topic.custom_cwd == "/topic"
         assert topic.require_mention is False
+    finally:
+        manager.store.close()
+
+
+def test_settings_manager_topic_mention_inherit_materializes_live_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # Scenario: TELEGRAM-TOPIC-001
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+
+    manager = SettingsManager(settings_file=str(settings_path), platform="telegram")
+    current_default = {"value": False}
+    manager.require_mention_default = lambda: current_default["value"]
+    try:
+        manager.store.update_channel(
+            "-1001",
+            ChannelSettings(enabled=True, require_mention=None),
+            platform="telegram",
+        )
+        manager.set_require_mention(v2_settings.make_thread_settings_key("-1001", "42"), None)
+        current_default["value"] = True
+        manager.set_require_mention(v2_settings.make_thread_settings_key("-1001", "43"), None)
+
+        first = manager.store.find_thread("-1001", "42", platform="telegram")
+        second = manager.store.find_thread("-1001", "43", platform="telegram")
+        assert first is not None and first.require_mention is False
+        assert second is not None and second.require_mention is True
     finally:
         manager.store.close()
 

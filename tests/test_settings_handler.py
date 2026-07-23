@@ -37,6 +37,53 @@ def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandl
     return SettingsHandler(controller), send_message
 
 
+def test_settings_update_materializes_topic_mention_before_saving_other_fields() -> None:
+    calls: list[str] = []
+    user_settings = SimpleNamespace(show_message_types=[])
+
+    class TopicSettingsManager:
+        sessions = object()
+
+        def set_require_mention(self, settings_key: str, value: bool | None) -> None:
+            assert settings_key == "thread::-100123::1"
+            assert value is None
+            calls.append("mention")
+
+        def get_user_settings(self, settings_key: str):
+            assert settings_key == "thread::-100123::1"
+            calls.append("read")
+            return user_settings
+
+        def update_user_settings(self, settings_key: str, settings) -> None:
+            assert settings_key == "thread::-100123::1"
+            assert settings.show_message_types == ["assistant"]
+            calls.append("save")
+
+    manager = TopicSettingsManager()
+    controller = SimpleNamespace(
+        config=SimpleNamespace(platform="telegram", language="en"),
+        im_client=SimpleNamespace(send_message=AsyncMock()),
+        settings_manager=manager,
+        _get_settings_key=lambda _context: "thread::-100123::1",
+        _get_lang=lambda: "en",
+    )
+    handler = SettingsHandler(controller)
+
+    asyncio.run(
+        handler.handle_settings_update(
+            user_id="42",
+            channel_id="-100123",
+            thread_id="1",
+            show_message_types=["assistant"],
+            require_mention=None,
+            notify_user=False,
+            platform="telegram",
+        )
+    )
+
+    assert calls == ["mention", "read", "save"]
+
+
 class _FlatScopeSessions:
     def __init__(self, row: dict | None):
         self.row = row

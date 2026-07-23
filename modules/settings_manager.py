@@ -106,7 +106,7 @@ class SettingsManager:
         # The controller replaces this with the live platform config during
         # dependency injection. Keep standalone managers aligned with the
         # built-in defaults before that happens.
-        self.require_mention_default = platform == "telegram"
+        self.require_mention_default = lambda: platform == "telegram"
         self.channel_settings: Dict[str, UserSettings] = {}
         self.dm_user_settings: Dict[str, UserSettings] = {}
         self.store = SettingsStore.get_instance(self.settings_file)
@@ -320,7 +320,7 @@ class SettingsManager:
                 updated.require_mention = existing.require_mention
                 updated.require_bind = existing.require_bind
             if existing_thread is None and updated.require_mention is None:
-                updated.require_mention = self.require_mention_default
+                updated.require_mention = bool(self.require_mention_default())
             self.store.update_thread(channel_id, thread_id, updated, platform=self.platform)
             self._last_seen_store_mtime = self.store._file_mtime
             return
@@ -535,6 +535,12 @@ class SettingsManager:
             if channel_settings is None:
                 parent = self.store.find_channel(parent_id, platform=self.platform)
                 channel_settings = ChannelSettings(**vars(parent)) if parent is not None else ChannelSettings()
+                if value is None:
+                    value = (
+                        parent.require_mention
+                        if parent is not None and parent.require_mention is not None
+                        else bool(self.require_mention_default())
+                    )
             channel_settings.require_mention = value
             self.store.update_thread(parent_id, thread_id, channel_settings, platform=self.platform)
             self._last_seen_store_mtime = self.store._file_mtime
