@@ -56,14 +56,14 @@ def classify_outcome(
     if outcome.kind == RawOutcomeKind.PROTOCOL_ERROR:
         return ResolutionDecision("surface", error_code="upstream_protocol_error")
 
-    error_text = _error_text(outcome)
-    if _SURFACE_PATTERNS.search(error_text):
-        return ResolutionDecision("surface", error_code="upstream_request_invalid")
-
     if outcome.http_status == 401:
         if refresh_attempted:
             return ResolutionDecision("surface", error_code="upstream_unauthorized")
         return ResolutionDecision("refresh")
+
+    error_text = _error_text(outcome)
+    if _SURFACE_PATTERNS.search(error_text):
+        return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):
         return ResolutionDecision(

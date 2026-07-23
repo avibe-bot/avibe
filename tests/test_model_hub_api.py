@@ -586,6 +586,43 @@ def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
     assert adapter.cancelled == [flow_id, flow_id]
 
 
+def test_native_oauth_cannot_record_experimental_hub_consent(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.oauth_start(
+                {
+                    "vendor": "anthropic",
+                    "channel": "native_cli",
+                    "experimental_consent": True,
+                }
+            )
+        )
+
+    assert exc_info.value.code == "consent_required"
+    assert store.config.subscription_hub_experimental is False
+    assert adapter.flows == {}
+
+
+def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
+    service, _, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "expires_at_iso": "2026-07-23T02:59:00+00:00",
+        }
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_submit({"flow_id": flow["flow_id"], "value": "stale-code"}))
+
+    assert exc_info.value.code == "flow_expired"
+    assert adapter.secret_lengths == []
+    assert service.oauth_flows.channel(flow["flow_id"]) is None
+
+
 def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tmp_path):
     service, _, _ = _service(tmp_path)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
@@ -747,3 +784,61 @@ def test_source_patch_rejects_credential_bearing_base_url(tmp_path):
 
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].base_url == "https://relay.example/v1?api-version=2026-07-23"
+
+
+def test_source_display_names_reject_credential_material(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    pasted_key = "sk-test-never-persist-this"
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": pasted_key,
+                    "key": "sk-test-transient-only",
+                }
+            )
+        )
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources == []
+    assert adapter.secret_lengths == []
+
+    source = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Safe source",
+                "key": "sk-test-transient-only",
+            }
+        )
+    )
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.patch_source(source["id"], {"display_name": pasted_key}))
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources[0].display_name == "Safe source"
+    assert pasted_key not in json.dumps(store.config.to_payload())
+
+
+def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Before rename",
+                "key": "sk-test-transient-only",
+            }
+        )
+    )
+    sync_count = len(adapter.synced)
+    adapter.fail_sync = True
+
+    updated = asyncio.run(service.patch_source(source["id"], {"display_name": "After rename"}))
+
+    assert updated["display_name"] == "After rename"
+    assert store.config.sources[0].display_name == "After rename"
+    assert len(adapter.synced) == sync_count

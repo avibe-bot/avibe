@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -53,6 +54,7 @@ from .oauth import (
 )
 
 CONTRACT_VERSION = 1
+logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
 _CREDENTIAL_QUERY_KEYS = {
@@ -445,6 +447,24 @@ class ModelHubService:
             )
         )
 
+    def _record_event(self, **event_fields: Any) -> None:
+        try:
+            self.events.append(build_resolution_event(**event_fields))
+        except Exception:
+            # Resolution telemetry is best effort and must never affect routing.
+            logger.warning("Failed to persist Model Hub resolution event")
+
+    def _raise_if_flow_expired(self, flow_id: str, flow: OAuthFlowState) -> None:
+        if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
+            return
+        try:
+            expired = _parse_datetime(flow.expires_at_iso) <= self.now()
+        except ValueError:
+            return
+        if expired:
+            self.oauth_flows.forget(flow_id)
+            raise ModelHubError("flow_expired", status=410)
+
     def _apply_discovered_models(
         self,
         source: ModelHubSourceConfig,
@@ -566,7 +586,12 @@ class ModelHubService:
         display_name = payload.get("display_name") or vendor
         if kind not in {"subscription", "api_key"} or not isinstance(vendor, str) or not vendor:
             raise ModelHubError("discovery_failed")
-        if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
+        if (
+            not isinstance(display_name, str)
+            or not display_name
+            or len(display_name) > 64
+            or contains_credential_material(display_name)
+        ):
             raise ModelHubError("discovery_failed")
         channel = payload.get("supply_channel") or ("native_cli" if kind == "subscription" else "hub")
         if channel not in {"native_cli", "hub"} or (kind == "api_key" and channel != "hub"):
@@ -665,7 +690,12 @@ class ModelHubService:
             source = self._source(config, source_id)
             if "display_name" in payload:
                 display_name = payload["display_name"]
-                if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
+                if (
+                    not isinstance(display_name, str)
+                    or not display_name
+                    or len(display_name) > 64
+                    or contains_credential_material(display_name)
+                ):
                     raise ModelHubError("discovery_failed")
                 source.display_name = display_name
             if "base_url" in payload:
@@ -684,7 +714,10 @@ class ModelHubService:
                     for model_id in discovered
                     if model_id not in manual_ids
                 ] + manual
-            await self._commit_synced(previous, config)
+            if "base_url" in payload:
+                await self._commit_synced(previous, config)
+            else:
+                self.store.save(config)
             return source.to_payload()
 
     @staticmethod
@@ -891,7 +924,9 @@ class ModelHubService:
         display_name = payload.get("display_name")
         if not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable")
-        if display_name is not None and not isinstance(display_name, str):
+        if display_name is not None and (
+            not isinstance(display_name, str) or contains_credential_material(display_name)
+        ):
             raise ModelHubError("mapping_target_unavailable")
         async with self._mutation_lock:
             previous = self.store.load()
@@ -942,8 +977,12 @@ class ModelHubService:
         if not isinstance(vendor, str) or channel not in {"native_cli", "hub"}:
             raise ModelHubError("flow_not_found", status=400)
         consented = payload.get("experimental_consent") is True
+        if "experimental_consent" in payload and not isinstance(payload.get("experimental_consent"), bool):
+            raise ModelHubError("consent_required")
         if channel == "hub" and not consented:
             raise ModelHubError("consent_required", status=409)
+        if consented and channel != "hub":
+            raise ModelHubError("consent_required")
         oauth_channel = cast(OAuthChannel, channel)
         pending_source_id = _source_id()
         flow = await self._oauth_call(
@@ -952,7 +991,7 @@ class ModelHubService:
         if flow.source_id != pending_source_id or flow.vendor != vendor:
             raise ModelHubError("flow_not_found", status=502)
         self.oauth_flows.remember(flow.flow_id, oauth_channel)
-        if consented:
+        if channel == "hub" and consented:
             async with self._mutation_lock:
                 config = self.store.load()
                 config.subscription_hub_experimental = True
@@ -962,14 +1001,7 @@ class ModelHubService:
     async def oauth_status(self, flow_id: str) -> dict:
         channel = self._oauth_channel(flow_id)
         flow = await self._oauth_status(flow_id, channel)
-        if flow.expires_at_iso and flow.state not in {"success", "failed", "cancelled"}:
-            try:
-                expired = _parse_datetime(flow.expires_at_iso) <= self.now()
-            except ValueError:
-                expired = False
-            if expired:
-                self.oauth_flows.forget(flow_id)
-                raise ModelHubError("flow_expired", status=410)
+        self._raise_if_flow_expired(flow_id, flow)
         return _oauth_payload(flow, channel=channel)
 
     async def oauth_submit(self, payload: dict) -> dict:
@@ -978,6 +1010,8 @@ class ModelHubService:
         if not isinstance(flow_id, str) or not isinstance(value, str):
             raise ModelHubError("flow_not_found", status=404)
         channel = self._oauth_channel(flow_id)
+        current = await self._oauth_status(flow_id, channel)
+        self._raise_if_flow_expired(flow_id, current)
         flow = await self._oauth_call(
             self._oauth_adapter(channel).submit_oauth(flow_id, value),
             flow_id=flow_id,
@@ -1029,16 +1063,14 @@ class ModelHubService:
                         continue
                     source.state = ModelHubSourceStateConfig(status="standby")
                     config_changed = True
-                    self.events.append(
-                        build_resolution_event(
-                            agent=cast(EventAgent, backend),
-                            kind="recover",
-                            model_id=model_id,
-                            reason="recovery",
-                            to_source=source.id,
-                            to_label=source.display_name,
-                            now=self.now(),
-                        )
+                    self._record_event(
+                        agent=cast(EventAgent, backend),
+                        kind="recover",
+                        model_id=model_id,
+                        reason="recovery",
+                        to_source=source.id,
+                        to_label=source.display_name,
+                        now=self.now(),
                     )
                 if (
                     self._eligible_for_agent(source, backend)
@@ -1071,16 +1103,14 @@ class ModelHubService:
                 detail_key=f"models.source.cooldown.{decision.reason}",
             )
             self.store.save(config)
-            self.events.append(
-                build_resolution_event(
-                    agent=agent,
-                    kind="cooldown",
-                    model_id=model_id,
-                    reason=cast(EventReason, decision.reason),
-                    from_source=current.id,
-                    from_label=current.display_name,
-                    now=self.now(),
-                )
+            self._record_event(
+                agent=agent,
+                kind="cooldown",
+                model_id=model_id,
+                reason=cast(EventReason, decision.reason),
+                from_source=current.id,
+                from_label=current.display_name,
+                now=self.now(),
             )
 
     def _emit_switch(
@@ -1097,19 +1127,17 @@ class ModelHubService:
         billing_note = (
             "entered_metered" if failed_source.billing == "monthly" and source.billing == "metered" else None
         )
-        self.events.append(
-            build_resolution_event(
-                agent=agent,
-                kind="switch",
-                model_id=model_id,
-                reason=failed_reason,
-                from_source=failed_source.id,
-                to_source=source.id,
-                from_label=failed_source.display_name,
-                to_label=source.display_name,
-                billing_note=billing_note,
-                now=self.now(),
-            )
+        self._record_event(
+            agent=agent,
+            kind="switch",
+            model_id=model_id,
+            reason=failed_reason,
+            from_source=failed_source.id,
+            to_source=source.id,
+            from_label=failed_source.display_name,
+            to_label=source.display_name,
+            billing_note=billing_note,
+            now=self.now(),
         )
 
     async def _invoke(
@@ -1162,15 +1190,13 @@ class ModelHubService:
                 raise ModelHubError("mapping_target_unavailable", status=409)
         event_agent = cast(EventAgent, backend)
         if mapping_applied:
-            self.events.append(
-                build_resolution_event(
-                    agent=event_agent,
-                    kind="mapping_applied",
-                    model_id=target_model,
-                    reason="mapping",
-                    from_label=model_id,
-                    now=self.now(),
-                )
+            self._record_event(
+                agent=event_agent,
+                kind="mapping_applied",
+                model_id=target_model,
+                reason="mapping",
+                from_label=model_id,
+                now=self.now(),
             )
         candidates = await self._resolution_candidates(backend, target_model, provider=provider)
         if not candidates:

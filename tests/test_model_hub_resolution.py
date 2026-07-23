@@ -184,6 +184,8 @@ def _service(tmp_path, adapter, *, agents=None, now=None):
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=422, code="tool_schema_error"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), False, "refresh", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), True, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), False, "refresh", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), True, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=429), False, "fallback", "rate_limited"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=403, code="quota_exhausted"), False, "fallback", "quota_exhausted"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=503), False, "fallback", "server_error"),
@@ -243,6 +245,32 @@ def test_quota_failure_cools_source_switches_and_emits_redacted_events(tmp_path)
     assert recovered.source_id == "src_primary01"
     assert service.store.load().sources[0].state.status == "standby"
     assert service.list_events(limit=10)[0]["kind"] == "recover"
+
+
+def test_event_log_failure_does_not_abort_failover(tmp_path):
+    class UnwritableEventLog:
+        def append(self, event):
+            raise OSError("read-only state")
+
+        def list(self, *, limit=20, before=None):
+            return []
+
+    adapter = FakeAdapter(
+        [
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=429),
+            _outcome(RawOutcomeKind.SUCCESS, status=200),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+    service.events = UnwritableEventLog()
+
+    resolved = asyncio.run(
+        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+    )
+
+    assert resolved.source_id == "src_backup001"
+    assert service.store.load().sources[0].state.status == "cooldown"
+    assert [call[0] for call in adapter.invocations] == ["src_primary01", "src_backup001"]
 
 
 def test_401_refreshes_exactly_once_before_returning(tmp_path):
