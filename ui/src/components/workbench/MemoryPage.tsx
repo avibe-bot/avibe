@@ -518,6 +518,16 @@ const SettingsPanel: React.FC<{
   const embeddingLocked = !statusKnown || embeddingDataLock;
   const canClearKeys = !enabledDraft;
 
+  // If data_exists transitions to true while the user has an unsaved embedding draft
+  // (e.g. they edited it while data_exists was false, then a poll reports data_exists
+  // true), discard that draft back to the persisted settings. Otherwise save() would
+  // drop the embedding patch (locked) yet report success — a silent discard.
+  useEffect(() => {
+    if (embeddingDataLock) {
+      setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
+    }
+  }, [embeddingDataLock, settings]);
+
   const save = async () => {
     setSaving(true);
     setError(null);
