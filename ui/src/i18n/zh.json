@@ -13,6 +13,11 @@
     "retry": "重试",
     "reload": "刷新页面"
   },
+  "remoteLogin": {
+    "title": "登录后继续",
+    "body": "使用 Avibe Cloud 登录后即可安全地继续访问。",
+    "action": "重新登录"
+  },
   "preview": {
     "title": "预览",
     "unsupported": "此文件无法预览。",

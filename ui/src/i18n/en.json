@@ -13,6 +13,11 @@
     "retry": "Retry",
     "reload": "Reload page"
   },
+  "remoteLogin": {
+    "title": "Sign in to continue",
+    "body": "Sign in with Avibe Cloud to continue securely.",
+    "action": "Sign in"
+  },
   "preview": {
     "title": "Preview",
     "unsupported": "This file can't be previewed.",

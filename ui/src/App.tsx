@@ -48,6 +48,7 @@ import { AgentationToggle } from './components/AgentationToggle';
 import { PwaLoopbackLinkGuard } from './components/PwaLoopbackLinkGuard';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { REMOTE_AUTH_REQUIRED_EVENT, shouldDeferRemoteAuthRedirect } from './lib/remoteAuth';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -85,12 +86,29 @@ import { Button } from './components/ui/button';
 // logs / doctor output even before configuration is complete.
 const LOGIN_CHECK_PATHS = new Set(['/admin/logs', '/admin/settings/diagnostics']);
 
-const RemoteLoginRedirect = ({ target }: { target: string }) => {
+const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
+    const requireUserAction = shouldDeferRemoteAuthRedirect();
 
     useEffect(() => {
-        window.location.assign(target);
-    }, [target]);
+        if (!requireUserAction) window.location.assign(target);
+    }, [requireUserAction, target]);
+
+    if (requireUserAction) {
+        return (
+            <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
+                <Card className="max-w-md w-full">
+                    <CardHeader>
+                        <CardTitle>{t('remoteLogin.title')}</CardTitle>
+                        <CardDescription>{t('remoteLogin.body')}</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <Button onClick={() => window.location.assign(target)}>{t('remoteLogin.action')}</Button>
+                    </CardContent>
+                </Card>
+            </main>
+        );
+    }
 
     return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
 };
@@ -202,6 +220,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const guardTarget = location.pathname + location.search;
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
+    const [authCheckVersion, setAuthCheckVersion] = useState(0);
     const bypassSetupGuard = LOGIN_CHECK_PATHS.has(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
@@ -214,6 +233,29 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         previousIsSetupRouteRef.current = isSetupRoute;
     }, [isSetupRoute]);
+
+    useEffect(() => {
+        const onRemoteAuthRequired = () => setGuardStatus('remote-login-required');
+        window.addEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
+        return () => window.removeEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
+    }, []);
+
+    useEffect(() => {
+        if (guardStatus !== 'remote-login-required' || !shouldDeferRemoteAuthRedirect()) return;
+
+        let recheckStarted = false;
+        const recheckAfterLogin = () => {
+            if (document.visibilityState !== 'visible' || recheckStarted) return;
+            recheckStarted = true;
+            setAuthCheckVersion((version) => version + 1);
+        };
+        document.addEventListener('visibilitychange', recheckAfterLogin);
+        window.addEventListener('focus', recheckAfterLogin);
+        return () => {
+            document.removeEventListener('visibilitychange', recheckAfterLogin);
+            window.removeEventListener('focus', recheckAfterLogin);
+        };
+    }, [guardStatus]);
 
     useEffect(() => {
         let cancelled = false;
@@ -276,14 +318,14 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // completion clears the stale needs-setup status, while ordinary
         // sidebar navigation never re-runs (which would re-mount the
         // shell behind the Loading state).
-    }, [bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
+    }, [authCheckVersion, bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
 
     if (bypassSetupGuard) return children;
     if (guardStatus === 'loading') {
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
     if (guardStatus === 'remote-login-required') {
-        return <RemoteLoginRedirect target={guardTarget} />;
+        return <RemoteLoginGate target={guardTarget} />;
     }
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
