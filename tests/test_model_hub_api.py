@@ -420,6 +420,29 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         headers=headers,
         base_url=base_url,
     )
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "mode_switch_blocked"
+
+    response = client.put(
+        "/api/models/agents/claude/mappings",
+        json={"mappings": []},
+        headers=headers,
+        base_url=base_url,
+    )
+    _assert_envelope(response.get_json())
+    response = client.put(
+        "/api/models/agents/opencode/menu",
+        json={"menu": {"view": "featured", "checked": []}},
+        headers=headers,
+        base_url=base_url,
+    )
+    _assert_envelope(response.get_json())
+    response = client.delete(
+        "/api/models/custom-models",
+        json={"source_id": source_id, "model_id": "custom-model"},
+        headers=headers,
+        base_url=base_url,
+    )
     _assert_valid("source.schema.json", response.get_json()["source"])
 
     response = client.delete(

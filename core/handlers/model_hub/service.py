@@ -310,11 +310,28 @@ class ModelHubService:
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:
         return [_binding(source) for source in config.sources if source.supply_channel == "hub"]
 
+    @staticmethod
+    def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
+        return ModelHubConfig.from_payload(config.to_payload())
+
     async def _sync_sources(self, config: ModelHubConfig) -> None:
         bindings = self._bindings(config)
         if not bindings and isinstance(self.adapter, UnavailableEngineAdapter):
             return
         await self._engine_call(self.adapter.sync_sources(bindings))
+
+    async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
+        """Register the new projection before making it authoritative on disk."""
+
+        await self._sync_sources(updated)
+        try:
+            self.store.save(updated)
+        except Exception:
+            try:
+                await self._sync_sources(previous)
+            except ModelHubError:
+                pass
+            raise
 
     def _oauth_adapter(self, channel: OAuthChannel) -> OAuthAdapter:
         if channel == "hub":
@@ -442,16 +459,16 @@ class ModelHubService:
                 ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=discovered_at)
                 for model_id in discovered
             ] + manual_models
-            config = self.store.load()
+            previous = self.store.load()
+            config = self._clone_config(previous)
             if any(item.id == source.id for item in config.sources):
                 raise ModelHubError("migration_item_conflict", status=409)
             config.sources.append(source)
             config.priority_order.append(source.id)
             if consented:
                 config.subscription_hub_experimental = True
-            self.store.save(config)
+            await self._commit_synced(previous, config)
             persisted = True
-            await self._sync_sources(config)
             return source.to_payload()
         except Exception:
             if provisioned_ref is not None and not persisted:
@@ -464,7 +481,8 @@ class ModelHubService:
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         if not isinstance(payload, dict) or set(payload) - {"display_name", "base_url"}:
             raise ModelHubError("discovery_failed", detail="Only display_name and base_url may be changed")
-        config = self.store.load()
+        previous = self.store.load()
+        config = self._clone_config(previous)
         source = self._source(config, source_id)
         if "display_name" in payload:
             display_name = payload["display_name"]
@@ -482,52 +500,67 @@ class ModelHubService:
                 ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=self.now().isoformat())
                 for model_id in discovered
             ] + manual
-        self.store.save(config)
-        await self._sync_sources(config)
+        await self._commit_synced(previous, config)
         return source.to_payload()
 
-    def _only_selected_supplier(self, config: ModelHubConfig, source: ModelHubSourceConfig) -> bool:
+    @staticmethod
+    def _selected_targets(agent: ModelHubAgentSupplyConfig) -> list[tuple[Optional[str], str]]:
+        if agent.backend == "opencode" and agent.menu:
+            targets = []
+            for identifier in agent.menu.checked:
+                provider, separator, model_id = identifier.partition("/")
+                if separator and provider and model_id:
+                    targets.append((provider, model_id))
+            return targets
+        return [(None, mapping.target_model_id) for mapping in agent.mappings if mapping.enabled]
+
+    def _only_selected_model_supplier(
+        self,
+        config: ModelHubConfig,
+        source: ModelHubSourceConfig,
+        model_id: str,
+    ) -> bool:
         for agent in config.agents.values():
-            selected = {mapping.target_model_id for mapping in agent.mappings if mapping.enabled}
-            if agent.menu:
-                selected.update(
-                    identifier.split("/", 1)[1]
-                    for identifier in agent.menu.checked
-                    if "/" in identifier
-                )
-            for model in source.models:
-                if model.id not in selected or not self._eligible_for_agent(source, agent.backend):
+            for provider, target_model_id in self._selected_targets(agent):
+                if target_model_id != model_id or (provider is not None and provider != source.vendor):
                     continue
                 suppliers = [
                     candidate
                     for candidate in config.sources
                     if self._eligible_for_agent(candidate, agent.backend)
-                    and any(item.id == model.id for item in candidate.models)
+                    and (provider is None or candidate.vendor == provider)
+                    and any(item.id == model_id for item in candidate.models)
                 ]
-                if len(suppliers) == 1:
+                if len(suppliers) == 1 and suppliers[0].id == source.id:
                     return True
         return False
 
+    def _only_selected_supplier(self, config: ModelHubConfig, source: ModelHubSourceConfig) -> bool:
+        return any(self._only_selected_model_supplier(config, source, model.id) for model in source.models)
+
     async def delete_source(self, source_id: str, *, force: bool = False) -> None:
-        config = self.store.load()
+        previous = self.store.load()
+        config = self._clone_config(previous)
         source = self._source(config, source_id)
         if not force and self._only_selected_supplier(config, source):
             raise ModelHubError("mode_switch_blocked", status=409, detail="Source is the only selected model supplier")
         config.sources = [item for item in config.sources if item.id != source_id]
         config.priority_order = [item for item in config.priority_order if item != source_id]
-        self.store.save(config)
-        sync_error: Optional[ModelHubError] = None
+        await self._sync_sources(config)
         try:
-            await self._sync_sources(config)
-        except ModelHubError as exc:
-            sync_error = exc
-        if source.credential_ref:
-            await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
-        if sync_error is not None:
-            raise sync_error
+            if source.credential_ref:
+                await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
+        except ModelHubError:
+            try:
+                await self._sync_sources(previous)
+            except ModelHubError:
+                pass
+            raise
+        self.store.save(config)
 
     async def test_source(self, source_id: str) -> tuple[dict, int]:
-        config = self.store.load()
+        previous = self.store.load()
+        config = self._clone_config(previous)
         source = self._source(config, source_id)
         model_ids = await self._discover(source)
         manual = [model for model in source.models if model.provenance == "manual"]
@@ -536,8 +569,7 @@ class ModelHubService:
             for model_id in model_ids
         ] + manual
         source.state = ModelHubSourceStateConfig(status="standby")
-        self.store.save(config)
-        await self._sync_sources(config)
+        await self._commit_synced(previous, config)
         return source.to_payload(), len(model_ids)
 
     def set_priority(self, order: object) -> dict:
@@ -566,13 +598,18 @@ class ModelHubService:
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         current = None
         if agent.mode == "hub":
+            provider = None
             target = next((mapping.target_model_id for mapping in agent.mappings if mapping.enabled), None)
             if target is None and agent.menu and agent.menu.checked:
-                target = agent.menu.checked[0].split("/", 1)[-1]
+                provider, separator, target = agent.menu.checked[0].partition("/")
+                if not separator:
+                    provider = None
             by_id = {source.id: source for source in config.sources}
             for source_id in config.priority_order:
                 source = by_id[source_id]
                 if not self._eligible_for_agent(source, agent.backend):
+                    continue
+                if provider is not None and source.vendor != provider:
                     continue
                 model = next((model for model in source.models if target is None or model.id == target), None)
                 if model is not None:
@@ -636,7 +673,8 @@ class ModelHubService:
     async def add_custom_model(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("source_not_found", status=404)
-        config = self.store.load()
+        previous = self.store.load()
+        config = self._clone_config(previous)
         source = self._source(config, str(payload.get("source_id") or ""))
         model_id = payload.get("model_id")
         display_name = payload.get("display_name")
@@ -651,18 +689,25 @@ class ModelHubService:
             )
         elif existing.provenance == "manual":
             existing.display_name = display_name
-        self.store.save(config)
-        await self._sync_sources(config)
+        await self._commit_synced(previous, config)
         return source.to_payload()
 
     async def delete_custom_model(self, source_id: object, model_id: object) -> dict:
-        config = self.store.load()
+        if not isinstance(model_id, str) or not model_id:
+            raise ModelHubError("mapping_target_unavailable")
+        previous = self.store.load()
+        config = self._clone_config(previous)
         source = self._source(config, str(source_id or ""))
+        manual = next(
+            (model for model in source.models if model.id == model_id and model.provenance == "manual"),
+            None,
+        )
+        if manual is not None and self._only_selected_model_supplier(config, source, model_id):
+            raise ModelHubError("mode_switch_blocked", status=409, detail="Model is the only selected supplier")
         source.models = [
             model for model in source.models if not (model.id == model_id and model.provenance == "manual")
         ]
-        self.store.save(config)
-        await self._sync_sources(config)
+        await self._commit_synced(previous, config)
         return source.to_payload()
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
@@ -744,6 +789,8 @@ class ModelHubService:
         config: ModelHubConfig,
         backend: str,
         model_id: str,
+        *,
+        provider: Optional[str] = None,
     ) -> list[ModelHubSourceConfig]:
         by_id = {source.id: source for source in config.sources}
         candidates: list[ModelHubSourceConfig] = []
@@ -773,6 +820,7 @@ class ModelHubService:
             if (
                 source.supply_channel == "hub"
                 and self._eligible_for_agent(source, backend)
+                and (provider is None or source.vendor == provider)
                 and any(model.id == model_id for model in source.models)
                 and source.state.status != "error"
             ):
@@ -865,6 +913,8 @@ class ModelHubService:
             raise ModelHubError("mapping_target_unavailable")
         config = self.store.load()
         agent = self._agent(config, backend)
+        if agent.mode != "hub":
+            raise ModelHubError("mode_switch_blocked", status=409, detail="Backend is in Direct mode")
         target_model = next(
             (
                 mapping.target_model_id
@@ -873,8 +923,14 @@ class ModelHubService:
             ),
             model_id,
         )
+        mapping_applied = target_model != model_id
+        provider = None
+        if backend == "opencode":
+            provider, separator, target_model = target_model.partition("/")
+            if not separator or not provider or not target_model:
+                raise ModelHubError("mapping_target_unavailable", status=409)
         event_agent = cast(EventAgent, backend)
-        if target_model != model_id:
+        if mapping_applied:
             self.events.append(
                 build_resolution_event(
                     agent=event_agent,
@@ -885,7 +941,7 @@ class ModelHubService:
                     now=self.now(),
                 )
             )
-        candidates = self._resolution_candidates(config, backend, target_model)
+        candidates = self._resolution_candidates(config, backend, target_model, provider=provider)
         if not candidates:
             raise ModelHubError("mapping_target_unavailable", status=409)
 

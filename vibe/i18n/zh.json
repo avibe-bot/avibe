@@ -474,6 +474,24 @@
     "routingSaving": "正在保存 Agent 路由设置...",
     "routingCanceled": "已取消更新 Agent 路由设置。"
   },
+  "modelHub": {
+    "events": {
+      "sourceFallback": "来源",
+      "switch": "{from_source}：{reason} -> 已切到 {to_source}",
+      "cooldown": "{from_source}：{reason}，暂时冷却",
+      "recover": "{to_source}：已恢复可用",
+      "status": "{from_source}：{reason}",
+      "reason": {
+        "quota_exhausted": "额度用完",
+        "rate_limited": "请求受限",
+        "server_error": "上游服务暂不可用",
+        "network": "网络暂不可用",
+        "recovery": "已恢复",
+        "manual": "手动调整",
+        "mapping": "已应用模型映射"
+      }
+    }
+  },
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "重新登录",

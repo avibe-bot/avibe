@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
+from vibe.i18n import t as i18n_t
+
 EventAgent = Literal["claude", "codex", "opencode", "system"]
 EventKind = Literal["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"]
 EventReason = Literal["quota_exhausted", "rate_limited", "server_error", "network", "recovery", "manual", "mapping"]
@@ -83,38 +85,25 @@ def build_resolution_event(
     billing_note: Optional[BillingNote] = None,
     now: Optional[datetime] = None,
 ) -> ResolutionEvent:
-    safe_from = redact_credential_material(from_label or from_source or "source")
-    safe_to = redact_credential_material(to_label or to_source or "source")
-    reason_en = {
-        "quota_exhausted": "quota exhausted",
-        "rate_limited": "rate limited",
-        "server_error": "upstream server unavailable",
-        "network": "network unavailable",
-        "recovery": "recovered",
-        "manual": "manual change",
-        "mapping": "model mapping applied",
-    }[reason]
-    reason_zh = {
-        "quota_exhausted": "额度用完",
-        "rate_limited": "请求受限",
-        "server_error": "上游服务暂不可用",
-        "network": "网络暂不可用",
-        "recovery": "已恢复",
-        "manual": "手动调整",
-        "mapping": "已应用模型映射",
-    }[reason]
-    if kind == "switch":
-        human_en = f"{safe_from}: {reason_en} -> switched to {safe_to}"
-        human_zh = f"{safe_from}:{reason_zh} -> 已切到 {safe_to}"
-    elif kind == "cooldown":
-        human_en = f"{safe_from}: {reason_en}; cooling down"
-        human_zh = f"{safe_from}:{reason_zh}，暂时冷却"
-    elif kind == "recover":
-        human_en = f"{safe_to}: recovered and available"
-        human_zh = f"{safe_to}:已恢复可用"
-    else:
-        human_en = f"{safe_from}: {reason_en}"
-        human_zh = f"{safe_from}:{reason_zh}"
+    safe_from = redact_credential_material(from_label or from_source or "")
+    safe_to = redact_credential_material(to_label or to_source or "")
+
+    def render(lang: str) -> str:
+        template = {
+            "switch": "switch",
+            "cooldown": "cooldown",
+            "recover": "recover",
+        }.get(kind, "status")
+        return i18n_t(
+            f"modelHub.events.{template}",
+            lang,
+            from_source=safe_from or i18n_t("modelHub.events.sourceFallback", lang),
+            to_source=safe_to or i18n_t("modelHub.events.sourceFallback", lang),
+            reason=i18n_t(f"modelHub.events.reason.{reason}", lang),
+        )
+
+    human_en = render("en")
+    human_zh = render("zh")
     event = ResolutionEvent(
         id=f"evt_{uuid.uuid4().hex}",
         ts=(now or datetime.now(timezone.utc)).isoformat(),

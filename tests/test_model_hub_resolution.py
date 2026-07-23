@@ -24,6 +24,7 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.events import BoundedEventLog, build_resolution_event
 from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from vibe.i18n import t as i18n_t
 
 
 class MemoryStore:
@@ -42,6 +43,9 @@ class FakeAdapter:
         self.outcomes = deque(outcomes)
         self.invocations = []
         self.synced = []
+        self.revoked = []
+        self.fail_sync = False
+        self.fail_revoke = False
 
     async def ensure_installed(self):
         return await self.status()
@@ -62,10 +66,15 @@ class FakeAdapter:
         return "cred_test"
 
     async def revoke_credential(self, credential_ref):
+        self.revoked.append(credential_ref)
+        if self.fail_revoke:
+            raise RuntimeError("revoke failed")
         return None
 
     async def sync_sources(self, bindings):
         self.synced.append(tuple(bindings))
+        if self.fail_sync:
+            raise RuntimeError("sync failed")
 
     async def discover_models(self, vendor, protocol, base_url, credential_ref):
         return ("claude-opus-4-6",)
@@ -257,6 +266,123 @@ def test_mapping_is_scoped_to_the_requesting_backend(tmp_path):
 
     assert result.model_id == "claude-opus-4-6"
     assert agents["codex"].mappings == []
+
+
+def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].vendor = "custom"
+    config.sources[1].vendor = "anthropic"
+    config.agents["opencode"].menu.checked = ["anthropic/claude-opus-4-6"]
+
+    current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
+    resolved = asyncio.run(
+        service.resolve(
+            backend="opencode",
+            model_id="anthropic/claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert current["source_id"] == "src_backup001"
+    assert resolved.source_id == "src_backup001"
+    assert adapter.invocations == [("src_backup001", "claude-opus-4-6", "opencode")]
+    assert service.list_events(limit=10) == []
+
+
+def test_direct_mode_never_enters_hub_resolution(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    service.store.load().agents["claude"].mode = "direct"
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
+
+    assert exc_info.value.code == "mode_switch_blocked"
+    assert adapter.invocations == []
+
+
+def test_source_creation_is_not_persisted_when_engine_sync_fails(tmp_path):
+    adapter = FakeAdapter([])
+    adapter.fail_sync = True
+    service = _service(tmp_path, adapter)
+    for source in service.store.load().sources:
+        source.credential_ref = f"cred_{source.id}"
+    original_ids = [source.id for source in service.store.load().sources]
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Uncommitted",
+                    "key": "sk-test-transaction-only",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert [source.id for source in service.store.load().sources] == original_ids
+    assert adapter.revoked == ["cred_test"]
+
+
+def test_source_reference_survives_failed_credential_revoke(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    service.store.load().sources[0].credential_ref = "cred_primary"
+    service.store.load().sources[1].credential_ref = "cred_backup"
+    adapter.fail_revoke = True
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.delete_source("src_primary01", force=True))
+
+    assert exc_info.value.code == "engine_down"
+    assert [source.id for source in service.store.load().sources] == ["src_primary01", "src_backup001"]
+    assert [tuple(binding.source_id for binding in batch) for batch in adapter.synced] == [
+        ("src_backup001",),
+        ("src_primary01", "src_backup001"),
+    ]
+
+
+def test_selected_custom_model_cannot_be_deleted(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models.append(ModelHubModelConfig(id="manual-model", provenance="manual"))
+    config.agents["opencode"].menu.checked = ["anthropic/manual-model"]
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.delete_custom_model("src_primary01", "manual-model"))
+
+    assert exc_info.value.code == "mode_switch_blocked"
+    assert any(model.id == "manual-model" for model in service.store.load().sources[0].models)
+
+
+def test_resolution_event_copy_comes_from_backend_i18n(tmp_path):
+    event = build_resolution_event(
+        agent="system",
+        kind="cooldown",
+        model_id="test-model",
+        reason="network",
+        from_label="Primary",
+    )
+
+    assert event.human_en == i18n_t(
+        "modelHub.events.cooldown",
+        "en",
+        from_source="Primary",
+        to_source=i18n_t("modelHub.events.sourceFallback", "en"),
+        reason=i18n_t("modelHub.events.reason.network", "en"),
+    )
+    assert event.human_zh == i18n_t(
+        "modelHub.events.cooldown",
+        "zh",
+        from_source="Primary",
+        to_source=i18n_t("modelHub.events.sourceFallback", "zh"),
+        reason=i18n_t("modelHub.events.reason.network", "zh"),
+    )
 
 
 def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):

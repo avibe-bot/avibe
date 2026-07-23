@@ -474,6 +474,24 @@
     "routingSaving": "Saving routing settings...",
     "routingCanceled": "Routing update canceled."
   },
+  "modelHub": {
+    "events": {
+      "sourceFallback": "source",
+      "switch": "{from_source}: {reason} -> switched to {to_source}",
+      "cooldown": "{from_source}: {reason}; cooling down",
+      "recover": "{to_source}: recovered and available",
+      "status": "{from_source}: {reason}",
+      "reason": {
+        "quota_exhausted": "quota exhausted",
+        "rate_limited": "rate limited",
+        "server_error": "upstream server unavailable",
+        "network": "network unavailable",
+        "recovery": "recovered",
+        "manual": "manual change",
+        "mapping": "model mapping applied"
+      }
+    }
+  },
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "Sign in again",
