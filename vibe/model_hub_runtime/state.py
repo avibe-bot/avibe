@@ -135,7 +135,21 @@ class EngineStateStore:
         _validated_source_id(source_id)
         if not vendor.strip() or not auth_name.strip():
             raise EngineStateError("OAuth credential binding is incomplete")
+        normalized_vendor = vendor.strip().lower()
+        normalized_auth_name = auth_name.strip()
         with self._lock:
+            matches = [
+                (credential_ref, payload)
+                for credential_ref, payload in self._oauth_credentials()
+                if payload.get("auth_name") == normalized_auth_name
+            ]
+            if matches:
+                if len(matches) != 1:
+                    raise EngineStateError("OAuth auth record binding is ambiguous")
+                credential_ref, payload = matches[0]
+                if payload.get("source_id") != source_id or payload.get("vendor") != normalized_vendor:
+                    raise EngineStateError("OAuth auth record is already bound to another source")
+                return credential_ref
             credential_ref = f"cred_{secrets.token_hex(16)}"
             prefix = f"avibe-{secrets.token_hex(12)}"
             self._secure_write_json(
@@ -143,8 +157,8 @@ class EngineStateStore:
                 {
                     "kind": "oauth",
                     "source_id": source_id,
-                    "vendor": vendor.strip().lower(),
-                    "auth_name": auth_name.strip(),
+                    "vendor": normalized_vendor,
+                    "auth_name": normalized_auth_name,
                     "prefix": prefix,
                 },
             )
@@ -326,6 +340,22 @@ class EngineStateStore:
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         return credentials_dir / f"{credential_ref}.json"
+
+    def _oauth_credentials(self) -> list[tuple[str, dict[str, Any]]]:
+        credentials_dir = self.root / "credentials"
+        self._ensure_private_dir(credentials_dir)
+        result: list[tuple[str, dict[str, Any]]] = []
+        for path in credentials_dir.iterdir():
+            mode = path.lstat().st_mode
+            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                raise EngineStateError("credential permissions are unsafe")
+            credential_ref = path.stem
+            if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+                raise EngineStateError("credential state contains an unsafe entry")
+            payload = self._read_json(path)
+            if payload and payload.get("kind") == "oauth":
+                result.append((credential_ref, payload))
+        return result
 
     def _write_sources(self, sources: Sequence[SourceRecord]) -> None:
         self._secure_write_json(

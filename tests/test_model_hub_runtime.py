@@ -280,6 +280,21 @@ def test_oauth_source_bindings_are_scoped_and_follow_reauthentication(tmp_path: 
     assert replacement.prefix == store.credential_metadata(replacement_ref)["prefix"]
     assert replacement.prefix != first.prefix
 
+    assert (
+        store.bind_oauth_credential(
+            "src_fixture123",
+            "anthropic",
+            "claude-replacement.json",
+        )
+        == replacement_ref
+    )
+    with pytest.raises(EngineStateError, match="already bound to another source"):
+        store.bind_oauth_credential(
+            "src_other1234",
+            "anthropic",
+            "claude-replacement.json",
+        )
+
 
 @contextmanager
 def _models_endpoint():
@@ -653,6 +668,15 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
         store.prepare_instance("install-1")
         (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
         (store.auth_dir / "claude-account.json").chmod(0o600)
+        existing_ref = None
+        existing_prefix = None
+        if refresh_existing:
+            existing_ref = store.bind_oauth_credential(
+                "src_fixture123",
+                "anthropic",
+                "claude-account.json",
+            )
+            existing_prefix = store.credential_metadata(existing_ref)["prefix"]
         client = Client()
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store, client),  # type: ignore[arg-type]
@@ -670,9 +694,14 @@ def test_oauth_flow_binds_new_or_refreshed_auth_record(
         assert completed.state == "success"
         assert completed.source_id == "src_fixture123"
         assert completed.credential_ref and completed.credential_ref.startswith("cred_")
+        if refresh_existing:
+            assert completed.credential_ref == existing_ref
         assert concurrent.credential_ref == completed.credential_ref
         assert client.patches[0]["name"] == "claude-account.json"
         assert str(client.patches[0]["prefix"]).startswith("avibe-")
+        if refresh_existing:
+            assert client.patches[0]["prefix"] == existing_prefix
+            assert len(list((store.root / "credentials").glob("*.json"))) == 1
         repeated = await adapter.oauth_status(flow.flow_id)
         assert repeated.credential_ref == completed.credential_ref
         assert len(client.patches) == 1
