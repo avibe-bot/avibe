@@ -24,6 +24,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { SessionPinAction } from './SessionPinAction';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -253,6 +254,7 @@ const MobileSessionRow: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const handledRef = useRef(false);
@@ -281,6 +283,20 @@ const MobileSessionRow: React.FC<{
     setRenaming(false);
   };
 
+  const togglePinned = async () => {
+    if (pinningRef.current) return;
+    pinningRef.current = true;
+    setPinning(true);
+    try {
+      await setSessionPinned(projectId, session.id, !session.pinned);
+    } catch {
+      // apiFetch already surfaced the error toast.
+    } finally {
+      pinningRef.current = false;
+      setPinning(false);
+    }
+  };
+
   if (renaming) {
     return (
       <div className="flex items-center gap-2 px-3 py-2">
@@ -302,7 +318,7 @@ const MobileSessionRow: React.FC<{
   }
 
   return (
-    <div className="flex items-center">
+    <div className="group/sess flex items-center">
       <button
         type="button"
         onClick={onOpen}
@@ -312,15 +328,6 @@ const MobileSessionRow: React.FC<{
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
           {session.title || `#${session.id.slice(-6)}`}
         </span>
-        {session.pinned && (
-          <span
-            className="flex shrink-0 text-cyan"
-            aria-label={t('workbench.sessionPinned')}
-            title={t('workbench.sessionPinned')}
-          >
-            <Pin className="size-3.5" aria-hidden="true" />
-          </span>
-        )}
         {unread > 0 ? (
           <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-background">
             {unread > 99 ? '99+' : unread}
@@ -331,6 +338,13 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
+      <SessionPinAction
+        pinned={session.pinned}
+        pending={pinning}
+        pinLabel={t('workbench.sessionPin')}
+        unpinLabel={t('workbench.sessionUnpin')}
+        onToggle={() => void togglePinned()}
+      />
       <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <Button
@@ -348,15 +362,7 @@ const MobileSessionRow: React.FC<{
             icon={session.pinned ? PinOff : Pin}
             onClick={() => {
               setMenuOpen(false);
-              if (pinningRef.current) return;
-              pinningRef.current = true;
-              void setSessionPinned(projectId, session.id, !session.pinned)
-                .catch(() => {
-                  // apiFetch already surfaced the error toast.
-                })
-                .finally(() => {
-                  pinningRef.current = false;
-                });
+              void togglePinned();
             }}
           >
             {t(session.pinned ? 'workbench.sessionUnpin' : 'workbench.sessionPin')}
