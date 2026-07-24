@@ -88,6 +88,16 @@ export const OpenCodeMenuDrawer: React.FC<{
   // force-deleted source) is dropped rather than shown as an invisible checked
   // row or sent to putMenu (which the server rejects as mapping_target_unavailable).
   const availableIds = React.useMemo(() => new Set(allRows.map((r) => r.identifier)), [allRows]);
+  // Whether another eligible source still supplies `identifier` once `exceptSourceId`
+  // is removed. When true, deleting one manual copy must NOT drop the featured menu
+  // entry (the identifier stays valid) and the backend won't guard the delete.
+  const hasOtherSupplier = React.useCallback(
+    (identifier: string, exceptSourceId: string) => {
+      const row = allRows.find((r) => r.identifier === identifier);
+      return !!row && row.sources.some((s) => s.id !== exceptSourceId);
+    },
+    [allRows],
+  );
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
   const [checked, setChecked] = React.useState<Set<string>>(() => new Set(agent.menu?.checked ?? []));
@@ -244,17 +254,18 @@ export const OpenCodeMenuDrawer: React.FC<{
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onBeforeDelete={async () => {
-          // delete_custom_model is guarded while the model is a selected supplier.
-          // If the edited model is checked in the persisted OpenCode menu, drop it
-          // there first (the common case) so the delete isn't blocked; a model that
-          // is ALSO a fixed-menu mapping target elsewhere still 409s and surfaces an
-          // honest "in use" message from the dialog.
+          // delete_custom_model is guarded only while the model is the SOLE selected
+          // supplier of its identifier. If another eligible source still supplies it,
+          // the delete isn't blocked and the featured entry must stay — so only drop
+          // the persisted menu entry when this is the last supplier. (A model that is
+          // also a fixed-menu mapping target elsewhere still 409s and surfaces an
+          // honest "in use" message from the dialog.)
           if (!editTarget) return;
           const src = sources.find((s) => s.id === editTarget.sourceId);
           if (!src) return;
           const identifier = buildIdentifier(src.vendor, editTarget.modelId, standardVendors);
           const persisted = agent.menu?.checked ?? [];
-          if (persisted.includes(identifier)) {
+          if (persisted.includes(identifier) && !hasOtherSupplier(identifier, editTarget.sourceId)) {
             await modelsApi.putMenu({
               view: agent.menu?.view ?? 'featured',
               checked: persisted.filter((id) => id !== identifier && availableIds.has(id)),
@@ -269,13 +280,17 @@ export const OpenCodeMenuDrawer: React.FC<{
           onRefresh();
         }}
         onDeleted={(identifier) => {
-          // Drop the removed model from the menu selection so 完成 doesn't try to
-          // re-check a now-nonexistent identifier (set_opencode_menu would reject).
-          setChecked((prev) => {
-            const next = new Set(prev);
-            next.delete(identifier);
-            return next;
-          });
+          // Uncheck only when the deleted model was the last supplier of the
+          // identifier; if another source still supplies it, keep it checked (the
+          // featured model remains available). The self-heal on save/reopen drops
+          // any identifier that later becomes unsupplied.
+          if (editTarget && !hasOtherSupplier(identifier, editTarget.sourceId)) {
+            setChecked((prev) => {
+              const next = new Set(prev);
+              next.delete(identifier);
+              return next;
+            });
+          }
           onRefresh();
         }}
       />
