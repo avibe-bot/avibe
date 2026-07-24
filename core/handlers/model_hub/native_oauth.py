@@ -10,7 +10,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .adapter import OAuthFlowState
 from .events import contains_credential_material
-from .oauth import NativeOAuthUnavailableError
+from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
 
 _VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
 _INSTRUCTIONS_KEYS = {
@@ -20,7 +20,6 @@ _INSTRUCTIONS_KEYS = {
 _TIMEOUT_ERROR_KEY = "settings.models.oauth.error.timeout"
 _GENERIC_ERROR_KEY = "settings.models.oauth.error.generic"
 _MAX_FLOWS = 100
-NATIVE_OAUTH_SIGNED_OUT_DETAIL_KEY = "settings.models.source.oauthSignedOut"
 
 
 class AgentAuthService(Protocol):
@@ -33,14 +32,6 @@ class AgentAuthService(Protocol):
     async def submit_web_code(self, flow_id: str, code: str) -> dict[str, Any]: ...
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]: ...
-
-
-@dataclass(frozen=True)
-class NativeOAuthSourceStatus:
-    """Non-secret native source metadata resolved after CLI login succeeds."""
-
-    signed_in: bool
-    account_label: str | None
 
 
 @dataclass
@@ -56,14 +47,15 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _safe_account_label(value: object) -> str | None:
+def _safe_label_part(value: object, *, email: bool = False) -> str | None:
     if not isinstance(value, str):
         return None
     candidate = value.strip()
     if (
         not candidate
         or len(candidate) > 64
-        or re.fullmatch(r"[^@\s]+@[^@\s]+", candidate) is None
+        or any(ord(character) < 32 for character in candidate)
+        or (email and re.fullmatch(r"[^@\s]+@[^@\s]+", candidate) is None)
         or contains_credential_material(candidate)
     ):
         return None
@@ -72,12 +64,27 @@ def _safe_account_label(value: object) -> str | None:
 
 def _account_label(status: Mapping[str, Any]) -> str | None:
     account = status.get("chatgpt_account")
-    candidates = (
-        status.get("account_label"),
-        status.get("email"),
-        account.get("email") if isinstance(account, Mapping) else None,
-    )
-    return next((label for value in candidates if (label := _safe_account_label(value))), None)
+    explicit = _safe_label_part(status.get("account_label"))
+    if explicit is not None:
+        return explicit
+
+    email = _safe_label_part(status.get("email"), email=True)
+    if isinstance(account, Mapping):
+        email = email or _safe_label_part(account.get("email"), email=True)
+        plan_type = _safe_label_part(account.get("plan_type"))
+        organizations = account.get("organizations")
+        organization = None
+        if isinstance(organizations, list):
+            candidates = [item for item in organizations if isinstance(item, Mapping)]
+            selected = next((item for item in candidates if item.get("is_default") is True), None)
+            selected = selected or next(iter(candidates), None)
+            if selected is not None:
+                organization = _safe_label_part(selected.get("title"))
+        parts = [part for part in (email, plan_type, organization) if part is not None]
+        if parts:
+            label = " \u00b7 ".join(parts)
+            return label if len(label) <= 192 else email
+    return email
 
 
 def _signed_in(backend: str, status: Mapping[str, Any]) -> bool:
@@ -115,7 +122,7 @@ class AgentAuthNativeOAuthAdapter:
         if backend is None:
             raise NativeOAuthUnavailableError
 
-        flow = await self._agent_auth_service.start_web_setup(backend, force_reset=True)
+        flow = await self._agent_auth_service.start_web_setup(backend, force_reset=False)
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError

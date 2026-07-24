@@ -13,6 +13,7 @@ from typing import Literal, Optional, Protocol
 from .adapter import OAuthFlowState
 
 OAuthChannel = Literal["native_cli", "hub"]
+NATIVE_OAUTH_SIGNED_OUT_DETAIL_KEY = "settings.models.source.oauthSignedOut"
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class OAuthFlowBinding:
     channel: OAuthChannel
     source_id: Optional[str]
     vendor: Optional[str]
+    experimental_consent: bool = False
 
 
 class OAuthAdapter(Protocol):
@@ -30,6 +32,18 @@ class OAuthAdapter(Protocol):
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState: ...
 
     async def cancel_oauth(self, flow_id: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class NativeOAuthSourceStatus:
+    """Non-secret native source metadata resolved after CLI login succeeds."""
+
+    signed_in: bool
+    account_label: str | None
+
+
+class NativeOAuthAdapter(OAuthAdapter, Protocol):
+    def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus: ...
 
 
 class NativeOAuthUnavailableError(RuntimeError):
@@ -51,9 +65,12 @@ class UnavailableNativeOAuthAdapter:
     async def cancel_oauth(self, flow_id: str) -> None:
         raise NativeOAuthUnavailableError
 
+    def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus:
+        raise NativeOAuthUnavailableError
+
 
 class OAuthFlowRegistry:
-    """Persist the non-secret source identity associated with each in-flight flow."""
+    """Persist non-secret source identity and consent for each in-flight flow."""
 
     def __init__(self, path: Path, *, max_entries: int = 100):
         self.path = path
@@ -81,12 +98,19 @@ class OAuthFlowRegistry:
             channel = value.get("channel")
             source_id = value.get("source_id")
             vendor = value.get("vendor")
+            experimental_consent = value.get("experimental_consent", False)
             if (
                 channel in {"native_cli", "hub"}
                 and (source_id is None or (isinstance(source_id, str) and source_id))
                 and (vendor is None or (isinstance(vendor, str) and vendor))
+                and isinstance(experimental_consent, bool)
             ):
-                flows[flow_id] = OAuthFlowBinding(channel, source_id, vendor)
+                flows[flow_id] = OAuthFlowBinding(
+                    channel,
+                    source_id,
+                    vendor,
+                    experimental_consent,
+                )
         return flows
 
     def _write(self, payload: dict[str, OAuthFlowBinding]) -> None:
@@ -98,6 +122,7 @@ class OAuthFlowRegistry:
                     "channel": binding.channel,
                     "source_id": binding.source_id,
                     "vendor": binding.vendor,
+                    "experimental_consent": binding.experimental_consent,
                 }
                 for flow_id, binding in bounded.items()
             },
@@ -112,11 +137,24 @@ class OAuthFlowRegistry:
         os.chmod(temp_name, 0o600)
         os.replace(temp_name, self.path)
 
-    def remember(self, flow_id: str, channel: OAuthChannel, source_id: str, vendor: str) -> None:
+    def remember(
+        self,
+        flow_id: str,
+        channel: OAuthChannel,
+        source_id: str,
+        vendor: str,
+        *,
+        experimental_consent: bool = False,
+    ) -> None:
         with self._lock:
             flows = self._read()
             flows.pop(flow_id, None)
-            flows[flow_id] = OAuthFlowBinding(channel, source_id, vendor)
+            flows[flow_id] = OAuthFlowBinding(
+                channel,
+                source_id,
+                vendor,
+                experimental_consent,
+            )
             self._write(flows)
 
     def channel(self, flow_id: str) -> OAuthChannel | None:

@@ -114,23 +114,29 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
   - id: MH-OAUTH-NATIVE-001
-    name: Claude native CLI paste-code login completes through AgentAuthService
+    name: Claude native CLI paste-code login persists an active Source
     status: covered
     kind: oauth
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_001_claude_paste_code_happy_path
   - id: MH-OAUTH-NATIVE-002
-    name: Codex native CLI device-code login self-completes through AgentAuthService
+    name: Codex native CLI device-code login self-completes and persists its account Source
     status: covered
     kind: oauth
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_002_codex_device_code_self_completes
   - id: MH-OAUTH-NATIVE-003
-    name: Native CLI OAuth cancel and timeout terminate cleanly
+    name: Native CLI OAuth cancel, timeout, and signed-out state terminate safely
     status: covered
     kind: timeout_cancel
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
+  - id: MH-OAUTH-CONSENT-001
+    name: Experimental hub OAuth requires and persists explicit consent before Source creation
+    status: covered
+    kind: oauth_consent
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_consent_001_is_required_and_persisted
 next_priority:
   - MH-RES-001
   - MH-PRI-001
@@ -150,3 +156,4 @@ next_priority:
   - MH-OAUTH-NATIVE-001
   - MH-OAUTH-NATIVE-002
   - MH-OAUTH-NATIVE-003
+  - MH-OAUTH-CONSENT-001

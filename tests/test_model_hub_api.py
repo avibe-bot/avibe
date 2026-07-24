@@ -22,7 +22,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
-from core.handlers.model_hub.oauth import OAuthFlowRegistry
+from core.handlers.model_hub.oauth import NativeOAuthSourceStatus, OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
 from tests.ui_server_test_helpers import csrf_headers
@@ -81,6 +81,8 @@ class FakeAdapter:
         self.flows = {}
         self.fail_sync = False
         self.fail_cancel = False
+        self.native_signed_in = True
+        self.native_account_label = None
 
     async def ensure_installed(self):
         return await self.status()
@@ -167,6 +169,14 @@ class FakeAdapter:
         if self.fail_cancel:
             raise RuntimeError("temporary engine failure")
 
+    def completed_source_status(self, flow_id):
+        if flow_id not in self.flows:
+            raise KeyError(flow_id)
+        return NativeOAuthSourceStatus(
+            signed_in=self.native_signed_in,
+            account_label=self.native_account_label,
+        )
+
 
 def _service(tmp_path):
     store = MemoryStore()
@@ -201,6 +211,16 @@ def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
 
     assert isinstance(service.adapter, CLIProxyEngineAdapter)
     assert service.adapter.supervisor.state_store.root.is_relative_to(tmp_path)
+
+
+def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
+    from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+
+    service = create_default_service(adapter=FakeAdapter())
+
+    assert isinstance(service.native_oauth_adapter, AgentAuthNativeOAuthAdapter)
 
 
 def test_runtime_status_starts_engine_before_reporting_health(tmp_path):

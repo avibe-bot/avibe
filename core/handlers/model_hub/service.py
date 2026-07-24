@@ -57,6 +57,8 @@ from .migration import (
     scan_native_configs,
 )
 from .oauth import (
+    NATIVE_OAUTH_SIGNED_OUT_DETAIL_KEY,
+    NativeOAuthAdapter,
     NativeOAuthUnavailableError,
     OAuthAdapter,
     OAuthChannel,
@@ -368,7 +370,7 @@ class ModelHubService:
         store: ModelHubConfigStore,
         adapter: EngineAdapter,
         events: BoundedEventLog,
-        native_oauth_adapter: Optional[OAuthAdapter] = None,
+        native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
@@ -595,6 +597,7 @@ class ModelHubService:
         channel: Literal["native_cli", "hub"],
         vendor: str,
         consented: bool,
+        completed_flow: Optional[OAuthFlowState] = None,
     ) -> dict:
         # Claim and consume a completed flow under the aggregate lock. This
         # prevents a duplicate browser retry from revoking the winning source's
@@ -606,7 +609,7 @@ class ModelHubService:
                 binding = self._oauth_binding(oauth_ref)
                 if binding.channel != channel:
                     raise ModelHubError("flow_not_found", status=404)
-                flow = await self._oauth_status(oauth_ref, binding.channel)
+                flow = completed_flow or await self._oauth_status(oauth_ref, binding.channel)
                 if flow.state != "success" or (channel == "hub" and not flow.credential_ref):
                     raise ModelHubError("flow_not_found", status=404)
                 if (
@@ -623,6 +626,24 @@ class ModelHubService:
                 if channel == "hub":
                     source.credential_ref = cast(str, flow.credential_ref)
                     rollback_credential_ref = source.credential_ref
+                else:
+                    try:
+                        source_status = self.native_oauth_adapter.completed_source_status(oauth_ref)
+                    except KeyError:
+                        raise ModelHubError("flow_not_found", status=404) from None
+                    except NativeOAuthUnavailableError:
+                        raise ModelHubError("engine_down", status=503) from None
+                    except Exception:
+                        raise ModelHubError("engine_down", status=503) from None
+                    source.account_label = source_status.account_label
+                    source.state = (
+                        ModelHubSourceStateConfig(status="active")
+                        if source_status.signed_in
+                        else ModelHubSourceStateConfig(
+                            status="error",
+                            detail_key=NATIVE_OAUTH_SIGNED_OUT_DETAIL_KEY,
+                        )
+                    )
 
                 discovered = (
                     await self._discover(source)
@@ -651,6 +672,51 @@ class ModelHubService:
                     except OSError:
                         pass
                 raise
+
+    async def _materialize_completed_oauth(
+        self,
+        flow_id: str,
+        binding: OAuthFlowBinding,
+        flow: OAuthFlowState,
+    ) -> None:
+        if flow.state != "success":
+            return
+        if binding.source_id is None or binding.vendor is None:
+            raise ModelHubError("flow_not_found", status=404)
+        if binding.channel == "hub" and not binding.experimental_consent:
+            raise ModelHubError("consent_required", status=409)
+
+        display_name = {
+            "anthropic": "Claude",
+            "openai": "ChatGPT",
+        }.get(binding.vendor, binding.vendor)
+        source = ModelHubSourceConfig(
+            id=binding.source_id,
+            kind="subscription",
+            vendor=binding.vendor,
+            display_name=display_name,
+            protocol=_default_protocol(binding.vendor),
+            base_url=None,
+            supply_channel=binding.channel,
+            experimental_consent_at=(
+                self.now().isoformat()
+                if binding.channel == "hub" and binding.experimental_consent
+                else None
+            ),
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            usage=ModelHubSourceUsageConfig(),
+            models=[],
+        )
+        await self._create_oauth_source(
+            source,
+            [],
+            oauth_ref=flow_id,
+            channel=binding.channel,
+            vendor=binding.vendor,
+            consented=binding.experimental_consent,
+            completed_flow=flow,
+        )
 
     def list_sources(self) -> list[dict]:
         config = self.store.load()
@@ -1106,7 +1172,13 @@ class ModelHubService:
         )
         if flow.source_id != pending_source_id or flow.vendor != vendor:
             raise ModelHubError("flow_not_found", status=502)
-        self.oauth_flows.remember(flow.flow_id, oauth_channel, pending_source_id, vendor)
+        self.oauth_flows.remember(
+            flow.flow_id,
+            oauth_channel,
+            pending_source_id,
+            vendor,
+            experimental_consent=consented,
+        )
         if channel == "hub" and consented:
             async with self._mutation_lock:
                 config = self.store.load()
@@ -1115,24 +1187,26 @@ class ModelHubService:
         return _oauth_payload(flow, channel=channel)
 
     async def oauth_status(self, flow_id: str) -> dict:
-        channel = self._oauth_channel(flow_id)
-        flow = await self._oauth_status(flow_id, channel)
+        binding = self._oauth_binding(flow_id)
+        flow = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, flow)
-        return _oauth_payload(flow, channel=channel)
+        await self._materialize_completed_oauth(flow_id, binding, flow)
+        return _oauth_payload(flow, channel=binding.channel)
 
     async def oauth_submit(self, payload: dict) -> dict:
         flow_id = payload.get("flow_id") if isinstance(payload, dict) else None
         value = payload.get("value") if isinstance(payload, dict) else None
         if not isinstance(flow_id, str) or not isinstance(value, str):
             raise ModelHubError("flow_not_found", status=404)
-        channel = self._oauth_channel(flow_id)
-        current = await self._oauth_status(flow_id, channel)
+        binding = self._oauth_binding(flow_id)
+        current = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, current)
         flow = await self._oauth_call(
-            self._oauth_adapter(channel).submit_oauth(flow_id, value),
+            self._oauth_adapter(binding.channel).submit_oauth(flow_id, value),
             flow_id=flow_id,
         )
-        return _oauth_payload(flow, channel=channel)
+        await self._materialize_completed_oauth(flow_id, binding, flow)
+        return _oauth_payload(flow, channel=binding.channel)
 
     async def oauth_cancel(self, flow_id: object) -> None:
         if not isinstance(flow_id, str):
@@ -1426,12 +1500,17 @@ class ModelHubService:
 def create_default_service(
     *,
     adapter: Optional[EngineAdapter] = None,
-    native_oauth_adapter: Optional[OAuthAdapter] = None,
+    native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
 
         adapter = get_model_hub_engine_adapter()
+
+    if native_oauth_adapter is None:
+        from .native_oauth import create_native_oauth_adapter
+
+        native_oauth_adapter = create_native_oauth_adapter()
 
     def claude_oauth_probe() -> bool:
         from vibe.api import (

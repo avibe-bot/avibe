@@ -1,108 +1,222 @@
 from __future__ import annotations
 
-import asyncio
+from tests.scenario_harness.model_hub_native_oauth import (
+    HubOAuthScenarioHarness,
+    NativeOAuthScenarioHarness,
+)
+from tests.ui_server_test_helpers import csrf_headers
+from vibe import ui_server
+from vibe.ui_server import app
 
-import pytest
-
-from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
+BASE_URL = "http://127.0.0.1:15131"
 
 
-def test_mh_oauth_native_001_claude_paste_code_happy_path():
+def _client(monkeypatch, service):
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    return client, csrf_headers(client, BASE_URL)
+
+
+def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path):
     """Scenario: MH-OAUTH-NATIVE-001."""
 
-    async def run():
-        harness = NativeOAuthScenarioHarness()
-        harness.auth_status["claude"] = {
-            "active_auth_mode": "oauth",
-        }
+    harness = NativeOAuthScenarioHarness(tmp_path)
+    harness.auth_status["claude"] = {"active_auth_mode": "oauth"}
+    client, headers = _client(monkeypatch, harness.service)
 
-        started = await harness.adapter.start_oauth("src_claude01", "anthropic")
+    started = client.post(
+        "/api/models/oauth/start",
+        json={"vendor": "anthropic", "channel": "native_cli"},
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    assert started["state"] == "awaiting_action"
+    assert started["presentation"] == {
+        "auth_url": "https://claude.ai/oauth/authorize?test=true",
+        "device_code": None,
+        "expects": "paste_code",
+        "instructions_key": "settings.models.oauth.pasteCode.hint",
+    }
 
-        assert started.state == "awaiting_action"
-        assert started.expects == "paste_code"
-        assert started.auth_url == "https://claude.ai/oauth/authorize?test=true"
-        assert started.device_code is None
-        assert started.credential_ref is None
+    submitted = client.post(
+        "/api/models/oauth/submit",
+        json={"flow_id": started["flow_id"], "value": "code-value#state-value"},
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    assert submitted["state"] == "verifying"
+    assert harness.agent_auth.submissions == [(started["flow_id"], "code-value#state-value")]
 
-        submitted = await harness.adapter.submit_oauth(
-            started.flow_id,
-            "code-value#state-value",
-        )
-        assert submitted.state == "verifying"
-        assert harness.agent_auth.submissions == [(started.flow_id, "code-value#state-value")]
+    harness.agent_auth.complete(started["flow_id"])
+    completed = client.get(
+        f"/api/models/oauth/status/{started['flow_id']}",
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    sources = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"]
 
-        harness.agent_auth.complete(started.flow_id)
-        completed = await harness.adapter.oauth_status(started.flow_id)
-        source_status = harness.adapter.completed_source_status(started.flow_id)
+    assert completed["state"] == "success"
+    assert len(sources) == 1
+    assert sources[0]["id"] == started["source_id"]
+    assert sources[0]["state"] == {"status": "active", "retry_at": None, "detail_key": None}
+    assert sources[0]["account_label"] is None
+    assert sources[0]["credential_ref"] is None
+    assert harness.store.config.sources[0].id == started["source_id"]
+    claude = next(
+        agent
+        for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
+        if agent["backend"] == "claude"
+    )
+    assert claude["current"]["source_id"] == started["source_id"]
 
-        assert completed.state == "success"
-        assert completed.source_id == "src_claude01"
-        assert completed.credential_ref is None
-        assert source_status.signed_in is True
-        assert source_status.account_label is None
 
-    asyncio.run(run())
-
-
-def test_mh_oauth_native_002_codex_device_code_self_completes():
+def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_path):
     """Scenario: MH-OAUTH-NATIVE-002."""
 
-    async def run():
-        harness = NativeOAuthScenarioHarness()
-        harness.auth_status["codex"] = {
-            "active_auth_mode": "oauth",
-            "chatgpt_account": {"email": "chatgpt-owner@example.com"},
-        }
+    harness = NativeOAuthScenarioHarness(tmp_path)
+    harness.auth_status["codex"] = {
+        "active_auth_mode": "oauth",
+        "chatgpt_account": {
+            "email": "chatgpt-owner@example.com",
+            "plan_type": "plus",
+            "organizations": [{"title": "Example Org", "is_default": True}],
+        },
+    }
+    client, headers = _client(monkeypatch, harness.service)
 
-        started = await harness.adapter.start_oauth("src_chatgpt01", "openai")
-        assert started.state == "starting"
-        assert started.expects == "none"
+    started = client.post(
+        "/api/models/oauth/start",
+        json={"vendor": "openai", "channel": "native_cli"},
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    assert started["state"] == "starting"
+    assert started["presentation"]["expects"] == "none"
 
-        harness.agent_auth.expose_codex_device_flow(started.flow_id)
-        awaiting = await harness.adapter.oauth_status(started.flow_id)
-        assert awaiting.state == "awaiting_action"
-        assert awaiting.auth_url == "https://auth.openai.com/codex/device"
-        assert awaiting.device_code == "T74L-XU61D"
-        assert awaiting.expects == "none"
+    harness.agent_auth.expose_codex_device_flow(started["flow_id"])
+    awaiting = client.get(
+        f"/api/models/oauth/status/{started['flow_id']}",
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    assert awaiting["state"] == "awaiting_action"
+    assert awaiting["presentation"]["auth_url"] == "https://auth.openai.com/codex/device"
+    assert awaiting["presentation"]["device_code"] == "T74L-XU61D"
+    assert awaiting["presentation"]["expects"] == "none"
 
-        harness.agent_auth.complete(started.flow_id)
-        completed = await harness.adapter.oauth_status(started.flow_id)
-        source_status = harness.adapter.completed_source_status(started.flow_id)
+    harness.agent_auth.complete(started["flow_id"])
+    completed = client.get(
+        f"/api/models/oauth/status/{started['flow_id']}",
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
 
-        assert completed.state == "success"
-        assert completed.credential_ref is None
-        assert harness.agent_auth.submissions == []
-        assert source_status.signed_in is True
-        assert source_status.account_label == "chatgpt-owner@example.com"
-
-    asyncio.run(run())
+    assert completed["state"] == "success"
+    assert harness.agent_auth.submissions == []
+    assert source["state"]["status"] == "active"
+    assert source["account_label"] == "chatgpt-owner@example.com \u00b7 plus \u00b7 Example Org"
+    assert source["credential_ref"] is None
 
 
-def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly():
+def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, tmp_path):
     """Scenario: MH-OAUTH-NATIVE-003."""
 
-    async def run():
-        harness = NativeOAuthScenarioHarness()
+    harness = NativeOAuthScenarioHarness(tmp_path)
+    client, headers = _client(monkeypatch, harness.service)
 
-        timed = await harness.adapter.start_oauth("src_timeout01", "anthropic")
-        harness.agent_auth.timeout(timed.flow_id)
-        timed_out = await harness.adapter.oauth_status(timed.flow_id)
+    timed = client.post(
+        "/api/models/oauth/start",
+        json={"vendor": "anthropic", "channel": "native_cli"},
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    harness.agent_auth.timeout(timed["flow_id"])
+    timed_out = client.get(
+        f"/api/models/oauth/status/{timed['flow_id']}",
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    assert timed_out["state"] == "failed"
+    assert timed_out["error_key"] == "settings.models.oauth.error.timeout"
+    assert client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"] == []
 
-        assert timed_out.state == "failed"
-        assert timed_out.error_key == "settings.models.oauth.error.timeout"
-        assert timed_out.credential_ref is None
+    signed_out = client.post(
+        "/api/models/oauth/start",
+        json={"vendor": "anthropic", "channel": "native_cli"},
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    harness.auth_status["claude"] = {"active_auth_mode": "none"}
+    harness.agent_auth.complete(signed_out["flow_id"])
+    client.get(f"/api/models/oauth/status/{signed_out['flow_id']}", base_url=BASE_URL)
+    source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
+    assert source["state"] == {
+        "status": "error",
+        "retry_at": None,
+        "detail_key": "settings.models.source.oauthSignedOut",
+    }
+    claude = next(
+        agent
+        for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
+        if agent["backend"] == "claude"
+    )
+    assert claude["current"] is None
 
-        signed_out = await harness.adapter.start_oauth("src_signedout01", "anthropic")
-        harness.auth_status["claude"] = {"active_auth_mode": "none"}
-        harness.agent_auth.complete(signed_out.flow_id)
-        await harness.adapter.oauth_status(signed_out.flow_id)
-        assert harness.adapter.completed_source_status(signed_out.flow_id).signed_in is False
+    cancelled = client.post(
+        "/api/models/oauth/start",
+        json={"vendor": "openai", "channel": "native_cli"},
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    response = client.post(
+        "/api/models/oauth/cancel",
+        json={"flow_id": cancelled["flow_id"]},
+        headers=headers,
+        base_url=BASE_URL,
+    )
+    assert response.status_code == 200
+    assert harness.agent_auth.cancelled == [cancelled["flow_id"]]
+    assert client.get(
+        f"/api/models/oauth/status/{cancelled['flow_id']}",
+        base_url=BASE_URL,
+    ).status_code == 404
 
-        cancelled = await harness.adapter.start_oauth("src_cancel01", "openai")
-        await harness.adapter.cancel_oauth(cancelled.flow_id)
 
-        assert harness.agent_auth.cancelled == [cancelled.flow_id]
-        with pytest.raises(KeyError):
-            await harness.adapter.oauth_status(cancelled.flow_id)
+def test_mh_oauth_consent_001_is_required_and_persisted(monkeypatch, tmp_path):
+    """Scenario: MH-OAUTH-CONSENT-001."""
 
-    asyncio.run(run())
+    harness = HubOAuthScenarioHarness(tmp_path)
+    client, headers = _client(monkeypatch, harness.service)
+
+    rejected = client.post(
+        "/api/models/oauth/start",
+        json={"vendor": "anthropic", "channel": "hub"},
+        headers=headers,
+        base_url=BASE_URL,
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"] == "consent_required"
+    assert harness.adapter.flows == {}
+
+    started = client.post(
+        "/api/models/oauth/start",
+        json={
+            "vendor": "anthropic",
+            "channel": "hub",
+            "experimental_consent": True,
+        },
+        headers=headers,
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    binding = harness.service.oauth_flows.binding(started["flow_id"])
+    assert binding is not None
+    assert binding.experimental_consent is True
+
+    harness.adapter.complete(started["flow_id"])
+    completed = client.get(
+        f"/api/models/oauth/status/{started['flow_id']}",
+        base_url=BASE_URL,
+    ).get_json()["flow"]
+    source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
+
+    assert completed["state"] == "success"
+    assert source["id"] == started["source_id"]
+    assert source["supply_channel"] == "hub"
+    assert source["experimental_consent_at"] == "2026-07-25T00:00:00+00:00"
