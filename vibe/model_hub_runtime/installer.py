@@ -27,6 +27,7 @@ _ENGINE_PLATFORM_MAP = {
     "linux-x64": "linux-amd64",
     "linux-arm64": "linux-arm64",
 }
+_ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
 _ENGINE_SPEC = ManagedRuntimeSpec(
     runtime_id="model_hub_engine",
     manifest_resource="model_hub_runtime/cliproxyapi_manifest.json",
@@ -78,6 +79,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                     "sha256": asset["sha256"],
                 }
                 for asset in payload.get("assets", [])
+                if asset.get("platform") in _ENGINE_ASSET_PLATFORMS
             ],
         }
 

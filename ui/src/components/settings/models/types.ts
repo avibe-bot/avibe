@@ -210,7 +210,7 @@ export type RuntimeDependency = {
     version: string;
     source_sha: string;
     assets: Array<{
-      platform: 'darwin-arm64' | 'linux-amd64';
+      platform: 'darwin-arm64' | 'darwin-x64' | 'linux-amd64' | 'linux-arm64';
       url: string;
       size_bytes: number;
       sha256: string;

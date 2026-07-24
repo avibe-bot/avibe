@@ -150,6 +150,37 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
 
 
+def test_contract_manifest_filters_unsupported_override_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.loads(Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text(encoding="utf-8"))
+    payload["assets"].append(
+        {
+            "platform": "win32-x64",
+            "url": "https://example.test/unsupported.zip",
+            "size_bytes": 1,
+            "sha256": "1" * 64,
+            "binary_sha256": "2" * 64,
+            "bin_path": "cli-proxy-api.exe",
+        }
+    )
+    manifest_path = tmp_path / "override.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+        offline=True,
+    )
+
+    assert "win32-x64" not in {asset["platform"] for asset in manager.contract_manifest()["assets"]}
+
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    unsupported = manager.ensure()
+    assert unsupported["ok"] is False
+    assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
+
+
 @pytest.mark.parametrize(
     ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
     [
