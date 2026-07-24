@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -18,7 +20,7 @@ REMOTE_CATALOG_URL_ENV = "AVIBE_BACKEND_MODEL_CATALOG_URL"
 DEFAULT_REMOTE_CATALOG_URL = (
     "https://raw.githubusercontent.com/avibe-bot/avibe/master/vibe/data/backend_models.json"
 )
-REMOTE_CATALOG_TTL_SECONDS = 6 * 60 * 60
+REMOTE_CATALOG_REVALIDATE_SECONDS = 60
 REMOTE_CATALOG_FAILURE_TTL_SECONDS = 10 * 60
 REMOTE_CATALOG_TIMEOUT_SECONDS = 3.0
 REMOTE_CATALOG_USER_AGENT = "avibe/backend-model-catalog"
@@ -115,20 +117,95 @@ def schedule_remote_catalog_refresh() -> bool:
 
 
 def refresh_remote_catalog_now(url: str | None = None) -> dict[str, Any]:
-    catalog = fetch_remote_catalog(url=url)
-    payload = {"fetched_at": time.time(), "catalog": catalog, "error": None}
+    previous = _cached_remote_payload()
+    request_url = _remote_catalog_url(url)
+    source_key = _remote_catalog_source_key(request_url)
+    same_source = previous.get("source_key") == source_key
+    catalog, validators = _fetch_remote_catalog_response(
+        url=request_url,
+        etag=previous.get("etag") if same_source else None,
+        last_modified=previous.get("last_modified") if same_source else None,
+    )
+    now = time.time()
+    not_modified = catalog is None
+    if not_modified:
+        catalog = previous.get("catalog")
+        if not isinstance(catalog, dict):
+            catalog, validators = _fetch_remote_catalog_response(url=request_url)
+            not_modified = False
+    if not isinstance(catalog, dict):
+        raise ValueError("Remote backend model catalog returned no content")
+
+    payload = {
+        "fetched_at": previous.get("fetched_at", now) if not_modified else now,
+        "checked_at": now,
+        "catalog": catalog,
+        "error": None,
+        "source_key": source_key,
+    }
+    for key in ("etag", "last_modified"):
+        value = validators.get(key)
+        if not_modified and not value:
+            value = previous.get(key)
+        if isinstance(value, str) and value:
+            payload[key] = value
     _write_cached_remote_payload(payload)
     return catalog
 
 
 def fetch_remote_catalog(url: str | None = None) -> dict[str, Any]:
-    request_url = (url or os.environ.get(REMOTE_CATALOG_URL_ENV) or DEFAULT_REMOTE_CATALOG_URL).strip()
-    request = urllib.request.Request(request_url, headers={"User-Agent": REMOTE_CATALOG_USER_AGENT})
-    with urllib.request.urlopen(  # noqa: S310 - fixed public catalog or explicit operator override
-        request,
-        timeout=REMOTE_CATALOG_TIMEOUT_SECONDS,
-    ) as response:
-        return _normalize_catalog(json.loads(response.read().decode("utf-8")), strict=True)
+    catalog, _validators = _fetch_remote_catalog_response(url=url)
+    if catalog is None:
+        raise ValueError("Remote backend model catalog returned no content")
+    return catalog
+
+
+def _fetch_remote_catalog_response(
+    url: str | None = None,
+    *,
+    etag: object = None,
+    last_modified: object = None,
+) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    request_url = _remote_catalog_url(url)
+    headers = {
+        "User-Agent": REMOTE_CATALOG_USER_AGENT,
+        "Cache-Control": "no-cache",
+    }
+    if isinstance(etag, str) and etag:
+        headers["If-None-Match"] = etag
+    if isinstance(last_modified, str) and last_modified:
+        headers["If-Modified-Since"] = last_modified
+    request = urllib.request.Request(request_url, headers=headers)
+    try:
+        with urllib.request.urlopen(  # noqa: S310 - fixed public catalog or explicit operator override
+            request,
+            timeout=REMOTE_CATALOG_TIMEOUT_SECONDS,
+        ) as response:
+            catalog = _normalize_catalog(json.loads(response.read().decode("utf-8")), strict=True)
+            return catalog, _response_validators(response.headers)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return None, _response_validators(exc.headers)
+        raise
+
+
+def _remote_catalog_url(url: str | None = None) -> str:
+    return (url or os.environ.get(REMOTE_CATALOG_URL_ENV) or DEFAULT_REMOTE_CATALOG_URL).strip()
+
+
+def _remote_catalog_source_key(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def _response_validators(headers: object) -> dict[str, str]:
+    if not hasattr(headers, "get"):
+        return {}
+    validators = {}
+    for header, key in (("ETag", "etag"), ("Last-Modified", "last_modified")):
+        value = headers.get(header)
+        if isinstance(value, str) and value:
+            validators[key] = value
+    return validators
 
 
 def backend_model_entries(backend: str, catalog: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -428,14 +505,16 @@ def _cached_remote_payload() -> dict[str, Any]:
 
 def _remote_cache_stale(payload: dict[str, Any]) -> bool:
     fetched_at = payload.get("fetched_at")
+    checked_at = payload.get("checked_at")
+    last_success_at = checked_at if isinstance(checked_at, (int, float)) else fetched_at
     failed_at = payload.get("failed_at")
     if isinstance(failed_at, (int, float)) and (
-        not isinstance(fetched_at, (int, float)) or float(failed_at) >= float(fetched_at)
+        not isinstance(last_success_at, (int, float)) or float(failed_at) >= float(last_success_at)
     ):
         return time.time() - float(failed_at) >= REMOTE_CATALOG_FAILURE_TTL_SECONDS
-    if not isinstance(fetched_at, (int, float)):
+    if not isinstance(last_success_at, (int, float)):
         return True
-    return time.time() - float(fetched_at) >= REMOTE_CATALOG_TTL_SECONDS
+    return time.time() - float(last_success_at) >= REMOTE_CATALOG_REVALIDATE_SECONDS
 
 
 def _refresh_remote_catalog_worker() -> None:
@@ -451,6 +530,15 @@ def _refresh_remote_catalog_worker() -> None:
         }
         if isinstance(previous.get("fetched_at"), (int, float)):
             payload["fetched_at"] = previous["fetched_at"]
+        if isinstance(previous.get("checked_at"), (int, float)):
+            payload["checked_at"] = previous["checked_at"]
+        for key in ("etag", "last_modified"):
+            value = previous.get(key)
+            if isinstance(value, str) and value:
+                payload[key] = value
+        source_key = previous.get("source_key")
+        if isinstance(source_key, str) and source_key:
+            payload["source_key"] = source_key
         _write_cached_remote_payload(payload)
     finally:
         with _REMOTE_LOCK:
@@ -482,10 +570,15 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
             catalog_valid = True
         except ValueError:
             pass
-    for key in ("fetched_at", "failed_at"):
+    for key in ("fetched_at", "checked_at", "failed_at"):
         value = payload.get(key)
-        if isinstance(value, (int, float)) and (key != "fetched_at" or catalog_valid):
+        if isinstance(value, (int, float)) and (key not in {"fetched_at", "checked_at"} or catalog_valid):
             normalized[key] = value
+    if catalog_valid:
+        for key in ("etag", "last_modified", "source_key"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                normalized[key] = value
     error = payload.get("error")
     if isinstance(error, str) or error is None:
         normalized["error"] = error
