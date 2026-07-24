@@ -13,7 +13,7 @@ session auth; localhost curl is rejected the same way as other `/api/*` routes.
 | DELETE `/api/models/sources/<id>` | → `{ok}` | refuses while source is the only supplier of a checked/ mapped model unless `force=true` |
 | POST `/api/models/sources/<id>/test` | → `{ok, discovered: n}` | re-discovery |
 | PUT `/api/models/priority` | `Priority` → `Priority` | authoritative full order; server re-echoes canonical order |
-| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | includes `current` per backend |
+| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | includes `current` per backend. Response agents[] carry server-populated read-only `builtin_models` / `standard_vendors` (integration 2026-07-24). |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `AgentSupply` | hub⇄direct switch; never silent (plan §4) |
 | PUT `/api/models/agents/<backend>/mappings` | `{mappings}` → `AgentSupply` | fixed-menu backends only |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `AgentSupply` | open menu config |

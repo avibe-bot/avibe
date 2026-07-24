@@ -172,6 +172,7 @@ class ClaudeAgent(BaseAgent):
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
+            await self.record_model_hub_native_failure(context, str(e))
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
             self._remove_pending_request(runtime_session_key, request)
@@ -1075,6 +1076,8 @@ class ClaudeAgent(BaseAgent):
             # the receiver is dead and won't process any more results.
             await self._clear_pending_reactions(composite_key, context)
             error_notify = self._format_error_notify(e)
+            failure_context = getattr(pending_request, "context", context)
+            await self.record_model_hub_native_failure(failure_context, str(e))
             handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
@@ -1245,6 +1248,8 @@ class ClaudeAgent(BaseAgent):
             composite_key,
             diagnostic,
         )
+        failure_context = getattr(pending_request, "context", context)
+        await self.record_model_hub_native_failure(failure_context, diagnostic)
         handled_auth = await emit_backend_failure(
             self.controller,
             context,

@@ -44,7 +44,17 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .identifiers import opencode_model_id, opencode_provider_id, parse_opencode_model_id
+from .identifiers import (
+    STANDARD_OPENCODE_VENDOR_IDS,
+    opencode_model_id,
+    opencode_provider_id,
+    parse_opencode_model_id,
+)
+from .migration import (
+    MigrationConflictError,
+    apply_native_migration,
+    scan_native_configs,
+)
 from .oauth import (
     NativeOAuthUnavailableError,
     OAuthAdapter,
@@ -262,12 +272,22 @@ def _validated_base_url(value: object) -> Optional[str]:
     return value
 
 
+def _builtin_model_ids(backend: str) -> tuple[str, ...]:
+    """Real built-in model ids for a fixed-menu backend, from the bundled catalog.
+
+    Single source of truth for both the native-subscription supply list
+    (_native_model_ids) and the agents endpoint's read-only builtin_models
+    projection (agent-supply.schema.json v1.2), so the two never diverge.
+    """
+    catalog = load_bundled_catalog()
+    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+
+
 def _native_model_ids(vendor: str) -> tuple[str, ...]:
     backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
     if backend is None:
         return ()
-    catalog = load_bundled_catalog()
-    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+    return _builtin_model_ids(backend)
 
 
 def _default_protocol(vendor: str) -> str:
@@ -350,6 +370,7 @@ class ModelHubService:
         native_oauth_adapter: Optional[OAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
+        migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -360,6 +381,7 @@ class ModelHubService:
         self.revocations = revocations or CredentialRevocationJournal(
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
+        self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.now = now
         self._mutation_lock = asyncio.Lock()
         self._engine_synced = False
@@ -912,9 +934,8 @@ class ModelHubService:
 
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         current = None
-        if agent.mode == "hub":
-            if agent.backend == "opencode" and (agent.menu is None or not agent.menu.checked):
-                return {**agent.to_payload(), "current": None}
+        opencode_menu_empty = agent.backend == "opencode" and (agent.menu is None or not agent.menu.checked)
+        if agent.mode == "hub" and not opencode_menu_empty:
             provider = None
             target = next((mapping.target_model_id for mapping in agent.mappings if mapping.enabled), None)
             if target is None and agent.menu and agent.menu.checked:
@@ -935,7 +956,19 @@ class ModelHubService:
                 if model is not None:
                     current = {"model_id": model.id, "source_id": source.id, "channel": source.supply_channel}
                     break
-        return {**agent.to_payload(), "current": current}
+        # Read-only projections (agent-supply.schema.json v1.2, integration 2026-07-24):
+        # fixed-menu backends expose their built-in catalog; opencode exposes the
+        # standard vendor prefixes. Both are populated straight from the backend
+        # modules so the UI never hand-mirrors a menu or vendor list. Not persisted
+        # config — injected here exactly like `current`.
+        builtin_models = list(_builtin_model_ids(agent.backend)) if agent.menu_kind == "fixed" else None
+        standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
+        return {
+            **agent.to_payload(),
+            "current": current,
+            "builtin_models": builtin_models,
+            "standard_vendors": standard_vendors,
+        }
 
     def list_agents(self) -> list[dict]:
         config = self.store.load()
@@ -1112,13 +1145,30 @@ class ModelHubService:
         return _runtime_payload(await self._engine_call(self.adapter.status()))
 
     def migration_scan(self) -> dict:
-        # L6 supplies the native-config scanner. Empty is valid and read-only.
-        return {"items": []}
+        config = self.store.load()
+        return {
+            "items": [
+                item.to_payload()
+                for item in scan_native_configs(
+                    config,
+                    mask_credential=_mask_credential,
+                    claude_oauth_probe=self.migration_claude_oauth_probe,
+                    validate_base_url=_validated_base_url,
+                )
+            ]
+        }
 
-    def migration_apply(self, item_ids: object) -> dict:
-        if not isinstance(item_ids, list) or item_ids:
+    async def migration_apply(self, item_ids: object) -> dict:
+        try:
+            applied = await apply_native_migration(
+                self,
+                item_ids,
+                mask_credential=_mask_credential,
+                validate_base_url=_validated_base_url,
+            )
+        except MigrationConflictError:
             raise ModelHubError("migration_item_conflict", status=409)
-        return {"applied": 0, "sources": self.list_sources()}
+        return {"applied": applied, "sources": self.list_sources()}
 
     async def _resolution_candidates(
         self,
@@ -1369,6 +1419,28 @@ def create_default_service(
     adapter: Optional[EngineAdapter] = None,
     native_oauth_adapter: Optional[OAuthAdapter] = None,
 ) -> ModelHubService:
+    def claude_oauth_probe() -> bool:
+        from vibe.api import (
+            _build_claude_status_probe_env,
+            _read_claude_cli_oauth_signed_in,
+            _resolve_claude_status_probe_cwd,
+        )
+        from vibe.claude_config import build_claude_subprocess_env
+
+        try:
+            config = V2Config.load()
+        except FileNotFoundError:
+            config = default_config()
+        claude = config.agents.claude
+        env = _build_claude_status_probe_env(
+            build_claude_subprocess_env(claude, force_oauth=True)
+        )
+        return _read_claude_cli_oauth_signed_in(
+            claude.cli_path,
+            env=env,
+            cwd=_resolve_claude_status_probe_cwd(config),
+        ) is True
+
     return ModelHubService(
         store=V2ModelHubConfigStore(),
         adapter=adapter or UnavailableEngineAdapter(),
@@ -1376,4 +1448,5 @@ def create_default_service(
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
+        migration_claude_oauth_probe=claude_oauth_probe,
     )

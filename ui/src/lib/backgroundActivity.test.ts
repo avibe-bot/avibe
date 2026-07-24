@@ -7,6 +7,7 @@ import {
   harnessItemNativeId,
   harnessNavPath,
   isHarnessActivity,
+  isQueuedRun,
   resolveActivityLabel,
   sortBackgroundActivities,
 } from './backgroundActivity';
@@ -46,17 +47,55 @@ describe('activityItemKind', () => {
 
 describe('activityKindI18nKey', () => {
   it('classifies one-shot and recurring tasks from schedule_type', () => {
-    expect(activityKindI18nKey({ item_kind: 'task', schedule_type: 'at' })).toBe('taskOneShot');
-    expect(activityKindI18nKey({ item_kind: 'task', schedule_type: 'cron' })).toBe(
+    expect(activityKindI18nKey(item({ item_kind: 'task', schedule_type: 'at' }))).toBe(
+      'taskOneShot',
+    );
+    expect(activityKindI18nKey(item({ item_kind: 'task', schedule_type: 'cron' }))).toBe(
       'taskRecurring',
     );
   });
 
   it('does not infer recurrence from labels or other activity kinds', () => {
-    expect(activityKindI18nKey({ item_kind: 'task', schedule_type: null })).toBe('task');
-    expect(activityKindI18nKey({ item_kind: 'watch' })).toBe('watch');
-    expect(activityKindI18nKey({ item_kind: 'agent_run' })).toBe('agentRun');
-    expect(activityKindI18nKey({ item_kind: 'backend_activity' })).toBe('backendActivity');
+    expect(activityKindI18nKey(item({ item_kind: 'task', schedule_type: null }))).toBe('task');
+    expect(activityKindI18nKey(item({ item_kind: 'watch', status: 'enabled' }))).toBe('watch');
+    expect(activityKindI18nKey(item({ item_kind: 'agent_run' }))).toBe('agentRun');
+    expect(activityKindI18nKey(item({ item_kind: 'backend_activity' }))).toBe('backendActivity');
+  });
+
+  it('maps a queued delegated run to its own key, not "agentRun"', () => {
+    expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'queued' }))).toBe(
+      'agentRunQueued',
+    );
+    // The raw/legacy alias the durable store may still carry (normalized to
+    // public "queued" by storage/background.RUN_STATUS_ALIASES).
+    expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'pending' }))).toBe(
+      'agentRunQueued',
+    );
+    // Executing forms keep the plain kind key.
+    expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'running' }))).toBe(
+      'agentRun',
+    );
+    expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'processing' }))).toBe(
+      'agentRun',
+    );
+  });
+
+  it('leaves non-run kinds untouched by a queued-looking status', () => {
+    expect(activityKindI18nKey(item({ item_kind: 'watch', status: 'queued' }))).toBe('watch');
+    expect(activityKindI18nKey(item({ item_kind: 'task', status: 'queued' }))).toBe('task');
+    expect(activityKindI18nKey(item({ status: 'queued' }))).toBe('backendActivity');
+  });
+});
+
+describe('isQueuedRun', () => {
+  it('is true only for a delegated run with a waiting status', () => {
+    expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'queued' }))).toBe(true);
+    // Raw/legacy alias of "queued" (storage/background.RUN_STATUS_ALIASES).
+    expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'pending' }))).toBe(true);
+    expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'running' }))).toBe(false);
+    expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'processing' }))).toBe(false);
+    expect(isQueuedRun(item({ item_kind: 'watch', status: 'queued' }))).toBe(false);
+    expect(isQueuedRun(item({ status: 'queued' }))).toBe(false);
   });
 });
 

@@ -51,7 +51,15 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
 
     for example in _schema("agent-supply.schema.json")["examples"]:
         agent = ModelHubAgentSupplyConfig.from_payload(example)
-        serialized = {**agent.to_payload(), "current": example.get("current")}
+        # `current`, `builtin_models` and `standard_vendors` are read-only
+        # endpoint projections (v1.2), not persisted config — reconstruct them
+        # the way `_agent_payload` merges them onto to_payload().
+        serialized = {
+            **agent.to_payload(),
+            "current": example.get("current"),
+            "builtin_models": example.get("builtin_models"),
+            "standard_vendors": example.get("standard_vendors"),
+        }
         assert _canonical(serialized) == _canonical(example)
         _assert_valid("agent-supply.schema.json", serialized)
 

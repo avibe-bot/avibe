@@ -16,8 +16,10 @@ import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
+import { MappingDrawer } from './menus/MappingDrawer';
+import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
-import type { AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
+import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
 const StatusPill: React.FC<{ healthy: boolean; hubCount: number }> = ({ healthy, hubCount }) => {
   const { t } = useTranslation();
@@ -48,6 +50,9 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [oauthVendor, setOauthVendor] = React.useState<string | null>(null);
+  // Which backend's 模型菜单 drawer is open. Tracked by backend id (not the agent
+  // object) so a background refresh keeps feeding the drawer the freshest agent.
+  const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
 
   // Mirror the latest ordered sources for reorder-commit (drag end reads the
   // freshest order without threading it through the framer callback).
@@ -140,6 +145,9 @@ export const SettingsModelsPage: React.FC = () => {
     }
   };
 
+  // Resolve the open drawer's agent from live state so edits see fresh data.
+  const menuAgent = agents.find((a) => a.backend === menuBackend) ?? null;
+
   const hubCount = agents.filter((a) => a.mode === 'hub').length;
   // Only a fully-ok runtime + no errored source is "一切正常"; degraded / down /
   // not_installed / unknown all warrant the warning pill.
@@ -169,7 +177,13 @@ export const SettingsModelsPage: React.FC = () => {
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
           />
-          <AgentCard agents={agents} sources={sources} onConnectHub={connectHub} connectingBackend={connecting} />
+          <AgentCard
+            agents={agents}
+            sources={sources}
+            onConnectHub={connectHub}
+            onOpenMenu={(agent) => setMenuBackend(agent.backend)}
+            connectingBackend={connecting}
+          />
           <RecentSwitchesCard events={events} />
           <AdvancedRow />
         </div>
@@ -182,6 +196,26 @@ export const SettingsModelsPage: React.FC = () => {
         onClose={() => setOauthVendor(null)}
         onConnected={() => void refreshSourcesAgents()}
       />
+
+      {menuAgent && menuAgent.menu_kind === 'open' ? (
+        <OpenCodeMenuDrawer
+          open
+          agent={menuAgent}
+          sources={sources}
+          onClose={() => setMenuBackend(null)}
+          onSaved={() => void refreshSourcesAgents()}
+          onRefresh={() => void refreshSourcesAgents()}
+        />
+      ) : menuAgent && (menuAgent.backend === 'claude' || menuAgent.backend === 'codex') ? (
+        <MappingDrawer
+          open
+          backend={menuAgent.backend}
+          agent={menuAgent}
+          sources={sources}
+          onClose={() => setMenuBackend(null)}
+          onSaved={() => void refreshSourcesAgents()}
+        />
+      ) : null}
     </SettingsPageShell>
   );
 };

@@ -3277,11 +3277,11 @@ def model_hub_migration_scan():
 
 
 @app.route("/api/models/migration/apply", methods=["POST"])
-def model_hub_migration_apply():
+async def model_hub_migration_apply():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        result = _model_hub_service().migration_apply(
+        result = await _model_hub_service().migration_apply(
             _model_hub_json_object("migration_item_conflict", status=409).get("item_ids")
         )
         return _model_hub_success(**result)
@@ -6415,6 +6415,7 @@ def _publish_session_update_activity(
             "event": "updated",
             "title": session.get("title"),
             "visibility": session.get("visibility"),
+            "pinned": bool(session.get("pinned")),
         },
     )
     if previous_session is None:
@@ -6475,6 +6476,7 @@ async def sessions_update(session_id: str):
             "model",
             "reasoning_effort",
             "visibility",
+            "pinned",
             "scope_id",
         )
         if key in payload
@@ -8997,6 +8999,24 @@ def _is_show_page_entry_asset(asset_path: str) -> bool:
     return relative in {"", "index.html"}
 
 
+def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIRequest) -> bool:
+    if starlette_request.method not in {"GET", "HEAD"}:
+        return False
+    relative = _decode_show_page_asset_path(asset_path)
+    if relative in {"", "index.html"}:
+        return True
+    segments = [segment for segment in relative.split("/") if segment]
+    if not segments or segments[0] in {"api", "__show"}:
+        return False
+    if "." not in segments[-1]:
+        return True
+
+    # The runtime gets first refusal for real files. After a 404, Accept is the
+    # remaining distinction between a dotted route parameter (document navigation)
+    # and a missing script/style/image asset.
+    return "text/html" in starlette_request.headers.get("accept", "").lower()
+
+
 def _decode_show_page_asset_path(asset_path: str) -> str:
     decoded = (asset_path or "").strip("/")
     for _ in range(3):
@@ -9144,6 +9164,21 @@ def _show_page_file_response(root: Path, asset_path: str):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+def _show_page_runtime_failure_response(
+    page_dir: Path,
+    session_id: str,
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+):
+    if not _is_show_page_spa_route_request(asset_path, starlette_request):
+        return None
+    if not _is_show_page_entry_asset(asset_path):
+        static_response = _show_page_file_response(page_dir, asset_path)
+        if static_response.status_code != 404:
+            return static_response
+    return _show_page_recovery_response(session_id)
 
 
 def _show_session_event_error_response(exc: Exception):
@@ -9813,12 +9848,17 @@ async def _show_page_runtime_response(
     from core.show_runtime import get_show_runtime_manager
 
     session_part = quote(session_id, safe="")
-    asset_part = quote(asset_path.lstrip("/"), safe="/@:-._~")
-    runtime_path = f"/sessions/{session_part}/app/"
-    if asset_part:
-        runtime_path = f"{runtime_path}{asset_part}"
-    if starlette_request.url.query:
-        runtime_path = f"{runtime_path}?{starlette_request.url.query}"
+
+    def runtime_app_path(relative_asset_path: str) -> str:
+        asset_part = quote(relative_asset_path.lstrip("/"), safe="/@:-._~")
+        path = f"/sessions/{session_part}/app/"
+        if asset_part:
+            path = f"{path}{asset_part}"
+        if starlette_request.url.query:
+            path = f"{path}?{starlette_request.url.query}"
+        return path
+
+    runtime_path = runtime_app_path(asset_path)
     forwarded_headers = {
         key: value
         for key, value in starlette_request.headers.items()
@@ -9828,14 +9868,32 @@ async def _show_page_runtime_response(
         forwarded_headers["x-vibe-show-base"] = f"{external_prefix.rstrip('/')}/"
     body = await starlette_request.body()
     request_started = time.monotonic()
-    proxied = await get_show_runtime_manager().request(
+    manager = get_show_runtime_manager()
+    proxied = await manager.request(
         starlette_request.method,
         runtime_path,
         headers=forwarded_headers,
         body=body or None,
     )
+    served_entry_fallback = False
+    if proxied.status_code == 404 and _is_show_page_spa_route_request(asset_path, starlette_request):
+        # Compatibility fallback for runtimes predating History-mode serving.
+        # The requested file/handler had first refusal above; only a route-shaped
+        # miss retries the entry document under the same private/public base.
+        runtime_path = runtime_app_path("")
+        proxied = await manager.request(
+            starlette_request.method,
+            runtime_path,
+            headers=forwarded_headers,
+            body=body or None,
+        )
+        served_entry_fallback = True
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
-    if proxy_duration_ms >= SHOW_RUNTIME_SLOW_REQUEST_MS or _is_show_page_entry_asset(asset_path):
+    if (
+        proxy_duration_ms >= SHOW_RUNTIME_SLOW_REQUEST_MS
+        or _is_show_page_entry_asset(asset_path)
+        or served_entry_fallback
+    ):
         logger.info(
             "Show Runtime proxy %s %s session=%s asset=%s status=%s duration_ms=%s",
             starlette_request.method,
@@ -9888,7 +9946,7 @@ async def _show_page_runtime_response(
         if external_prefix:
             response_headers["Referrer-Policy"] = "same-origin"
         _mark_show_runtime_document_no_store(response_headers)
-    elif _is_show_page_entry_asset(asset_path) and 200 <= proxied.status_code < 300:
+    elif (_is_show_page_entry_asset(asset_path) or served_entry_fallback) and 200 <= proxied.status_code < 300:
         # The entry document is per-session/per-share dynamic (it embeds the import map
         # and base path); never let it be cached. App modules and per-session deps keep
         # the runtime's own cache headers (Vite marks optimized deps immutable).
@@ -10372,9 +10430,14 @@ async def serve_private_show_page(session_id, asset_path):
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
-                if _is_show_page_entry_asset(asset_path):
-                    response = _show_page_recovery_response(page.session_id)
-                    logger.debug("Show runtime unavailable; serving recovery Show Page", exc_info=True)
+                response = _show_page_runtime_failure_response(
+                    page_dir,
+                    page.session_id,
+                    asset_path,
+                    request._request,
+                )
+                if response is not None:
+                    logger.debug("Show runtime unavailable; serving fallback Show Page response", exc_info=True)
                 else:
                     logger.debug("Show runtime unavailable; serving static Show Page", exc_info=True)
         if response is None:
@@ -10505,9 +10568,14 @@ async def serve_public_show_page(share_id, asset_path):
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_unavailable_response()
-                if _is_show_page_entry_asset(asset_path):
-                    response = _show_page_recovery_response(page.session_id)
-                    logger.debug("Show runtime unavailable; serving recovery public Show Page", exc_info=True)
+                response = _show_page_runtime_failure_response(
+                    page_dir,
+                    page.session_id,
+                    asset_path,
+                    request._request,
+                )
+                if response is not None:
+                    logger.debug("Show runtime unavailable; serving fallback public Show Page response", exc_info=True)
                 else:
                     logger.debug("Show runtime unavailable; serving static public Show Page", exc_info=True)
         if response is None:

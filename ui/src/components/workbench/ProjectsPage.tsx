@@ -13,6 +13,8 @@ import {
   GitFork,
   Loader2,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RotateCw,
   Settings2,
@@ -22,6 +24,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { SessionPinAction } from './SessionPinAction';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -246,15 +249,17 @@ const MobileSessionRow: React.FC<{
   onOpen: () => void;
 }> = ({ projectId, session, unread, onOpen }) => {
   const { t } = useTranslation();
-  const { renameSession, archiveSession, forkSession } = useWorkbenchProjectsTree();
+  const { renameSession, setSessionPinned, archiveSession, forkSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const handledRef = useRef(false);
   const forkingRef = useRef(false);
+  const pinningRef = useRef(false);
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -278,6 +283,20 @@ const MobileSessionRow: React.FC<{
     setRenaming(false);
   };
 
+  const togglePinned = async () => {
+    if (pinningRef.current) return;
+    pinningRef.current = true;
+    setPinning(true);
+    try {
+      await setSessionPinned(projectId, session.id, !session.pinned);
+    } catch {
+      // apiFetch already surfaced the error toast.
+    } finally {
+      pinningRef.current = false;
+      setPinning(false);
+    }
+  };
+
   if (renaming) {
     return (
       <div className="flex items-center gap-2 px-3 py-2">
@@ -299,7 +318,7 @@ const MobileSessionRow: React.FC<{
   }
 
   return (
-    <div className="flex items-center">
+    <div className="group/sess flex items-center">
       <button
         type="button"
         onClick={onOpen}
@@ -319,6 +338,13 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
+      <SessionPinAction
+        pinned={session.pinned}
+        pending={pinning}
+        pinLabel={t('workbench.sessionPin')}
+        unpinLabel={t('workbench.sessionUnpin')}
+        onToggle={() => void togglePinned()}
+      />
       <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <Button
@@ -332,6 +358,15 @@ const MobileSessionRow: React.FC<{
           </Button>
         </PopoverTrigger>
         <PopoverContent align="end" className="w-[176px] p-1">
+          <MenuItem
+            icon={session.pinned ? PinOff : Pin}
+            onClick={() => {
+              setMenuOpen(false);
+              void togglePinned();
+            }}
+          >
+            {t(session.pinned ? 'workbench.sessionUnpin' : 'workbench.sessionPin')}
+          </MenuItem>
           <MenuItem
             icon={Pencil}
             onClick={() => {

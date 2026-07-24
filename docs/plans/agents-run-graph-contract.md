@@ -49,6 +49,14 @@ Amendments (orchestrator-approved):
   trigger messages click through to the corresponding Harness filter view
   (reuse the backgroundActivity deep-link helpers). Read-side message
   enrichment only if the payload lacks source ids.
+- **A10 (2026-07-23, owner feedback — graph blew up with every Harness
+  definition)**: `trigger_nodes` are **edge-derived**: emit a chip ONLY for
+  definitions that have ≥1 `trigger` edge in the returned payload (i.e. they
+  actually triggered a session within the window/filters). Enabled-but-idle
+  and disabled definitions with no in-window runs never appear. A disabled
+  definition that DID fire in-window keeps its chip (it explains lineage) —
+  client renders it dimmed with a disabled marker using the existing
+  `enabled` field.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —

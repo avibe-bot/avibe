@@ -12,6 +12,7 @@ from core.backend_failure import emit_backend_failure
 from core.message_context import build_context_session_key
 from core.message_output import terminal_output_for, terminal_turn_output
 from modules.agents.base import AgentRequest
+from modules.agents.model_hub import bind_persisted_launch
 from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
@@ -19,6 +20,15 @@ from .message_processor import is_empty_terminal_opencode_message
 from .server import OpenCodeServerManager
 
 logger = logging.getLogger(__name__)
+
+
+def _opencode_error_text(error: object) -> str:
+    if not isinstance(error, dict):
+        return str(error)
+    error_name = error.get("name", "UnknownError")
+    error_data = error.get("data", {})
+    error_message = error_data.get("message", "") if isinstance(error_data, dict) else str(error_data)
+    return f"{error_name} - {error_message[:500]}".strip(" -")
 
 
 def restored_platform_from_poll_info(poll_info) -> str:
@@ -79,6 +89,11 @@ class OpenCodePollLoop:
         config = getattr(controller, "config", None)
         lang = getattr(config, "language", "en")
         return str(i18n_t(key, lang, **kwargs))
+
+    async def _record_model_hub_failure(self, context: MessageContext, diagnostic: str) -> None:
+        record_failure = getattr(self._agent, "record_model_hub_native_failure", None)
+        if callable(record_failure):
+            await record_failure(context, diagnostic)
 
     def _build_restored_handle(self, poll_info):
         snapshot = poll_info.processing_indicator or {
@@ -296,15 +311,12 @@ class OpenCodePollLoop:
                     msg_error = last_info.get("error")
                     if msg_error and last_id != last_error_message_id:
                         last_error_message_id = last_id
-                        error_name = msg_error.get("name", "UnknownError")
-                        error_data = msg_error.get("data", {})
-                        error_msg = error_data.get("message", "") if isinstance(error_data, dict) else str(error_data)
+                        diagnostic = _opencode_error_text(msg_error)
 
                         logger.warning(
-                            "OpenCode message error detected for %s: %s - %s (retry %d/%d)",
+                            "OpenCode message error detected for %s: %s (retry %d/%d)",
                             session_id,
-                            error_name,
-                            error_msg[:200],
+                            diagnostic[:200],
                             error_retry_count,
                             error_retry_limit,
                         )
@@ -337,7 +349,7 @@ class OpenCodePollLoop:
                                     retry_err,
                                 )
 
-                        diagnostic = f"{error_name} - {error_msg[:500]}".strip(" -")
+                        await self._record_model_hub_failure(request.context, diagnostic)
                         message = f"OpenCode error: {diagnostic}"
                         await emit_backend_failure(
                             self._agent.controller,
@@ -394,6 +406,10 @@ class OpenCodePollLoop:
         session_id = poll_info.opencode_session_id
         restored_request = self._build_restored_ack_request(poll_info)
         context = restored_request.context
+        processing_snapshot = (
+            poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
+        )
+        bind_persisted_launch(context, processing_snapshot.get("model_hub_launch"))
 
         await self._agent.controller.emit_agent_message(
             context,
@@ -523,12 +539,13 @@ class OpenCodePollLoop:
                         if time_info.get("completed"):
                             msg_error = last_info.get("error")
                             if msg_error:
-                                error_text = str(msg_error)
+                                error_text = _opencode_error_text(msg_error)
                                 if last_info.get("id") != last_error_message_id:
                                     error_retry_count = 0
                                     last_error_message_id = last_info.get("id")
                                 error_retry_count += 1
                                 if error_retry_count > error_retry_limit:
+                                    await self._record_model_hub_failure(context, error_text)
                                     message = f"OpenCode error: {error_text}"
                                     await emit_backend_failure(
                                         self._agent.controller,
@@ -601,6 +618,7 @@ class OpenCodePollLoop:
             error_text = f"{error_name}: {error_details}" if error_details else error_name
 
             logger.error(f"Restored OpenCode poll failed: {error_text}", exc_info=True)
+            await self._record_model_hub_failure(context, error_text)
             try:
                 await server.abort_session(session_id, poll_info.working_path)
             except Exception as abort_err:

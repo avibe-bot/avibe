@@ -48,6 +48,7 @@ class _FakeShowRuntimeManager:
         extra_headers: dict[str, str] | None = None,
         headers_by_path: dict[str, dict[str, str]] | None = None,
         bodies_by_path: dict[str, bytes] | None = None,
+        status_by_path: dict[str, int] | None = None,
     ):
         self.body = body
         self.fail = fail
@@ -55,6 +56,7 @@ class _FakeShowRuntimeManager:
         self.extra_headers = extra_headers or {}
         self.headers_by_path = headers_by_path or {}
         self.bodies_by_path = bodies_by_path or {}
+        self.status_by_path = status_by_path or {}
         self.calls = []
         self.websocket_paths = []
         self.stopped = False
@@ -70,7 +72,11 @@ class _FakeShowRuntimeManager:
             "set-cookie": "__Host-vibe_remote_session=attacker",
             "x-runtime-private-header": "secret",
         } | self.extra_headers | self.headers_by_path.get(path, {})
-        return httpx.Response(self.status_code, content=self.bodies_by_path.get(path, self.body), headers=headers)
+        return httpx.Response(
+            self.status_by_path.get(path, self.status_code),
+            content=self.bodies_by_path.get(path, self.body),
+            headers=headers,
+        )
 
     async def websocket_url(self, path):
         self.websocket_paths.append(path)
@@ -375,6 +381,170 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert "authorization" not in manager.calls[0][2]
     assert "cookie" not in manager.calls[0][2]
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+@pytest.mark.parametrize("route_path", ["reports/daily", "users/alice@example.com"])
+def test_show_page_history_route_retries_entry_after_runtime_404(monkeypatch, tmp_path, surface, route_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    if surface == "private":
+        _create_show_page("ses123", "private")
+        public_path = f"/show/ses123/{route_path}"
+        expected_base = "/show/ses123/"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+    else:
+        share_id = _create_show_page("ses123", "public")
+        public_path = f"/p/{share_id}/{route_path}"
+        expected_base = f"/p/{share_id}/"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+
+    route_runtime_path = f"/sessions/ses123/app/{route_path}?vibe-embed=1"
+    entry_runtime_path = "/sessions/ses123/app/?vibe-embed=1"
+    entry = (
+        '<!doctype html><html><head><base href="/show/ses123/"></head><body>'
+        '<script type="module" src="/show/ses123/src/main.tsx"></script></body></html>'
+    ).encode()
+    manager = _FakeShowRuntimeManager(
+        status_code=404,
+        status_by_path={entry_runtime_path: 200},
+        bodies_by_path={entry_runtime_path: entry},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"{public_path}?vibe-embed=1",
+            headers={"Accept": "text/html"},
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert f'<base href="{expected_base}">' in body
+    assert f'"basePath":"{expected_base}"' in body
+    assert response.headers["cache-control"] == "no-store"
+    assert [call[1] for call in manager.calls] == [route_runtime_path, entry_runtime_path]
+    if surface == "public":
+        assert all(call[2]["x-vibe-show-base"] == expected_base for call in manager.calls)
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_page_history_route_uses_recovery_when_runtime_unavailable(monkeypatch, tmp_path, surface):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    if surface == "private":
+        _create_show_page("ses123", "private")
+        public_path = "/show/ses123/reports/daily"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+    else:
+        share_id = _create_show_page("ses123", "public")
+        public_path = f"/p/{share_id}/reports/daily"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+
+    manager = _FakeShowRuntimeManager(fail=True)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            public_path,
+            headers={"Accept": "text/html"},
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert b"Loading Show Page" in response.content
+    assert b"Ready to visualize" in response.content
+    assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/reports/daily"]
+
+
+@pytest.mark.parametrize(
+    ("asset_path", "accept"),
+    [
+        ("assets/missing.js", "application/javascript"),
+        ("api/missing", "text/html"),
+        ("__show/unknown", "text/html"),
+        ("__show/annotation.js", "text/html"),
+    ],
+)
+def test_private_show_page_does_not_spa_fallback_asset_or_reserved_misses(
+    monkeypatch, tmp_path, asset_path, accept
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        status_code=404,
+        status_by_path={"/sessions/ses123/app/": 200},
+        bodies_by_path={"/sessions/ses123/app/": b"<html>entry</html>"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/{asset_path}",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": accept},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert [call[1] for call in manager.calls] == [f"/sessions/ses123/app/{asset_path}"]
+
+
+def test_private_show_page_real_extensionless_asset_precedes_spa_fallback(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    asset_runtime_path = "/sessions/ses123/app/robots"
+    manager = _FakeShowRuntimeManager(
+        status_code=404,
+        status_by_path={asset_runtime_path: 200, "/sessions/ses123/app/": 200},
+        bodies_by_path={asset_runtime_path: b"real extensionless asset"},
+        headers_by_path={asset_runtime_path: {"content-type": "text/plain"}},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/robots",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/html"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"real extensionless asset"
+    assert [call[1] for call in manager.calls] == [asset_runtime_path]
+
+
+def test_private_show_page_real_extensionless_asset_survives_runtime_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    (paths.get_show_page_dir("ses123") / "robots").write_text("real extensionless asset", encoding="utf-8")
+    manager = _FakeShowRuntimeManager(fail=True)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/robots",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/html"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"real extensionless asset"
+    assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/robots"]
 
 
 def _icon_token(session_id: str) -> str:

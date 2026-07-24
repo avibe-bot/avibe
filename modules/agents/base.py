@@ -163,6 +163,19 @@ class BaseAgent(ABC):
         if callable(mark_started):
             mark_started(context)
 
+    async def record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
+        """Persist source cooldown state when a terminal turn proves source loss."""
+
+        router = getattr(self.controller, "model_hub_runtime", None)
+        recorder = getattr(router, "record_native_failure", None)
+        if not callable(recorder):
+            return False
+        try:
+            return bool(await recorder(context, diagnostic))
+        except Exception:
+            logger.warning("Failed to record Model Hub native cooldown", exc_info=True)
+            return False
+
     def ensure_agent_session_id(
         self,
         request: AgentRequest,

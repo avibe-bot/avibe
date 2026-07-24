@@ -20,6 +20,8 @@ import { Label } from '../../ui/label';
 import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
+import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
+import { MODEL_HUB_NAV_ENABLED } from '../models/featureFlags';
 import { SegmentedRadio } from '../shared/SegmentedRadio';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOAuthFlowLock } from '../shared/useOAuthFlowLock';
@@ -218,6 +220,9 @@ export const ClaudeProviderConfig: React.FC<{
         runtime={runtime}
         hideEnableToggle={hideEnableToggle}
       />
+
+      {/* Model Hub 供给方式 card (L5); flag-gated until the hub feature is advertised. */}
+      {MODEL_HUB_NAV_ENABLED && <BackendSupplyModeCard backend="claude" />}
 
       {authLoading ? (
         <div className="text-sm text-muted">{t('common.loading')}</div>

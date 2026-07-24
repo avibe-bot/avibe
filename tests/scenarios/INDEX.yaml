@@ -13,7 +13,8 @@ capabilities:
     status: active
     catalog: tests/scenarios/model_hub/catalog.yaml
     observations: tests/scenarios/model_hub/observations.yaml
-    scenario_tests: []
+    scenario_tests:
+      - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_config.py

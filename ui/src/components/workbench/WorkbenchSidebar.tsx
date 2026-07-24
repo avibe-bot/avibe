@@ -21,6 +21,8 @@ import {
   KeyRound,
   Loader2,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   Search,
   Settings2,
@@ -37,6 +39,7 @@ import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesAct
 import { useApi } from '../../context/ApiContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { SessionPinAction } from './SessionPinAction';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
@@ -208,9 +211,10 @@ const SessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
+  onSetPinned: (sessionId: string, pinned: boolean) => Promise<void>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, onForkSession, onRenameSession, onArchiveSession }) => {
+}> = ({ session, unread, onForkSession, onSetPinned, onRenameSession, onArchiveSession }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const api = useApi();
@@ -225,6 +229,8 @@ const SessionRow: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [forking, setForking] = useState(false);
+  const [pinning, setPinning] = useState(false);
+  const pinningRef = useRef(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -258,7 +264,7 @@ const SessionRow: React.FC<{
 
   if (renaming) {
     return (
-      <div className="flex items-center gap-2 py-1.5 pl-[30px] pr-2.5">
+      <div className="flex items-center gap-2 py-1.5 pl-[26px] pr-2.5">
         <span
           className={clsx(
             'size-[5px] shrink-0 rounded-full',
@@ -283,47 +289,89 @@ const SessionRow: React.FC<{
 
   const displayName = session.title?.trim() || t('workbench.untitledSession');
   const canFork = !!session.native_session_id && !forking;
+  const togglePinned = async () => {
+    if (pinningRef.current) return;
+    pinningRef.current = true;
+    setPinning(true);
+    try {
+      await onSetPinned(session.id, !session.pinned);
+    } catch {
+      // apiFetch already surfaced the error toast.
+    } finally {
+      pinningRef.current = false;
+      setPinning(false);
+    }
+  };
   return (
     <>
     <Popover open={menuOpen} onOpenChange={setMenuOpen}>
       <PopoverAnchor asChild>
-        <button
-          type="button"
-          onClick={() => navigate(`/chat/${encodeURIComponent(session.id)}`)}
+        <div
           onContextMenu={(e) => {
             e.preventDefault();
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess flex items-center gap-2 rounded-md py-1.5 pl-[30px] pr-2.5 text-left transition',
+            'group/sess flex items-center gap-2 rounded-md py-1.5 pl-[26px] pr-2.5 text-left transition',
             active
-              ? 'border-l-2 border-mint bg-mint-soft pl-[28px] font-semibold text-foreground'
+              ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',
           )}
         >
-          <span
-            title={t(`workbench.sessionStatus.${session.agent_status}`)}
-            className={clsx(
-              'size-[5px] shrink-0 rounded-full',
-              STATUS_DOT_CLASS[session.agent_status] ?? STATUS_DOT_CLASS.idle,
-            )}
-          />
-          <span
-            className={clsx(
-              'flex-1 truncate text-[12px]',
-              active ? 'font-semibold text-foreground' : 'font-medium text-foreground',
-            )}
+          <button
+            type="button"
+            onClick={() => navigate(`/chat/${encodeURIComponent(session.id)}`)}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none"
           >
-            {displayName}
-          </span>
-          {unread > 0 && (
-            <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
-              {unread > 99 ? '99+' : unread}
+            <span
+              title={t(`workbench.sessionStatus.${session.agent_status}`)}
+              className={clsx(
+                'size-[5px] shrink-0 rounded-full',
+                STATUS_DOT_CLASS[session.agent_status] ?? STATUS_DOT_CLASS.idle,
+              )}
+            />
+            <span
+              className={clsx(
+                'flex-1 truncate text-[12px]',
+                active ? 'font-semibold text-foreground' : 'font-medium text-foreground',
+              )}
+            >
+              {displayName}
             </span>
-          )}
-        </button>
+            {unread > 0 && (
+              <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            )}
+          </button>
+          <SessionPinAction
+            pinned={session.pinned}
+            pending={pinning}
+            pinLabel={t('workbench.sessionPin')}
+            unpinLabel={t('workbench.sessionUnpin')}
+            onToggle={() => void togglePinned()}
+          />
+        </div>
       </PopoverAnchor>
       <PopoverContent align="start" className="w-[176px] p-1">
+        <button
+          type="button"
+          disabled={pinning}
+          onClick={() => {
+            setMenuOpen(false);
+            void togglePinned();
+          }}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:cursor-not-allowed disabled:text-muted"
+        >
+          {pinning ? (
+            <Loader2 className="size-3 animate-spin text-muted" />
+          ) : session.pinned ? (
+            <PinOff className="size-3 text-muted" />
+          ) : (
+            <Pin className="size-3 text-muted" />
+          )}
+          {t(session.pinned ? 'workbench.sessionUnpin' : 'workbench.sessionPin')}
+        </button>
         {canReference && (
           <button
             type="button"
@@ -448,6 +496,7 @@ const ProjectRow: React.FC<{
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
+  onSetPinned: (sessionId: string, pinned: boolean) => Promise<void>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
 }> = ({
@@ -465,6 +514,7 @@ const ProjectRow: React.FC<{
   onRename,
   onArchive,
   onForkSession,
+  onSetPinned,
   onRenameSession,
   onArchiveSession,
 }) => {
@@ -661,6 +711,7 @@ const ProjectRow: React.FC<{
                 session={session}
                 unread={unreadBySession[session.id] || 0}
                 onForkSession={onForkSession}
+                onSetPinned={onSetPinned}
                 onRenameSession={onRenameSession}
                 onArchiveSession={onArchiveSession}
               />
@@ -714,6 +765,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     renameProject,
     archiveProject,
     renameSession,
+    setSessionPinned,
     archiveSession,
     upsertProjectToTop,
   } = useWorkbenchProjectsTree();
@@ -955,6 +1007,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
                   onForkSession={(sessionId) => forkSession(project.id, sessionId)}
+                  onSetPinned={(sessionId, pinned) => setSessionPinned(project.id, sessionId, pinned)}
                   onRenameSession={(sessionId, title) => renameSession(project.id, sessionId, title)}
                   onArchiveSession={(sessionId) => archiveSession(project.id, sessionId)}
                 />
