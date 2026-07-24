@@ -164,7 +164,15 @@ def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, t
     ).get_json()["flow"]
     harness.auth_status["claude"] = {"active_auth_mode": "none"}
     harness.agent_auth.complete(signed_out["flow_id"])
-    client.get(f"/api/models/oauth/status/{signed_out['flow_id']}", base_url=BASE_URL)
+    signed_out_response = client.get(
+        f"/api/models/oauth/status/{signed_out['flow_id']}",
+        base_url=BASE_URL,
+    )
+    assert signed_out_response.get_json()["flow"]["state"] == "failed"
+    assert (
+        signed_out_response.get_json()["flow"]["error_key"]
+        == "settings.models.source.oauthSignedOut"
+    )
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
     assert source["state"] == {
         "status": "error",

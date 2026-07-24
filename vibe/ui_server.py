@@ -3023,11 +3023,11 @@ _MODEL_HUB_SERVICE = None
 
 
 def _model_hub_service():
-    from core.handlers.model_hub import create_default_service
+    from vibe.model_hub_client import ModelHubRemoteService
 
     global _MODEL_HUB_SERVICE
     if _MODEL_HUB_SERVICE is None:
-        _MODEL_HUB_SERVICE = create_default_service()
+        _MODEL_HUB_SERVICE = ModelHubRemoteService()
     return _MODEL_HUB_SERVICE
 
 
@@ -3053,7 +3053,12 @@ def _model_hub_json_object(error: str = "discovery_failed", *, status: int = 400
 
 @app.route("/api/models/sources", methods=["GET"])
 def model_hub_sources_get():
-    return _model_hub_success(sources=_model_hub_service().list_sources())
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(sources=_model_hub_service().list_sources())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
 
 
 @app.route("/api/models/sources", methods=["POST"])
@@ -3103,8 +3108,13 @@ async def model_hub_sources_test(source_id):
 
 @app.route("/api/models/priority", methods=["GET"])
 def model_hub_priority_get():
-    priority = _model_hub_service().priority()
-    return _model_hub_success(order=priority["order"])
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        priority = _model_hub_service().priority()
+        return _model_hub_success(order=priority["order"])
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
 
 
 @app.route("/api/models/priority", methods=["PUT"])
@@ -3122,7 +3132,12 @@ async def model_hub_priority_put():
 
 @app.route("/api/models/agents", methods=["GET"])
 def model_hub_agents_get():
-    return _model_hub_success(agents=_model_hub_service().list_agents())
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(agents=_model_hub_service().list_agents())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
 
 
 @app.route("/api/models/agents/<backend>/mode", methods=["PATCH"])
@@ -3193,12 +3208,17 @@ async def model_hub_custom_models_delete():
 
 @app.route("/api/models/events", methods=["GET"])
 def model_hub_events_get():
+    from core.handlers.model_hub import ModelHubError
+
     try:
         limit = int(request.args.get("limit") or 20)
     except (TypeError, ValueError):
         limit = 20
-    events = _model_hub_service().list_events(limit=limit, before=request.args.get("before") or None)
-    return _model_hub_success(events=events)
+    try:
+        events = _model_hub_service().list_events(limit=limit, before=request.args.get("before") or None)
+        return _model_hub_success(events=events)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
 
 
 @app.route("/api/models/oauth/start", methods=["POST"])
@@ -3252,7 +3272,12 @@ async def model_hub_oauth_cancel():
 
 @app.route("/api/models/migration/scan", methods=["POST"])
 def model_hub_migration_scan():
-    return _model_hub_success(**_model_hub_service().migration_scan())
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(**_model_hub_service().migration_scan())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
 
 
 @app.route("/api/models/migration/apply", methods=["POST"])

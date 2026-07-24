@@ -8,11 +8,36 @@ capability:
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
 status_legend:
   covered: closed-loop scenario coverage exists
   partial: unit or contract coverage exists but the cross-lane loop is incomplete
   gap: owned by a later lane or integration pass
 scenarios:
+  - id: MH-RES-LIVE-001
+    name: Live turn retries an eligible backup before streaming starts
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_001_pre_stream_failure_falls_back_within_turn
+  - id: MH-RES-LIVE-002
+    name: Live turn refreshes one 401 exactly once
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_002_401_refreshes_once_in_live_turn
+  - id: MH-RES-LIVE-003
+    name: Live turn never retries after response streaming starts
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_003_started_stream_never_retries
+  - id: MH-EVT-002
+    name: Causal switch events survive service restart
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_evt_002_switch_events_survive_router_and_service_restart
   - id: MH-RES-001
     name: Quota-exhausted failover and recovery switchback
     status: partial
