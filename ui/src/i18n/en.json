@@ -624,6 +624,7 @@
         "customEndpoint": "Custom endpoint",
         "retryIn": "retry in {{minutes}} min",
         "reorder": "Reorder",
+        "oauthSignedOut": "CLI subscription is signed out",
         "cooldown": {
           "timeout": "Repeated timeouts"
         }

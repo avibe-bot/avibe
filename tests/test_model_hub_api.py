@@ -22,7 +22,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
-from core.handlers.model_hub.oauth import OAuthFlowRegistry
+from core.handlers.model_hub.oauth import NativeOAuthSourceStatus, OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
 from vibe.model_hub_client import ModelHubRemoteService, _decode
@@ -82,6 +82,8 @@ class FakeAdapter:
         self.flows = {}
         self.fail_sync = False
         self.fail_cancel = False
+        self.native_signed_in = True
+        self.native_account_label = None
 
     async def ensure_installed(self):
         return await self.status()
@@ -168,6 +170,14 @@ class FakeAdapter:
         if self.fail_cancel:
             raise RuntimeError("temporary engine failure")
 
+    def completed_source_status(self, flow_id):
+        if flow_id not in self.flows:
+            raise KeyError(flow_id)
+        return NativeOAuthSourceStatus(
+            signed_in=self.native_signed_in,
+            account_label=self.native_account_label,
+        )
+
 
 def _service(tmp_path):
     store = MemoryStore()
@@ -198,10 +208,24 @@ def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_adapter, "_adapter", None)
     monkeypatch.setattr(runtime_supervisor, "_supervisor", None)
 
-    service = create_default_service()
+    service = create_default_service(native_oauth_adapter=FakeAdapter())
 
     assert isinstance(service.adapter, CLIProxyEngineAdapter)
     assert service.adapter.supervisor.state_store.root.is_relative_to(tmp_path)
+
+
+def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
+    from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+    from vibe import api
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    agent_auth_service = object()
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: agent_auth_service)
+
+    service = create_default_service(adapter=FakeAdapter())
+
+    assert isinstance(service.native_oauth_adapter, AgentAuthNativeOAuthAdapter)
+    assert service.native_oauth_adapter._agent_auth_service is agent_auth_service
 
 
 def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
@@ -594,7 +618,9 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     consented_source = response.get_json()["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
-    assert service.oauth_flows.channel(hub_flow["flow_id"]) is None
+    completed_binding = service.oauth_flows.binding(hub_flow["flow_id"])
+    assert completed_binding is not None
+    assert completed_binding.completed is True
 
     scan = client.post("/api/models/migration/scan", headers=headers, base_url=base_url).get_json()
     _assert_valid("migration-scan.schema.json", {"items": scan["items"]})

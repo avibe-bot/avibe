@@ -263,11 +263,16 @@ class ModelHubRuntimeRouter:
         self.service = service
         self.turn_gateway = turn_gateway
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
+        self._uses_default_native_cli_ready = native_cli_ready is None
         self.native_cli_ready = native_cli_ready or self._default_native_cli_ready
         self._last_launch: dict[tuple[BackendName, str], ModelHubLaunch] = {}
 
     @staticmethod
-    def _default_native_cli_ready(backend: BackendName) -> bool:
+    def _default_native_cli_ready(
+        backend: BackendName,
+        *,
+        verified_oauth: bool = False,
+    ) -> bool:
         if backend == "claude":
             from vibe.claude_config import read_claude_settings_env
 
@@ -283,7 +288,11 @@ class ModelHubRuntimeRouter:
         if any(os.environ.get(key) for key in conflicts):
             return False
         state = read_codex_auth_state()
-        if state.get("has_api_key") or not state.get("has_chatgpt_tokens") or state.get("base_url"):
+        if (
+            state.get("has_api_key")
+            or (not state.get("has_chatgpt_tokens") and not verified_oauth)
+            or state.get("base_url")
+        ):
             return False
         config_path, _ = get_codex_config_paths()
         try:
@@ -299,6 +308,18 @@ class ModelHubRuntimeRouter:
             return False
         provider = config.get("model_provider") if isinstance(config, dict) else None
         return provider is None or provider == "openai"
+
+    def _native_source_ready(
+        self,
+        backend: BackendName,
+        source: ModelHubSourceConfig,
+    ) -> bool:
+        if not self._uses_default_native_cli_ready:
+            return self.native_cli_ready(backend)
+        return self._default_native_cli_ready(
+            backend,
+            verified_oauth=backend == "codex" and source.state.status == "active",
+        )
 
     @staticmethod
     def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
@@ -519,7 +540,8 @@ class ModelHubRuntimeRouter:
             (
                 candidate
                 for candidate in candidates
-                if candidate.supply_channel != "native_cli" or self.native_cli_ready(backend)
+                if candidate.supply_channel != "native_cli"
+                or self._native_source_ready(backend, candidate)
             ),
             None,
         )
