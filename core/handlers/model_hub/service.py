@@ -1185,6 +1185,7 @@ class ModelHubService:
         model_id: str,
         *,
         provider: Optional[str] = None,
+        supply_channel: Literal["hub"] | None = None,
     ) -> list[ModelHubSourceConfig]:
         async with self._mutation_lock:
             config = self.store.load()
@@ -1195,6 +1196,7 @@ class ModelHubService:
                 source = by_id[source_id]
                 matches_request = (
                     self._eligible_for_agent(source, backend)
+                    and (supply_channel is None or source.supply_channel == supply_channel)
                     and (provider is None or opencode_provider_id(source.vendor) == provider)
                     and any(model.id == model_id for model in source.models)
                 )
@@ -1304,6 +1306,7 @@ class ModelHubService:
         model_id: str,
         request: Mapping[str, Any],
         stream: bool = False,
+        supply_channel: Literal["hub"] | None = None,
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
@@ -1339,7 +1342,12 @@ class ModelHubService:
                 from_label=model_id,
                 now=self.now(),
             )
-        candidates = await self._resolution_candidates(backend, target_model, provider=provider)
+        candidates = await self._resolution_candidates(
+            backend,
+            target_model,
+            provider=provider,
+            supply_channel=supply_channel,
+        )
         if not candidates:
             raise ModelHubError("mapping_target_unavailable", status=409)
 
@@ -1414,6 +1422,15 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(source.id, target_model, handle, outcome)
+            if decision.action == "surface":
+                raise ModelHubError(
+                    decision.error_code or outcome.error_code or "engine_down",
+                    status=(
+                        outcome.http_status
+                        if outcome.http_status is not None and 400 <= outcome.http_status <= 599
+                        else 502
+                    ),
+                )
             if decision.action == "fallback":
                 await self._cooldown(source, decision, agent=event_agent, model_id=target_model)
                 failed_source = source

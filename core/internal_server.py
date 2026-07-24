@@ -424,6 +424,30 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.exception("internal Agent backend reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/model-hub")
+    async def _model_hub(request: Request) -> Any:
+        """Dispatch UI operations to the controller-owned Model Hub aggregate."""
+
+        from core.handlers.model_hub import ModelHubError
+        from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+        body = await _safe_json(request)
+        operation = body.get("operation") if isinstance(body, dict) else None
+        payload = body.get("payload") if isinstance(body, dict) else None
+        if not isinstance(operation, str) or not isinstance(payload, dict):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "discovery_failed"})
+        service = getattr(controller, "model_hub_service", None)
+        if service is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "engine_down"})
+        try:
+            result = await dispatch_model_hub_rpc(service, operation, payload)
+        except ModelHubError as exc:
+            response = {"ok": False, "error": exc.code}
+            if exc.detail:
+                response["detail"] = exc.detail
+            return JSONResponse(status_code=exc.status, content=response)
+        return {"ok": True, "result": result}
+
     @app.get("/internal/events")
     async def _events() -> Any:
         """Long-lived SSE feed of Controller-side inbox events.

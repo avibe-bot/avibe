@@ -225,11 +225,18 @@ class Controller:
 
         self.session_turns = SessionTurnManager(self)
 
-        # Model Hub owns per-turn supply selection. Backend adapters consume
-        # the resulting launch plan without persisting native CLI config.
+        # The controller is the single Model Hub aggregate and engine owner.
+        # The UI process reaches this instance through the internal Unix socket.
+        from core.handlers.model_hub import create_default_service
+        from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
 
-        self.model_hub_runtime = ModelHubRuntimeRouter()
+        self.model_hub_service = create_default_service()
+        self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
+        self.model_hub_runtime = ModelHubRuntimeRouter(
+            service=self.model_hub_service,
+            turn_gateway=self.model_hub_turn_gateway,
+        )
 
         # Initialize core modules
         self._init_modules()
@@ -1533,6 +1540,9 @@ class Controller:
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
+        if model_hub_turn_gateway is not None:
+            _stop_loop_coroutine(model_hub_turn_gateway.close(), "Model Hub turn gateway")
         show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
