@@ -18,3 +18,5 @@ observations:
       - MH-OAUTH-A-001
       - MH-OAUTH-B-001
       - MH-OAUTH-C-001
+      - MH-OAUTH-NATIVE-001
+      - MH-OAUTH-NATIVE-002
