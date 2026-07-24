@@ -116,12 +116,9 @@ export const AddCustomModelDialog: React.FC<{
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
-  /** Runs before the DELETE — lets the host clear any selection that would make
-   *  the backend's only-supplier guard reject the delete (edit mode only). */
-  onBeforeDelete?: () => Promise<void>;
   /** Fired after a custom model is removed (edit mode only). */
   onDeleted?: (identifier: string) => void;
-}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onBeforeDelete, onDeleted }) => {
+}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onDeleted }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -175,7 +172,6 @@ export const AddCustomModelDialog: React.FC<{
   const submitDelete = async () => {
     if (!edit) return;
     try {
-      await onBeforeDelete?.();
       await modelsApi.deleteCustomModel(edit.sourceId, edit.modelId);
       onDeleted?.(identifier);
       setDeleteOpen(false);

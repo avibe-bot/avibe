@@ -17,7 +17,7 @@ import { backendVisual } from '../vendorMeta';
 import type { AgentMenu, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
 import { AddCustomModelDialog } from './AddCustomModelDialog';
-import { buildIdentifier, buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
+import { buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
 import { SupplyDots } from './supplyBits';
 
 type EditTarget = { sourceId: string; modelId: string; displayName: string | null } | null;
@@ -88,16 +88,6 @@ export const OpenCodeMenuDrawer: React.FC<{
   // force-deleted source) is dropped rather than shown as an invisible checked
   // row or sent to putMenu (which the server rejects as mapping_target_unavailable).
   const availableIds = React.useMemo(() => new Set(allRows.map((r) => r.identifier)), [allRows]);
-  // Whether another eligible source still supplies `identifier` once `exceptSourceId`
-  // is removed. When true, deleting one manual copy must NOT drop the featured menu
-  // entry (the identifier stays valid) and the backend won't guard the delete.
-  const hasOtherSupplier = React.useCallback(
-    (identifier: string, exceptSourceId: string) => {
-      const row = allRows.find((r) => r.identifier === identifier);
-      return !!row && row.sources.some((s) => s.id !== exceptSourceId);
-    },
-    [allRows],
-  );
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
   const [checked, setChecked] = React.useState<Set<string>>(() => new Set(agent.menu?.checked ?? []));
@@ -109,12 +99,15 @@ export const OpenCodeMenuDrawer: React.FC<{
   React.useEffect(() => {
     if (!open) return;
     const v = agent.menu?.view ?? 'featured';
-    // Self-heal: drop persisted checked ids whose supplier no longer exists so
-    // the count is honest and putMenu never resubmits a now-invalid identifier.
-    const c = (agent.menu?.checked ?? []).filter((id) => availableIds.has(id));
+    const raw = agent.menu?.checked ?? [];
+    // Self-heal the DISPLAY: drop checked ids whose supplier no longer exists
+    // (e.g. after a force-delete). Seed initialRef with the RAW persisted list so,
+    // when the heal removed entries, the drawer is dirty and Done PERSISTS the
+    // cleaned menu — a no-op close still heals the stored config.
+    const healed = raw.filter((id) => availableIds.has(id));
     setView(v);
-    setChecked(new Set(c));
-    initialRef.current = { view: v, checked: [...c] };
+    setChecked(new Set(healed));
+    initialRef.current = { view: v, checked: [...raw] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -139,8 +132,10 @@ export const OpenCodeMenuDrawer: React.FC<{
     }
     setSaving(true);
     try {
-      // Defensive: never send an identifier whose supplier is gone (self-heal).
-      await modelsApi.putMenu({ view, checked: [...checked].filter((id) => availableIds.has(id)) });
+      // `checked` is already self-healed at open and only grows via toggles/adds
+      // of available (or just-added) identifiers, so send it as-is — filtering
+      // here would strip a just-added custom model before onRefresh lands.
+      await modelsApi.putMenu({ view, checked: [...checked] });
       onSaved();
       onClose();
     } catch {
@@ -253,25 +248,6 @@ export const OpenCodeMenuDrawer: React.FC<{
         standardVendors={standardVendors}
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
-        onBeforeDelete={async () => {
-          // delete_custom_model is guarded only while the model is the SOLE selected
-          // supplier of its identifier. If another eligible source still supplies it,
-          // the delete isn't blocked and the featured entry must stay — so only drop
-          // the persisted menu entry when this is the last supplier. (A model that is
-          // also a fixed-menu mapping target elsewhere still 409s and surfaces an
-          // honest "in use" message from the dialog.)
-          if (!editTarget) return;
-          const src = sources.find((s) => s.id === editTarget.sourceId);
-          if (!src) return;
-          const identifier = buildIdentifier(src.vendor, editTarget.modelId, standardVendors);
-          const persisted = agent.menu?.checked ?? [];
-          if (persisted.includes(identifier) && !hasOtherSupplier(identifier, editTarget.sourceId)) {
-            await modelsApi.putMenu({
-              view: agent.menu?.view ?? 'featured',
-              checked: persisted.filter((id) => id !== identifier && availableIds.has(id)),
-            });
-          }
-        }}
         onSaved={(identifier) => {
           // Auto-check only a NEWLY added model (so it shows in 精选). Editing an
           // existing entry's metadata must not flip its menu-selection state — a
@@ -279,18 +255,12 @@ export const OpenCodeMenuDrawer: React.FC<{
           if (!editTarget) setChecked((prev) => new Set(prev).add(identifier));
           onRefresh();
         }}
-        onDeleted={(identifier) => {
-          // Uncheck only when the deleted model was the last supplier of the
-          // identifier; if another source still supplies it, keep it checked (the
-          // featured model remains available). The self-heal on save/reopen drops
-          // any identifier that later becomes unsupplied.
-          if (editTarget && !hasOtherSupplier(identifier, editTarget.sourceId)) {
-            setChecked((prev) => {
-              const next = new Set(prev);
-              next.delete(identifier);
-              return next;
-            });
-          }
+        onDeleted={() => {
+          // No local uncheck: the backend only lets the delete through when the
+          // model is NOT the sole selected supplier, so any checked identifier that
+          // survives a successful delete is still supplied by another source and
+          // must stay checked. A sole-supplier checked model is blocked (the dialog
+          // shows an honest "in use" message). Just refresh the source list.
           onRefresh();
         }}
       />

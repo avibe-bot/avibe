@@ -50,7 +50,10 @@ export const MigrationBanner: React.FC<{
         setDismissed(items.length > 0 && readMigrationDismissed() === migrationSignature(items));
       })
       .catch(() => {
-        /* best-effort: banner self-hides if the hub is unreachable */
+        // A rescan (after apply, or a transient outage) that fails must not keep
+        // advertising the previous importable rows — self-hide instead of leaving
+        // a stale strip that reopens a dead migration dialog.
+        if (!cancelled && aliveRef.current) setImportable([]);
       });
     return () => {
       cancelled = true;

@@ -160,9 +160,17 @@ export const MappingDrawer: React.FC<{
   // refresh of the agent prop.
   React.useEffect(() => {
     if (!open) return;
-    const seed = seedDraft(agent);
-    setDraft(seed);
-    initialRef.current = seed;
+    const raw = seedDraft(agent);
+    // Self-heal: an enabled override whose target's supplier was deleted is no
+    // longer selectable — display it as 跟随原生. Seed initialRef with the RAW
+    // draft so the heal makes the drawer dirty and Done PERSISTS the cleaned
+    // mappings; a no-op close still heals the stored config.
+    const targetIds = new Set(targets.map((tg) => tg.id));
+    const healed = raw.map((m) =>
+      m.enabled && !targetIds.has(m.target_model_id) ? { ...m, enabled: false, target_model_id: '' } : m,
+    );
+    setDraft(healed);
+    initialRef.current = raw;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
