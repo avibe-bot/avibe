@@ -86,6 +86,8 @@ def _request(
     return CaptureRequest(
         source_message_id=source,
         session_id=session,
+        principal_id="u-11111111111111111111111111111111",
+        provenance="user_input",
         text=text,
         occurred_at_ms=occurred_at_ms,
         attachments=attachments,
@@ -121,8 +123,8 @@ async def test_disabled_methods_are_closed_and_status_remains_readable(tmp_path:
     module, store, _provider = _module(tmp_path, enabled=False)
 
     capture = await module.capture(_request())
-    search = await module.search("query")
-    profile = await module.profile()
+    search = await module.search("query", principal_id="u-11111111111111111111111111111111")
+    profile = await module.profile(principal_id="u-11111111111111111111111111111111")
     status = await module.status()
 
     assert capture == CaptureSkipped(reason="memory_disabled")
@@ -221,7 +223,7 @@ async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_
     disk = await module.capture(_request(source="source-4", text="content"))
 
     assert blank == CaptureSkipped(reason="memory_invalid_input")
-    assert command == CaptureSkipped(reason="memory_invalid_input")
+    assert command == CaptureSkipped(reason="memory_low_disk_space")
     assert too_large == CaptureSkipped(reason="memory_input_too_large")
     assert oversized_id == CaptureSkipped(reason="memory_invalid_input")
     assert oversized_attachments == CaptureSkipped(reason="memory_input_too_large")
@@ -645,14 +647,17 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     )
     module, _store, _provider = _module(tmp_path, provider=provider)
 
-    assert await module.search("query") == MemoryItems(items=provider.search_items)
-    assert await module.profile() == MemoryItems(items=provider.profile_items)
-    assert await module.search("x" * (MAX_QUERY_BYTES + 1)) == OperationFailed(error="memory_input_too_large")
+    assert await module.search("query", principal_id="u-11111111111111111111111111111111") == MemoryItems(items=provider.search_items)
+    assert await module.profile(principal_id="u-11111111111111111111111111111111") == MemoryItems(items=provider.profile_items)
+    assert await module.search(
+        "x" * (MAX_QUERY_BYTES + 1),
+        principal_id="u-11111111111111111111111111111111",
+    ) == OperationFailed(error="memory_input_too_large")
     provider.search_items = tuple(MemoryItem(kind="fact", text=str(index)) for index in range(9))
-    assert await module.search("query") == OperationFailed(error="memory_provider_response_invalid")
+    assert await module.search("query", principal_id="u-11111111111111111111111111111111") == OperationFailed(error="memory_provider_response_invalid")
     provider.search_items = ()
     provider.search_failure = RuntimeError("provider-search-body-canary")
-    result = await module.search("query")
+    result = await module.search("query", principal_id="u-11111111111111111111111111111111")
     assert result == OperationFailed(error="memory_processing_failed")
     assert "provider-search-body-canary" not in repr(result)
 
@@ -1084,7 +1089,7 @@ async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(
     module, store, _provider = _module(tmp_path, provider=provider)
 
     assert await module.capture(_request(text=canary)) == CaptureAccepted()
-    result = await module.search("query-canary")
+    result = await module.search("query-canary", principal_id="u-11111111111111111111111111111111")
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
     await worker.drain_once()
 
@@ -1098,7 +1103,7 @@ async def test_provider_failures_are_closed_codes_and_never_persist_provider_tex
     provider = FakeMemoryProvider(search_failure=MemoryProviderFailure(canary))  # type: ignore[arg-type]
     module, store, _provider = _module(tmp_path, provider=provider)
 
-    result = await module.search("query")
+    result = await module.search("query", principal_id="u-11111111111111111111111111111111")
 
     assert isinstance(result, OperationFailed)
     assert result.error in CLOSED_MEMORY_ERROR_CODES
@@ -1124,7 +1129,7 @@ async def test_malformed_unicode_returns_closed_capture_and_search_errors(tmp_pa
     module, _store, _provider = _module(tmp_path)
 
     capture = await module.capture(_request(text="\ud800"))
-    search = await module.search("\ud800")
+    search = await module.search("\ud800", principal_id="u-11111111111111111111111111111111")
 
     assert capture == CaptureSkipped(reason="memory_invalid_input")
     assert search == OperationFailed(error="memory_invalid_input")

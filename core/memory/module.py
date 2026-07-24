@@ -17,7 +17,13 @@ from typing import Any, Literal
 
 from config import paths
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
-from core.memory.store import MAX_NONTERMINAL_QUEUE_ROWS, MemoryMeta, MemoryStore, QueueStats
+from core.memory.store import (
+    MAX_NONTERMINAL_QUEUE_ROWS,
+    MemoryMeta,
+    MemoryStore,
+    QueueStats,
+    is_principal_id,
+)
 from core.memory.types import (
     CaptureAccepted,
     CaptureAttachment,
@@ -234,6 +240,8 @@ class MemoryModule:
                 self._store.enqueue_request,
                 source_message_id=request.source_message_id,
                 session_id=request.session_id,
+                principal_id=request.principal_id,
+                provenance=request.provenance,
                 payload_text=normalized_text,
                 payload_attachments=encode_capture_attachments(request.attachments),
                 occurred_at_ms=request.occurred_at_ms,
@@ -255,7 +263,13 @@ class MemoryModule:
             return CaptureSkipped(reason="memory_invalid_input")
         return CaptureSkipped(reason="memory_clear_failed")
 
-    async def search(self, query: str, *, limit: int = DEFAULT_SEARCH_LIMIT) -> MemoryResult:
+    async def search(
+        self,
+        query: str,
+        *,
+        principal_id: str,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+    ) -> MemoryResult:
         """Return a bounded provider search result or one closed error category."""
 
         if not self._is_enabled():
@@ -264,6 +278,8 @@ class MemoryModule:
         query_bytes = _utf8_bytes(normalized_query)
         if query_bytes is None or not normalized_query.strip():
             return OperationFailed(error="memory_invalid_input")
+        if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_SEARCH_LIMIT:
             return OperationFailed(error="memory_invalid_input")
         if len(query_bytes) > MAX_QUERY_BYTES:
@@ -285,15 +301,17 @@ class MemoryModule:
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
             result = await self._provider_read(
-                lambda: self._provider.search(meta.principal_id, normalized_query, limit)
+                lambda: self._provider.search(principal_id, normalized_query, limit)
             )
         return result if isinstance(result, OperationFailed) else self._bounded_items(result, limit=limit)
 
-    async def profile(self) -> MemoryResult:
+    async def profile(self, *, principal_id: str) -> MemoryResult:
         """Return a bounded provider profile result or one closed error category."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
+        if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
         recovery = await self._recover_interrupted_clear()
         if recovery is not None:
             return recovery
@@ -309,7 +327,7 @@ class MemoryModule:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
-            result = await self._provider_read(lambda: self._provider.profile(meta.principal_id))
+            result = await self._provider_read(lambda: self._provider.profile(principal_id))
         return result if isinstance(result, OperationFailed) else self._bounded_items(
             result,
             limit=MAX_PROVIDER_RESULT_ITEMS,
@@ -522,8 +540,6 @@ class MemoryModule:
             return "memory_input_too_large"
         text_bytes = _utf8_bytes(normalized_text)
         if text_bytes is None:
-            return "memory_invalid_input"
-        if normalized_text.strip() and self._is_memory_command(normalized_text):
             return "memory_invalid_input"
         if not normalized_text.strip() and not request.attachments:
             return "memory_invalid_input"
@@ -867,12 +883,6 @@ class MemoryModule:
     def _valid_identifier(value: str) -> bool:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
-
-    @staticmethod
-    def _is_memory_command(value: str) -> bool:
-        command = value.strip().casefold()
-        return command == "/memory" or command.startswith("/memory ")
-
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return error.error if is_memory_error_code(error.error) else fallback

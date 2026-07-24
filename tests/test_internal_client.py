@@ -211,49 +211,29 @@ def test_memory_runtime_install_sync_round_trip(socket_path):
     }
 
 
-def test_memory_capture_round_trip(socket_path):
-    app = FastAPI()
+def test_memory_remember_round_trip(socket_path):
     captured: dict = {}
 
-    @app.post("/internal/memory/capture")
-    async def _capture(payload: dict):
-        captured["payload"] = payload
-        return {"status": "accepted"}
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        captured["session"] = request.headers["X-Avibe-Caller-Session"]
+        captured["capability"] = request.headers["X-Avibe-Memory-Capability"]
+        return httpx.Response(200, json={"status": "accepted"})
 
-    async def _go():
-        fake_transport = httpx.ASGITransport(app=app)
-        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
-            return await internal_client.memory_capture(
-                "workbench:message-1",
-                "session-1",
-                "ordinary text",
-                123,
-                attachments=[
-                    {
-                        "type": "image",
-                        "name": "diagram.png",
-                        "uri": "file:///owned/attachments/diagram.png",
-                        "ext": "png",
-                    }
-                ],
-                socket_path=socket_path,
-            )
+    with patch("vibe.internal_client.httpx.HTTPTransport", return_value=httpx.MockTransport(handler)):
+        result = internal_client.memory_remember_sync(
+            "ordinary text",
+            caller_session_id="session-1",
+            capability="capability-1",
+            socket_path=socket_path,
+        )
 
-    result = asyncio.run(_go())
-
-    assert captured["payload"] == {
-        "source_message_id": "workbench:message-1",
-        "session_id": "session-1",
-        "text": "ordinary text",
-        "occurred_at_ms": 123,
-        "attachments": [
-            {
-                "type": "image",
-                "name": "diagram.png",
-                "uri": "file:///owned/attachments/diagram.png",
-                "ext": "png",
-            }
-        ],
+    assert captured == {
+        "path": "/internal/memory/remember",
+        "payload": {"text": "ordinary text"},
+        "session": "session-1",
+        "capability": "capability-1",
     }
     assert result == {"status_code": 200, "body": {"status": "accepted"}}
 

@@ -2715,21 +2715,6 @@
       "sendNow": "Send now",
       "recall": "Recall to input",
       "remove": "Remove from queue"
-    },
-    "memory": {
-      "title": "Memory",
-      "help": "Memory commands: /memory status, /memory profile, /memory search <query>",
-      "unavailable": "Memory is unavailable.",
-      "status": "Memory status: {{state}}",
-      "counts": "Syncing: {{syncing}}; succeeded: {{succeeded}}; result unknown: {{unknown}}; failed: {{failed}}; dead: {{dead}}; missed: {{missed}}",
-      "fault": {
-        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
-        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
-      },
-      "profileWarning": "Profile warning: {{warning}}",
-      "profile": "Memory profile",
-      "search": "Memory search",
-      "empty": "No memory items found."
     }
   },
   "vaults": {
@@ -3007,7 +2992,12 @@
   },
   "memory": {
     "title": "Memory",
+    "betaTitle": "Memory · Beta",
     "subtitle": "A personal memory distilled from your Workbench and private-IM messages — review it, search it, or clear it here.",
+    "setup": {
+      "runtimeRequired": "Install the Memory runtime first",
+      "runtimeRequiredHint": "Install Memory explicitly from Dependencies, then configure and enable it here."
+    },
     "tabs": {
       "status": "Status",
       "profile": "Profile",
@@ -3106,7 +3096,7 @@
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
       "enableLabel": "Memory",
-      "enableHint": "Distill eligible Workbench messages and bound administrator private-IM messages into a searchable personal memory.",
+      "enableHint": "Distill eligible Workbench messages and bound, enabled private-IM messages into a per-user searchable memory.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
       "llmTitle": "LLM endpoint",
@@ -3128,16 +3118,16 @@
       "saved": "Memory settings saved.",
       "disclosureTitle": "Before you enable Memory",
       "disclosure": [
-        "Eligible Workbench and bound, enabled administrator private-IM text is copied into a bounded local queue for processing.",
+        "Eligible Workbench and bound, enabled private-IM text is copied into a bounded local queue for processing.",
         "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days, bounded to the newest 100,000 rows.",
         "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
         "These remote endpoints receive captured text or search queries and may retain them under their own policy.",
-        "Private-IM text has already traveled over that platform before capture, and an IM /memory reply is subject to that platform's own retention and sync.",
+        "Private-IM text has already traveled over that platform before capture and remains subject to that platform's own retention and sync.",
         "The local runtime retains unflushed raw messages and extracted data in local state in addition to the visible profile.",
         "Disabling Memory freezes local data rather than deleting it — use Clear all to remove it.",
         "Clear all removes this install's local Memory data but cannot retract copies already sent to a remote endpoint or your original chat history.",
         "Delivery to the Memory endpoints is at-least-once — a rare duplicate derived memory is possible after a timeout or crash.",
-        "Every enabled IM administrator is a co-owner of the same personal memory pool."
+        "Each platform user has a separate memory scope; identities are not linked across platforms."
       ],
       "clearKeyLabel": "Clear the saved key"
     },

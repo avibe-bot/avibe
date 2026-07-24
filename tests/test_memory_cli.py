@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from core.caller_context import AVIBE_MEMORY_CLI_CAPABILITY_ENV, AVIBE_SESSION_ID_ENV
 from vibe import cli, internal_client
 
@@ -120,3 +122,55 @@ def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypa
 
     assert cli.cmd_memory(args) == 1
     assert capsys.readouterr().err.strip() == "Memory status failed: memory_sidecar_unavailable"
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "duplicate"])
+def test_memory_remember_exits_zero_only_for_queued_outcomes(
+    monkeypatch,
+    capsys,
+    outcome,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "remember", "keep this", "--json"])
+    monkeypatch.setattr(
+        internal_client,
+        "memory_remember_sync",
+        lambda text: {"status_code": 200, "body": {"status": outcome}},
+    )
+
+    assert cli.cmd_memory(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] is True
+    assert result["result"]["status"] == outcome
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"status": "skipped", "reason": "memory_disabled"}, "memory_disabled"),
+        ({"status": "skipped", "reason": "memory_queue_full"}, "memory_queue_full"),
+        ({"status": "skipped", "reason": "memory_low_disk_space"}, "memory_low_disk_space"),
+        ({"status": "failed", "error": "memory_store_unavailable"}, "memory_store_unavailable"),
+    ],
+)
+def test_memory_remember_nonqueued_outcomes_exit_nonzero(monkeypatch, capsys, body, expected) -> None:
+    args = cli.build_parser().parse_args(["memory", "remember", "keep this", "--json"])
+    monkeypatch.setattr(
+        internal_client,
+        "memory_remember_sync",
+        lambda text: {"status_code": 200, "body": body},
+    )
+
+    assert cli.cmd_memory(args) == 1
+    assert json.loads(capsys.readouterr().out)["code"] == expected
+
+
+def test_memory_remember_rejects_over_limit_text_before_transport(monkeypatch, capsys) -> None:
+    args = cli.build_parser().parse_args(["memory", "remember", "x" * 4_001, "--json"])
+    monkeypatch.setattr(
+        internal_client,
+        "memory_remember_sync",
+        lambda *_args, **_kwargs: pytest.fail("invalid input reached the controller"),
+    )
+
+    assert cli.cmd_memory(args) == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"

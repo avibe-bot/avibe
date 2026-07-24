@@ -161,6 +161,14 @@ export const SettingsDependenciesPage: React.FC = () => {
                     <Badge variant={statusVariant(d)} className="font-mono">
                       {statusText(d)}
                     </Badge>
+                    {d.id === 'memory-runtime' && d.installed && (
+                      <Button asChild variant="secondary" size="xs">
+                        <Link to="/admin/settings/memory">
+                          {t('common.configure')}
+                          <ArrowUpRight className="size-3.5" />
+                        </Link>
+                      </Button>
+                    )}
                     {showAction && (
                       <Button variant={d.installed ? 'secondary' : 'brand'} size="xs" disabled={installing} onClick={() => void install(d)}>
                         {installing ? (

@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildEndpointPatch } from './memorySettings';
+import { buildEndpointPatch, memorySetupStage } from './memorySettings';
+
+
+describe('memorySetupStage', () => {
+  it('keeps setup discoverable without exposing the management navigation early', () => {
+    expect(memorySetupStage(null, null)).toBe('loading');
+    expect(memorySetupStage(false, false)).toBe('runtime-required');
+    expect(memorySetupStage(true, false)).toBe('setup');
+    expect(memorySetupStage(true, true)).toBe('manage');
+  });
+});
 
 
 describe('buildEndpointPatch', () => {

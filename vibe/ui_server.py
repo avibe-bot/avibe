@@ -4090,6 +4090,27 @@ def _web_push_user_key() -> str:
     return "local"
 
 
+def _workbench_memory_user_id() -> str | None:
+    """Resolve only identities that may receive a scoped Memory capability."""
+
+    if is_direct_loopback_memory_request():
+        return "local"
+    config = _load_remote_access_config()
+    if config is None:
+        return None
+    try:
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    return f"remote:{subject}" if isinstance(subject, str) and subject.strip() else None
+
+
 @app.route("/api/web-push/status", methods=["GET", "POST"])
 def web_push_status():
     from core.web_push import load_or_create_vapid_keys
@@ -6876,205 +6897,6 @@ async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     return _memory_response(body, status_code=result.get("status_code", 503))
 
 
-def _workbench_memory_command_is_text_only(
-    payload: object,
-    text: object,
-    content: object,
-    quick_reply_for: object,
-) -> bool:
-    """Keep command interception separate from rich Workbench turn payloads."""
-
-    if not isinstance(payload, dict) or quick_reply_for:
-        return False
-    if payload.get("attachments") or payload.get("files"):
-        return False
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and any(
-        metadata.get(key)
-        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
-    ):
-        return False
-    if content is None:
-        return isinstance(text, str)
-    if not isinstance(content, dict) or set(content) - {"text"}:
-        return False
-    return isinstance(content.get("text"), str) and (text is None or isinstance(text, str))
-
-
-def _workbench_memory_capture_is_eligible(
-    payload: object,
-    text: str,
-    quick_reply_for: object,
-    attachments: list[dict],
-) -> bool:
-    if not isinstance(payload, dict) or quick_reply_for or payload.get("files"):
-        return False
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and any(
-        metadata.get(key)
-        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
-    ):
-        return False
-    return bool(text.strip() or attachments)
-
-
-def _workbench_memory_attachment_payload(spec: object) -> dict[str, str] | None:
-    if not isinstance(spec, dict):
-        return None
-    path_value = spec.get("path")
-    name = spec.get("name")
-    mimetype = spec.get("mimetype")
-    if not all(isinstance(value, str) and value for value in (path_value, name, mimetype)):
-        return None
-    try:
-        path = Path(path_value).resolve(strict=True)
-        allowed_root = (paths.get_attachments_dir() / "avibe").resolve(strict=True)
-        path.relative_to(allowed_root)
-    except (OSError, ValueError):
-        return None
-    extension = path.suffix.lstrip(".").lower()
-    if not extension.isalnum() or len(extension) > 8:
-        return None
-    normalized_mime = mimetype.lower().split(";", 1)[0].strip()
-    if normalized_mime.startswith("image/"):
-        kind = "image"
-    elif normalized_mime.startswith("audio/"):
-        kind = "audio"
-    elif normalized_mime == "application/pdf" or extension == "pdf":
-        kind = "pdf"
-    elif normalized_mime == "text/html" or extension in {"html", "htm"}:
-        kind = "html"
-    elif normalized_mime == "message/rfc822" or extension == "eml":
-        kind = "email"
-    else:
-        kind = "doc"
-    display_name = Path(name).name
-    if len(display_name.encode("utf-8")) > 512:
-        display_name = display_name.encode("utf-8")[:512].decode("utf-8", errors="ignore")
-    if not display_name:
-        return None
-    return {
-        "type": kind,
-        "name": display_name,
-        "uri": path.as_uri(),
-        "ext": extension,
-    }
-
-
-def _memory_command_result(command: str, result: dict[str, Any]) -> Response:
-    return _memory_response(
-        {
-            "memory_command_result": {
-                "schema_version": 1,
-                "type": "memory_command_result",
-                "command": command,
-                "result": result,
-            }
-        }
-    )
-
-
-async def _workbench_memory_command_response(command_text: str) -> Response:
-    """Resolve one already-authorized Workbench Memory read through the UDS."""
-
-    from core.memory.commands import parse_memory_command
-    from core.memory.types import is_memory_error_code
-    from vibe import internal_client
-
-    command = parse_memory_command(command_text)
-    if command is None:
-        return _memory_command_result("invalid", {"status": "failed", "error": "memory_invalid_input"})
-    if command.action == "invalid":
-        return _memory_command_result(command.action, {"status": "failed", "error": "memory_invalid_input"})
-    if command.action == "help":
-        return _memory_command_result(
-            command.action,
-            {"status": "ok", "commands": ["status", "profile", "search"]},
-        )
-    try:
-        if command.action == "status":
-            response = await internal_client.memory_status()
-        elif command.action == "profile":
-            response = await internal_client.memory_profile()
-        else:
-            response = await internal_client.memory_search(command.query or "", 8)
-    except internal_client.InternalServerUnavailable:
-        return _memory_command_result(
-            command.action,
-            {"status": "failed", "error": "memory_sidecar_unavailable"},
-        )
-    body = response.get("body") if isinstance(response, dict) else None
-    if not isinstance(body, dict):
-        return _memory_command_result(
-            command.action,
-            {"status": "failed", "error": "memory_provider_response_invalid"},
-        )
-    status_code = response.get("status_code")
-    if status_code != 200 or body.get("status") == "failed":
-        error = body.get("error")
-        fallback = "memory_provider_response_invalid" if status_code == 200 else "memory_sidecar_unavailable"
-        return _memory_command_result(
-            command.action,
-            {"status": "failed", "error": error if is_memory_error_code(error) else fallback},
-        )
-    return _memory_command_result(command.action, body)
-
-
-def _workbench_message_occurred_at_ms(message: dict[str, Any]) -> int:
-    value = message.get("created_at")
-    if isinstance(value, str):
-        try:
-            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
-        except ValueError:
-            pass
-    return int(time.time() * 1000)
-
-
-async def _handoff_workbench_memory_capture(
-    message: dict[str, Any],
-    session_id: str,
-    attachment_specs: list[dict],
-) -> None:
-    """Submit one post-commit capture handoff before ordinary dispatch starts."""
-
-    from vibe import internal_client
-
-    message_id = message.get("id")
-    text = message.get("text")
-    if not isinstance(text, str):
-        content = message.get("content")
-        text = content.get("text") if isinstance(content, dict) else ""
-    attachments = [
-        payload
-        for spec in attachment_specs
-        if (payload := _workbench_memory_attachment_payload(spec)) is not None
-    ]
-    if (
-        not isinstance(message_id, str)
-        or not message_id
-        or not isinstance(text, str)
-        or (not text.strip() and not attachments)
-    ):
-        return
-
-    started_at = time.monotonic()
-    try:
-        await internal_client.memory_capture(
-            message_id,
-            session_id,
-            text,
-            _workbench_message_occurred_at_ms(message),
-            attachments=attachments,
-        )
-    except Exception:
-        # Capture is best effort: a rejected/unavailable local sidecar must never
-        # prevent the already-committed user row from reaching the agent.
-        logger.warning(
-            "Memory Workbench capture failed message_id=%s latency_ms=%d",
-            message_id,
-            int((time.monotonic() - started_at) * 1000),
-        )
-
 
 def _memory_settings_payload() -> dict:
     from config.v2_config import memory_config_to_payload
@@ -7257,7 +7079,9 @@ async def memory_profile_get(starlette_request: FastAPIRequest):
             return _memory_forbidden_response()
         from vibe import internal_client
 
-        return await _memory_internal_response(internal_client.memory_profile)
+        return await _memory_internal_response(
+            lambda: internal_client.memory_profile(user_key="avibe:local")
+        )
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -7279,7 +7103,9 @@ async def memory_search_post(starlette_request: FastAPIRequest):
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
         from vibe import internal_client
 
-        return await _memory_internal_response(lambda: internal_client.memory_search(query, limit))
+        return await _memory_internal_response(
+            lambda: internal_client.memory_search(query, limit, user_key="avibe:local")
+        )
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -8005,7 +7831,8 @@ async def sessions_messages_create(session_id: str):
     from vibe.sse_broker import broker
 
     payload = request.json or {}
-    memory_cli_admitted = is_direct_loopback_memory_request()
+    memory_user_id = _workbench_memory_user_id()
+    memory_cli_admitted = memory_user_id is not None
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
@@ -8039,18 +7866,6 @@ async def sessions_messages_create(session_id: str):
         or (content.get("text") if isinstance(content, dict) else None)
         or ""
     )
-
-    # A local Workbench /memory command is a direct UI read, never a chat row
-    # or agent turn. The global CSRF gate has already run; this additional
-    # predicate keeps the direct-read authority loopback-only.
-    from core.memory.commands import is_memory_command_candidate
-
-    if (
-        is_memory_command_candidate(dispatch_text)
-        and is_direct_loopback_memory_request()
-        and _workbench_memory_command_is_text_only(payload, text, content, quick_reply_for)
-    ):
-        return await _workbench_memory_command_response(dispatch_text)
 
     # Resolve uploaded-attachment refs (media tokens the browser holds) to local
     # file specs the agent turn can read. Done here (not in the browser) so a
@@ -8092,6 +7907,7 @@ async def sessions_messages_create(session_id: str):
                 metadata={
                     **(payload.get("metadata") or {}),
                     "_web_push_user_key": web_push_user_key,
+                    "_memory_user_id": memory_user_id,
                     "_memory_cli_admitted": memory_cli_admitted,
                 },
                 author_id=web_push_user_key,
@@ -8140,17 +7956,6 @@ async def sessions_messages_create(session_id: str):
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
         return jsonify({"error": "session is archived", "code": "session_archived"}), 409
-    if (
-        memory_cli_admitted
-        and _workbench_memory_capture_is_eligible(
-            payload,
-            dispatch_text,
-            quick_reply_for,
-            attachment_specs,
-        )
-        and not is_memory_command_candidate(dispatch_text)
-    ):
-        await _handoff_workbench_memory_capture(message, session_id, attachment_specs)
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.
@@ -8167,6 +7972,8 @@ async def sessions_messages_create(session_id: str):
         "scope_id": session["scope_id"],
         "user_message_id": message.get("id"),
         "files": attachment_specs,
+        "user_id": memory_user_id,
+        "message_id": message.get("id"),
         "memory_cli_admitted": memory_cli_admitted,
     }
     try:

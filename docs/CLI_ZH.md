@@ -85,12 +85,13 @@ vibe status
 
 ### `vibe memory`
 
-通过现有 mode-0600 控制器 socket 读取本地记忆。该命令不会启动服务，也没有写入、清空、配置、捕获或导出子命令。
+通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或明确提交需要记住的内容。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
 
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
 vibe memory search <查询> [--limit 1..20] [--json]
+vibe memory remember <文本> [--json]
 ```
 
 ### `vibe doctor`

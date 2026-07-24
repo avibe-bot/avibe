@@ -470,13 +470,13 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         context = bot.on_message_callback.await_args.args[0]  # type: ignore[union-attr]
         self.assertFalse(context.is_ordinary_text)
 
-    async def test_denied_memory_command_reaches_only_safe_handler(self):
+    async def test_denied_memory_text_uses_regular_auth_denial(self):
         bot = self._make_bot()
         bot.check_authorization = lambda **kwargs: AuthResult(
             allowed=False,
             denial="unbound_dm",
             is_dm=True,
-            dispatch_to_safe_handler=True,
+            dispatch_to_safe_handler=False,
         )
         bot.dispatch_text_command = AsyncMock(return_value=True)
         bot._process_media_items = AsyncMock(return_value=None)
@@ -491,8 +491,8 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        bot.dispatch_text_command.assert_awaited_once()
-        bot.send_message.assert_not_awaited()
+        bot.dispatch_text_command.assert_not_awaited()
+        bot.send_message.assert_awaited_once()
         bot.on_message_callback.assert_not_awaited()
 
     async def test_process_inbound_message_sends_pending_bind_menu_hint_once(self):

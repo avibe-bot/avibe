@@ -158,7 +158,7 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
         )
         slack.sessions.mark_thread_active.assert_called_once_with("U123", "C123", "1710000000.000700")
 
-    async def test_denied_memory_slash_command_reaches_only_safe_handler(self):
+    async def test_legacy_memory_slash_uses_regular_auth_denial(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         handler = AsyncMock()
         slack.on_command_callbacks["memory"] = handler
@@ -168,7 +168,7 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
             allowed=False,
             denial="unbound_dm",
             is_dm=True,
-            dispatch_to_safe_handler=True,
+            dispatch_to_safe_handler=False,
         )
         slack._send_auth_denial = AsyncMock()
 
@@ -182,8 +182,8 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        handler.assert_awaited_once()
-        slack._send_auth_denial.assert_not_awaited()
+        handler.assert_not_awaited()
+        slack._send_auth_denial.assert_awaited_once()
         slack.on_message_callback.assert_not_awaited()
 
 

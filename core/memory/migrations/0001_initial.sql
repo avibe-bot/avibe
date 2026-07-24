@@ -2,7 +2,6 @@ CREATE TABLE IF NOT EXISTS memory_meta (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     epoch INTEGER NOT NULL,
     clear_in_progress INTEGER NOT NULL DEFAULT 0 CHECK (clear_in_progress IN (0, 1)),
-    principal_id TEXT NOT NULL,
     scope_key BLOB NOT NULL,
     provider_root_id TEXT NOT NULL,
     last_provider_timestamp_ms INTEGER NOT NULL DEFAULT 0,
@@ -25,6 +24,12 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     source_message_digest TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL,
     session_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL CHECK (
+        length(principal_id) = 34
+        AND substr(principal_id, 1, 2) = 'u-'
+        AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
+    ),
+    provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
     payload_text TEXT,
     occurred_at_ms INTEGER NOT NULL,
     provider_timestamp_ms INTEGER NOT NULL,

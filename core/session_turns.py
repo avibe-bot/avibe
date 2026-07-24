@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
+from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
@@ -84,6 +84,7 @@ _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
+MEMORY_USER_ID_METADATA = "_memory_user_id"
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -969,12 +970,20 @@ class SessionTurnManager:
                             pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
-                    # (stop at the first scheduled row so it stays its own turn).
+                    # for one resolved user. Missing identity rows remain isolated.
                     segment = []
+                    segment_owner = None
                     for r in rows:
                         if _scheduled_provenance(r) is not None:
                             break
+                        owner = (r.get("metadata") or {}).get(MEMORY_USER_ID_METADATA)
+                        owner = owner.strip() if isinstance(owner, str) and owner.strip() else None
+                        if segment and (owner is None or segment_owner is None or owner != segment_owner):
+                            break
                         segment.append(r)
+                        segment_owner = owner
+                        if owner is None:
+                            break
                 if segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
@@ -990,23 +999,13 @@ class SessionTurnManager:
                     ]
                     if not texts and not queued_attachments:
                         return False
-                    user_owners = list(
-                        dict.fromkeys(
-                            owner.strip()
-                            for r in segment
-                            if isinstance((owner := (r.get("metadata") or {}).get(WEB_PUSH_USER_KEY_METADATA)), str)
-                            and owner.strip()
-                        )
-                    )
-                    user_owner = user_owners[0] if len(user_owners) == 1 else None
+                    user_owner = segment_owner
                     memory_cli_admitted = all(
                         (row.get("metadata") or {}).get("_memory_cli_admitted") is True for row in segment
                     )
                     user_metadata = None
                     if user_owner:
                         user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
-                    elif user_owners:
-                        user_metadata = {WEB_PUSH_USER_KEYS_METADATA: user_owners}
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )
@@ -1045,6 +1044,9 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
+            context.user_id = user_owner or "workbench"
+            context.message_id = str(segment[-1]["id"])
+            context.is_ordinary_text = True
             if context.platform_specific is None:
                 context.platform_specific = {}
             if memory_cli_admitted:

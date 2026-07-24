@@ -1,6 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { memoryStatusBuckets } from '../../lib/memoryStatus';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -29,11 +28,6 @@ import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from 
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
-import {
-  isPlainMemoryCommandRequest,
-  routeWorkbenchMessageResponse,
-  type MemoryCommandResult,
-} from '../../lib/memoryCommandResult';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
@@ -341,14 +335,6 @@ export const ChatPage: React.FC = () => {
   const [messageFontSize, setMessageFontSize] = useState(() => normalizeChatMessageFontSize(undefined));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Direct `/memory` reads deliberately stay outside the durable transcript.
-  // This state is reset with the session and replaced by the next command result.
-  const [memoryCommandResult, setMemoryCommandResult] = useState<MemoryCommandResult | null>(null);
-
-  useEffect(() => {
-    setMemoryCommandResult(null);
-  }, [sessionId]);
-
   // ``working`` = a turn is in flight for this session (from our send, or any
   // other origin we observe). Drives the thinking bubble + the Send→Stop swap.
   const [working, setWorking] = useState(false);
@@ -1179,18 +1165,8 @@ export const ChatPage: React.FC = () => {
       const ready = (attachments ?? []).filter((a) => a.status === 'ready');
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
       const refs = references ?? [];
-      // A direct `/memory` read creates no turn. Avoid claiming foreground work
-      // for it, so its response can reconcile an existing turn without clearing
-      // the Stop state. If the server does not intercept it, its ordinary response
-      // below claims the turn after confirmation.
-      const directMemoryRead = isPlainMemoryCommandRequest(text, {
-        hasAttachments: ready.length > 0,
-        hasReferences: refs.length > 0,
-        metadata,
-      });
-      if (!directMemoryRead) markWorking();
+      markWorking();
       setError(null);
-      setMemoryCommandResult(null);
       try {
         // Plain (non-streaming) POST: the turn runs fire-and-forget on the
         // controller and its reply arrives over the persistent ``message.new``
@@ -1244,15 +1220,7 @@ export const ChatPage: React.FC = () => {
         if (!response.ok) {
           throw new Error(body?.detail ? String(body.detail) : `HTTP ${response.status}`);
         }
-        const responseAction = routeWorkbenchMessageResponse(body);
-        if (responseAction.kind === 'memory_command_result') {
-          // `/memory` never starts a turn. Ask the controller whether a different
-          // turn is live instead of clearing the Stop state optimistically.
-          setMemoryCommandResult(responseAction.result);
-          void syncTurnStateRef.current?.();
-          return;
-        }
-        if (responseAction.kind === 'already_answered') {
+        if (body?.already_answered) {
           // A duplicate quick-reply the backend already had (stale tab / missed
           // event): no turn started HERE. Reconcile authoritatively rather than
           // force-clearing — a genuinely-running turn (e.g. clicking an old group
@@ -1262,20 +1230,18 @@ export const ChatPage: React.FC = () => {
           syncTurnStateRef.current?.();
           return false;
         }
-        if (responseAction.kind === 'queued') {
+        if (body?.queued) {
           // Sent while a turn was running → enqueued (shows above the composer
           // via queue.updated). A turn IS in flight, so keep working/Stop; don't
           // add a transcript row. Refresh immediately in case the event races.
-          if (directMemoryRead) markWorking();
           void refreshQueue();
           return;
         }
         // A turn started — show the user row. If this send happened from a
         // historical search window, first replace that window with the live tail;
         // the persisted prompt belongs there, not grafted below old context.
-        if (responseAction.kind === 'message') {
-          if (directMemoryRead) markWorking();
-          const message = responseAction.message as WorkbenchMessage;
+        if (body?.id) {
+          const message = body as WorkbenchMessage;
           if (historicalWindowRef.current) {
             const caughtUp = await reloadLatestMessages();
             if (sessionId === sessionIdRef.current) {
@@ -1908,8 +1874,6 @@ export const ChatPage: React.FC = () => {
             {error}
           </div>
         )}
-        {memoryCommandResult && <MemoryCommandResultPanel result={memoryCommandResult} />}
-
         <Transcript
           messages={messages}
           session={session}
@@ -1981,55 +1945,6 @@ export const ChatPage: React.FC = () => {
       </div>
       </FileViewerProvider>
     </ImageViewerProvider>
-  );
-};
-
-const MemoryCommandResultPanel: React.FC<{ result: MemoryCommandResult }> = ({ result }) => {
-  const { t } = useTranslation();
-  const payload = result.result;
-  const status = typeof payload.status === 'string' ? payload.status : '';
-  const warning = typeof payload.profile_warning === 'string' ? payload.profile_warning : null;
-  const state = typeof payload.state === 'string' ? payload.state : t('common.unknown');
-  const buckets = memoryStatusBuckets(payload);
-  const faultKind = payload.processing_fault_kind === 'credential' || payload.processing_fault_kind === 'engine'
-    ? payload.processing_fault_kind
-    : null;
-  const items = Array.isArray(payload.items)
-    ? payload.items
-        .map((item) => (typeof item === 'object' && item !== null && typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : null))
-        .filter((item): item is string => item !== null)
-    : [];
-
-  let content: React.ReactNode;
-  if (status === 'failed') {
-    content = <div>{t('chat.memory.unavailable')}</div>;
-  } else if (result.command === 'status') {
-    content = (
-      <>
-        <div>{t('chat.memory.status', { state })}</div>
-        <div>{t('chat.memory.counts', {
-          ...buckets,
-        })}</div>
-        {faultKind && <div>{t(`chat.memory.fault.${faultKind}`)}</div>}
-        {warning && <div>{t('chat.memory.profileWarning', { warning })}</div>}
-      </>
-    );
-  } else if (result.command === 'profile' || result.command === 'search') {
-    content = (
-      <>
-        <div className="font-medium">{t(result.command === 'profile' ? 'chat.memory.profile' : 'chat.memory.search')}</div>
-        {items.length > 0 ? items.map((item, index) => <div key={`${index}-${item}`}>{item}</div>) : <div>{t('chat.memory.empty')}</div>}
-      </>
-    );
-  } else {
-    content = <div>{t('chat.memory.help')}</div>;
-  }
-
-  return (
-    <div role="status" className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-cyan/35 bg-cyan/[0.06] px-3 py-2 text-[12px] text-foreground">
-      <div className="mb-1 font-medium text-cyan">{t('chat.memory.title')}</div>
-      <div className="whitespace-pre-wrap break-words">{content}</div>
-    </div>
   );
 };
 

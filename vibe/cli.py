@@ -252,6 +252,9 @@ def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, s
 
 
 def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> None:
+    if operation == "remember":
+        print(i18n_t("memory.cli.remembered", language))
+        return
     if operation == "status":
         from core.memory.presentation import memory_status_buckets
 
@@ -302,7 +305,7 @@ def cmd_memory(args) -> int:
     as_json = bool(getattr(args, "json", False))
     language = _memory_cli_language()
     query = ""
-    if operation not in {"status", "profile", "search"}:
+    if operation not in {"status", "profile", "search", "remember"}:
         return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
     if operation == "search":
         query = args.query.strip() if isinstance(args.query, str) else ""
@@ -313,6 +316,10 @@ def cmd_memory(args) -> int:
             or isinstance(args.limit, bool)
             or not 1 <= args.limit <= 20
         ):
+            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
+    if operation == "remember":
+        query = args.text if isinstance(args.text, str) else ""
+        if not query.strip() or len(query) > 4_000:
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
         caller = caller_context_from_env()
@@ -328,8 +335,10 @@ def cmd_memory(args) -> int:
             response = internal_client.memory_status_sync(**access)
         elif operation == "profile":
             response = internal_client.memory_profile_sync(**access)
-        else:
+        elif operation == "search":
             response = internal_client.memory_search_sync(query, args.limit, **access)
+        else:
+            response = internal_client.memory_remember_sync(query, **access)
     except internal_client.InternalServerUnavailable:
         return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
 
@@ -337,6 +346,11 @@ def cmd_memory(args) -> int:
     if error is not None:
         return _print_memory_cli_error(operation, error, as_json=as_json, language=language)
     assert result is not None
+    if operation == "remember":
+        outcome = result.get("status")
+        if outcome not in {"accepted", "duplicate"}:
+            code = result.get("reason") or result.get("error") or "memory_store_unavailable"
+            return _print_memory_cli_error(operation, code, as_json=as_json, language=language)
     if as_json:
         print(
             json.dumps(
@@ -11831,8 +11845,11 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
-    memory_parser = subparsers.add_parser("memory", help="Read local Memory state through the running controller")
-    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", metavar="{status,profile,search}")
+    memory_parser = subparsers.add_parser("memory", help="Use local Memory through the running controller")
+    memory_subparsers = memory_parser.add_subparsers(
+        dest="memory_command",
+        metavar="{status,profile,search,remember}",
+    )
     memory_subparsers.required = True
     memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
     memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -11842,6 +11859,9 @@ def build_parser():
     memory_search_parser.add_argument("query", help="Search query")
     memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
     memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_remember_parser = memory_subparsers.add_parser("remember", help="Queue durable personal context")
+    memory_remember_parser.add_argument("text", help="Text to remember (maximum 4,000 characters)")
+    memory_remember_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",

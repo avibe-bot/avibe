@@ -71,7 +71,6 @@ def _ensure_no_follow_directory_chain(directory: Path) -> None:
 class MemoryMeta:
     epoch: int
     clear_in_progress: bool
-    principal_id: str
     scope_key: bytes
     provider_root_id: str
     last_provider_timestamp_ms: int
@@ -90,6 +89,8 @@ class QueueRow:
     source_message_digest: str
     epoch: int
     session_id: str
+    principal_id: str
+    provenance: Literal["user_input", "agent"]
     payload_text: str | None
     occurred_at_ms: int
     provider_timestamp_ms: int
@@ -157,6 +158,13 @@ class MemoryStore:
         with self._transaction() as conn:
             return self._ensure_meta_in_connection(conn)
 
+    def principal_for_user_key(self, user_key: str) -> str:
+        """Return the stable opaque provider principal for one platform identity."""
+
+        with self._transaction() as conn:
+            meta = self._ensure_meta_in_connection(conn)
+            return derive_principal_id(meta.scope_key, user_key)
+
     def get_meta(self) -> MemoryMeta | None:
         """Return the metadata row without creating Memory state."""
 
@@ -183,6 +191,8 @@ class MemoryStore:
         *,
         source_message_id: str,
         session_id: str,
+        principal_id: str,
+        provenance: Literal["user_input", "agent"],
         payload_text: str,
         payload_attachments: str | None = None,
         occurred_at_ms: int,
@@ -194,6 +204,9 @@ class MemoryStore:
         Raw source identifiers are transformed only inside this transaction and
         never written to SQLite.
         """
+
+        if not is_principal_id(principal_id) or provenance not in {"user_input", "agent"}:
+            raise ValueError("invalid Memory capture identity")
 
         now = utc_now_iso()
         with self._transaction() as conn:
@@ -227,7 +240,7 @@ class MemoryStore:
                 self._record_capture_skip_in_connection(conn, None, now)
                 return EnqueueResult(outcome="timestamp_invalid")
 
-            session_ref = _provider_session_ref(meta.scope_key, session_id, meta.epoch)
+            session_ref = _provider_session_ref(meta.scope_key, principal_id, session_id, meta.epoch)
             conn.execute(
                 """
                 UPDATE memory_meta
@@ -248,17 +261,20 @@ class MemoryStore:
             conn.execute(
                 """
                 INSERT INTO memory_capture_queue (
-                    source_message_digest, epoch, session_id, payload_text,
+                    source_message_digest, epoch, session_id, principal_id,
+                    provenance, payload_text,
                     payload_attachments,
                     occurred_at_ms, provider_timestamp_ms, state, attempts,
                     next_retry_at, lease_owner, lease_at, last_error,
                     created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
                 """,
                 (
                     source_message_digest,
                     meta.epoch,
                     session_ref,
+                    principal_id,
+                    provenance,
                     payload_text,
                     payload_attachments,
                     occurred_at_ms,
@@ -272,6 +288,8 @@ class MemoryStore:
                     source_message_digest=source_message_digest,
                     epoch=meta.epoch,
                     session_id=session_ref,
+                    principal_id=principal_id,
+                    provenance=provenance,
                     payload_text=payload_text,
                     occurred_at_ms=occurred_at_ms,
                     provider_timestamp_ms=provider_timestamp_ms,
@@ -814,7 +832,6 @@ class MemoryStore:
             return MemoryMeta(
                 epoch=epoch,
                 clear_in_progress=True,
-                principal_id=meta.principal_id,
                 scope_key=meta.scope_key,
                 provider_root_id=meta.provider_root_id,
                 last_provider_timestamp_ms=meta.last_provider_timestamp_ms,
@@ -847,7 +864,6 @@ class MemoryStore:
             return MemoryMeta(
                 epoch=meta.epoch,
                 clear_in_progress=False,
-                principal_id=meta.principal_id,
                 scope_key=meta.scope_key,
                 provider_root_id=meta.provider_root_id,
                 last_provider_timestamp_ms=meta.last_provider_timestamp_ms,
@@ -1060,23 +1076,21 @@ class MemoryStore:
         if meta is not None:
             return meta
         now = utc_now_iso()
-        principal_id = str(uuid.uuid4())
         scope_key = secrets.token_bytes(32)
         provider_root_id = str(uuid.uuid4())
         conn.execute(
             """
             INSERT INTO memory_meta (
-                singleton, epoch, clear_in_progress, principal_id, scope_key,
+                singleton, epoch, clear_in_progress, scope_key,
                 provider_root_id, last_provider_timestamp_ms, missed_count,
                 last_success_at, last_error, last_error_at, updated_at
-            ) VALUES (1, 0, 0, ?, ?, ?, 0, 0, NULL, NULL, NULL, ?)
+            ) VALUES (1, 0, 0, ?, ?, 0, 0, NULL, NULL, NULL, ?)
             """,
-            (principal_id, scope_key, provider_root_id, now),
+            (scope_key, provider_root_id, now),
         )
         return MemoryMeta(
             epoch=0,
             clear_in_progress=False,
-            principal_id=principal_id,
             scope_key=scope_key,
             provider_root_id=provider_root_id,
             last_provider_timestamp_ms=0,
@@ -1212,7 +1226,6 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
     return MemoryMeta(
         epoch=int(row["epoch"]),
         clear_in_progress=bool(row["clear_in_progress"]),
-        principal_id=str(row["principal_id"]),
         scope_key=bytes(row["scope_key"]),
         provider_root_id=str(row["provider_root_id"]),
         last_provider_timestamp_ms=int(row["last_provider_timestamp_ms"]),
@@ -1249,6 +1262,8 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         source_message_digest=str(row["source_message_digest"]),
         epoch=int(row["epoch"]),
         session_id=str(row["session_id"]),
+        principal_id=str(row["principal_id"]),
+        provenance=str(row["provenance"]),
         payload_text=str(row["payload_text"]) if row["payload_text"] is not None else None,
         payload_attachments=(
             str(row["payload_attachments"])
@@ -1319,5 +1334,32 @@ def _keyed_digest(scope_key: bytes, value: str) -> str:
     return hmac.new(scope_key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _provider_session_ref(scope_key: bytes, session_id: str, epoch: int) -> str:
-    return f"src--{_keyed_digest(scope_key, session_id)}--e{epoch}"
+def derive_principal_id(scope_key: bytes, user_key: str) -> str:
+    """Derive one stable provider-safe principal without retaining the user key."""
+
+    if not isinstance(scope_key, bytes) or len(scope_key) < 16:
+        raise ValueError("invalid Memory scope key")
+    if not isinstance(user_key, str) or not user_key or user_key != user_key.strip():
+        raise ValueError("invalid Memory user key")
+    digest = hmac.new(scope_key, user_key.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"u-{digest[:32]}"
+
+
+def is_principal_id(value: object) -> bool:
+    """Return whether a value has the exact opaque Memory principal shape."""
+
+    return (
+        isinstance(value, str)
+        and len(value) == 34
+        and value.startswith("u-")
+        and all(character in "0123456789abcdef" for character in value[2:])
+    )
+
+
+def _provider_session_ref(
+    scope_key: bytes,
+    principal_id: str,
+    session_id: str,
+    epoch: int,
+) -> str:
+    return f"src--{_keyed_digest(scope_key, f'{principal_id}:{session_id}')}--e{epoch}"

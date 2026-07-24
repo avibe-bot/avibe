@@ -52,7 +52,6 @@ These commands are registered by the controller today:
 | `/stop` | Interrupt the active backend execution |
 | `/bind <code>` | Bind a DM user to this Avibe instance |
 | `bind <code>` | Plain-text DM alias for unbound users only |
-| `/memory [help\|status\|profile\|search <query>]` | Read local Memory in an eligible administrator DM |
 
 ### 2.2 Permission model
 
@@ -84,16 +83,11 @@ Notes:
 - `/bind <code>` is allowed for unbound DM users.
 - Plain `bind <code>` is also allowed for unbound DM users on platforms where plain-text bind is enabled as a workaround.
 
-#### Private Memory reads
-
-- `/memory` is available only to bound, enabled administrators in a direct message.
-- It supports only `help`, `status`, `profile`, and `search <query>`; it cannot clear, configure, capture, export, or delete Memory data.
-
 ### 2.3 Platform behavior
 
 #### Slack
 
-- Native Slack slash commands are exposed for `/start`, `/stop`, and `/memory` after the Slack App command is declared.
+- Native Slack slash commands are exposed for `/start` and `/stop` after the Slack App commands are declared.
 - Other commands are typically sent as normal bot-directed messages, for example:
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -528,7 +522,7 @@ The `vibe` executable controls the local service and async automation features.
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
-| `vibe memory ...` | Read local Memory status, profile, or search results through the running controller |
+| `vibe memory ...` | Read scoped Memory or explicitly queue context to remember through the running controller |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |

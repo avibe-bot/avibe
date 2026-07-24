@@ -28,11 +28,13 @@ The endpoint set is intentionally tiny for v1 (``dispatch`` + a stub
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import socket
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -51,34 +53,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
-
-
-def _memory_capture_attachments(value: object) -> tuple | None:
-    from core.memory import CaptureAttachment
-
-    if not isinstance(value, list) or len(value) > 8:
-        return None
-    attachments = []
-    for item in value:
-        if not isinstance(item, dict) or set(item) != {"type", "name", "uri", "ext"}:
-            return None
-        if (
-            item.get("type") not in {"image", "audio", "doc", "pdf", "html", "email"}
-            or not all(isinstance(item.get(key), str) for key in ("name", "uri", "ext"))
-        ):
-            return None
-        try:
-            attachments.append(
-                CaptureAttachment(
-                    kind=item["type"],
-                    name=item["name"],
-                    uri=item["uri"],
-                    ext=item["ext"],
-                )
-            )
-        except (KeyError, TypeError):
-            return None
-    return tuple(attachments)
 
 
 def default_socket_path() -> Path:
@@ -485,21 +459,42 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.warning("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
-    def _memory_read_denied(request: Request) -> bool:
+    def _memory_capability_principal(request: Request) -> str | None:
         from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         capability = str(request.headers.get(MEMORY_CAPABILITY_HEADER) or "").strip()
-        if not session_id and not capability:
-            return False
+        if not session_id or not capability:
+            return None
         registry = getattr(controller, "memory_cli_access", None)
         validate = getattr(registry, "validate", None)
-        return not callable(validate) or not bool(validate(session_id, capability))
+        principal_id = validate(session_id, capability) if callable(validate) else None
+        from core.memory.store import is_principal_id
+
+        return principal_id if is_principal_id(principal_id) else None
+
+    def _memory_read_principal(request: Request) -> str | None:
+        from core.memory.cli_access import (
+            CALLER_SESSION_HEADER,
+            MEMORY_CAPABILITY_HEADER,
+            MEMORY_USER_KEY_HEADER,
+        )
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        capability = str(request.headers.get(MEMORY_CAPABILITY_HEADER) or "").strip()
+        user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
+        if user_key:
+            if session_id or capability or user_key != "avibe:local":
+                return None
+            runtime = _memory_runtime()
+            try:
+                return runtime.principal_for_user_key(user_key) if runtime is not None else None
+            except Exception:
+                return None
+        return _memory_capability_principal(request)
 
     @app.get("/internal/memory/status")
-    async def _memory_status(request: Request) -> Any:
-        if _memory_read_denied(request):
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+    async def _memory_status() -> Any:
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
@@ -522,20 +517,22 @@ def create_app(controller: "Controller") -> FastAPI:
 
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
-        if _memory_read_denied(request):
+        principal_id = _memory_read_principal(request)
+        if principal_id is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         try:
-            return await runtime.profile_payload()
+            return await runtime.profile_payload(principal_id)
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
-        if _memory_read_denied(request):
+        principal_id = _memory_read_principal(request)
+        if principal_id is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
@@ -551,57 +548,50 @@ def create_app(controller: "Controller") -> FastAPI:
         if not isinstance(limit, int) or isinstance(limit, bool):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         try:
-            return await runtime.search_payload(payload["query"], limit)
+            return await runtime.search_payload(payload["query"], limit, principal_id)
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
-    @app.post("/internal/memory/capture")
-    async def _memory_capture(request: Request) -> Any:
+    @app.post("/internal/memory/remember")
+    async def _memory_remember(request: Request) -> Any:
+        principal_id = _memory_capability_principal(request)
+        if principal_id is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         module = getattr(runtime, "module", None) if runtime is not None else None
         if module is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         payload = await _safe_json(request)
-        attachments = (
-            _memory_capture_attachments(payload.get("attachments", []))
-            if isinstance(payload, dict)
-            else None
-        )
         if (
             not isinstance(payload, dict)
-            or set(payload)
-            not in (
-                {"source_message_id", "session_id", "text", "occurred_at_ms"},
-                {"source_message_id", "session_id", "text", "occurred_at_ms", "attachments"},
-            )
-            or not isinstance(payload.get("source_message_id"), str)
-            or not isinstance(payload.get("session_id"), str)
+            or set(payload) != {"text"}
             or not isinstance(payload.get("text"), str)
-            or not isinstance(payload.get("occurred_at_ms"), int)
-            or isinstance(payload.get("occurred_at_ms"), bool)
-            or attachments is None
+            or not payload["text"].strip()
+            or len(payload["text"]) > 4_000
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
         from core.memory import CaptureRequest
+        from core.memory.cli_access import CALLER_SESSION_HEADER
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        text = payload["text"]
+        source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
-            # ``capture`` performs just the local idempotent queue insert; it
-            # never waits for EverOS or a model endpoint. Returning only after
-            # it finishes gives the UI a durable capture-before-dispatch
-            # handoff while its outcome remains non-critical to agent dispatch.
             receipt = await module.capture(
                 CaptureRequest(
-                    source_message_id=payload["source_message_id"],
-                    session_id=payload["session_id"],
-                    text=payload["text"],
-                    occurred_at_ms=payload["occurred_at_ms"],
-                    attachments=attachments,
+                    source_message_id=f"agent:{session_id}:{source_digest}",
+                    session_id=session_id,
+                    principal_id=principal_id,
+                    provenance="agent",
+                    text=text,
+                    occurred_at_ms=int(time.time() * 1000),
                 )
             )
         except Exception:
-            logger.warning("internal memory capture failed")
+            logger.warning("internal memory remember failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
         response: dict[str, Any] = {"status": receipt.status}
         reason = getattr(receipt, "reason", None)
@@ -1003,6 +993,7 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
+        is_ordinary_text=True,
     )
 
 

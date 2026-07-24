@@ -444,20 +444,6 @@
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
   "memory": {
-    "command": {
-      "unavailable": "Memory is unavailable in this conversation.",
-      "usage": "Memory commands: /memory status, /memory profile, /memory search <query>",
-      "status": "Memory status: {state}",
-      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
-      "fault": {
-        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
-        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
-      },
-      "profileWarning": "Profile warning: {warning}",
-      "profile": "Memory profile:",
-      "search": "Memory search:",
-      "empty": "No memory items found."
-    },
     "cli": {
       "error": "Memory {operation} failed: {code}",
       "status": "Memory status: {state}",
@@ -467,7 +453,8 @@
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
       },
       "profileWarning": "Profile warning: {warning}",
-      "empty": "No memory items found."
+      "empty": "No memory items found.",
+      "remembered": "Memory queued."
     },
     "alert": {
       "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",

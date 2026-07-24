@@ -133,13 +133,13 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context.files), 1)
         self.assertEqual(context.files[0].name, "img_123.image")
 
-    async def test_denied_memory_command_reaches_only_safe_handler(self):
+    async def test_denied_memory_text_uses_regular_auth_denial(self):
         bot = self._make_bot()
         bot.check_authorization = lambda **kwargs: AuthResult(
             allowed=False,
             denial="unbound_dm",
             is_dm=True,
-            dispatch_to_safe_handler=True,
+            dispatch_to_safe_handler=False,
         )
         bot.dispatch_text_command = AsyncMock(return_value=True)
         bot.on_message_callback = AsyncMock()
@@ -157,8 +157,8 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
 
         await bot._async_handle_message(event_data)
 
-        bot.dispatch_text_command.assert_awaited_once()
-        bot._send_auth_denial.assert_not_awaited()
+        bot.dispatch_text_command.assert_not_awaited()
+        bot._send_auth_denial.assert_awaited_once()
         bot.on_message_callback.assert_not_awaited()
 
     async def test_active_thread_requires_fresh_mention_when_require_mention_enabled(self):

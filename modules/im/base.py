@@ -281,7 +281,7 @@ class BaseIMClient(ABC):
         settings_manager: Any = None,
     ):
         """Run centralized auth with shared action extraction logic."""
-        from core.auth import AuthResult, check_auth
+        from core.auth import check_auth
 
         allow_plain_bind = self.should_allow_plain_bind(
             user_id=user_id,
@@ -298,19 +298,6 @@ class BaseIMClient(ABC):
             action=resolved_action,
             settings_manager=settings_manager,
         )
-        # Memory deliberately hides whether eligibility failed because the user is
-        # unbound, disabled, in the wrong channel, or not an administrator. The
-        # shared controller handler repeats its own fail-closed admission check and
-        # sends the one generic inert response. Keep this bypass conditional on a
-        # registered handler so a partially initialized adapter cannot fall through
-        # to an ordinary agent turn.
-        if resolved_action == "memory" and not result.allowed and "memory" in self.on_command_callbacks:
-            return AuthResult(
-                allowed=False,
-                denial=result.denial,
-                is_dm=result.is_dm,
-                dispatch_to_safe_handler=True,
-            )
         return result
 
     def build_auth_denial_text(self, denial: str, channel_id: Optional[str] = None) -> Optional[str]:

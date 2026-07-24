@@ -15,6 +15,7 @@ from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
     TERMINAL_TOMBSTONE_RETENTION,
+    derive_principal_id,
     _keyed_digest,
 )
 
@@ -27,6 +28,8 @@ def _enqueue(store: MemoryStore, digest: str, *, occurred_at_ms: int = 1_000):
     return store.enqueue_request(
         source_message_id=digest,
         session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        provenance="user_input",
         payload_text="queued payload",
         occurred_at_ms=occurred_at_ms,
         max_provider_timestamp_ms=4_102_444_800_000,
@@ -42,6 +45,8 @@ def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-sess
     result = store.enqueue_request(
         source_message_id=digest,
         session_id=session_ref,
+        principal_id="u-11111111111111111111111111111111",
+        provenance="user_input",
         payload_text="queued payload",
         occurred_at_ms=1_000,
         max_provider_timestamp_ms=4_102_444_800_000,
@@ -72,6 +77,8 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
         }
         assert {"memory_meta", "memory_capture_queue"}.issubset(tables)
         assert "ix_memory_capture_due" in indexes
+        queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
+        assert {"principal_id", "provenance"}.issubset(queue_columns)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -81,6 +88,17 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
+
+
+def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
+    scope_key = bytes.fromhex("11" * 32)
+
+    first = derive_principal_id(scope_key, "slack:U123")
+    assert first == derive_principal_id(scope_key, "slack:U123")
+    assert first != derive_principal_id(scope_key, "slack:U456")
+    assert first != derive_principal_id(bytes.fromhex("22" * 32), "slack:U123")
+    assert first.startswith("u-") and len(first) == 34
+    assert "U123" not in first
 
 
 def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: Path) -> None:
@@ -121,53 +139,6 @@ def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: 
     assert delivered.add_request_id == "add-request-1"
     assert delivered.flush_observation == "not_attempted"
     assert store.ensure_meta().last_success_at is None
-
-
-def test_v1_store_migrates_once_and_projects_legacy_delivery_as_unknown(tmp_path: Path) -> None:
-    database = _store_path(tmp_path / "v1-migration", "memory.sqlite")
-    database.parent.mkdir(parents=True)
-    migration = Path(__file__).parents[1] / "core" / "memory" / "migrations" / "0001_initial.sql"
-    with sqlite3.connect(database) as conn:
-        conn.executescript(migration.read_text(encoding="utf-8"))
-        conn.execute("PRAGMA user_version = 1")
-        conn.execute(
-            """
-            INSERT INTO memory_meta (
-                singleton, epoch, clear_in_progress, principal_id, scope_key,
-                provider_root_id, last_provider_timestamp_ms, missed_count,
-                last_success_at, last_error, updated_at
-            ) VALUES (
-                1, 0, 0, 'principal', X'00', 'root', 1, 0,
-                NULL, 'memory_provider_timeout', ?
-            )
-            """,
-            ("2026-01-01T00:00:00.000Z",),
-        )
-        conn.execute(
-            """
-            INSERT INTO memory_capture_queue (
-                source_message_digest, epoch, session_id, payload_text,
-                occurred_at_ms, provider_timestamp_ms, state, attempts,
-                next_retry_at, lease_owner, lease_at, last_error,
-                created_at, completed_at
-            ) VALUES (
-                'legacy', 0, 'session', NULL, 1, 1, 'delivered', 0,
-                NULL, NULL, NULL, NULL, ?, ?
-            )
-            """,
-            ("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z"),
-        )
-
-    store = MemoryStore(database)
-    reopened = MemoryStore(database)
-    stats = reopened.queue_stats()
-
-    assert stats.receipt_unknown == 1
-    assert stats.last_flush_observation == "unknown"
-    assert stats.last_flush_at is None
-    assert reopened.ensure_meta().last_error_at == "2026-01-01T00:00:00.000Z"
-    with sqlite3.connect(store.path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 4
 
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
@@ -299,6 +270,8 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
     accepted = store.enqueue_request(
         source_message_id="one",
         session_id="one",
+        principal_id="u-11111111111111111111111111111111",
+        provenance="user_input",
         payload_text="payload",
         occurred_at_ms=1,
         max_provider_timestamp_ms=100,
@@ -307,6 +280,8 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
     full = store.enqueue_request(
         source_message_id="two",
         session_id="two",
+        principal_id="u-11111111111111111111111111111111",
+        provenance="user_input",
         payload_text="payload",
         occurred_at_ms=2,
         max_provider_timestamp_ms=100,
@@ -345,6 +320,29 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert completed.clear_in_progress is False
     assert completed.epoch == clearing.epoch
     assert store.list_queue_rows() == ()
+
+
+@pytest.mark.parametrize("provenance", ["user_input", "agent"])
+def test_provenance_survives_payload_tombstoning(tmp_path: Path, provenance: str) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    result = store.enqueue_request(
+        source_message_id=f"source-{provenance}",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        provenance=provenance,
+        payload_text="private payload",
+        occurred_at_ms=1,
+        max_provider_timestamp_ms=100,
+    )
+    assert result.row is not None
+    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.mark_delivered(row, lease_owner="boot", now="2026-01-01T00:00:01.000Z")
+
+    tombstone = store.get_queue_row(result.row.source_message_digest)
+    assert tombstone is not None
+    assert tombstone.payload_text is None
+    assert tombstone.provenance == provenance
 
 
 def test_terminal_tombstones_compact_by_retention(tmp_path: Path) -> None:

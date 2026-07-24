@@ -385,16 +385,24 @@ async def memory_failures(
 
 async def memory_profile(
     *,
+    user_key: str,
     socket_path: Optional[Path] = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
-    return await _memory_request("GET", "/internal/memory/profile", socket_path=socket_path, timeout=timeout)
+    return await _memory_request(
+        "GET",
+        "/internal/memory/profile",
+        headers=_memory_user_key_headers(user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
 
 
 async def memory_search(
     query: str,
     limit: int,
     *,
+    user_key: str,
     socket_path: Optional[Path] = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
@@ -402,33 +410,7 @@ async def memory_search(
         "POST",
         "/internal/memory/search",
         payload={"query": query, "limit": limit},
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_capture(
-    source_message_id: str,
-    session_id: str,
-    text: str,
-    occurred_at_ms: int,
-    *,
-    attachments: Optional[list[dict[str, Any]]] = None,
-    socket_path: Optional[Path] = None,
-    timeout: float = 2.0,
-) -> dict[str, Any]:
-    """Durably enqueue one Workbench capture before ordinary dispatch starts."""
-
-    return await _memory_request(
-        "POST",
-        "/internal/memory/capture",
-        payload={
-            "source_message_id": source_message_id,
-            "session_id": session_id,
-            "text": text,
-            "occurred_at_ms": occurred_at_ms,
-            "attachments": attachments or [],
-        },
+        headers=_memory_user_key_headers(user_key),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -499,11 +481,30 @@ def memory_search_sync(
     )
 
 
+def memory_remember_sync(
+    text: str,
+    *,
+    caller_session_id: str | None = None,
+    capability: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/remember",
+        payload={"text": text},
+        headers=_memory_cli_access_headers(caller_session_id, capability),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def _memory_request(
     method: str,
     route: str,
     *,
     payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
     socket_path: Optional[Path] = None,
     timeout: float,
 ) -> dict[str, Any]:
@@ -515,7 +516,7 @@ async def _memory_request(
             base_url="http://localhost",
             timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
         ) as client:
-            response = await client.request(method, route, json=payload)
+            response = await client.request(method, route, json=payload, headers=headers)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     try:
@@ -563,6 +564,12 @@ def _memory_cli_access_headers(session_id: str | None, capability: str | None) -
     if capability:
         headers[MEMORY_CAPABILITY_HEADER] = capability
     return headers
+
+
+def _memory_user_key_headers(user_key: str) -> dict[str, str]:
+    from core.memory.cli_access import MEMORY_USER_KEY_HEADER
+
+    return {MEMORY_USER_KEY_HEADER: user_key}
 
 
 async def notify_vault_request_created(

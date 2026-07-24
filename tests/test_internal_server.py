@@ -32,6 +32,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
+from core.memory.cli_access import MemoryCliAccessRegistry
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from modules.im import MessageContext
 
@@ -194,7 +195,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/memory/failures", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
-    assert ("/internal/memory/capture", ("POST",)) in routes
+    assert ("/internal/memory/remember", ("POST",)) in routes
     assert ("/internal/memory/clear", ("POST",)) in routes
 
 
@@ -221,12 +222,16 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
             calls.append(("failures", None))
             return {"items": [], "retention_days": 90}
 
-        async def profile_payload(self):
-            calls.append(("profile", None))
+        def principal_for_user_key(self, user_key):
+            assert user_key == "avibe:local"
+            return "u-11111111111111111111111111111111"
+
+        async def profile_payload(self, principal_id):
+            calls.append(("profile", principal_id))
             return {"status": "ok", "items": []}
 
-        async def search_payload(self, query, limit):
-            calls.append(("search", (query, limit)))
+        async def search_payload(self, query, limit, principal_id):
+            calls.append(("search", (query, limit, principal_id)))
             return {"status": "ok", "items": []}
 
         async def clear(self):
@@ -242,6 +247,11 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         return {"ok": True, "state": "ready"}
 
     controller.memory_runtime = _Runtime()
+    controller.memory_cli_access = MemoryCliAccessRegistry()
+    capability = controller.memory_cli_access.grant(
+        "session-1",
+        "u-11111111111111111111111111111111",
+    )
     controller.reconcile_memory = reconcile_memory
     monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured-memory"))
     app = internal_server.create_app(controller)
@@ -249,25 +259,34 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     async def _go():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            user_headers = {"X-Avibe-Memory-User-Key": "avibe:local"}
+            capability_headers = {
+                "X-Avibe-Caller-Session": "session-1",
+                "X-Avibe-Memory-Capability": capability,
+            }
             responses = (
                 await client.get("/internal/memory/status"),
                 await client.get("/internal/memory/failures"),
-                await client.get("/internal/memory/profile"),
-                await client.post("/internal/memory/search", json={"query": "safe query", "limit": 3}),
+                await client.get("/internal/memory/profile", headers=user_headers),
                 await client.post(
-                    "/internal/memory/capture",
-                    json={
-                        "source_message_id": "workbench:message-1",
-                        "session_id": "session-1",
-                        "text": "ordinary text",
-                        "occurred_at_ms": 123,
-                    },
+                    "/internal/memory/search",
+                    json={"query": "safe query", "limit": 3},
+                    headers=user_headers,
+                ),
+                await client.post(
+                    "/internal/memory/remember",
+                    json={"text": "ordinary text"},
+                    headers=capability_headers,
                 ),
                 await client.post("/internal/memory/clear", json={"confirm": True}),
                 await client.post("/internal/memory/install-runtime"),
                 await client.post("/internal/reconcile-memory"),
-                await client.post("/internal/memory/search", json=[]),
-                await client.post("/internal/memory/capture", json={"text": "missing fields"}),
+                await client.post("/internal/memory/search", json=[], headers=user_headers),
+                await client.post(
+                    "/internal/memory/remember",
+                    json={"text": ""},
+                    headers=capability_headers,
+                ),
             )
             await asyncio.wait_for(capture_finished.wait(), timeout=1)
             return responses
@@ -294,8 +313,10 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         "reconcile",
     ]
     captured_request = next(value for name, value in calls if name == "capture")
-    assert captured_request.source_message_id == "workbench:message-1"
+    assert captured_request.source_message_id.startswith("agent:session-1:")
     assert captured_request.session_id == "session-1"
+    assert captured_request.principal_id == "u-11111111111111111111111111111111"
+    assert captured_request.provenance == "agent"
 
 
 def test_memory_internal_reads_reject_an_unverified_agent_capability():
@@ -303,7 +324,7 @@ def test_memory_internal_reads_reject_an_unverified_agent_capability():
     calls: list[str] = []
 
     class _Runtime:
-        async def profile_payload(self):
+        async def profile_payload(self, principal_id):
             calls.append("profile")
             return {"status": "ok", "items": []}
 
@@ -337,7 +358,8 @@ def test_memory_internal_reads_accept_a_session_bound_agent_capability():
         profile_payload=AsyncMock(return_value={"status": "ok", "items": []})
     )
     controller.memory_cli_access = MemoryCliAccessRegistry()
-    capability = controller.memory_cli_access.grant("ses-admin")
+    principal_id = "u-11111111111111111111111111111111"
+    capability = controller.memory_cli_access.grant("ses-admin", principal_id)
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -355,10 +377,64 @@ def test_memory_internal_reads_accept_a_session_bound_agent_capability():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "items": []}
-    controller.memory_runtime.profile_payload.assert_awaited_once_with()
+    controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id)
 
 
-def test_memory_capture_endpoint_returns_after_durable_capture_handoff():
+def test_memory_internal_reads_keep_two_capability_principals_isolated():
+    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
+
+    first_principal = "u-11111111111111111111111111111111"
+    second_principal = "u-22222222222222222222222222222222"
+    calls: list[tuple[str, str]] = []
+
+    class _Runtime:
+        async def profile_payload(self, principal_id):
+            calls.append(("profile", principal_id))
+            return {"status": "ok", "items": [{"kind": "profile", "text": principal_id}]}
+
+        async def search_payload(self, _query, _limit, principal_id):
+            calls.append(("search", principal_id))
+            return {"status": "ok", "items": [{"kind": "fact", "text": principal_id}]}
+
+    controller = _build_controller_double()
+    controller.memory_runtime = _Runtime()
+    controller.memory_cli_access = MemoryCliAccessRegistry()
+    first_token = controller.memory_cli_access.grant("session-1", first_principal)
+    second_token = controller.memory_cli_access.grant("session-2", second_principal)
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first_headers = {
+                CALLER_SESSION_HEADER: "session-1",
+                MEMORY_CAPABILITY_HEADER: first_token,
+            }
+            second_headers = {
+                CALLER_SESSION_HEADER: "session-2",
+                MEMORY_CAPABILITY_HEADER: second_token,
+            }
+            return (
+                await client.get("/internal/memory/profile", headers=first_headers),
+                await client.post(
+                    "/internal/memory/search",
+                    json={"query": "mine", "limit": 3},
+                    headers=second_headers,
+                ),
+                await client.get("/internal/memory/profile"),
+                await client.post("/internal/memory/search", json={"query": "none", "limit": 3}),
+            )
+
+    first, second, unscoped_profile, unscoped_search = asyncio.run(_go())
+
+    assert first.json()["items"][0]["text"] == first_principal
+    assert second.json()["items"][0]["text"] == second_principal
+    assert unscoped_profile.status_code == 403
+    assert unscoped_search.status_code == 403
+    assert calls == [("profile", first_principal), ("search", second_principal)]
+
+
+def test_memory_remember_endpoint_returns_after_durable_capture_handoff():
     controller = _build_controller_double()
     capture_started = asyncio.Event()
     release_capture = asyncio.Event()
@@ -370,6 +446,11 @@ def test_memory_capture_endpoint_returns_after_durable_capture_handoff():
             return types.SimpleNamespace(status="accepted")
 
     controller.memory_runtime = types.SimpleNamespace(module=_Module())
+    controller.memory_cli_access = MemoryCliAccessRegistry()
+    capability = controller.memory_cli_access.grant(
+        "session-1",
+        "u-11111111111111111111111111111111",
+    )
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -377,12 +458,11 @@ def test_memory_capture_endpoint_returns_after_durable_capture_handoff():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             response_task = asyncio.create_task(
                 client.post(
-                    "/internal/memory/capture",
-                    json={
-                        "source_message_id": "workbench:message-1",
-                        "session_id": "session-1",
-                        "text": "ordinary text",
-                        "occurred_at_ms": 123,
+                    "/internal/memory/remember",
+                    json={"text": "ordinary text"},
+                    headers={
+                        "X-Avibe-Caller-Session": "session-1",
+                        "X-Avibe-Memory-Capability": capability,
                     },
                 )
             )
@@ -991,7 +1071,10 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                     message_type=messages_service.QUEUED_TYPE,
                     text="q1",
                     author_id="remote:user-a",
-                    metadata={"_web_push_user_key": "remote:user-a"},
+                    metadata={
+                        "_web_push_user_key": "remote:user-a",
+                        "_memory_user_id": "remote:user-a",
+                    },
                 )
                 messages_service.append(
                     conn,
@@ -1002,6 +1085,7 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                     source="user",
                     message_type=messages_service.QUEUED_TYPE,
                     text="q2",
+                    metadata={"_memory_user_id": "remote:user-a"},
                 )
         controller.mark_turn_complete(ctx)  # release each turn immediately
         return None
@@ -1780,7 +1864,11 @@ def _seed_avibe_session_with_queue(queued):
                 source=("harness" if prov is not None else "user"),
                 message_type=messages_service.QUEUED_TYPE,
                 text=text,
-                metadata=({session_turns.SCHEDULED_PROVENANCE_KEY: prov} if prov is not None else None),
+                metadata=(
+                    {session_turns.SCHEDULED_PROVENANCE_KEY: prov}
+                    if prov is not None
+                    else {session_turns.MEMORY_USER_ID_METADATA: "local"}
+                ),
                 native_message_id=(prov or {}).get("message_id") if prov is not None else None,
             )
     return session["id"]
@@ -3188,7 +3276,7 @@ def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
     assert runs[-1][2].platform_specific["suppress_delivery"] is True
 
 
-def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch):
+def test_flush_mixed_owner_user_rows_never_merge(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.services import sessions as sessions_service
@@ -3218,21 +3306,21 @@ def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch)
                 message_type=messages_service.QUEUED_TYPE,
                 text=text,
                 author_id=owner,
-                metadata={"_web_push_user_key": owner},
+                metadata={"_web_push_user_key": owner, "_memory_user_id": owner},
             )
 
     mgr, runs = _manager_capturing_runs()
 
     assert asyncio.run(mgr.flush_queue(session["id"])) is True
-    assert [(t, s) for t, s, _ in runs] == [("u1\nu2", SOURCE_HUMAN)]
+    assert [(t, s) for t, s, _ in runs] == [("u1", SOURCE_HUMAN)]
+    assert runs[0][2].user_id == "remote:user-a"
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, session["id"])
+    assert [row["text"] for row in queued] == ["u2"]
     with engine.connect() as conn:
         transcript = messages_service.list_session_messages(conn, session_id=session["id"], types=("user",))
-    assert transcript["messages"][0]["author_id"] is None
-    assert transcript["messages"][0]["metadata"]["_web_push_user_keys"] == [
-        "remote:user-a",
-        "remote:user-b",
-    ]
-    assert "_web_push_user_key" not in transcript["messages"][0]["metadata"]
+    assert transcript["messages"][0]["author_id"] == "remote:user-a"
+    assert transcript["messages"][0]["metadata"]["_web_push_user_key"] == "remote:user-a"
 
 
 def test_capture_scheduled_provenance_keeps_delivery_drops_routing():

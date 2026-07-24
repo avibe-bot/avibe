@@ -112,13 +112,13 @@ def test_group_message_uses_channel_require_mention_override() -> None:
     assert bot.on_message_callback.await_args.args[1] == "hello team"
 
 
-def test_denied_memory_command_reaches_only_safe_handler() -> None:
+def test_denied_memory_text_uses_regular_auth_denial() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     bot.check_authorization = lambda **kwargs: AuthResult(
         allowed=False,
         denial="unbound_dm",
         is_dm=True,
-        dispatch_to_safe_handler=True,
+        dispatch_to_safe_handler=False,
     )
     bot.dispatch_text_command = AsyncMock(return_value=True)
     bot.on_message_callback = AsyncMock()
@@ -135,8 +135,8 @@ def test_denied_memory_command_reaches_only_safe_handler() -> None:
         )
     )
 
-    bot.dispatch_text_command.assert_awaited_once()
-    bot.send_message.assert_not_awaited()
+    bot.dispatch_text_command.assert_not_awaited()
+    bot.send_message.assert_awaited_once()
     bot.on_message_callback.assert_not_awaited()
 
 

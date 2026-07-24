@@ -41,7 +41,6 @@ from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureRequest
-from core.memory.commands import bounded_inert_text, is_memory_command_candidate, parse_memory_command
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -734,7 +733,6 @@ class Controller:
             "settings": self._dispatch_to_controller_loop(self.settings_handler.handle_settings),
             "stop": self._dispatch_to_controller_loop(self.command_handler.handle_stop),
             "bind": self._dispatch_to_controller_loop(self.command_handler.handle_bind),
-            "memory": self._dispatch_to_controller_loop(self.handle_memory_command),
         }
 
         # IM inbound messages funnel through ``core.services.dispatch``
@@ -1205,24 +1203,32 @@ class Controller:
     # ----- Direct Memory entry admission ---------------------------------
 
     _MEMORY_IM_PLATFORMS = frozenset({"slack", "discord", "telegram", "lark", "feishu", "wechat"})
+    _MEMORY_PLATFORMS = _MEMORY_IM_PLATFORMS | {"avibe"}
 
     @classmethod
     def _memory_context_platform(cls, context: MessageContext) -> Optional[str]:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
         platform = context.platform or payload.get("platform")
-        if not isinstance(platform, str) or platform not in cls._MEMORY_IM_PLATFORMS:
+        if not isinstance(platform, str) or platform not in cls._MEMORY_PLATFORMS:
             return None
         return platform
 
-    def memory_im_admitted(self, context: MessageContext) -> bool:
-        """Fail closed unless this is a bound, enabled administrator DM."""
+    def memory_capture_admitted(self, context: MessageContext) -> bool:
+        """Admit an attributed human Workbench turn or a bound private IM turn."""
 
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
-        if payload.get("is_dm") is not True:
-            return False
         platform = self._memory_context_platform(context)
         user_id = getattr(context, "user_id", None)
-        if platform is None or not isinstance(user_id, str) or not user_id:
+        if (
+            platform is None
+            or not isinstance(user_id, str)
+            or not user_id.strip()
+            or user_id == "workbench"
+        ):
+            return False
+        if platform == "avibe":
+            return True
+        if payload.get("is_dm") is not True:
             return False
 
         try:
@@ -1233,11 +1239,26 @@ class Controller:
             store = manager.get_store()
             store.maybe_reload()
             user = store.get_user(user_id, platform=platform)
-            return bool(user is not None and user.enabled and user.is_admin)
+            return bool(user is not None and user.enabled)
         except Exception:
             # Direct Memory reads and capture must never turn a settings read
             # failure into an implicit authorization grant.
             return False
+
+    def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
+        platform = self._memory_context_platform(context)
+        user_id = getattr(context, "user_id", None)
+        if (
+            platform is None
+            or not isinstance(user_id, str)
+            or not user_id.strip()
+            or user_id == "workbench"
+        ):
+            return None
+        try:
+            return self.memory_runtime.principal_for_user_key(f"{platform}:{user_id}")
+        except Exception:
+            return None
 
     def configure_memory_cli_access(self, context: MessageContext, *, admitted: bool) -> bool:
         """Publish or revoke the CLI capability for this Agent session."""
@@ -1252,7 +1273,15 @@ class Controller:
             self.memory_cli_access.revoke(caller.session_id)
             payload.pop("memory_cli_capability", None)
             return False
-        payload["memory_cli_capability"] = self.memory_cli_access.grant(caller.session_id)
+        principal_id = self.memory_principal_for_context(context)
+        if principal_id is None:
+            self.memory_cli_access.revoke(caller.session_id)
+            payload.pop("memory_cli_capability", None)
+            return False
+        payload["memory_cli_capability"] = self.memory_cli_access.grant(
+            caller.session_id,
+            principal_id,
+        )
         return True
 
     def _memory_feature_enabled(self) -> bool:
@@ -1263,21 +1292,17 @@ class Controller:
     def _memory_inbound_is_ordinary_text(
         context: MessageContext,
         text: object,
-        *,
-        allow_memory_command: bool = False,
     ) -> bool:
         """Accept only adapter-normalized ordinary human text."""
 
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
             return False
-        if not allow_memory_command and is_memory_command_candidate(text):
-            return False
-        if getattr(context, "files", None):
-            return False
-        return context.is_ordinary_text is True
+        platform = Controller._memory_context_platform(context)
+        has_workbench_attachment = platform == "avibe" and bool(getattr(context, "files", None))
+        return context.is_ordinary_text is True and (bool(text.strip()) or has_workbench_attachment)
 
-    async def capture_memory_from_im(self, context: MessageContext, text: str, session_id: str) -> None:
-        """Submit eligible private-IM text after native dedup/session resolution.
+    async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
+        """Submit one eligible attributed human turn after session resolution.
 
         This is deliberately best effort. It is scheduled by ``MessageHandler``
         and never participates in an agent turn's completion path.
@@ -1285,107 +1310,54 @@ class Controller:
 
         platform = self._memory_context_platform(context)
         native_message_id = getattr(context, "message_id", None)
+        principal_id = self.memory_principal_for_context(context)
         if (
             platform is None
             or not isinstance(native_message_id, str)
             or not native_message_id
             or not isinstance(session_id, str)
             or not session_id
+            or principal_id is None
             or not self._memory_feature_enabled()
-            or not self.memory_im_admitted(context)
+            or not self.memory_capture_admitted(context)
             or not self._memory_inbound_is_ordinary_text(context, text)
+            or (platform != "avibe" and bool(getattr(context, "files", None)))
         ):
             return
+
+        from core.memory.attachments import workbench_capture_attachments
+
+        attachments = (
+            workbench_capture_attachments(getattr(context, "files", None))
+            if platform == "avibe"
+            else ()
+        )
+        source_prefix = "workbench" if platform == "avibe" else f"im:{platform}"
 
         started_at = time.monotonic()
         try:
             await self.memory_module.capture(
                 CaptureRequest(
-                    source_message_id=f"im:{platform}:{native_message_id}",
+                    source_message_id=f"{source_prefix}:{native_message_id}",
                     session_id=session_id,
+                    principal_id=principal_id,
+                    provenance="user_input",
                     text=text,
                     occurred_at_ms=int(time.time() * 1000),
+                    attachments=attachments,
                 )
             )
             logger.info(
-                "Memory IM capture platform=%s latency_ms=%d",
+                "Memory capture platform=%s latency_ms=%d",
                 platform,
                 int((time.monotonic() - started_at) * 1000),
             )
         except Exception:
             logger.warning(
-                "Memory IM capture failed platform=%s latency_ms=%d",
+                "Memory capture failed platform=%s latency_ms=%d",
                 platform,
                 int((time.monotonic() - started_at) * 1000),
             )
-
-    async def _send_memory_inert_reply(self, context: MessageContext, text: str) -> None:
-        client = self.get_im_client_for_context(context)
-        sender = getattr(client, "send_inert_message", None)
-        if not callable(sender):
-            return
-        await sender(context, bounded_inert_text(text))
-
-    def _claim_memory_command(self, context: MessageContext) -> bool:
-        """Claim a stable private command event before a direct Memory read."""
-
-        platform = self._memory_context_platform(context)
-        native_message_id = getattr(context, "message_id", None)
-        if platform is None or not isinstance(native_message_id, str) or not native_message_id:
-            # Some native slash command transports do not expose an event id.
-            # Those reads are non-mutating and may be repeated by a retry.
-            return True
-        sessions = getattr(self, "sessions", None)
-        recorder = getattr(sessions, "try_record_processed_message", None)
-        if not callable(recorder):
-            return True
-        try:
-            return bool(
-                recorder(
-                    f"memory-command:{platform}:{context.channel_id}",
-                    context.thread_id or native_message_id,
-                    native_message_id,
-                )
-            )
-        except Exception:
-            return False
-
-    def _memory_command_text(self, action: str, payload: dict[str, Any]) -> str:
-        if action == "status":
-            from core.memory.presentation import memory_status_buckets
-
-            state = payload.get("state") if isinstance(payload.get("state"), str) else "error"
-            buckets = memory_status_buckets(payload)
-            lines = [
-                self._t("memory.command.status", state=state),
-                self._t(
-                    "memory.command.counts",
-                    syncing=buckets.syncing,
-                    succeeded=buckets.succeeded,
-                    unknown=buckets.unknown,
-                    failed=buckets.failed,
-                    dead=buckets.dead,
-                    missed=buckets.missed,
-                ),
-            ]
-            fault_kind = payload.get("processing_fault_kind")
-            if fault_kind in {"credential", "engine"}:
-                lines.append(self._t(f"memory.command.fault.{fault_kind}"))
-            warning = payload.get("profile_warning")
-            if isinstance(warning, str) and warning:
-                lines.append(self._t("memory.command.profileWarning", warning=warning))
-            return "\n".join(lines)
-
-        items = payload.get("items")
-        if not isinstance(items, list) or not items:
-            return self._t("memory.command.empty")
-        heading = self._t("memory.command.profile") if action == "profile" else self._t("memory.command.search")
-        rendered_items: list[str] = []
-        for item in items[:8]:
-            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
-                continue
-            rendered_items.append(f"- {item['text']}")
-        return "\n".join([heading, *rendered_items]) if rendered_items else self._t("memory.command.empty")
 
     async def _send_memory_processing_event(
         self,
@@ -1412,48 +1384,6 @@ class Controller:
             log_label="Memory processing notification",
         )
         return bool(delivered)
-
-    async def handle_memory_command(self, context: MessageContext, args: str = "") -> None:
-        """Serve the closed read-only private-IM ``/memory`` command surface."""
-
-        command_text = f"/memory {args}".rstrip()
-        if (
-            not self._memory_feature_enabled()
-            or not self.memory_im_admitted(context)
-            or not self._memory_inbound_is_ordinary_text(
-                context,
-                command_text,
-                allow_memory_command=True,
-            )
-        ):
-            await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
-            return
-        if not self._claim_memory_command(context):
-            return
-
-        command = parse_memory_command(command_text)
-        if command is None or command.action == "invalid":
-            await self._send_memory_inert_reply(context, self._t("memory.command.usage"))
-            return
-        if command.action == "help":
-            await self._send_memory_inert_reply(context, self._t("memory.command.usage"))
-            return
-
-        try:
-            if command.action == "status":
-                payload = await self.memory_runtime.status_payload()
-            elif command.action == "profile":
-                payload = await self.memory_runtime.profile_payload()
-            else:
-                payload = await self.memory_runtime.search_payload(command.query or "", limit=8)
-        except Exception:
-            await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
-            return
-
-        if payload.get("status") == "failed":
-            await self._send_memory_inert_reply(context, self._t("memory.command.unavailable"))
-            return
-        await self._send_memory_inert_reply(context, self._memory_command_text(command.action, payload))
 
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""

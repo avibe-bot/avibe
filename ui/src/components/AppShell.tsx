@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -219,6 +219,7 @@ export const AppShell: React.FC = () => {
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
+  const [memoryNavVisible, setMemoryNavVisible] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
@@ -239,6 +240,20 @@ export const AppShell: React.FC = () => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
+  }, [api]);
+
+  useEffect(() => {
+    const refreshMemoryNav = () => {
+      void Promise.all([api.listDependencies(), api.getMemorySettings()])
+        .then(([dependencies, memory]) => {
+          const runtime = dependencies.deps?.find((item) => item.id === 'memory-runtime');
+          setMemoryNavVisible(Boolean(runtime?.installed && 'enabled' in memory && memory.enabled));
+        })
+        .catch(() => setMemoryNavVisible(false));
+    };
+    refreshMemoryNav();
+    window.addEventListener('avibe:memory-settings-changed', refreshMemoryNav);
+    return () => window.removeEventListener('avibe:memory-settings-changed', refreshMemoryNav);
   }, [api]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
@@ -318,6 +333,9 @@ export const AppShell: React.FC = () => {
       icon: Bot,
       match: (p) => p.startsWith('/admin/settings/backends'),
     },
+    ...(memoryNavVisible
+      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain }]
+      : []),
     {
       // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
       // backends moved out to their own sidebar destinations above, so exclude

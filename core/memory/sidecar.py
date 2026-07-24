@@ -7,6 +7,7 @@ import asyncio
 import importlib
 import json
 import os
+import re
 import stat
 from importlib.metadata import version
 from pathlib import Path
@@ -17,15 +18,14 @@ from urllib.parse import unquote, urlparse
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _PROJECT_ID = "personal"
+_PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
 
 
-def serve(uds: Path, owner_id: str) -> None:
+def serve(uds: Path) -> None:
     if version("everos") != "1.1.3":
         raise RuntimeError("everos version mismatch")
     if uds.exists() or not uds.parent.is_dir():
         raise RuntimeError("invalid sidecar socket path")
-    if not owner_id:
-        raise RuntimeError("missing sidecar owner")
     os.umask(0o077)
 
     from starlette.responses import JSONResponse
@@ -43,7 +43,6 @@ def serve(uds: Path, owner_id: str) -> None:
             request.method,
             request.url.path,
             body,
-            owner_id,
             attachments_root=attachments_root,
         ) is not None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
@@ -57,7 +56,6 @@ def _request_rejection(
     method: str,
     path: str,
     body: bytes,
-    owner_id: str,
     *,
     attachments_root: Path | None = None,
 ) -> str | None:
@@ -79,12 +77,12 @@ def _request_rejection(
     if not isinstance(payload, dict):
         return "shape"
     if path == "/api/v1/memory/add":
-        return _validate_add(payload, owner_id, attachments_root=attachments_root)
+        return _validate_add(payload, attachments_root=attachments_root)
     if path == "/api/v1/memory/flush":
         return _validate_flush(payload)
     if path == "/api/v1/memory/search":
-        return _validate_search(payload, owner_id)
-    return _validate_get(payload, owner_id)
+        return _validate_search(payload)
+    return _validate_get(payload)
 
 
 def _valid_scope(payload: dict[str, Any]) -> bool:
@@ -97,7 +95,6 @@ def _exact_keys(payload: dict[str, Any], keys: set[str]) -> bool:
 
 def _validate_add(
     payload: dict[str, Any],
-    owner_id: str,
     *,
     attachments_root: Path | None,
 ) -> str | None:
@@ -110,7 +107,7 @@ def _validate_add(
     if not isinstance(message, dict) or set(message) != {"sender_id", "role", "timestamp", "content"}:
         return "add"
     if (
-        message.get("sender_id") != owner_id
+        not _valid_principal(message.get("sender_id"))
         or message.get("role") != "user"
         or not isinstance(message.get("timestamp"), int)
         or isinstance(message.get("timestamp"), bool)
@@ -175,12 +172,12 @@ def _validate_flush(payload: dict[str, Any]) -> str | None:
     return None if isinstance(payload.get("session_id"), str) else "flush"
 
 
-def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
+def _validate_search(payload: dict[str, Any]) -> str | None:
     keys = {"user_id", "app_id", "project_id", "query", "method", "top_k", "include_profile", "enable_llm_rerank"}
     if not _exact_keys(payload, keys) or not _valid_scope(payload):
         return "search"
     if (
-        payload.get("user_id") != owner_id
+        not _valid_principal(payload.get("user_id"))
         or not isinstance(payload.get("query"), str)
         or payload.get("method") != "hybrid"
         or not isinstance(payload.get("top_k"), int)
@@ -193,12 +190,12 @@ def _validate_search(payload: dict[str, Any], owner_id: str) -> str | None:
     return None
 
 
-def _validate_get(payload: dict[str, Any], owner_id: str) -> str | None:
+def _validate_get(payload: dict[str, Any]) -> str | None:
     keys = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size", "sort_by", "sort_order"}
     if not _exact_keys(payload, keys) or not _valid_scope(payload):
         return "get"
     if (
-        payload.get("user_id") != owner_id
+        not _valid_principal(payload.get("user_id"))
         or payload.get("memory_type") not in {"profile", "episode"}
         or payload.get("page") != 1
         or payload.get("page_size") != 20
@@ -207,6 +204,10 @@ def _validate_get(payload: dict[str, Any], owner_id: str) -> str | None:
     ):
         return "get"
     return None
+
+
+def _valid_principal(value: object) -> bool:
+    return isinstance(value, str) and _PRINCIPAL_PATTERN.fullmatch(value) is not None
 
 
 def _processing_healthy_from_child_environment() -> bool:
@@ -229,14 +230,13 @@ def _processing_healthy_from_child_environment() -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--uds")
-    parser.add_argument("--owner-id")
     parser.add_argument("--probe-processing", action="store_true")
     args = parser.parse_args()
     if args.probe_processing:
         return 0 if _processing_healthy_from_child_environment() else 1
-    if not args.uds or not args.owner_id:
-        parser.error("--uds and --owner-id are required when serving")
-    serve(Path(args.uds), args.owner_id)
+    if not args.uds:
+        parser.error("--uds is required when serving")
+    serve(Path(args.uds))
     return 0
 
 

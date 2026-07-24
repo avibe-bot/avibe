@@ -2,6 +2,13 @@ import type { MemoryEndpointConfig, MemoryEndpointPatch } from '../context/ApiCo
 
 
 export type EndpointDraft = { baseUrl: string; model: string; apiKey: string; clearKey: boolean };
+export type MemorySetupStage = 'loading' | 'runtime-required' | 'setup' | 'manage';
+
+export function memorySetupStage(runtimeInstalled: boolean | null, enabled: boolean | null): MemorySetupStage {
+  if (runtimeInstalled === false) return 'runtime-required';
+  if (runtimeInstalled === null || enabled === null) return 'loading';
+  return enabled ? 'manage' : 'setup';
+}
 
 export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
   baseUrl: config.base_url ?? '',

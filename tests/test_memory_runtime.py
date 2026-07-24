@@ -635,13 +635,63 @@ def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: P
     assert runtime._provider._embedding_api_key is None
 
 
+def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
+    class _Artifact:
+        def set_provider_root(self, _provider_root: Path) -> None:
+            return None
+
+        def set_activation_coordinator(self, _coordinator) -> None:
+            return None
+
+        def resolve_python(self) -> None:
+            return None
+
+        def provider_root_format(self) -> None:
+            return None
+
+        def artifact_fingerprint(self) -> None:
+            return None
+
+        def compatible_provider_root_formats(self) -> frozenset[str]:
+            return frozenset()
+
+        def status(self) -> dict:
+            return {"reason": "memory_runtime_missing"}
+
+        def ensure(self, *, force: bool) -> dict:
+            raise AssertionError("startup reconciliation must not download Memory")
+
+    artifact = _Artifact()
+    disabled = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        effective_home=tmp_path / "disabled",
+    )
+    enabled = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=artifact,
+        effective_home=tmp_path / "enabled",
+    )
+
+    async def run() -> None:
+        assert await disabled.reconcile(MemoryConfig(enabled=False)) == {
+            "ok": True,
+            "state": "disabled",
+        }
+        assert await enabled.reconcile(MemoryConfig(enabled=True)) == {
+            "ok": False,
+            "error": "memory_runtime_missing",
+        }
+
+    asyncio.run(run())
+
+
 def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_keys(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid")
     monkeypatch.setenv("SSL_CERT_FILE", "/tmp/override.pem")
     process = EverOSProcess(
         sys.executable,
         effective_home=tmp_path,
-        owner_id="owner-1",
         settings=_settings(),
     )
     process._prepare_owned_directories()
@@ -669,7 +719,6 @@ def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Pat
         sys.executable,
         effective_home=tmp_path,
         socket_path=socket_path,
-        owner_id="owner-1",
         settings=_settings(),
     )
 
@@ -710,7 +759,6 @@ def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(monkeyp
         sys.executable,
         effective_home=tmp_path,
         socket_path=Path(f"/tmp/everos-{os.getpid()}.sock"),
-        owner_id="owner-1",
         settings=_settings(),
     )
     monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
@@ -752,7 +800,6 @@ def test_processing_probe_reaps_child_when_its_caller_is_cancelled(monkeypatch, 
     process = EverOSProcess(
         sys.executable,
         effective_home=tmp_path,
-        owner_id="owner-1",
         settings=_settings(),
     )
     monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
@@ -788,7 +835,7 @@ def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
             await asyncio.sleep(0.02)
         assert child_pid_path.exists()
         descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        process = EverOSProcess(sys.executable, effective_home=tmp_path, owner_id="owner-1", settings=_settings())
+        process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
         process._process_group = os.getpgid(child.pid)
         owned_processes = _snapshot_owned_processes(child.pid, process._process_group)
         await process._terminate_owned_tree(
@@ -818,7 +865,7 @@ def test_sidecar_stop_reaps_a_descendant_that_leaves_the_child_group(tmp_path: P
             await asyncio.sleep(0.02)
         assert child_pid_path.exists()
         descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        process = EverOSProcess(sys.executable, effective_home=tmp_path, owner_id="owner-1", settings=_settings())
+        process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
         process._process_group = os.getpgid(child.pid)
         owned_processes = _snapshot_owned_processes(child.pid, process._process_group)
         await process._terminate_owned_tree(
@@ -849,7 +896,7 @@ def test_sidecar_cleanup_skips_a_reused_pid_identity(monkeypatch, tmp_path: Path
     async def reaped(*_args, **_kwargs) -> bool:
         return True
 
-    process = EverOSProcess(sys.executable, effective_home=tmp_path, owner_id="owner-1", settings=_settings())
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
     monkeypatch.setattr("core.memory.process._snapshot_owned_processes", lambda *_args: {42_424: 22.0})
     monkeypatch.setattr("core.memory.process._wait_for_owned_exit", reaped)
 
@@ -1014,7 +1061,7 @@ def test_sidecar_cleanup_keeps_access_denied_identity_live_without_signaling(mon
 
 
 def test_sidecar_crash_counter_resets_only_after_observed_healthy_window(tmp_path: Path) -> None:
-    process = EverOSProcess(sys.executable, effective_home=tmp_path, owner_id="owner-1", settings=_settings())
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
     process._consecutive_failures = 4
 
     process._record_health_observation(True, observed_at=10.0)
@@ -1030,7 +1077,7 @@ def test_sidecar_crash_counter_resets_only_after_observed_healthy_window(tmp_pat
 
 
 def test_explicit_sidecar_retry_keeps_crash_budget_until_observed_health(monkeypatch, tmp_path: Path) -> None:
-    process = EverOSProcess(sys.executable, effective_home=tmp_path, owner_id="owner-1", settings=_settings())
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
     process._down = True
     process._consecutive_failures = 5
 
@@ -1137,6 +1184,32 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
     asyncio.run(run())
     assert callable(artifact.activation_coordinator)
     assert calls == [True]
+    assert runtime._config.enabled is False
+
+
+def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> None:
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - Python 3.10
+        import tomli as tomllib
+
+    project_root = Path(__file__).resolve().parents[1]
+    build_config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["hatch"][
+        "build"
+    ]
+    memory_entries = [
+        entry
+        for entry in (*build_config["artifacts"], *build_config["targets"]["sdist"]["include"])
+        if "memory_runtime" in entry
+    ]
+
+    assert memory_entries == [
+        "vibe/memory_runtime_manifest.json",
+        "vibe/memory_runtime_manifest.json",
+    ]
+    assert not list((project_root / "vibe").glob("memory_runtime*.tar.gz"))
+    assert not list((project_root / "vibe").glob("memory_runtime*.tgz"))
+    assert not list((project_root / "vibe").glob("memory_runtime*.zip"))
 
 
 def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact(monkeypatch, tmp_path: Path) -> None:
@@ -1902,7 +1975,6 @@ def test_generated_timezone_stays_with_existing_provider_root(tmp_path: Path) ->
     process = EverOSProcess(
         sys.executable,
         effective_home=tmp_path,
-        owner_id="owner-1",
         settings=_settings(),
     )
     process._prepare_owned_directories()

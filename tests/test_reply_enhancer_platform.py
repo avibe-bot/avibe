@@ -254,7 +254,9 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_memory_cli_prompt_admission_is_turn_and_surface_scoped(self):
         controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
-            memory_im_admitted=lambda context: bool((context.platform_specific or {}).get("admitted")),
+            memory_capture_admitted=lambda context: bool(
+                (context.platform_specific or {}).get("admitted")
+            ),
         )
         workbench = MessageContext(
             user_id="owner",
@@ -295,6 +297,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
             memory_cli_access=MemoryCliAccessRegistry(),
+            memory_principal_for_context=lambda _context: "u-11111111111111111111111111111111",
         )
         controller.configure_memory_cli_access = Controller.configure_memory_cli_access.__get__(controller)
         context = MessageContext(

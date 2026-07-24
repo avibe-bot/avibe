@@ -135,7 +135,7 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
 
         bot.on_message_callback.assert_not_awaited()
 
-    async def test_denied_memory_command_reaches_only_safe_handler(self):
+    async def test_denied_memory_text_uses_regular_auth_denial(self):
         bot = object.__new__(DiscordBot)
         bot.config = DiscordConfig(require_mention=False)
         bot._controller = None
@@ -146,7 +146,7 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
             allowed=False,
             denial="unbound_dm",
             is_dm=False,
-            dispatch_to_safe_handler=True,
+            dispatch_to_safe_handler=False,
         )
         bot.dispatch_text_command = AsyncMock(return_value=True)
         bot.on_message_callback = AsyncMock()
@@ -169,8 +169,8 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
 
         await DiscordBot._on_message_event(bot, message)
 
-        bot.dispatch_text_command.assert_awaited_once()
-        bot._send_auth_denial.assert_not_awaited()
+        bot.dispatch_text_command.assert_not_awaited()
+        bot._send_auth_denial.assert_awaited_once()
         bot.on_message_callback.assert_not_awaited()
 
     async def test_scheduled_active_thread_bypasses_mention_requirement(self):

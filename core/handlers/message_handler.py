@@ -205,18 +205,18 @@ class MessageHandler(BaseHandler):
             # is now known, so the controller can make one best-effort capture
             # decision without delaying dispatch.
             if is_human:
-                capture_memory = getattr(self.controller, "capture_memory_from_im", None)
+                capture_memory = getattr(self.controller, "capture_user_memory", None)
                 if callable(capture_memory):
                     capture_task = asyncio.create_task(
                         capture_memory(context, control_message, base_session_id),
-                        name="memory-im-capture",
+                        name="memory-capture",
                     )
 
                     def _log_memory_capture_result(done_task: asyncio.Task) -> None:
                         try:
                             done_task.result()
                         except Exception:
-                            logger.warning("Memory IM capture task failed")
+                            logger.warning("Memory capture task failed")
 
                     capture_task.add_done_callback(_log_memory_capture_result)
 

@@ -139,10 +139,10 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
 def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, int, str]] = []
 
-    async def search(query: str, limit: int):
-        calls.append((query, limit))
+    async def search(query: str, limit: int, *, user_key: str):
+        calls.append((query, limit, user_key))
         return {"status_code": 200, "body": {"status": "ok", "items": [], "warnings": []}}
 
     monkeypatch.setattr(internal_client, "memory_search", search)
@@ -157,7 +157,7 @@ def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypat
     )
 
     assert response.status_code == 200
-    assert calls == [("find this", 3)]
+    assert calls == [("find this", 3, "avibe:local")]
     assert response.headers["cache-control"] == "no-store"
 
 

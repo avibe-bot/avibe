@@ -18,8 +18,7 @@ import {
   X,
 } from 'lucide-react';
 
-import { CapabilityTabs } from './CapabilityTabs';
-import { WorkbenchPageHeader } from './WorkbenchPageHeader';
+import { SettingsPageShell } from './SettingsPageShell';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent } from '../ui/card';
@@ -40,7 +39,7 @@ import type {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { memoryStatusBuckets } from '../../lib/memoryStatus';
-import { buildEndpointPatch, draftFromConfig } from '../../lib/memorySettings';
+import { buildEndpointPatch, draftFromConfig, memorySetupStage } from '../../lib/memorySettings';
 import type { EndpointDraft } from '../../lib/memorySettings';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
@@ -804,7 +803,7 @@ const SettingsPanel: React.FC<{
   );
 };
 
-export const MemoryPage: React.FC = () => {
+export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -823,6 +822,7 @@ export const MemoryPage: React.FC = () => {
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [dependencyReady, setDependencyReady] = useState(true);
+  const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [repairing, setRepairing] = useState(false);
 
   const loadSettings = useCallback(async () => {
@@ -888,7 +888,12 @@ export const MemoryPage: React.FC = () => {
       const res = await api.listDependencies();
       const dep = res.deps?.find((d) => d.id === 'memory-runtime');
       // Absent row (older backend) → don't block enablement; only a present, non-ready row does.
-      if (dep) setDependencyReady(dep.installed && dep.status === 'ready');
+      if (dep) {
+        setRuntimeInstalled(dep.installed);
+        setDependencyReady(dep.installed && dep.status === 'ready');
+      } else {
+        setRuntimeInstalled(true);
+      }
     } catch {
       // Best-effort: leave the prior readiness rather than falsely blocking the toggle.
     }
@@ -959,22 +964,63 @@ export const MemoryPage: React.FC = () => {
     [t],
   );
 
-  return (
-    <div className="mx-auto flex w-full max-w-[900px] flex-col gap-5 py-2">
-      <CapabilityTabs />
-      <WorkbenchPageHeader
-        icon={<Brain className="size-6" />}
-        accent="violet"
-        title={t('memory.title')}
-        subtitle={t('memory.subtitle')}
-      />
+  const setupStage = memorySetupStage(runtimeInstalled, settings?.enabled ?? null);
 
+  return (
+    <SettingsPageShell
+      activeTab="memory"
+      title={t('memory.title')}
+      subtitle={t('memory.subtitle')}
+    >
       {remoteUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">
           <ShieldAlert className="size-6 text-muted" />
           <span className="text-[14px] font-semibold text-foreground">{t('memory.remoteUnavailable.title')}</span>
           <span className="max-w-md text-[12.5px] text-muted">{t('memory.remoteUnavailable.description')}</span>
         </div>
+      ) : setupStage === 'runtime-required' ? (
+        <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
+          <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+            <Brain className="size-4 text-violet" />
+            {t('memory.setup.runtimeRequired')}
+          </div>
+          <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
+          <Button asChild variant="secondary" size="sm">
+            <Link to="/admin/settings/dependencies">
+              {t('memory.settings.goToDependencies')}
+              <ArrowUpRight className="size-3.5" />
+            </Link>
+          </Button>
+        </div>
+      ) : setupStage === 'loading' ? (
+        settingsError && !settings ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {settingsError}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 px-1 text-sm text-muted">
+            <Loader2 className="size-4 animate-spin" />
+            {t('memory.settings.loading')}
+          </div>
+        )
+      ) : setupStage === 'setup' && settings ? (
+        <SettingsPanel
+          settings={settings}
+          status={status}
+          dependencyReady={dependencyReady}
+          onSaved={(next) => {
+            setSettings(next);
+            window.dispatchEvent(new Event('avibe:memory-settings-changed'));
+            void loadStatus();
+            void loadDependency();
+          }}
+          onReloadStatus={() => {
+            void loadStatus();
+            void loadDependency();
+          }}
+          onClearAll={() => setClearOpen(true)}
+          clearing={clearing}
+        />
       ) : (
         <>
           <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
@@ -1018,6 +1064,7 @@ export const MemoryPage: React.FC = () => {
                 dependencyReady={dependencyReady}
                 onSaved={(next) => {
                   setSettings(next);
+                  window.dispatchEvent(new Event('avibe:memory-settings-changed'));
                   void loadStatus();
                   void loadDependency();
                 }}
@@ -1067,6 +1114,6 @@ export const MemoryPage: React.FC = () => {
           </div>
         </div>
       </ConfirmDialog>
-    </div>
+    </SettingsPageShell>
   );
 };

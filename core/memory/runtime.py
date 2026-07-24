@@ -230,7 +230,6 @@ class MemoryRuntime:
             python,
             provider_root=self._provider_root,
             effective_home=self._effective_home,
-            owner_id=meta.principal_id,
             settings=_process_settings(config),
             socket_path=self._socket_path,
             on_ready=self._on_sidecar_ready,
@@ -259,15 +258,20 @@ class MemoryRuntime:
             "retention_days": TERMINAL_TOMBSTONE_RETENTION.days,
         }
 
-    async def profile_payload(self) -> dict[str, Any]:
-        result = await self.module.profile()
+    def principal_for_user_key(self, user_key: str) -> str:
+        return self._store.principal_for_user_key(user_key)
+
+    async def profile_payload(self, principal_id: str) -> dict[str, Any]:
+        result = await self.module.profile(principal_id=principal_id)
         return {
             **_result_payload(result),
             "profile_warning": "empty" if self._provider.profile_empty_warning else None,
         }
 
-    async def search_payload(self, query: str, limit: int) -> dict[str, Any]:
-        return _result_payload(await self.module.search(query, limit=limit))
+    async def search_payload(self, query: str, limit: int, principal_id: str) -> dict[str, Any]:
+        return _result_payload(
+            await self.module.search(query, limit=limit, principal_id=principal_id)
+        )
 
     async def clear(self) -> dict[str, Any]:
         result = await self.module.clear()
@@ -520,7 +524,6 @@ class MemoryRuntime:
                 python,
                 provider_root=self._provider_root,
                 effective_home=self._effective_home,
-                owner_id="memory-probe",
                 settings=_process_settings(config),
                 socket_path=self._socket_path,
             )

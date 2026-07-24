@@ -220,7 +220,7 @@ class MemoryWorker:
             return False
 
         capture = ProviderCapture(
-            principal_id=meta.principal_id,
+            principal_id=row.principal_id,
             session_ref=row.session_id,
             text=row.payload_text,
             provider_timestamp_ms=row.provider_timestamp_ms,

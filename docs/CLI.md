@@ -100,12 +100,13 @@ vibe status
 
 ### `vibe memory`
 
-Read local Memory through the existing mode-0600 controller socket. This command does not start a service and has no write, clear, configuration, capture, or export subcommands.
+Read scoped local Memory or explicitly queue context to remember through the existing mode-0600 controller socket. This command does not start a service and has no clear, configuration, export, or delete subcommands.
 
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
 vibe memory search <query> [--limit 1..20] [--json]
+vibe memory remember <text> [--json]
 ```
 
 ### `vibe doctor`

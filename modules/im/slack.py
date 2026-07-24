@@ -2152,7 +2152,7 @@ class SlackBot(BaseIMClient):
             return
 
         # Map native Slack slash commands to the shared command handlers.
-        command_mapping = {"start": "start", "stop": "stop", "memory": "memory"}
+        command_mapping = {"start": "start", "stop": "stop"}
 
         # Get the actual command name
         actual_command = command_mapping.get(command, command)

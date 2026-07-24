@@ -63,7 +63,6 @@ class EverOSProcess:
         *,
         provider_root: Path | str | None = None,
         effective_home: Path | str | None = None,
-        owner_id: str = "",
         settings: EverOSProcessSettings | None = None,
         socket_path: Path | str | None = None,
         startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS,
@@ -75,7 +74,6 @@ class EverOSProcess:
         self._memory_dir = self._effective_home / "memory"
         self._provider_root = Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
-        self._owner_id = owner_id
         self._settings = settings or EverOSProcessSettings()
         self._startup_timeout_seconds = _positive_timeout(startup_timeout_seconds, _STARTUP_TIMEOUT_SECONDS)
         self._stop_timeout_seconds = _positive_timeout(stop_timeout_seconds, _STOP_TIMEOUT_SECONDS)
@@ -123,12 +121,10 @@ class EverOSProcess:
     def consecutive_failures(self) -> int:
         return self._consecutive_failures
 
-    def set_settings(self, settings: EverOSProcessSettings, *, owner_id: str | None = None) -> None:
+    def set_settings(self, settings: EverOSProcessSettings) -> None:
         """Replace launch settings before an explicit reconciliation/start."""
 
         self._settings = settings
-        if owner_id is not None:
-            self._owner_id = owner_id
 
     async def start(self) -> bool:
         """Request an owned sidecar; failed starts enter bounded supervision."""
@@ -265,8 +261,6 @@ class EverOSProcess:
                 "core.memory.sidecar",
                 "--uds",
                 str(self._socket_path),
-                "--owner-id",
-                self._owner_id,
                 cwd=str(self._memory_dir),
                 env=child_env,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -456,7 +450,7 @@ class EverOSProcess:
             return
 
     def _validate_launch_inputs(self) -> None:
-        if os.name != "posix" or not self._python.is_file() or not self._owner_id:
+        if os.name != "posix" or not self._python.is_file():
             raise RuntimeError("invalid sidecar launch")
         if len(os.fsencode(self._socket_path)) + 1 > _socket_path_limit():
             raise RuntimeError("socket path exceeds sun_path")

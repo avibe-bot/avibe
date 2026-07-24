@@ -7,18 +7,46 @@ from core.memory import everos
 from core.memory.sidecar import _processing_healthy_from_child_environment, _request_rejection
 
 
-def test_sidecar_guard_allows_only_the_fixed_owner_and_memory_scope() -> None:
+def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
+    principal = "u-11111111111111111111111111111111"
     payload = (
         b'{"session_id":"src--one--e1","app_id":"avibe","project_id":"personal",'
-        b'"messages":[{"sender_id":"owner-1","role":"user","timestamp":1725000001234,'
+        b'"messages":[{"sender_id":"u-11111111111111111111111111111111","role":"user","timestamp":1725000001234,'
         b'"content":"text"}]}'
     )
 
-    assert _request_rejection("GET", "/health", b"", "owner-1") is None
-    assert _request_rejection("POST", "/api/v1/memory/add", payload, "owner-1") is None
-    assert _request_rejection("POST", "/api/v1/memory/add", payload, "other-owner") == "add"
-    assert _request_rejection("GET", "/api/v1/memory/search", b"", "owner-1") == "route"
-    assert _request_rejection("POST", "/unrelated", b"{}", "owner-1") == "route"
+    search = json.dumps(
+        {
+            "user_id": principal,
+            "app_id": "avibe",
+            "project_id": "personal",
+            "query": "profile",
+            "method": "hybrid",
+            "top_k": 1,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+        }
+    ).encode()
+    get = json.dumps(
+        {
+            "user_id": "u-22222222222222222222222222222222",
+            "app_id": "avibe",
+            "project_id": "personal",
+            "memory_type": "profile",
+            "page": 1,
+            "page_size": 20,
+            "sort_by": "timestamp",
+            "sort_order": "desc",
+        }
+    ).encode()
+
+    assert _request_rejection("GET", "/health", b"") is None
+    assert _request_rejection("POST", "/api/v1/memory/add", payload) is None
+    assert _request_rejection("POST", "/api/v1/memory/search", search) is None
+    assert _request_rejection("POST", "/api/v1/memory/get", get) is None
+    assert _request_rejection("POST", "/api/v1/memory/add", payload.replace(principal.encode(), b"owner-1")) == "add"
+    assert _request_rejection("GET", "/api/v1/memory/search", b"") == "route"
+    assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
 def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:
@@ -32,7 +60,7 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
         "project_id": "personal",
         "messages": [
             {
-                "sender_id": "owner-1",
+                "sender_id": "u-11111111111111111111111111111111",
                 "role": "user",
                 "timestamp": 1_725_000_001_234,
                 "content": [
@@ -53,7 +81,6 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
             "POST",
             "/api/v1/memory/add",
             json.dumps(payload).encode(),
-            "owner-1",
             attachments_root=attachments_root,
         )
         is None
@@ -64,7 +91,6 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
             "POST",
             "/api/v1/memory/add",
             json.dumps(payload).encode(),
-            "owner-1",
             attachments_root=attachments_root,
         )
         == "add"
@@ -78,7 +104,6 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
             "POST",
             "/api/v1/memory/add",
             json.dumps(payload).encode(),
-            "owner-1",
             attachments_root=attachments_root,
         )
         == "add"
