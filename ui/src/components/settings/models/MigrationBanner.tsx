@@ -10,11 +10,7 @@ import { ArrowDownToLine, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import {
-  migrationSignature,
-  readMigrationDismissed,
-  writeMigrationDismissed,
-} from '@/lib/modelHubMigrationDismiss';
+import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import { MigrationDialog } from './MigrationDialog';
 import { modelsApi } from './modelsApi';
 import type { MigrationItem } from './types';
@@ -47,7 +43,9 @@ export const MigrationBanner: React.FC<{
         // so they don't count as importable (they'd open a dead-end dialog).
         const items = scan.items.filter((i) => i.proposed_action !== 'reauth');
         setImportable(items);
-        setDismissed(items.length > 0 && readMigrationDismissed() === migrationSignature(items));
+        // Hidden while the current set is a subset of what was dismissed; a
+        // genuinely new id/action resurfaces it.
+        setDismissed(isMigrationDismissed(items));
       })
       .catch(() => {
         // A rescan (after apply, or a transient outage) that fails must not keep
@@ -63,7 +61,7 @@ export const MigrationBanner: React.FC<{
   if (importable.length === 0 || dismissed) return null;
 
   const dismiss = () => {
-    writeMigrationDismissed(migrationSignature(importable));
+    writeMigrationDismissed(importable);
     setDismissed(true);
   };
 
