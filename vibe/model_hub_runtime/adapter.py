@@ -393,7 +393,17 @@ class CLIProxyEngineAdapter:
                         source_id=source_id,
                     )
                 )
-            return await client.invoke(source, model_id, request, stream=stream)
+            request_protocol = {
+                "claude": "anthropic",
+                "codex": "openai_responses",
+            }.get(origin, getattr(request, "protocol", None) or source.protocol)
+            return await client.invoke(
+                source,
+                model_id,
+                request,
+                stream=stream,
+                request_protocol=request_protocol,
+            )
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         inventory = await asyncio.to_thread(_auth_inventory, client)

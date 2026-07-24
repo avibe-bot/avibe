@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
 
 from config import paths
-from config.v2_config import ModelHubConfig
+from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import EventAgent, EventReason
 from core.handlers.model_hub.identifiers import opencode_provider_id, parse_opencode_model_id
@@ -253,6 +253,7 @@ class ModelHubRuntimeRouter:
         self,
         *,
         service: ModelHubService | None = None,
+        turn_gateway: Any | None = None,
         overlay_path: Path | None = None,
         native_cli_ready: Callable[[BackendName], bool] | None = None,
     ) -> None:
@@ -261,11 +262,10 @@ class ModelHubRuntimeRouter:
 
             service = create_default_service(adapter=get_model_hub_engine_adapter())
         self.service = service
+        self.turn_gateway = turn_gateway
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
         self.native_cli_ready = native_cli_ready or self._default_native_cli_ready
         self._last_launch: dict[tuple[BackendName, str], ModelHubLaunch] = {}
-        self._pending_switch_reason: dict[tuple[BackendName, str], EventReason] = {}
-        self._pending_source_failure: dict[tuple[BackendName, str], tuple[str, EventReason]] = {}
 
     @staticmethod
     def _default_native_cli_ready(backend: BackendName) -> bool:
@@ -372,7 +372,9 @@ class ModelHubRuntimeRouter:
                 return prefix
         raise ModelHubError("engine_down", status=503)
 
-    async def _gateway_credentials(self) -> tuple[str, str]:
+    async def _gateway_credentials(self, backend: BackendName) -> tuple[str, str]:
+        if self.turn_gateway is not None:
+            return await self.turn_gateway.endpoint(backend)
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
         if status.listen_port is None:
@@ -380,17 +382,93 @@ class ModelHubRuntimeRouter:
         token = await self.service._engine_call(self.service.adapter.gateway_token())
         return f"http://{status.listen_host}:{status.listen_port}", token
 
-    def _emit_channel_switch(self, current: ModelHubLaunch) -> None:
+    @staticmethod
+    def _source_for_id(
+        config: ModelHubConfig,
+        source_id: object,
+    ) -> ModelHubSourceConfig | None:
+        if not isinstance(source_id, str):
+            return None
+        return next((source for source in config.sources if source.id == source_id), None)
+
+    def _transition_context(
+        self,
+        current: ModelHubLaunch,
+        config: ModelHubConfig,
+    ) -> tuple[ModelHubLaunch | None, ModelHubSourceConfig | None, EventReason | None]:
         route_key = self._route_key(current)
         previous = self._last_launch.get(route_key)
-        self._last_launch[route_key] = current
-        reason = self._pending_switch_reason.pop(route_key, None)
+        route_events = [
+            event
+            for event in self.service.events.list(limit=100)
+            if event.get("agent") == current.backend and event.get("model_id") == current.target_model
+        ]
+        pending_source: ModelHubSourceConfig | None = None
+        pending_reason: EventReason | None = None
+        for index, event in enumerate(route_events):
+            if event.get("kind") != "cooldown":
+                continue
+            failed_source_id = event.get("from_source")
+            consumed = any(
+                (
+                    newer.get("kind") == "switch"
+                    and newer.get("from_source") == failed_source_id
+                )
+                or (
+                    newer.get("kind") == "recover"
+                    and newer.get("to_source") == failed_source_id
+                )
+                for newer in route_events[:index]
+            )
+            if not consumed:
+                pending_source = self._source_for_id(config, failed_source_id)
+                reason = event.get("reason")
+                if reason in {"quota_exhausted", "rate_limited", "server_error", "network"}:
+                    pending_reason = cast(EventReason, reason)
+                break
+
+        if previous is None:
+            for event in route_events:
+                if event.get("kind") == "cooldown":
+                    source = self._source_for_id(config, event.get("from_source"))
+                elif event.get("kind") in {"switch", "channel_switch"}:
+                    source = self._source_for_id(config, event.get("to_source"))
+                else:
+                    continue
+                if source is not None:
+                    previous = ModelHubLaunch(
+                        backend=current.backend,
+                        channel=cast(LaunchChannel, source.supply_channel),
+                        requested_model=current.requested_model,
+                        target_model=current.target_model,
+                        runtime_model=current.runtime_model,
+                        source_id=source.id,
+                    )
+                    break
+        return previous, pending_source, pending_reason
+
+    def _emit_transition(self, current: ModelHubLaunch, config: ModelHubConfig) -> None:
+        previous, failed_source, failed_reason = self._transition_context(current, config)
+        self._last_launch[self._route_key(current)] = current
+        current_source = self._source_for_id(config, current.source_id)
+        if (
+            failed_source is not None
+            and failed_reason is not None
+            and current_source is not None
+            and failed_source.id != current_source.id
+        ):
+            self.service._emit_switch(
+                agent=cast(EventAgent, current.backend),
+                model_id=current.target_model,
+                failed_source=failed_source,
+                failed_reason=failed_reason,
+                source=current_source,
+            )
         if previous is None or previous.channel == current.channel:
             return
         if {previous.channel, current.channel} != {"native_cli", "hub"}:
             return
-        if reason is None:
-            reason = "recovery" if current.channel == "native_cli" else "manual"
+        reason = failed_reason or ("recovery" if current.channel == "native_cli" else "manual")
         self.service._record_event(
             agent=cast(EventAgent, current.backend),
             kind="channel_switch",
@@ -401,36 +479,13 @@ class ModelHubRuntimeRouter:
             now=self.service.now(),
         )
 
-    def _emit_source_switch(self, current: ModelHubLaunch, config: ModelHubConfig) -> None:
-        route_key = self._route_key(current)
-        pending = self._pending_source_failure.get(route_key)
-        if pending is None or not current.source_id:
-            return
-        failed_source_id, reason = pending
-        if failed_source_id == current.source_id:
-            self._pending_source_failure.pop(route_key, None)
-            return
-        failed_source = next((source for source in config.sources if source.id == failed_source_id), None)
-        current_source = next((source for source in config.sources if source.id == current.source_id), None)
-        if failed_source is None or current_source is None:
-            self._pending_source_failure.pop(route_key, None)
-            return
-        self.service._emit_switch(
-            agent=cast(EventAgent, current.backend),
-            model_id=current.target_model,
-            failed_source=failed_source,
-            failed_reason=reason,
-            source=current_source,
-        )
-        self._pending_source_failure.pop(route_key, None)
-
     async def resolve(self, backend: BackendName, requested_model: str) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = self.service.store.load()
         agent = config.agents[backend]
         if agent.mode == "direct":
             launch = self._direct_launch(backend, requested_model)
-            self._emit_channel_switch(launch)
+            self._emit_transition(launch, config)
             return launch
         # Fresh installs seed Hub mode before setup/migration has configured
         # every backend/model route. Preserve native launch only for an
@@ -487,20 +542,22 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
             )
         else:
-            gateway_base_url, gateway_token = await self._gateway_credentials()
-            prefix = await self._source_prefix(source.id)
+            gateway_base_url, gateway_token = await self._gateway_credentials(backend)
+            runtime_model = target_model
+            if self.turn_gateway is None:
+                prefix = await self._source_prefix(source.id)
+                runtime_model = f"{prefix}/{target_model}"
             launch = ModelHubLaunch(
                 backend=backend,
                 channel="hub",
                 requested_model=requested_model,
                 target_model=target_model,
-                runtime_model=f"{prefix}/{target_model}",
+                runtime_model=runtime_model,
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
             )
-        self._emit_source_switch(launch, config)
-        self._emit_channel_switch(launch)
+        self._emit_transition(launch, config)
         return launch
 
     async def resolve_opencode_overlay_launch(
@@ -517,8 +574,7 @@ class ModelHubRuntimeRouter:
         if launch is None:
             raise ModelHubError("mapping_target_unavailable", status=409)
         config = self.service.store.load()
-        self._emit_source_switch(launch, config)
-        self._emit_channel_switch(launch)
+        self._emit_transition(launch, config)
         return launch
 
     async def record_native_failure(self, context: Any, diagnostic: str) -> bool:
@@ -530,6 +586,8 @@ class ModelHubRuntimeRouter:
 
         launch = launch_for_context(context)
         if launch is None or launch.channel not in {"native_cli", "hub"} or not launch.source_id:
+            return False
+        if launch.channel == "hub" and self.turn_gateway is not None:
             return False
         if getattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False):
             return False
@@ -554,10 +612,6 @@ class ModelHubRuntimeRouter:
             model_id=launch.target_model,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
-        reason = cast(EventReason, decision.reason)
-        route_key = self._route_key(launch)
-        self._pending_source_failure[route_key] = (launch.source_id, reason)
-        self._pending_switch_reason[route_key] = reason
         return True
 
     async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:
@@ -571,7 +625,7 @@ class ModelHubRuntimeRouter:
         if not checked:
             raise ModelHubError("mapping_target_unavailable", status=409)
 
-        gateway_base_url, gateway_token = await self._gateway_credentials()
+        gateway_base_url, gateway_token = await self._gateway_credentials("opencode")
         providers: dict[str, dict[str, Any]] = {}
         projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
@@ -609,7 +663,6 @@ class ModelHubRuntimeRouter:
                 )
             if source is None:
                 continue
-            prefix = await self._source_prefix(source.id)
             package = _provider_package(source.protocol)
             base_url = _provider_base_url(gateway_base_url, source.protocol)
             provider = providers.setdefault(
@@ -624,8 +677,12 @@ class ModelHubRuntimeRouter:
             if provider["npm"] != package or provider["options"]["baseURL"] != base_url:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             model = next(item for item in source.models if item.id == model_id)
+            runtime_model = identifier
+            if self.turn_gateway is None:
+                prefix = await self._source_prefix(source.id)
+                runtime_model = f"{prefix}/{model_id}"
             provider["models"][model_id] = {
-                "id": f"{prefix}/{model_id}",
+                "id": runtime_model,
                 "name": model.display_name or model_id,
             }
             projected_identifiers.append(identifier)
@@ -637,7 +694,7 @@ class ModelHubRuntimeRouter:
                         channel="hub",
                         requested_model=identifier,
                         target_model=model_id,
-                        runtime_model=f"{prefix}/{model_id}",
+                        runtime_model=runtime_model,
                         source_id=source.id,
                         gateway_base_url=gateway_base_url,
                         gateway_token=gateway_token,

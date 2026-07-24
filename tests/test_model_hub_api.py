@@ -24,6 +24,7 @@ from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from vibe.model_hub_client import ModelHubRemoteService, _decode
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
 from vibe.ui_server import app
@@ -208,6 +209,35 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
 
     assert agents["opencode"]["builtin_models"] is None
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
+
+
+def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
+    monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
+
+    service = ui_server._model_hub_service()
+
+    assert isinstance(service, ModelHubRemoteService)
+    assert not hasattr(service, "adapter")
+
+
+def test_ui_model_hub_rpc_preserves_controller_error_contract():
+    import httpx
+
+    response = httpx.Response(
+        409,
+        json={
+            "ok": False,
+            "error": "mode_switch_blocked",
+            "detail": "modelHub.errors.mode_switch_blocked",
+        },
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        _decode(response)
+
+    assert exc_info.value.code == "mode_switch_blocked"
+    assert exc_info.value.status == 409
+    assert exc_info.value.detail == "modelHub.errors.mode_switch_blocked"
 
 
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):

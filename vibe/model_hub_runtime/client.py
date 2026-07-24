@@ -139,8 +139,10 @@ class EngineClient:
         request: Mapping[str, Any],
         *,
         stream: bool,
+        request_protocol: str | None = None,
     ) -> EngineInvokeHandle:
-        endpoint = _endpoint_for_protocol(source.protocol)
+        request_protocol = request_protocol or source.protocol
+        endpoint = _endpoint_for_protocol(request_protocol)
         body = dict(request)
         body["model"] = f"{source.prefix}/{model_id}"
         body["stream"] = stream
@@ -148,7 +150,7 @@ class EngineClient:
             "Authorization": f"Bearer {self.connection.gateway_token}",
             "Content-Type": "application/json",
         }
-        if source.protocol == "anthropic":
+        if request_protocol == "anthropic":
             headers["anthropic-version"] = "2023-06-01"
 
         timeout = aiohttp.ClientTimeout(

@@ -25,6 +25,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceBinding,
 )
+from core.handlers.model_hub.request import ModelHubRequest
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError
@@ -761,6 +762,75 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("source_protocol", "origin", "caller_protocol", "request_protocol"),
+    [
+        ("openai_compatible", "claude", "openai_chat", "anthropic"),
+        ("anthropic", "codex", "anthropic", "openai_responses"),
+        ("openai_chat", "opencode", "anthropic", "anthropic"),
+    ],
+)
+def test_adapter_uses_origin_protocol_for_engine_translation(
+    tmp_path: Path,
+    source_protocol: str,
+    origin: str,
+    caller_protocol: str,
+    request_protocol: str,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.request_protocol = None
+
+        async def invoke(
+            self,
+            source,
+            model_id,
+            request,
+            *,
+            stream,
+            request_protocol=None,
+        ):
+            self.request_protocol = request_protocol
+            return object()
+
+    class Supervisor:
+        def __init__(self, client: Client) -> None:
+            self._client = client
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            vendor="custom",
+            protocol=source_protocol,
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources(
+            [
+                _binding(
+                    credential_ref,
+                    protocol=source_protocol,
+                    allowed_origins=(origin,),
+                )
+            ]
+        )
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        request = ModelHubRequest({}, protocol=caller_protocol)
+        await adapter.invoke("src_fixture123", "model-a", request, False, origin)
+
+        assert client.request_protocol == request_protocol
+
+    asyncio.run(run())
+
+
 def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self) -> None:
@@ -813,7 +883,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
     invoked_refs: list[str] = []
 
     class Client:
-        async def invoke(self, source, model_id, request, *, stream):
+        async def invoke(self, source, model_id, request, *, stream, request_protocol=None):
             invoked_refs.append(source.credential_ref)
             return object()
 

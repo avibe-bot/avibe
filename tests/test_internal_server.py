@@ -159,6 +159,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/dispatch_async", ("POST",)) in routes
     assert ("/internal/reconcile-platforms", ("POST",)) in routes
     assert ("/internal/reconcile-agent-backends", ("POST",)) in routes
+    assert ("/internal/model-hub", ("POST",)) in routes
     assert ("/internal/cancel/{session_id}", ("POST",)) in routes
     assert ("/internal/dispatch", ("POST",)) in routes
     assert ("/internal/events", ("GET",)) in routes
@@ -226,6 +227,27 @@ def test_health_endpoint():
     resp = asyncio.run(_health_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+
+def test_model_hub_rpc_uses_controller_owned_service():
+    controller = _build_controller_double()
+    controller.model_hub_service = MagicMock()
+    controller.model_hub_service.list_sources.return_value = [{"id": "src_owned"}]
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/model-hub",
+                json={"operation": "list_sources", "payload": {}},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "result": [{"id": "src_owned"}]}
+    controller.model_hub_service.list_sources.assert_called_once_with()
 
 
 async def _publish_event_round_trip():
