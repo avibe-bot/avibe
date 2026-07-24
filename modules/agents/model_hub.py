@@ -18,6 +18,7 @@ from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import EventAgent, EventReason
 from core.handlers.model_hub.identifiers import opencode_provider_id, parse_opencode_model_id
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 
 
 BackendName = Literal["claude", "codex", "opencode"]
@@ -253,14 +254,12 @@ class ModelHubRuntimeRouter:
         self,
         *,
         service: ModelHubService | None = None,
-        turn_gateway: Any | None = None,
+        turn_gateway: ModelHubTurnGateway | None = None,
         overlay_path: Path | None = None,
         native_cli_ready: Callable[[BackendName], bool] | None = None,
     ) -> None:
         if service is None:
-            from vibe.model_hub_runtime import get_model_hub_engine_adapter
-
-            service = create_default_service(adapter=get_model_hub_engine_adapter())
+            service = create_default_service()
         self.service = service
         self.turn_gateway = turn_gateway
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"

@@ -44,6 +44,7 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
+from .errors import ModelDiscoveryError
 from .identifiers import (
     STANDARD_OPENCODE_VENDOR_IDS,
     opencode_model_id,
@@ -144,7 +145,7 @@ class V2ModelHubConfigStore:
 
 
 class UnavailableEngineAdapter:
-    """Fail-closed placeholder until the L1 runtime implementation is present."""
+    """Explicit fail-closed adapter for isolated callers and tests."""
 
     async def ensure_installed(self) -> EngineStatus:
         return await self.status()
@@ -405,6 +406,8 @@ class ModelHubService:
             return await awaitable
         except OriginNotAllowedError:
             raise ModelHubError("mode_switch_blocked", status=409) from None
+        except ModelDiscoveryError:
+            raise ModelHubError("discovery_failed", status=502) from None
         except EngineUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
         except NativeOAuthUnavailableError:
@@ -1142,7 +1145,13 @@ class ModelHubService:
         self.oauth_flows.forget(flow_id)
 
     async def runtime_status(self) -> dict:
-        return _runtime_payload(await self._engine_call(self.adapter.status()))
+        try:
+            status = await self._engine_call(self.adapter.start())
+        except ModelHubError as exc:
+            if exc.code != "engine_down":
+                raise
+            status = await self._engine_call(self.adapter.status())
+        return _runtime_payload(status)
 
     def migration_scan(self) -> dict:
         config = self.store.load()
@@ -1436,6 +1445,11 @@ def create_default_service(
     adapter: Optional[EngineAdapter] = None,
     native_oauth_adapter: Optional[OAuthAdapter] = None,
 ) -> ModelHubService:
+    if adapter is None:
+        from vibe.model_hub_runtime import get_model_hub_engine_adapter
+
+        adapter = get_model_hub_engine_adapter()
+
     def claude_oauth_probe() -> bool:
         from vibe.api import (
             _build_claude_status_probe_env,
@@ -1460,7 +1474,7 @@ def create_default_service(
 
     return ModelHubService(
         store=V2ModelHubConfigStore(),
-        adapter=adapter or UnavailableEngineAdapter(),
+        adapter=adapter,
         events=BoundedEventLog(paths.get_state_dir() / "model_hub_resolution_events.json"),
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),

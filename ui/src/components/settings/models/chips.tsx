@@ -81,16 +81,6 @@ export const ModeChip: React.FC<{ mode: AgentMode }> = ({ mode }) => {
   );
 };
 
-/** 菜单固定 / 菜单开放 — tiny label next to a backend name. */
-export const MenuKindBadge: React.FC<{ kind: 'fixed' | 'open' }> = ({ kind }) => {
-  const { t } = useTranslation();
-  return (
-    <Badge variant="secondary" className="rounded-md px-2 py-0.5 text-[10px] font-medium">
-      {kind === 'fixed' ? t('settings.models.menuKind.fixed') : t('settings.models.menuKind.open')}
-    </Badge>
-  );
-};
-
 /** 实验 — marks a consent-gated hub-held subscription source. */
 export const ExperimentalChip: React.FC = () => {
   const { t } = useTranslation();

@@ -648,9 +648,8 @@
         "hub": "Hub",
         "direct": "Direct"
       },
-      "menuKind": {
-        "fixed": "Fixed menu",
-        "open": "Open menu"
+      "errors": {
+        "engineDown": "Model engine is not ready yet; try again shortly"
       },
       "experimental": "Experimental",
       "agents": {
@@ -702,7 +701,6 @@
         "discovered": "Connected · discovered {{count}} models, added to the supply list",
         "failed": "Connection failed: {{detail}}",
         "testing": "Connecting…",
-        "vaultNote": "Stored locally; can go in Vault",
         "vendors": {
           "custom": "Custom · OpenAI / Anthropic compatible",
           "anthropic": "Anthropic",

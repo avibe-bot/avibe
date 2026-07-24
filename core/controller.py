@@ -230,11 +230,8 @@ class Controller:
         from core.handlers.model_hub import create_default_service
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
-        from vibe.model_hub_runtime import get_model_hub_engine_adapter
 
-        self.model_hub_service = create_default_service(
-            adapter=get_model_hub_engine_adapter(),
-        )
+        self.model_hub_service = create_default_service()
         self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
         self.model_hub_runtime = ModelHubRuntimeRouter(
             service=self.model_hub_service,
