@@ -12,14 +12,20 @@ import { Switch } from '../ui/switch';
 import { SegmentedRadio } from '../ui/segmented';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import {
+  type AgentGraphNode,
   type AgentGraphResult,
+  type AgentGraphTriggerNode,
   type GraphWindow,
   GRAPH_WINDOWS,
+  isBackground,
+  triggerRefId,
 } from '../../lib/agentGraph';
+import { searchGraph, type GraphSearchResult } from '../../lib/graphSearch';
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
 import { AgentGraphDetail } from './AgentGraphDetail';
 import { AgentGraphOrphanStrip } from './AgentGraphOrphanStrip';
+import { AgentGraphSearch } from './AgentGraphSearch';
 
 // Degraded-mode refresh cadence while SSE is disconnected (mirrors the old
 // RunningAgentsTab). SSE covers lifecycle writes when connected.
@@ -67,6 +73,36 @@ export const AgentGraphTab: React.FC = () => {
   const [showBackground, setShowBackground] = useState(true);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  // ── Node search (M8) ──────────────────────────────────────────────────────
+  // The display graph is server-filtered, so search runs over a separate broad
+  // "index" payload (this window/project, but always incl. ended + background)
+  // fetched lazily on first focus and cached by window/project. Hits outside the
+  // visible filters get badged; selecting one widens the filters, then locates.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchIndex, setSearchIndex] = useState<{
+    key: string;
+    nodes: AgentGraphNode[];
+    triggers: AgentGraphTriggerNode[];
+  } | null>(null);
+  const [searchIndexLoading, setSearchIndexLoading] = useState(false);
+  const searchSeqRef = useRef(0);
+  // Set on any display refresh (filter change / SSE / poll) so the next focus
+  // refetches a fresh index; the stale copy stays usable until then.
+  const searchStaleRef = useRef(false);
+  // Locate request handed to the canvas (nonce bumps per request).
+  const [locate, setLocate] = useState<{ rfId: string; kind: 'node' | 'trigger'; nonce: number } | null>(null);
+  const locateNonceRef = useRef(0);
+  // A locate that must wait for a filter-widening refetch to surface its target.
+  // `graphAtRequest` pins the payload present when the user selected, so the
+  // resolver only decides once a genuinely newer payload lands (superseded
+  // in-flight fetches never call setGraph, so graph identity is the signal).
+  const [pendingLocate, setPendingLocate] = useState<{
+    kind: 'node' | 'trigger';
+    id: string;
+    rfId: string;
+    graphAtRequest: GraphPayload | null;
+  } | null>(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -125,6 +161,10 @@ export const AgentGraphTab: React.FC = () => {
         // newer one issued after a filter change.
         if (!mountedRef.current || seq !== seqRef.current) return;
         setGraph(result);
+        // The graph just changed (filter/SSE/poll); the search index may now be
+        // out of date. Mark it stale so the next search-box focus refetches —
+        // the current copy stays usable so an open dropdown doesn't blank out.
+        searchStaleRef.current = true;
         // Every session-less live row (any state) goes to the strip — the graph
         // is session-centric so these have no node, and the old flat list let
         // users end them. The strip labels each by its actual state and offers a
@@ -259,6 +299,121 @@ export const AgentGraphTab: React.FC = () => {
     [navigate, triggersById],
   );
 
+  // Lazy-load the broad search index for the current window/project. Skipped
+  // when a fresh copy for this key is already cached; a stale flag (set by any
+  // display refresh) forces a refetch on the next focus.
+  const ensureSearchIndex = useCallback(async () => {
+    const key = `${windowSel}|${projectSel}`;
+    if (searchIndex?.key === key && !searchStaleRef.current) return;
+    const seq = ++searchSeqRef.current;
+    setSearchIndexLoading(true);
+    try {
+      const res = await api.getAgentsGraph({
+        window: windowSel,
+        project: projectSel,
+        includeEnded: true,
+        includeBackground: true,
+      });
+      if (!mountedRef.current || seq !== searchSeqRef.current) return;
+      searchStaleRef.current = false;
+      setSearchIndex({ key, nodes: res.nodes, triggers: res.trigger_nodes });
+    } catch {
+      // Leave any prior index in place; the box just shows no fresh results.
+    } finally {
+      if (mountedRef.current && seq === searchSeqRef.current) setSearchIndexLoading(false);
+    }
+  }, [api, windowSel, projectSel, searchIndex]);
+
+  const searchResults = useMemo<GraphSearchResult[]>(() => {
+    // Gate on the current window/project key: after a filter change the cached
+    // index is for the old key until the focus-triggered refetch lands, and its
+    // hits can't be revealed (the select path only widens active/background, not
+    // project/window). Show nothing until the fresh index arrives.
+    const key = `${windowSel}|${projectSel}`;
+    if (!searchIndex || searchIndex.key !== key) return [];
+    const all = searchGraph(searchQuery, searchIndex.nodes, searchIndex.triggers);
+    // Mobile renders the grouped list, not the canvas, and triggers have no
+    // detail panel — a trigger hit there would be a dead tap, so show nodes
+    // only (they still open the detail panel).
+    return isDesktop ? all : all.filter((r) => r.kind === 'node');
+  }, [searchQuery, searchIndex, windowSel, projectSel, isDesktop]);
+
+  // A hit is "outside current filters" when it isn't in the visible payload.
+  const isOutsideFilters = useCallback(
+    (r: GraphSearchResult) => (r.kind === 'node' ? !nodesById.has(r.id) : !triggersById.has(r.id)),
+    [nodesById, triggersById],
+  );
+
+  const requestLocate = useCallback((kind: 'node' | 'trigger', rfId: string) => {
+    setLocate({ rfId, kind, nonce: ++locateNonceRef.current });
+  }, []);
+
+  // Select a search result: if it's already visible, select + locate now; if it
+  // sits outside the filters, widen the needed toggle(s) and defer the locate to
+  // the pendingLocate effect once the refetch surfaces it.
+  const onSelectResult = useCallback(
+    (r: GraphSearchResult) => {
+      const rfId = r.kind === 'node' ? r.id : triggerRefId(r.id);
+      const inDisplay = r.kind === 'node' ? nodesById.has(r.id) : triggersById.has(r.id);
+      if (inDisplay) {
+        if (r.kind === 'node') setSelectedNodeId(r.id);
+        requestLocate(r.kind, rfId);
+        return;
+      }
+      // Index & display share window/project, so a hit is hidden only by the
+      // active/background toggles — widen exactly what's needed.
+      let flipped = false;
+      if (r.kind === 'node') {
+        if (isBackground(r.node) && !showBackground) {
+          setShowBackground(true);
+          flipped = true;
+        }
+        // Active view keeps only live + queued; an ended/idle node needs 含历史.
+        if (mode === 'active' && !(r.node.live || r.node.status === 'queued')) {
+          setMode('history');
+          flipped = true;
+        }
+      } else {
+        // A trigger chip only draws when its triggered session is in-window;
+        // widen both so the session (and thus the chip) can reappear.
+        if (!showBackground) {
+          setShowBackground(true);
+          flipped = true;
+        }
+        if (mode === 'active') {
+          setMode('history');
+          flipped = true;
+        }
+      }
+      setPendingLocate({ kind: r.kind, id: r.id, rfId, graphAtRequest: graph });
+      // Already at the widest filters but still absent ⇒ the index is stale and
+      // the row aged out; force a refetch so the pendingLocate effect confirms
+      // (graph identity changes) and toasts rather than hanging.
+      if (!flipped) void fetchGraph(false);
+    },
+    [nodesById, triggersById, showBackground, mode, requestLocate, fetchGraph, graph],
+  );
+
+  // Resolve a deferred locate: fire once the widened payload includes the
+  // target; once a genuinely newer payload has landed (graph identity changed)
+  // and it's still missing, it left the window between index load and select —
+  // tell the user, don't hang.
+  useEffect(() => {
+    if (!pendingLocate) return;
+    const present =
+      pendingLocate.kind === 'node'
+        ? nodesById.has(pendingLocate.id)
+        : triggersById.has(pendingLocate.id);
+    if (present) {
+      if (pendingLocate.kind === 'node') setSelectedNodeId(pendingLocate.id);
+      requestLocate(pendingLocate.kind, pendingLocate.rfId);
+      setPendingLocate(null);
+    } else if (graph !== pendingLocate.graphAtRequest) {
+      showToast(t('agents.graph.search.noLongerInWindow'), 'warning');
+      setPendingLocate(null);
+    }
+  }, [pendingLocate, nodesById, triggersById, graph, requestLocate, showToast, t]);
+
   const projectLabel = useMemo(() => {
     if (projectSel === 'all') return t('agents.graph.filters.projectAll');
     if (projectSel === 'standalone') return t('agents.graph.detail.standalone');
@@ -282,6 +437,15 @@ export const AgentGraphTab: React.FC = () => {
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-2.5">
+        <AgentGraphSearch
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          results={searchResults}
+          onFocus={() => void ensureSearchIndex()}
+          onSelect={onSelectResult}
+          loading={searchIndexLoading}
+          isOutsideFilters={isOutsideFilters}
+        />
         <SegmentedRadio
           value={mode}
           onChange={setMode}
@@ -398,6 +562,7 @@ export const AgentGraphTab: React.FC = () => {
                 // large graph, different project/window); SSE-only refreshes keep
                 // the same key and preserve the current pan/zoom.
                 fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}`}
+                locate={locate}
                 onSelectNode={setSelectedNodeId}
                 onSelectTrigger={onSelectTrigger}
                 onOpenChat={(id) => navigate(`/chat/${encodeURIComponent(id)}`)}
