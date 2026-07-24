@@ -686,15 +686,11 @@ class ModelHubService:
         if binding.channel == "hub" and not binding.experimental_consent:
             raise ModelHubError("consent_required", status=409)
 
-        display_name = {
-            "anthropic": "Claude",
-            "openai": "ChatGPT",
-        }.get(binding.vendor, binding.vendor)
         source = ModelHubSourceConfig(
             id=binding.source_id,
             kind="subscription",
             vendor=binding.vendor,
-            display_name=display_name,
+            display_name=binding.vendor,
             protocol=_default_protocol(binding.vendor),
             base_url=None,
             supply_channel=binding.channel,

@@ -88,17 +88,20 @@ def _account_label(status: Mapping[str, Any]) -> str | None:
 
 
 def _signed_in(backend: str, status: Mapping[str, Any]) -> bool:
-    if status.get("active_auth_mode") == "oauth":
+    active_auth_mode = status.get("active_auth_mode")
+    if active_auth_mode == "oauth":
         return True
+    if active_auth_mode not in {None, "none"}:
+        return False
     if backend == "claude":
+        if active_auth_mode == "none":
+            return False
         return status.get("has_oauth_credentials") is True
     if backend == "codex":
-        if status.get("has_chatgpt_tokens") is True:
-            return True
-        # Codex's default keyring store is intentionally opaque to the file
-        # status reader. The AgentAuthService success probe is authoritative in
-        # that case, so do not turn a just-completed login into a false error.
-        return status.get("auth_mode_uncertain") is True
+        # AgentAuthService reports success only after its own Codex CLI probe.
+        # The Settings status reader cannot see tokens in the default keyring,
+        # so an otherwise non-API-key completion must trust that probe.
+        return True
     return False
 
 

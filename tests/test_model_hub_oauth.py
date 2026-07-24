@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from core.handlers.model_hub.native_oauth import _signed_in
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 
 
@@ -41,3 +42,32 @@ def test_flow_registry_defaults_legacy_bindings_to_no_consent(tmp_path):
     binding = OAuthFlowRegistry(path).binding("oaf_legacy01")
     assert binding is not None
     assert binding.experimental_consent is False
+
+
+def test_native_status_trusts_codex_keyring_success_but_not_active_api_keys():
+    assert _signed_in(
+        "codex",
+        {
+            "active_auth_mode": "none",
+            "has_chatgpt_tokens": False,
+            "auth_mode_uncertain": False,
+        },
+    )
+    assert not _signed_in(
+        "codex",
+        {
+            "active_auth_mode": "api_key",
+            "has_chatgpt_tokens": True,
+        },
+    )
+
+
+def test_native_status_does_not_override_explicit_claude_api_key_mode():
+    assert not _signed_in(
+        "claude",
+        {
+            "active_auth_mode": "api_key",
+            "has_oauth_credentials": True,
+        },
+    )
+    assert _signed_in("claude", {"has_oauth_credentials": True})

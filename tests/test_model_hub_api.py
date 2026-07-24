@@ -207,7 +207,7 @@ def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_adapter, "_adapter", None)
     monkeypatch.setattr(runtime_supervisor, "_supervisor", None)
 
-    service = create_default_service()
+    service = create_default_service(native_oauth_adapter=FakeAdapter())
 
     assert isinstance(service.adapter, CLIProxyEngineAdapter)
     assert service.adapter.supervisor.state_store.root.is_relative_to(tmp_path)
@@ -215,12 +215,16 @@ def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
 
 def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
     from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+    from vibe import api
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    agent_auth_service = object()
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: agent_auth_service)
 
     service = create_default_service(adapter=FakeAdapter())
 
     assert isinstance(service.native_oauth_adapter, AgentAuthNativeOAuthAdapter)
+    assert service.native_oauth_adapter._agent_auth_service is agent_auth_service
 
 
 def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
