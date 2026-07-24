@@ -276,24 +276,36 @@ class TelegramBot(BaseIMClient):
         ]
 
     async def _sync_command_menu(self) -> None:
-        registrations: list[tuple[Optional[str], str]] = [(None, "en")]
-        registrations.extend(
+        languages: list[tuple[Optional[str], str]] = [(None, "en")]
+        languages.extend(
             (language, language)
             for language in get_supported_languages()
             if re.fullmatch(r"[a-z]{2}", language)
         )
+        scopes: tuple[Optional[dict[str, str]], ...] = (
+            None,
+            {"type": "all_private_chats"},
+        )
 
-        for language_code, translation_language in registrations:
-            try:
-                await telegram_api.set_my_commands(
-                    self.config.bot_token,
-                    self._build_command_menu(translation_language),
-                    language_code=language_code,
-                    proxy_url=self._proxy_url,
-                )
-            except Exception as err:
-                label = language_code or "default"
-                logger.warning("Failed to sync Telegram command menu for %s: %s", label, err)
+        for scope in scopes:
+            for language_code, translation_language in languages:
+                try:
+                    await telegram_api.set_my_commands(
+                        self.config.bot_token,
+                        self._build_command_menu(translation_language),
+                        scope=scope,
+                        language_code=language_code,
+                        proxy_url=self._proxy_url,
+                    )
+                except Exception as err:
+                    scope_label = scope["type"] if scope else "default"
+                    language_label = language_code or "default"
+                    logger.warning(
+                        "Failed to sync Telegram command menu for scope=%s language=%s: %s",
+                        scope_label,
+                        language_label,
+                        err,
+                    )
 
         try:
             await telegram_api.set_chat_menu_button(
