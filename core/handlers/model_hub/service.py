@@ -87,27 +87,6 @@ _CREDENTIAL_QUERY_KEYS = {
     "token",
 }
 
-_RUNTIME_MANIFEST = {
-    "name": "cliproxyapi",
-    "version": "v7.2.95",
-    "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
-    "assets": [
-        {
-            "platform": "darwin-arm64",
-            "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_aarch64.tar.gz",
-            "size_bytes": 14384655,
-            "sha256": "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
-        },
-        {
-            "platform": "linux-amd64",
-            "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_amd64.tar.gz",
-            "size_bytes": 15401775,
-            "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
-        },
-    ],
-}
-
-
 class ModelHubError(Exception):
     def __init__(self, code: str, *, status: int = 400):
         detail_key = f"modelHub.errors.{code}"
@@ -345,8 +324,11 @@ def _oauth_payload(flow: OAuthFlowState, *, channel: str) -> dict:
 
 
 def _runtime_payload(status: EngineStatus) -> dict:
+    # Import lazily to avoid the runtime adapter's dependency back on this service module.
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
     return {
-        "manifest": _RUNTIME_MANIFEST,
+        "manifest": EngineRuntimeManager().contract_manifest(),
         "status": {
             "installed_version": status.installed_version,
             "verified": status.verified,
