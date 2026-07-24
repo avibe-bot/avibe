@@ -74,6 +74,7 @@ class AdapterBoundaryFake:
     def __init__(self, results: list[AdapterResult]) -> None:
         self.results = deque(results)
         self.invocations: list[tuple[str, str, str]] = []
+        self.requests: list[object] = []
 
     async def start(self) -> EngineStatus:
         return EngineStatus(EngineHealth.OK, "test", True, "127.0.0.1", 18443, None)
@@ -89,6 +90,7 @@ class AdapterBoundaryFake:
 
     async def invoke(self, source_id, model_id, request, stream, origin) -> InvokeHandle:
         self.invocations.append((source_id, model_id, origin))
+        self.requests.append(request)
         result = self.results.popleft()
         outcome = RawCallOutcome(
             kind=result.kind,
@@ -367,6 +369,42 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
                 ) as response:
                     assert response.status == 401
             assert adapter.invocations == []
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake(
+            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
+        )
+        store = MemoryStore(_config(_source("src_primary")))
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        try:
+            base_url, token = await gateway.endpoint("claude")
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                async with client.post(
+                    f"{base_url}/v1/messages",
+                    headers={
+                        "x-api-key": token,
+                        "Authorization": "Bearer upstream-must-not-cross",
+                        "anthropic-beta": "interleaved-thinking",
+                    },
+                    json={"model": "model-live", "messages": []},
+                ) as response:
+                    assert response.status == 200
+            request = adapter.requests[0]
+            assert getattr(request, "headers") == {
+                "anthropic-beta": "interleaved-thinking",
+            }
         finally:
             await gateway.close()
 

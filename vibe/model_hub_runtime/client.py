@@ -43,6 +43,7 @@ _OFFICIAL_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "codex": "https://api.openai.com/v1",
 }
+_PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 
 
 class EngineClientError(RuntimeError):
@@ -140,6 +141,7 @@ class EngineClient:
         *,
         stream: bool,
         request_protocol: str | None = None,
+        request_headers: Mapping[str, str] | None = None,
     ) -> EngineInvokeHandle:
         request_protocol = request_protocol or source.protocol
         endpoint = _endpoint_for_protocol(request_protocol)
@@ -147,11 +149,18 @@ class EngineClient:
         body["model"] = f"{source.prefix}/{model_id}"
         body["stream"] = stream
         headers = {
-            "Authorization": f"Bearer {self.connection.gateway_token}",
-            "Content-Type": "application/json",
+            key.lower(): value
+            for key, value in (request_headers or {}).items()
+            if key.lower() in _PROTOCOL_HEADERS
         }
+        headers.update(
+            {
+                "Authorization": f"Bearer {self.connection.gateway_token}",
+                "Content-Type": "application/json",
+            }
+        )
         if request_protocol == "anthropic":
-            headers["anthropic-version"] = "2023-06-01"
+            headers.setdefault("anthropic-version", "2023-06-01")
 
         timeout = aiohttp.ClientTimeout(
             total=None,

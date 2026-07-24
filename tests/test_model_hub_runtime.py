@@ -789,8 +789,10 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             *,
             stream,
             request_protocol=None,
+            request_headers=None,
         ):
             self.request_protocol = request_protocol
+            self.request_headers = request_headers
             return object()
 
     class Supervisor:
@@ -823,10 +825,18 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             state_store=store,
         )
 
-        request = ModelHubRequest({}, protocol=caller_protocol)
+        request = ModelHubRequest(
+            {},
+            protocol=caller_protocol,
+            headers={"anthropic-beta": "interleaved-thinking", "authorization": "never-forward"},
+        )
         await adapter.invoke("src_fixture123", "model-a", request, False, origin)
 
         assert client.request_protocol == request_protocol
+        assert client.request_headers == {
+            "anthropic-beta": "interleaved-thinking",
+            "authorization": "never-forward",
+        }
 
     asyncio.run(run())
 
@@ -883,7 +893,16 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
     invoked_refs: list[str] = []
 
     class Client:
-        async def invoke(self, source, model_id, request, *, stream, request_protocol=None):
+        async def invoke(
+            self,
+            source,
+            model_id,
+            request,
+            *,
+            stream,
+            request_protocol=None,
+            request_headers=None,
+        ):
             invoked_refs.append(source.credential_ref)
             return object()
 

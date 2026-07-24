@@ -28,6 +28,13 @@ _REQUEST_PROTOCOLS: Final = {
     "responses": "openai_responses",
     "chat/completions": "openai_chat",
 }
+_PROTOCOL_HEADERS: Final = frozenset(
+    {
+        "anthropic-beta",
+        "anthropic-version",
+        "openai-beta",
+    }
+)
 
 
 class ModelHubTurnGateway:
@@ -114,10 +121,19 @@ class ModelHubTurnGateway:
             return self._error_response(status=400, code="invalid_request_error")
 
         try:
+            protocol_headers = {
+                name.lower(): value
+                for name, value in request.headers.items()
+                if name.lower() in _PROTOCOL_HEADERS
+            }
             resolved = await self.service.resolve(
                 backend=backend,
                 model_id=model_id,
-                request=ModelHubRequest(payload, protocol=_REQUEST_PROTOCOLS[endpoint]),
+                request=ModelHubRequest(
+                    payload,
+                    protocol=_REQUEST_PROTOCOLS[endpoint],
+                    headers=protocol_headers,
+                ),
                 stream=stream,
                 supply_channel="hub",
             )

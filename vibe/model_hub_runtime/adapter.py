@@ -404,6 +404,7 @@ class CLIProxyEngineAdapter:
                 request,
                 stream=stream,
                 request_protocol=request_protocol,
+                request_headers=getattr(request, "headers", None),
             )
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
