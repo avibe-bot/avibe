@@ -21,6 +21,7 @@ import {
   activityItemKind,
   activityKindI18nKey,
   harnessNavPath,
+  isQueuedRun,
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
@@ -2054,6 +2055,9 @@ const ActivityRow: React.FC<{
   const label = resolveActivityLabel(item, kindLabel);
   const relative = formatRelativeTime(item.since ?? item.started_at, t);
   const isHarness = kind !== 'backend_activity';
+  // A queued delegated run is waiting, not executing — mute its icon box so it
+  // cannot read as in-progress (its kind label already says "Queued message").
+  const queued = isQueuedRun(item);
   const subtitle =
     kind === 'backend_activity' && item.backend ? `${item.backend} · ${relative}` : relative;
   const body = (
@@ -2061,7 +2065,7 @@ const ActivityRow: React.FC<{
       <span
         className={clsx(
           'flex size-8 shrink-0 items-center justify-center rounded-lg',
-          ACTIVITY_ITEM_TINT[kind],
+          queued ? 'bg-surface-2 text-muted' : ACTIVITY_ITEM_TINT[kind],
         )}
       >
         <Icon className="size-4" aria-hidden="true" />
@@ -2122,6 +2126,12 @@ const ActivityStrip: React.FC<{
   const firstLabel = first
     ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
     : '';
+  // Mute the pill only when the banner consists SOLELY of queued delegated
+  // runs — a waiting message must not glow like live work. Any running item,
+  // watch, or task in the union keeps today's active treatment (pending items
+  // tie on rank and order by time, so checking only the headline row would
+  // mute a banner that still contains an enabled watch or scheduled task).
+  const queuedOnly = active.length > 0 && active.every(isQueuedRun);
   const expandable = active.length > 0;
   const navigateTo = (path: string) => {
     setOpen(false);
@@ -2130,16 +2140,20 @@ const ActivityStrip: React.FC<{
 
   const pill = (
     <StatusPill
-      tone="running"
+      tone={queuedOnly ? 'idle' : 'running'}
       role="status"
       aria-live="polite"
       className={clsx(
-        'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
+        'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
+        !queuedOnly && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
         active.length > 0 ? (
-          <Activity className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
+          <Activity
+            className={clsx('size-3.5 shrink-0', queuedOnly ? 'text-muted' : 'text-mint')}
+            aria-hidden="true"
+          />
         ) : (
           <Loader2 className="size-3.5 shrink-0 animate-spin text-mint" aria-hidden="true" />
         )

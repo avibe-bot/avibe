@@ -2739,7 +2739,8 @@
         "task": "任务",
         "taskOneShot": "一次性",
         "taskRecurring": "周期性",
-        "agentRun": "Agent 运行"
+        "agentRun": "Agent 运行",
+        "agentRunQueued": "排队消息"
       }
     },
     "agentActivity": {

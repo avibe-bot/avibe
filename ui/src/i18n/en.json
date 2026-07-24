@@ -2739,7 +2739,8 @@
         "task": "Task",
         "taskOneShot": "One-time",
         "taskRecurring": "Recurring",
-        "agentRun": "Agent run"
+        "agentRun": "Agent run",
+        "agentRunQueued": "Queued message"
       }
     },
     "agentActivity": {
