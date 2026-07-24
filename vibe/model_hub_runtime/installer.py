@@ -20,6 +20,7 @@ from vibe.model_hub_runtime.environment import engine_subprocess_environment
 
 
 _ENGINE_VERSION_RE = re.compile(r"CLIProxyAPI Version:\s*([\w.-]+)")
+# A manifest override must not silently expand the engine's supported host set.
 _ENGINE_PLATFORM_MAP = {
     "darwin-arm64": "darwin-arm64",
     "darwin-x64": "darwin-x64",
