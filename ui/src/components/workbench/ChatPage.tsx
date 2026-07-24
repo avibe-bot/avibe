@@ -21,6 +21,7 @@ import {
   activityItemKind,
   activityKindI18nKey,
   harnessNavPath,
+  isQueuedRun,
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
@@ -2054,6 +2055,9 @@ const ActivityRow: React.FC<{
   const label = resolveActivityLabel(item, kindLabel);
   const relative = formatRelativeTime(item.since ?? item.started_at, t);
   const isHarness = kind !== 'backend_activity';
+  // A queued delegated run is waiting, not executing — mute its icon box so it
+  // cannot read as in-progress (its kind label already says "Queued message").
+  const queued = isQueuedRun(item);
   const subtitle =
     kind === 'backend_activity' && item.backend ? `${item.backend} · ${relative}` : relative;
   const body = (
@@ -2061,7 +2065,7 @@ const ActivityRow: React.FC<{
       <span
         className={clsx(
           'flex size-8 shrink-0 items-center justify-center rounded-lg',
-          ACTIVITY_ITEM_TINT[kind],
+          queued ? 'bg-surface-2 text-muted' : ACTIVITY_ITEM_TINT[kind],
         )}
       >
         <Icon className="size-4" aria-hidden="true" />
@@ -2122,6 +2126,10 @@ const ActivityStrip: React.FC<{
   const firstLabel = first
     ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
     : '';
+  // Sorting puts in-progress items first, so a queued run in the headline slot
+  // means nothing is actively executing — drop the running glow (idle tone,
+  // muted icon, no mint shadow) so a waiting message can't look like live work.
+  const firstQueued = first ? isQueuedRun(first) : false;
   const expandable = active.length > 0;
   const navigateTo = (path: string) => {
     setOpen(false);
@@ -2130,16 +2138,20 @@ const ActivityStrip: React.FC<{
 
   const pill = (
     <StatusPill
-      tone="running"
+      tone={firstQueued ? 'idle' : 'running'}
       role="status"
       aria-live="polite"
       className={clsx(
-        'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal shadow-sm shadow-mint/5',
+        'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
+        !firstQueued && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
         active.length > 0 ? (
-          <Activity className="size-3.5 shrink-0 text-mint" aria-hidden="true" />
+          <Activity
+            className={clsx('size-3.5 shrink-0', firstQueued ? 'text-muted' : 'text-mint')}
+            aria-hidden="true"
+          />
         ) : (
           <Loader2 className="size-3.5 shrink-0 animate-spin text-mint" aria-hidden="true" />
         )

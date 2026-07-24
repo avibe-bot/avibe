@@ -15,11 +15,22 @@ export function activityItemKind(
   return kind && HARNESS_ITEM_KINDS.includes(kind) ? kind : 'backend_activity';
 }
 
+// A delegated run that is waiting behind the target session's active turn.
+// Only agent runs carry ``queued``; watches/tasks have their own pending
+// statuses (``enabled`` / ``scheduled``) and keep their kind labels.
+export function isQueuedRun(
+  item: Pick<SessionActivityState, 'item_kind' | 'status'>,
+): boolean {
+  return activityItemKind(item) === 'agent_run' && item.status === 'queued';
+}
+
 // Task recurrence is an explicit durable field (`at` / `cron`). Keep this
 // mapping independent of task names so display text can never misclassify a
-// user-authored label that happens to mention scheduling words.
+// user-authored label that happens to mention scheduling words. A queued
+// delegated run maps to its own key ("Queued message") — labeling it "Agent
+// run" reads as still-executing and misled users about unfinished work.
 export function activityKindI18nKey(
-  item: Pick<SessionActivityState, 'item_kind' | 'schedule_type'>,
+  item: Pick<SessionActivityState, 'item_kind' | 'schedule_type' | 'status'>,
 ): string {
   const kind = activityItemKind(item);
   if (kind === 'task') {
@@ -27,7 +38,7 @@ export function activityKindI18nKey(
     if (item.schedule_type === 'cron') return 'taskRecurring';
   }
   if (kind === 'backend_activity') return 'backendActivity';
-  if (kind === 'agent_run') return 'agentRun';
+  if (kind === 'agent_run') return isQueuedRun(item) ? 'agentRunQueued' : 'agentRun';
   return kind;
 }
 
