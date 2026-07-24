@@ -229,6 +229,40 @@ def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
     assert runtime["status"]["verified"] is True
 
 
+def test_runtime_status_falls_back_when_engine_cannot_start(tmp_path):
+    class StartFailureAdapter(FakeAdapter):
+        async def start(self):
+            raise RuntimeError("engine cannot start")
+
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_INSTALLED,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=StartFailureAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert runtime["status"] == {
+        "installed_version": None,
+        "verified": False,
+        "listening": None,
+        "health": "not_installed",
+        "last_check": None,
+    }
+
+
 def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
     class DiscoveryFailureAdapter(FakeAdapter):
         async def discover_models(self, vendor, protocol, base_url, credential_ref):
