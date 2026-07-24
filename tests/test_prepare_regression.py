@@ -292,6 +292,31 @@ def test_normalize_config_payload_preserves_custom_backend_paths(tmp_path: Path)
     assert json.loads(config_path.read_text(encoding="utf-8")) == payload
 
 
+def test_main_normalizes_preserved_config_without_preparing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "opencode": {"cli_path": "/usr/local/bin/opencode"},
+                    "claude": {"cli_path": "/usr/bin/claude"},
+                    "codex": {"cli_path": "/usr/local/bin/codex"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["prepare_regression.py", "--normalize-config", str(config_path)])
+
+    assert module.main() == 0
+
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["agents"]["opencode"]["cli_path"] == "opencode"
+    assert payload["agents"]["claude"]["cli_path"] == "claude"
+    assert payload["agents"]["codex"]["cli_path"] == "codex"
+
+
 def test_prepare_keeps_avibe_home_authoritative_when_legacy_layout_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

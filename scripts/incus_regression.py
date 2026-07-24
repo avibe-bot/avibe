@@ -1144,11 +1144,12 @@ def instance_ui_dist_exists(runner: Runner, target: RegressionTarget, *, remote:
 
 
 def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    config_path = f"{AVIBE_HOME}/config/config.json"
     script = textwrap.dedent(f"""
         import json
         from pathlib import Path
 
-        path = Path({str(AVIBE_HOME + "/config/config.json")!r})
+        path = Path({config_path!r})
         if not path.exists():
             raise SystemExit(0)
         payload = json.loads(path.read_text())
@@ -1165,9 +1166,10 @@ def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote
         path.write_text(json.dumps(payload, indent=2))
     """).strip()
     runner.run(
-        root_exec(
+        tenant_exec(
             target,
-            f"python3 - <<'PY'\n{script}\nPY\nchown {SERVICE_USER}:{SERVICE_USER} {AVIBE_HOME}/config/config.json",
+            f"{VENV_DIR}/bin/python scripts/prepare_regression.py --normalize-config {shlex.quote(config_path)} && "
+            f"python3 - <<'PY'\n{script}\nPY",
             remote=remote,
         )
     )

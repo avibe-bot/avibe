@@ -747,10 +747,18 @@ def main() -> int:
         default="none",
         help="Reset scope before generating files: none, config, or all",
     )
+    parser.add_argument(
+        "--normalize-config",
+        type=Path,
+        help="Normalize a preserved regression config in place without preparing state",
+    )
     args = parser.parse_args()
 
     try:
-        prepare(Path(args.output_root).resolve(), reset_mode=args.reset_mode)
+        if args.normalize_config is not None:
+            _normalize_config_payload(args.normalize_config.resolve())
+        else:
+            prepare(Path(args.output_root).resolve(), reset_mode=args.reset_mode)
     except SystemExit as exc:
         print(str(exc), file=sys.stderr)
         return 1

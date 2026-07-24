@@ -1872,7 +1872,7 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     assert "updated_at" in mapping
 
 
-def test_normalize_runtime_config_updates_host_and_port() -> None:
+def test_normalize_runtime_config_updates_preserved_backend_paths_host_and_port() -> None:
     commands = []
 
     class RecordingRunner:
@@ -1893,6 +1893,11 @@ def test_normalize_runtime_config_updates_host_and_port() -> None:
     incus_regression.normalize_runtime_config(RecordingRunner(), target, remote=None)
 
     joined = "\n".join(commands)
+    assert "sudo -H -u avibe" in joined
+    assert (
+        "/opt/avibe/venv/bin/python scripts/prepare_regression.py "
+        "--normalize-config /home/avibe/.avibe/config/config.json"
+    ) in joined
     assert "ui.get(\"setup_host\") != '127.0.0.1'" in joined
     assert 'ui.get("setup_port") != 6123' in joined
     assert 'ui["setup_port"] = 6123' in joined
