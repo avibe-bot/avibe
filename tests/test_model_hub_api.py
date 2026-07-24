@@ -229,6 +229,22 @@ def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
     assert runtime["status"]["verified"] is True
 
 
+def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    service, _store, _adapter = _service(tmp_path)
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert runtime["manifest"] == EngineRuntimeManager(offline=True).contract_manifest()
+    assert [asset["platform"] for asset in runtime["manifest"]["assets"]] == [
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-amd64",
+        "linux-arm64",
+    ]
+
+
 def test_runtime_status_falls_back_when_engine_cannot_start(tmp_path):
     class StartFailureAdapter(FakeAdapter):
         async def start(self):
