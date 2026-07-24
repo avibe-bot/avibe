@@ -324,10 +324,19 @@ export const AgentGraphTab: React.FC = () => {
     }
   }, [api, windowSel, projectSel, searchIndex]);
 
-  const searchResults = useMemo<GraphSearchResult[]>(
-    () => (searchIndex ? searchGraph(searchQuery, searchIndex.nodes, searchIndex.triggers) : []),
-    [searchQuery, searchIndex],
-  );
+  const searchResults = useMemo<GraphSearchResult[]>(() => {
+    // Gate on the current window/project key: after a filter change the cached
+    // index is for the old key until the focus-triggered refetch lands, and its
+    // hits can't be revealed (the select path only widens active/background, not
+    // project/window). Show nothing until the fresh index arrives.
+    const key = `${windowSel}|${projectSel}`;
+    if (!searchIndex || searchIndex.key !== key) return [];
+    const all = searchGraph(searchQuery, searchIndex.nodes, searchIndex.triggers);
+    // Mobile renders the grouped list, not the canvas, and triggers have no
+    // detail panel — a trigger hit there would be a dead tap, so show nodes
+    // only (they still open the detail panel).
+    return isDesktop ? all : all.filter((r) => r.kind === 'node');
+  }, [searchQuery, searchIndex, windowSel, projectSel, isDesktop]);
 
   // A hit is "outside current filters" when it isn't in the visible payload.
   const isOutsideFilters = useCallback(

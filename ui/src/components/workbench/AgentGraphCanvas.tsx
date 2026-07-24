@@ -189,6 +189,16 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   // re-runs whenever `layout` changes (SSE refreshes) waiting for a not-yet-laid
   // -out target to appear.
   const lastLocateRef = useRef(0);
+  // The locate pulse's release timer lives here — NOT in the effect cleanup — so
+  // an SSE/poll layout refresh mid-pulse (which re-runs the effect) can't clear
+  // it and leave the target stuck-hovered.
+  const pulseTimerRef = useRef<number | undefined>(undefined);
+  useEffect(
+    () => () => {
+      if (pulseTimerRef.current) window.clearTimeout(pulseTimerRef.current);
+    },
+    [],
+  );
 
   // Only spawn + trigger edges are drawn (contract A8 drops callback edges from
   // the canvas). Derive the rendered set once and drive both the hover
@@ -308,27 +318,32 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   useEffect(() => {
     if (!locate || locate.nonce === lastLocateRef.current) return;
     const pos = layout.get(locate.rfId);
-    if (!pos) return;
-    lastLocateRef.current = locate.nonce;
+    if (!pos) return; // not laid out yet; a later layout pass re-runs this
+    const targetId = locate.rfId;
+    const nonce = locate.nonce;
     fittedRef.current = true;
     const w = locate.kind === 'trigger' ? TRIGGER_NODE_WIDTH : SESSION_NODE_WIDTH;
     const h = locate.kind === 'trigger' ? TRIGGER_NODE_HEIGHT : SESSION_NODE_HEIGHT;
     // Defer the pan + pulse to the next frame (like the fit) so we never call
     // setState synchronously inside the effect body.
     const raf = requestAnimationFrame(() => {
+      // Consume the nonce only once the pan actually runs, so a layout-driven
+      // rerun that cancels this raf before it fires re-schedules rather than
+      // dropping the locate.
+      lastLocateRef.current = nonce;
       reactFlow.setCenter(pos.x + w / 2, pos.y + h / 2, { zoom: LOCATE_ZOOM, duration: 480 });
       // Reuse the hover-highlight as the pulse (no new style): mark the target
       // hovered so its chain lights + the rest fades, then release after a beat.
-      setHoveredId(locate.rfId);
+      // The release timer lives in a ref so a mid-pulse layout refresh can't
+      // clear it (see pulseTimerRef).
+      setHoveredId(targetId);
+      if (pulseTimerRef.current) window.clearTimeout(pulseTimerRef.current);
+      pulseTimerRef.current = window.setTimeout(() => {
+        setHoveredId((cur) => (cur === targetId ? null : cur));
+        pulseTimerRef.current = undefined;
+      }, LOCATE_PULSE_MS);
     });
-    const timer = window.setTimeout(
-      () => setHoveredId((cur) => (cur === locate.rfId ? null : cur)),
-      LOCATE_PULSE_MS,
-    );
-    return () => {
-      cancelAnimationFrame(raf);
-      window.clearTimeout(timer);
-    };
+    return () => cancelAnimationFrame(raf);
   }, [locate, layout, reactFlow]);
 
   return (
