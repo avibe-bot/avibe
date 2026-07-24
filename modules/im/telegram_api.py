@@ -111,10 +111,13 @@ async def set_my_commands(
     bot_token: str,
     commands: list[dict[str, str]],
     *,
+    scope: Optional[dict[str, Any]] = None,
     language_code: Optional[str] = None,
     proxy_url: Optional[str] = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"commands": commands}
+    if scope is not None:
+        payload["scope"] = scope
     if language_code:
         payload["language_code"] = language_code
     return await call_api(bot_token, "setMyCommands", payload, proxy_url=proxy_url)

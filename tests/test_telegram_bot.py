@@ -542,9 +542,19 @@ def test_sync_command_menu_registers_localized_commands_and_menu_button() -> Non
         ) as menu_mock:
             asyncio.run(bot._sync_command_menu())
 
-    assert [call.kwargs["language_code"] for call in commands_mock.await_args_list] == [None, "en", "zh"]
+    assert [
+        (call.kwargs["scope"], call.kwargs["language_code"])
+        for call in commands_mock.await_args_list
+    ] == [
+        (None, None),
+        (None, "en"),
+        (None, "zh"),
+        ({"type": "all_private_chats"}, None),
+        ({"type": "all_private_chats"}, "en"),
+        ({"type": "all_private_chats"}, "zh"),
+    ]
     default_commands = commands_mock.await_args_list[0].args[1]
-    chinese_commands = commands_mock.await_args_list[2].args[1]
+    chinese_private_commands = commands_mock.await_args_list[5].args[1]
     assert [item["command"] for item in default_commands] == [
         "start",
         "new",
@@ -556,7 +566,7 @@ def test_sync_command_menu_registers_localized_commands_and_menu_button() -> Non
         "stop",
     ]
     assert default_commands[0]["description"] == "Open the main menu"
-    assert chinese_commands[0]["description"] == "打开主菜单"
+    assert chinese_private_commands[0]["description"] == "打开主菜单"
     assert all(call.kwargs["proxy_url"] == "socks5://127.0.0.1:1080" for call in commands_mock.await_args_list)
     menu_mock.assert_awaited_once_with(
         "123456:test-token",
@@ -570,7 +580,7 @@ def test_sync_command_menu_keeps_going_after_registration_failure() -> None:
 
     with patch(
         "modules.im.telegram.telegram_api.set_my_commands",
-        new=AsyncMock(side_effect=[RuntimeError("default failed"), {"ok": True}, {"ok": True}]),
+        new=AsyncMock(side_effect=[RuntimeError("default failed")] + [{"ok": True}] * 5),
     ) as commands_mock:
         with patch(
             "modules.im.telegram.telegram_api.set_chat_menu_button",
@@ -578,7 +588,7 @@ def test_sync_command_menu_keeps_going_after_registration_failure() -> None:
         ) as menu_mock:
             asyncio.run(bot._sync_command_menu())
 
-    assert commands_mock.await_count == 3
+    assert commands_mock.await_count == 6
     menu_mock.assert_awaited_once()
 
 
@@ -591,6 +601,7 @@ def test_set_my_commands_builds_language_payload_and_uses_proxy() -> None:
             telegram_api.set_my_commands(
                 "123456:test-token",
                 [{"command": "start", "description": "Open the main menu"}],
+                scope={"type": "all_private_chats"},
                 language_code="en",
                 proxy_url="socks5://127.0.0.1:1080",
             )
@@ -601,6 +612,7 @@ def test_set_my_commands_builds_language_payload_and_uses_proxy() -> None:
         "setMyCommands",
         {
             "commands": [{"command": "start", "description": "Open the main menu"}],
+            "scope": {"type": "all_private_chats"},
             "language_code": "en",
         },
         proxy_url="socks5://127.0.0.1:1080",
