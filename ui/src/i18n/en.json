@@ -662,7 +662,8 @@
         "menuComingSoon": "Model menus arrive in the next milestone",
         "modelCount": "{{count}} models",
         "multiSource": "Multiple sources",
-        "multiSourceCustom": "Multiple sources · {{count}} custom"
+        "multiSourceCustom": "Multiple sources · {{count}} custom",
+        "hubNoSupply": "On Hub · no source available yet (using Direct)"
       },
       "recent": {
         "title": "Recent switches",
@@ -736,12 +737,15 @@
           "awaitingPaste": "Waiting for authorization · times out in {{time}}",
           "awaitingDevice": "Waiting to finish · detected automatically, nothing to paste",
           "verifying": "Verifying…",
-          "success": "Connected"
+          "success": "Connected",
+          "finalizing": "Creating the source…"
         },
         "error": {
           "start": "Couldn't start authorization, please retry",
           "timeout": "Authorization timed out, please reconnect",
-          "generic": "Connection failed, please retry"
+          "generic": "Connection failed, please retry",
+          "finalize": "Authorized, but couldn't create the source — please retry",
+          "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
         },
         "hubOption": {
           "title": "Let the Hub hold this subscription (experimental)",
@@ -764,7 +768,8 @@
         "reorderFailed": "Couldn't save the new order",
         "connected": "Connected to the Hub",
         "connectFailed": "Couldn't connect, please retry",
-        "refreshFailed": "Couldn't refresh, please retry"
+        "refreshFailed": "Couldn't refresh, please retry",
+        "connectedNoSupply": "Switched to Hub, but no source can supply yet — still on Direct"
       },
       "menus": {
         "done": "Done",
@@ -811,7 +816,13 @@
           "previewEmpty": "Enter a model ID to preview",
           "previewHint": "The provider segment is chosen automatically: a recognized vendor uses its standard ID (identical to native OpenCode), otherwise it falls under custom/. Adding or removing sources and switching modes never change the identifier.",
           "add": "Add to menu",
-          "failed": "Couldn't add the model, please retry"
+          "failed": "Couldn't add the model, please retry",
+          "delete": "Remove model",
+          "deleteConfirmTitle": "Remove custom model?",
+          "deleteConfirmBody": "This removes {{model}} from “{{source}}”.",
+          "deleted": "Custom model removed",
+          "deleteFailed": "Couldn't remove the model, please retry",
+          "deleteInUse": "This model is still selected by an agent — unselect it in that menu/mapping first."
         }
       },
       "supplyMode": {
@@ -832,7 +843,9 @@
           "description": "{{backend}} uses its own native config (settings.json / CLI sign-in); Avibe only launches the process and doesn't manage models. Good for troubleshooting or fully self-managed setups.",
           "detected": "Existing direct config detected: {{detail}} — import it into the Hub in one click",
           "import": "Import to Hub…"
-        }
+        },
+        "switchedHubNoSupply": "Switched to Hub, but no source can supply yet — still on Direct",
+        "hubNoSupply": "Hub is selected, but no source can supply this backend yet, so it's still using Direct. Add or enable a source on the Models page to activate it."
       },
       "migration": {
         "title": "Connect to the Model Hub",
@@ -861,6 +874,33 @@
         "claude": "Claude Code",
         "codex": "Codex",
         "opencode": "OpenCode"
+      },
+      "sourceActions": {
+        "more": "More actions",
+        "rename": "Rename",
+        "rediscover": "Re-discover models",
+        "delete": "Delete source",
+        "renameTitle": "Rename source",
+        "renameLabel": "Display name",
+        "renamePlaceholder": "e.g. Production key",
+        "renamed": "Renamed",
+        "renameFailed": "Couldn't rename, please retry",
+        "rediscovered": "Re-discovered {{count}} model(s)",
+        "rediscoverFailed": "Couldn't re-discover, please retry",
+        "deleteTitle": "Delete source?",
+        "deleteBody": "This removes “{{name}}” from the Hub and revokes its credential. This can't be undone.",
+        "deleteConfirm": "Delete",
+        "deleteForceTitle": "Delete this source anyway?",
+        "deleteForceBody": "“{{name}}” is the only supplier of a selected model; deleting it leaves that agent with no source. Force delete?",
+        "deleteForceConfirm": "Force delete",
+        "deleted": "Source deleted",
+        "deleteFailed": "Couldn't delete, please retry"
+      },
+      "migrationBanner": {
+        "title": "Native configs ready to import",
+        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — all three agents share one set of sources.",
+        "import": "Import to Hub",
+        "dismiss": "Dismiss"
       }
     }
   },

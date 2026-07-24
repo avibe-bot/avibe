@@ -119,7 +119,15 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
       const next = await modelsApi.setAgentMode(backend, mode);
       if (!aliveRef.current) return;
       setAgent(next);
-      showToast(t(mode === 'hub' ? 'settings.models.supplyMode.switchedHub' : 'settings.models.supplyMode.switchedDirect') as string, 'success');
+      if (mode === 'direct') {
+        showToast(t('settings.models.supplyMode.switchedDirect') as string, 'success');
+      } else if (next.mode === 'hub' && next.current) {
+        showToast(t('settings.models.supplyMode.switchedHub') as string, 'success');
+      } else {
+        // Hub selected but nothing can supply this backend yet → the launch
+        // silently falls back to Direct. Tell the truth, don't claim success.
+        showToast(t('settings.models.supplyMode.switchedHubNoSupply') as string, 'warning');
+      }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.supplyMode.switchFailed') as string, 'error');
     } finally {
@@ -172,7 +180,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
           description={t('settings.models.supplyMode.hub.description', {
             backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
           }) as string}
-        />
+        >
+          {mode === 'hub' && !agent.current && (
+            <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
+              <Info className="mt-0.5 size-3.5 shrink-0 text-gold" />
+              <span>{t('settings.models.supplyMode.hubNoSupply')}</span>
+            </div>
+          )}
+        </OptionCard>
 
         <OptionCard
           selected={mode === 'direct'}

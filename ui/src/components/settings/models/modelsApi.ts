@@ -28,10 +28,12 @@ import type {
   MigrationApplyResult,
   MigrationScan,
   OAuthFlow,
+  OAuthSourceCreate,
   Priority,
   ResolutionEvent,
   RuntimeDependency,
   Source,
+  SourcePatch,
   SupplyChannel,
 } from './types';
 import { CONTRACT_VERSION } from './types';
@@ -39,7 +41,14 @@ import { CONTRACT_VERSION } from './types';
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
   createApiKeySource(draft: ApiKeySourceCreate): Promise<Source>;
-  deleteSource(id: string): Promise<void>;
+  /** Finalize a completed subscription OAuth flow into a persisted Source. */
+  createOAuthSource(draft: OAuthSourceCreate): Promise<Source>;
+  /** Rename / re-point a source (display_name, base_url). */
+  patchSource(id: string, patch: SourcePatch): Promise<Source>;
+  /** Re-run discovery on a hub source; resolves with the discovered count. */
+  testSource(id: string): Promise<number>;
+  /** Delete a source. `force` overrides the only-supplier guard. */
+  deleteSource(id: string, force?: boolean): Promise<void>;
   putPriority(order: string[]): Promise<Priority>;
   listAgents(): Promise<AgentSupply[]>;
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
@@ -51,7 +60,9 @@ export type ModelsApi = {
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
   listEvents(limit?: number): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
-  startOAuth(vendor: string, channel: SupplyChannel): Promise<OAuthFlow>;
+  /** `experimentalConsent` MUST be true for a consent-gated hub-held
+   *  subscription connect, or the server returns consent_required. */
+  startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean): Promise<OAuthFlow>;
   getOAuthStatus(flowId: string): Promise<OAuthFlow>;
   submitOAuth(flowId: string, value: string): Promise<OAuthFlow>;
   cancelOAuth(flowId: string): Promise<void>;
@@ -94,7 +105,10 @@ const jsonInit = (method: string, body?: unknown): RequestInit => ({
 const liveApi: ModelsApi = {
   listSources: () => call<{ sources: Source[] }>('/api/models/sources').then((r) => r.sources),
   createApiKeySource: (draft) => call<{ source?: Source } & Source>('/api/models/sources', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
-  deleteSource: (id) => call(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('DELETE')).then(() => undefined),
+  createOAuthSource: (draft) => call<{ source?: Source } & Source>('/api/models/sources', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
+  patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
+  testSource: (id) => call<{ discovered: number }>(`/api/models/sources/${encodeURIComponent(id)}/test`, jsonInit('POST')).then((r) => r.discovered),
+  deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=1' : ''}`, jsonInit('DELETE')).then(() => undefined),
   putPriority: (order) => call<{ priority?: Priority } & Priority>('/api/models/priority', jsonInit('PUT', { contract_version: CONTRACT_VERSION, order })).then((r) => (r.priority ?? r) as Priority),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
@@ -106,7 +120,11 @@ const liveApi: ModelsApi = {
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
   listEvents: (limit = 20) => call<{ events: ResolutionEvent[] }>(`/api/models/events?limit=${limit}`).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
-  startOAuth: (vendor, channel) => call<{ flow?: OAuthFlow } & OAuthFlow>('/api/models/oauth/start', jsonInit('POST', { vendor, channel })).then((r) => (r.flow ?? r) as OAuthFlow),
+  startOAuth: (vendor, channel, experimentalConsent) =>
+    call<{ flow?: OAuthFlow } & OAuthFlow>(
+      '/api/models/oauth/start',
+      jsonInit('POST', { vendor, channel, ...(experimentalConsent ? { experimental_consent: true } : {}) }),
+    ).then((r) => (r.flow ?? r) as OAuthFlow),
   getOAuthStatus: (flowId) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then((r) => (r.flow ?? r) as OAuthFlow),
   submitOAuth: (flowId, value) => call<{ flow?: OAuthFlow } & OAuthFlow>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then((r) => (r.flow ?? r) as OAuthFlow),
   cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(() => undefined),
@@ -168,9 +186,15 @@ class MockStore {
     return delay(structuredClone(source), 900); // simulate probe latency
   }
 
-  deleteSource(id: string) {
+  deleteSource(id: string, force = false) {
+    // Mirror the server's only-supplier guard (mode_switch_blocked): a source
+    // currently bound as some agent's supply can't be dropped without force.
+    if (!force && this.agents.some((a) => a.current?.source_id === id)) {
+      throw new ApiCallError('mode_switch_blocked');
+    }
     this.sources = this.sources.filter((s) => s.id !== id);
     this.priority.order = this.priority.order.filter((x) => x !== id);
+    for (const a of this.agents) if (a.current?.source_id === id) a.current = null;
     return delay(undefined);
   }
 
@@ -293,10 +317,16 @@ class MockStore {
     return delay(structuredClone(this.runtime));
   }
 
-  startOAuth(vendor: string, channel: SupplyChannel) {
+  startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean) {
+    // Mirror the server: a hub-held subscription connect requires recorded consent.
+    if (channel === 'hub' && !experimentalConsent) throw new ApiCallError('consent_required');
     const isDevice = vendor === 'openai';
     const flow: OAuthFlow = {
       flow_id: rid('oaf'),
+      // Deterministic pending-source binding (schema: hub flows always set it),
+      // consumed by createOAuthSource on finalize — mirrors the server, where
+      // create_source assigns source.id = flow.source_id.
+      source_id: rid('src'),
       vendor,
       channel,
       state: 'awaiting_action',
@@ -352,34 +382,66 @@ class MockStore {
     return delay(undefined);
   }
 
+  // A completed flow reaches `success` but does NOT itself materialize a Source
+  // (mirrors the server, where flow completion and source creation are split):
+  // the UI must finalize via createOAuthSource. Earlier the mock appended here,
+  // which hid the live P0 gap the audit flagged.
   private completeFlow(entry: MockFlow) {
     entry.flow.state = 'success';
-    // A completed subscription connect materializes a new native_cli source.
-    const vendor = entry.flow.vendor;
-    const isOpenai = vendor === 'openai';
+  }
+
+  createOAuthSource(draft: OAuthSourceCreate) {
+    const entry = this.flows.get(draft.oauth_flow_ref);
+    if (!entry || entry.flow.state !== 'success') throw new ApiCallError('flow_not_found');
+    const flow = entry.flow;
+    const isOpenai = flow.vendor === 'openai';
+    const id = flow.source_id ?? rid('src');
+    // Idempotent finalize: a duplicate browser retry must not double-create
+    // (the server raises migration_item_conflict; here we just re-echo).
+    const existing = this.sources.find((s) => s.id === id);
+    if (existing) return delay(structuredClone(existing), 300);
     const source: Source = {
-      id: rid('src'),
+      id,
       kind: 'subscription',
-      vendor,
-      display_name: isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅',
+      vendor: flow.vendor,
+      display_name: draft.display_name ?? (isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅'),
       protocol: isOpenai ? 'openai_responses' : 'anthropic',
       base_url: null,
-      supply_channel: entry.flow.channel,
-      experimental_consent_at: entry.flow.channel === 'hub' ? new Date().toISOString() : null,
+      supply_channel: draft.supply_channel,
+      experimental_consent_at: draft.supply_channel === 'hub' ? new Date().toISOString() : null,
       billing: 'monthly',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 0, month_spend_cents: null, currency: null },
       // native_cli subscriptions surface the sanctioned CLI account; hub-held
       // experimental sources may stay null until a later adapter rev (schema).
-      account_label: entry.flow.channel === 'native_cli' ? 'me@gmail.com' : null,
+      account_label: draft.supply_channel === 'native_cli' ? 'me@gmail.com' : null,
       masked_credential: null,
       models: isOpenai
         ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: new Date().toISOString() }]
         : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: new Date().toISOString() }],
-      credential_ref: entry.flow.channel === 'hub' ? rid('cred') : null,
+      credential_ref: draft.supply_channel === 'hub' ? rid('cred') : null,
     };
     this.sources.push(source);
     this.priority.order.push(source.id);
+    return delay(structuredClone(source), 300);
+  }
+
+  patchSource(id: string, patch: SourcePatch) {
+    const source = this.sources.find((s) => s.id === id);
+    if (!source) throw new ApiCallError('source_not_found');
+    if (typeof patch.display_name === 'string') source.display_name = patch.display_name;
+    if ('base_url' in patch && source.kind === 'api_key') source.base_url = patch.base_url ?? null;
+    return delay(structuredClone(source), 300);
+  }
+
+  testSource(id: string) {
+    const source = this.sources.find((s) => s.id === id);
+    if (!source) throw new ApiCallError('source_not_found');
+    // Native-CLI subscriptions can't be re-discovered (server rejects them);
+    // the UI only offers this action for hub sources, but fail closed anyway.
+    if (source.supply_channel === 'native_cli') throw new ApiCallError('discovery_failed');
+    source.state = { status: 'standby', retry_at: null, detail_key: null };
+    return delay(source.models.length, 700);
   }
 }
 
@@ -416,7 +478,10 @@ const mockStore = new MockStore();
 const mockApi: ModelsApi = {
   listSources: () => mockStore.listSources(),
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
-  deleteSource: (id) => mockStore.deleteSource(id),
+  createOAuthSource: (draft) => mockStore.createOAuthSource(draft),
+  patchSource: (id, patch) => mockStore.patchSource(id, patch),
+  testSource: (id) => mockStore.testSource(id),
+  deleteSource: (id, force) => mockStore.deleteSource(id, force),
   putPriority: (order) => mockStore.putPriority(order),
   listAgents: () => mockStore.listAgents(),
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
@@ -428,7 +493,7 @@ const mockApi: ModelsApi = {
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
   listEvents: (limit) => mockStore.listEvents(limit),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
-  startOAuth: (vendor, channel) => mockStore.startOAuth(vendor, channel),
+  startOAuth: (vendor, channel, experimentalConsent) => mockStore.startOAuth(vendor, channel, experimentalConsent),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
   submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),
   cancelOAuth: (flowId) => mockStore.cancelOAuth(flowId),
