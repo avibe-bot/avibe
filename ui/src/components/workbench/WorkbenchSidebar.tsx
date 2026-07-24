@@ -264,7 +264,7 @@ const SessionRow: React.FC<{
 
   if (renaming) {
     return (
-      <div className="flex items-center gap-2 py-1.5 pl-[30px] pr-2.5">
+      <div className="flex items-center gap-2 py-1.5 pl-[26px] pr-2.5">
         <span
           className={clsx(
             'size-[5px] shrink-0 rounded-full',
@@ -312,9 +312,9 @@ const SessionRow: React.FC<{
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess flex items-center gap-2 rounded-md py-1.5 pl-[30px] pr-2.5 text-left transition',
+            'group/sess flex items-center gap-2 rounded-md py-1.5 pl-[26px] pr-2.5 text-left transition',
             active
-              ? 'border-l-2 border-mint bg-mint-soft pl-[28px] font-semibold text-foreground'
+              ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',
           )}
         >
