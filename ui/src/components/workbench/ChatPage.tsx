@@ -2126,10 +2126,12 @@ const ActivityStrip: React.FC<{
   const firstLabel = first
     ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
     : '';
-  // Sorting puts in-progress items first, so a queued run in the headline slot
-  // means nothing is actively executing — drop the running glow (idle tone,
-  // muted icon, no mint shadow) so a waiting message can't look like live work.
-  const firstQueued = first ? isQueuedRun(first) : false;
+  // Mute the pill only when the banner consists SOLELY of queued delegated
+  // runs — a waiting message must not glow like live work. Any running item,
+  // watch, or task in the union keeps today's active treatment (pending items
+  // tie on rank and order by time, so checking only the headline row would
+  // mute a banner that still contains an enabled watch or scheduled task).
+  const queuedOnly = active.length > 0 && active.every(isQueuedRun);
   const expandable = active.length > 0;
   const navigateTo = (path: string) => {
     setOpen(false);
@@ -2138,18 +2140,18 @@ const ActivityStrip: React.FC<{
 
   const pill = (
     <StatusPill
-      tone={firstQueued ? 'idle' : 'running'}
+      tone={queuedOnly ? 'idle' : 'running'}
       role="status"
       aria-live="polite"
       className={clsx(
         'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
-        !firstQueued && 'shadow-sm shadow-mint/5',
+        !queuedOnly && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
         active.length > 0 ? (
           <Activity
-            className={clsx('size-3.5 shrink-0', firstQueued ? 'text-muted' : 'text-mint')}
+            className={clsx('size-3.5 shrink-0', queuedOnly ? 'text-muted' : 'text-mint')}
             aria-hidden="true"
           />
         ) : (

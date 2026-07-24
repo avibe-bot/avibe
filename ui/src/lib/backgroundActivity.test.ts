@@ -66,6 +66,11 @@ describe('activityKindI18nKey', () => {
     expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'queued' }))).toBe(
       'agentRunQueued',
     );
+    // The raw/legacy alias the durable store may still carry (normalized to
+    // public "queued" by storage/background.RUN_STATUS_ALIASES).
+    expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'pending' }))).toBe(
+      'agentRunQueued',
+    );
     // Executing forms keep the plain kind key.
     expect(activityKindI18nKey(item({ item_kind: 'agent_run', status: 'running' }))).toBe(
       'agentRun',
@@ -83,8 +88,10 @@ describe('activityKindI18nKey', () => {
 });
 
 describe('isQueuedRun', () => {
-  it('is true only for a delegated run with status "queued"', () => {
+  it('is true only for a delegated run with a waiting status', () => {
     expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'queued' }))).toBe(true);
+    // Raw/legacy alias of "queued" (storage/background.RUN_STATUS_ALIASES).
+    expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'pending' }))).toBe(true);
     expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'running' }))).toBe(false);
     expect(isQueuedRun(item({ item_kind: 'agent_run', status: 'processing' }))).toBe(false);
     expect(isQueuedRun(item({ item_kind: 'watch', status: 'queued' }))).toBe(false);

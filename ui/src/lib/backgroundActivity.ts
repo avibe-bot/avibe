@@ -15,13 +15,19 @@ export function activityItemKind(
   return kind && HARNESS_ITEM_KINDS.includes(kind) ? kind : 'backend_activity';
 }
 
+// Waiting-run statuses. ``queued`` is the normalized public form; ``pending``
+// is the raw/legacy alias the durable store may still carry (see
+// storage/background.RUN_STATUS_ALIASES) — same parity rule as
+// RUNNING_STATUSES below, or an aliased row would keep the running treatment.
+const QUEUED_RUN_STATUSES = new Set(['queued', 'pending']);
+
 // A delegated run that is waiting behind the target session's active turn.
-// Only agent runs carry ``queued``; watches/tasks have their own pending
-// statuses (``enabled`` / ``scheduled``) and keep their kind labels.
+// Only agent runs carry ``queued``/``pending``; watches/tasks have their own
+// pending statuses (``enabled`` / ``scheduled``) and keep their kind labels.
 export function isQueuedRun(
   item: Pick<SessionActivityState, 'item_kind' | 'status'>,
 ): boolean {
-  return activityItemKind(item) === 'agent_run' && item.status === 'queued';
+  return activityItemKind(item) === 'agent_run' && QUEUED_RUN_STATUSES.has(item.status);
 }
 
 // Task recurrence is an explicit durable field (`at` / `cron`). Keep this
