@@ -2245,6 +2245,15 @@
         "watch": "Watch",
         "disabled": "Disabled"
       },
+      "search": {
+        "placeholder": "Find a session or trigger…",
+        "loading": "Loading…",
+        "empty": "No matches",
+        "more": "+{{count}} more — refine your search",
+        "triggerTag": "Trigger",
+        "outsideFilters": "Outside current filters",
+        "noLongerInWindow": "That session is no longer in the current window."
+      },
       "legend": {
         "spawn": "Spawn",
         "trigger": "Task / Watch",

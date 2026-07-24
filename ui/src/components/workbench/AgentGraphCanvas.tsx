@@ -147,10 +147,18 @@ interface AgentGraphCanvasProps {
   // Changes when the user changes a filter; a new value re-fits the viewport to
   // the new layout. Unchanged across SSE/poll refreshes so they keep the view.
   fitKey: string;
+  // A search "locate" request: pan+zoom to a node/chip and pulse it. `nonce`
+  // bumps per request so re-selecting the same target re-fires the animation.
+  locate?: { rfId: string; kind: 'node' | 'trigger'; nonce: number } | null;
   onSelectNode: (sessionId: string) => void;
   onSelectTrigger: (definitionId: string) => void;
   onOpenChat: (sessionId: string) => void;
 }
+
+// Zoom the locate animation settles on (readable, below maxZoom) and how long
+// the reused hover-highlight lingers as the "found it" pulse.
+const LOCATE_ZOOM = 1.15;
+const LOCATE_PULSE_MS = 1200;
 
 export const AgentGraphCanvas: React.FC<AgentGraphCanvasProps> = (props) => (
   // Provider lets the inner flow call fitView once nodes are measured.
@@ -165,6 +173,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   edges,
   selectedId,
   fitKey,
+  locate,
   onSelectNode,
   onSelectTrigger,
   onOpenChat,
@@ -176,6 +185,10 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const reactFlow = useReactFlow();
   const fittedRef = useRef(false);
+  // Guards the locate effect so it acts once per request (nonce), even though it
+  // re-runs whenever `layout` changes (SSE refreshes) waiting for a not-yet-laid
+  // -out target to appear.
+  const lastLocateRef = useRef(0);
 
   // Only spawn + trigger edges are drawn (contract A8 drops callback edges from
   // the canvas). Derive the rendered set once and drive both the hover
@@ -286,6 +299,37 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
       requestAnimationFrame(() => reactFlow.fitView({ padding: 0.22, maxZoom: 1 }));
     }
   }, [rfNodes, reactFlow]);
+
+  // Locate (search "跳转"): pan+zoom to the requested node/chip and pulse it.
+  // Runs once per nonce; if the target isn't laid out yet (it just entered via a
+  // filter-widening refetch) this no-ops until a later `layout` pass includes
+  // it. Marks `fittedRef` so a concurrent fitKey change can't steal the viewport
+  // back — a locate is the user's explicit "take me here".
+  useEffect(() => {
+    if (!locate || locate.nonce === lastLocateRef.current) return;
+    const pos = layout.get(locate.rfId);
+    if (!pos) return;
+    lastLocateRef.current = locate.nonce;
+    fittedRef.current = true;
+    const w = locate.kind === 'trigger' ? TRIGGER_NODE_WIDTH : SESSION_NODE_WIDTH;
+    const h = locate.kind === 'trigger' ? TRIGGER_NODE_HEIGHT : SESSION_NODE_HEIGHT;
+    // Defer the pan + pulse to the next frame (like the fit) so we never call
+    // setState synchronously inside the effect body.
+    const raf = requestAnimationFrame(() => {
+      reactFlow.setCenter(pos.x + w / 2, pos.y + h / 2, { zoom: LOCATE_ZOOM, duration: 480 });
+      // Reuse the hover-highlight as the pulse (no new style): mark the target
+      // hovered so its chain lights + the rest fades, then release after a beat.
+      setHoveredId(locate.rfId);
+    });
+    const timer = window.setTimeout(
+      () => setHoveredId((cur) => (cur === locate.rfId ? null : cur)),
+      LOCATE_PULSE_MS,
+    );
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+    };
+  }, [locate, layout, reactFlow]);
 
   return (
     <div className="h-[600px] max-h-[72vh] w-full overflow-hidden rounded-2xl border border-border-strong bg-surface-3/60">

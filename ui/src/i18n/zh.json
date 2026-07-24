@@ -2245,6 +2245,15 @@
         "watch": "WATCH",
         "disabled": "已禁用"
       },
+      "search": {
+        "placeholder": "查找会话或触发器…",
+        "loading": "加载中…",
+        "empty": "无匹配结果",
+        "more": "还有 {{count}} 条 — 请细化搜索",
+        "triggerTag": "触发",
+        "outsideFilters": "在当前筛选外",
+        "noLongerInWindow": "该会话已不在当前窗口。"
+      },
       "legend": {
         "spawn": "启动",
         "trigger": "Task / Watch 触发",
