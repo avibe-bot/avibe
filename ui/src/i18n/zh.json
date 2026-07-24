@@ -822,7 +822,8 @@
           "deleteConfirmTitle": "移除自定义模型？",
           "deleteConfirmBody": "将从「{{source}}」的清单移除 {{model}}。",
           "deleted": "已移除自定义模型",
-          "deleteFailed": "移除失败，请重试"
+          "deleteFailed": "移除失败，请重试",
+          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单/映射里取消后再删除。"
         }
       },
       "supplyMode": {

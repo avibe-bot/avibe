@@ -249,7 +249,7 @@ export const OAuthConnectDialog: React.FC<{
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <Dialog open={open} onOpenChange={(v) => !v && !finalizing && onClose()}>
         <DialogContent className="max-w-[520px] gap-5">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2.5 text-[17px] font-bold">
@@ -365,7 +365,7 @@ export const OAuthConnectDialog: React.FC<{
             ) : (
               <span />
             )}
-            <Button variant={active ? 'ghost' : 'outline'} size="sm" onClick={onClose}>
+            <Button variant={active ? 'ghost' : 'outline'} size="sm" onClick={onClose} disabled={finalizing}>
               {active ? t('common.cancel') : t('common.close')}
             </Button>
           </div>

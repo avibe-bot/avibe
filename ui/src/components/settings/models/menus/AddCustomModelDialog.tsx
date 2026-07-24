@@ -116,9 +116,12 @@ export const AddCustomModelDialog: React.FC<{
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
+  /** Runs before the DELETE — lets the host clear any selection that would make
+   *  the backend's only-supplier guard reject the delete (edit mode only). */
+  onBeforeDelete?: () => Promise<void>;
   /** Fired after a custom model is removed (edit mode only). */
   onDeleted?: (identifier: string) => void;
-}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onDeleted }) => {
+}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onBeforeDelete, onDeleted }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -172,13 +175,24 @@ export const AddCustomModelDialog: React.FC<{
   const submitDelete = async () => {
     if (!edit) return;
     try {
+      await onBeforeDelete?.();
       await modelsApi.deleteCustomModel(edit.sourceId, edit.modelId);
       onDeleted?.(identifier);
       setDeleteOpen(false);
       onClose();
       showToast(t('settings.models.menus.custom.deleted') as string, 'success');
-    } catch {
-      showToast(t('settings.models.menus.custom.deleteFailed') as string, 'error');
+    } catch (err) {
+      // The server guards a delete while the model is still the only selected
+      // supplier for some agent — surface that honestly instead of a generic fail.
+      const code = (err as { code?: string } | null)?.code;
+      showToast(
+        t(
+          code === 'mode_switch_blocked'
+            ? 'settings.models.menus.custom.deleteInUse'
+            : 'settings.models.menus.custom.deleteFailed',
+        ) as string,
+        'error',
+      );
     }
   };
 

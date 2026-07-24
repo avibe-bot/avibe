@@ -32,9 +32,9 @@ already implemented on master (`cf1b4314`).
    exist, owns its `MigrationDialog`, re-scans after apply). Mounted on the
    Models page (first-open-after-upgrade) and in the Setup Wizard's backend step
    (`AgentDetection`, wizard mode only — the Settings→Backends page already has
-   `BackendSupplyModeCard`'s strip). Dismissal is persisted by a stable
-   `backend:kind` signature so it is non-nagging but still resurfaces genuinely
-   new importable configs.
+   `BackendSupplyModeCard`'s strip). Dismissal is persisted by a stable signature
+   of the importable set's per-config identities (scan ids + action) so it is
+   non-nagging but still resurfaces a genuinely new importable config.
 
 4. **P1-06 / R46 — Honest Hub mode.** `set_agent_mode` returns a fresh
    `AgentSupply` whose `current` is computed honestly (null when hub is selected

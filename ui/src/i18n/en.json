@@ -822,7 +822,8 @@
           "deleteConfirmTitle": "Remove custom model?",
           "deleteConfirmBody": "This removes {{model}} from “{{source}}”.",
           "deleted": "Custom model removed",
-          "deleteFailed": "Couldn't remove the model, please retry"
+          "deleteFailed": "Couldn't remove the model, please retry",
+          "deleteInUse": "This model is still selected by an agent — unselect it in that menu/mapping first."
         }
       },
       "supplyMode": {

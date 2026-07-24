@@ -183,7 +183,11 @@ export const MappingDrawer: React.FC<{
     try {
       // Contract: absent entry = 跟随原生 (identity). Send only enabled overrides
       // — disabled rows carry an empty target_model_id that from_payload rejects.
-      await modelsApi.putMappings(backend, draft.filter((m) => m.enabled));
+      // Self-heal: drop an override whose target is no longer available (its
+      // supplier source was deleted); it reverts to 跟随原生 instead of being
+      // resubmitted and rejected as mapping_target_unavailable.
+      const targetIds = new Set(targets.map((tg) => tg.id));
+      await modelsApi.putMappings(backend, draft.filter((m) => m.enabled && targetIds.has(m.target_model_id)));
       onSaved();
       onClose();
     } catch {

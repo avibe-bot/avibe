@@ -17,7 +17,7 @@ import { backendVisual } from '../vendorMeta';
 import type { AgentMenu, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
 import { AddCustomModelDialog } from './AddCustomModelDialog';
-import { buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
+import { buildIdentifier, buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
 import { SupplyDots } from './supplyBits';
 
 type EditTarget = { sourceId: string; modelId: string; displayName: string | null } | null;
@@ -83,6 +83,11 @@ export const OpenCodeMenuDrawer: React.FC<{
   const eligibleSources = React.useMemo(() => sources.filter((s) => isSourceEligible(s, 'opencode')), [sources]);
   const groups = React.useMemo(() => buildMenuGroups(eligibleSources, standardVendors), [eligibleSources, standardVendors]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
+  // Identifiers a source currently supplies. Persisted `checked` is self-healed
+  // against this so an identifier whose only supplier was deleted (e.g. a
+  // force-deleted source) is dropped rather than shown as an invisible checked
+  // row or sent to putMenu (which the server rejects as mapping_target_unavailable).
+  const availableIds = React.useMemo(() => new Set(allRows.map((r) => r.identifier)), [allRows]);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
   const [checked, setChecked] = React.useState<Set<string>>(() => new Set(agent.menu?.checked ?? []));
@@ -94,7 +99,9 @@ export const OpenCodeMenuDrawer: React.FC<{
   React.useEffect(() => {
     if (!open) return;
     const v = agent.menu?.view ?? 'featured';
-    const c = agent.menu?.checked ?? [];
+    // Self-heal: drop persisted checked ids whose supplier no longer exists so
+    // the count is honest and putMenu never resubmits a now-invalid identifier.
+    const c = (agent.menu?.checked ?? []).filter((id) => availableIds.has(id));
     setView(v);
     setChecked(new Set(c));
     initialRef.current = { view: v, checked: [...c] };
@@ -122,7 +129,8 @@ export const OpenCodeMenuDrawer: React.FC<{
     }
     setSaving(true);
     try {
-      await modelsApi.putMenu({ view, checked: [...checked] });
+      // Defensive: never send an identifier whose supplier is gone (self-heal).
+      await modelsApi.putMenu({ view, checked: [...checked].filter((id) => availableIds.has(id)) });
       onSaved();
       onClose();
     } catch {
@@ -235,6 +243,24 @@ export const OpenCodeMenuDrawer: React.FC<{
         standardVendors={standardVendors}
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
+        onBeforeDelete={async () => {
+          // delete_custom_model is guarded while the model is a selected supplier.
+          // If the edited model is checked in the persisted OpenCode menu, drop it
+          // there first (the common case) so the delete isn't blocked; a model that
+          // is ALSO a fixed-menu mapping target elsewhere still 409s and surfaces an
+          // honest "in use" message from the dialog.
+          if (!editTarget) return;
+          const src = sources.find((s) => s.id === editTarget.sourceId);
+          if (!src) return;
+          const identifier = buildIdentifier(src.vendor, editTarget.modelId, standardVendors);
+          const persisted = agent.menu?.checked ?? [];
+          if (persisted.includes(identifier)) {
+            await modelsApi.putMenu({
+              view: agent.menu?.view ?? 'featured',
+              checked: persisted.filter((id) => id !== identifier && availableIds.has(id)),
+            });
+          }
+        }}
         onSaved={(identifier) => {
           // Auto-check only a NEWLY added model (so it shows in 精选). Editing an
           // existing entry's metadata must not flip its menu-selection state — a
