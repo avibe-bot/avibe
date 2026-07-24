@@ -37,7 +37,7 @@ class NativeOAuthUnavailableError(RuntimeError):
 
 
 class UnavailableNativeOAuthAdapter:
-    """L3 replaces this adapter when native CLI OAuth is wired."""
+    """Fail closed until a native CLI OAuth integration is available."""
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         raise NativeOAuthUnavailableError
