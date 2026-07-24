@@ -115,6 +115,9 @@ missing metadata but cannot replace populated values.
 - `snapshot()` never performs network I/O.
 - If the persisted remote payload is absent/stale, `snapshot()` starts one
   daemon refresh thread and returns immediately.
+- Successful remote checks are eligible for revalidation after 60 seconds and
+  reuse same-source ETag/Last-Modified validators; a 304 advances the check
+  timestamp without replacing the last-known-good catalog.
 - Remote payloads are strictly validated before replacing the cache.
 - Success/failure timestamps use separate TTLs; writes are atomic.
 - Responses expose `catalog_refresh_pending`. The shared TypeScript loader delivers the
