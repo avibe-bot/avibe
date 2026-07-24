@@ -172,6 +172,70 @@ def test_update_then_list_reflects_changes(isolated_state):
     assert page["sessions"][0]["model"] == "claude-sonnet-4-6"
 
 
+def test_project_session_pins_sort_first_and_paginate_across_groups(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+
+        def create(title: str, last_active_at: str, *, pinned: bool = False) -> dict:
+            row = sessions_service.create_session(
+                conn,
+                scope_id=scope_id,
+                agent_backend="claude",
+                title=title,
+            )
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == row["id"])
+                .values(last_active_at=last_active_at)
+            )
+            if pinned:
+                row = sessions_service.update_session(conn, row["id"], pinned=True)
+            return row
+
+        create("unpinned-new", "2026-07-24T05:00:00Z")
+        create("pinned-old", "2026-07-24T01:00:00Z", pinned=True)
+        create("pinned-new", "2026-07-24T04:00:00Z", pinned=True)
+        create("unpinned-old", "2026-07-24T02:00:00Z")
+        create("pinned-mid", "2026-07-24T03:00:00Z", pinned=True)
+
+    with engine.connect() as conn:
+        first = sessions_service.list_sessions(conn, scope_id=scope_id, limit=2)
+        second = sessions_service.list_sessions(
+            conn,
+            scope_id=scope_id,
+            limit=2,
+            before_id=first["next_before_id"],
+        )
+        third = sessions_service.list_sessions(
+            conn,
+            scope_id=scope_id,
+            limit=2,
+            before_id=second["next_before_id"],
+        )
+
+    assert [(row["title"], row["pinned"]) for row in first["sessions"]] == [
+        ("pinned-new", True),
+        ("pinned-mid", True),
+    ]
+    assert [(row["title"], row["pinned"]) for row in second["sessions"]] == [
+        ("pinned-old", True),
+        ("unpinned-new", False),
+    ]
+    assert [(row["title"], row["pinned"]) for row in third["sessions"]] == [
+        ("unpinned-old", False),
+    ]
+
+
+def test_update_session_requires_boolean_pin_state(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        session = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="claude")
+        with pytest.raises(ValueError, match="pinned must be a boolean"):
+            sessions_service.update_session(conn, session["id"], pinned="true")
+
+
 def test_session_lists_only_include_foreground_sessions(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:

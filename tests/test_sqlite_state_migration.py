@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260723_0033"
+HEAD_REVISION = "20260724_0034"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -118,6 +118,12 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
             )
         }
         assert "ix_agent_sessions_scope_status_activity" in agent_session_indexes
+        assert "ix_agent_sessions_scope_status_pinned_activity" in agent_session_indexes
+        agent_session_columns = {
+            row[1]: row for row in conn.execute("pragma table_info(agent_sessions)")
+        }
+        assert agent_session_columns["pinned"][3] == 1
+        assert str(agent_session_columns["pinned"][4]).strip("'") == "0"
         media_columns = {
             row[1] for row in conn.execute("pragma table_info(media_objects)")
         }
@@ -137,6 +143,56 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260723_0033")
+    now = "2026-07-24T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into scopes (
+                id, platform, scope_type, native_id, native_type, is_private,
+                supports_threads, metadata_json, first_seen_at, last_seen_at, updated_at
+            ) values (
+                'scope_pin', 'avibe', 'project', 'proj_pin', null, 0,
+                0, '{}', ?, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_backend, agent_variant, session_anchor,
+                workdir, native_session_id, title, status, visibility, agent_status,
+                metadata_json, created_at, updated_at, last_active_at
+            ) values (
+                'ses_existing', 'scope_pin', 'codex', 'codex', 'ses_existing',
+                '/tmp/project', '', 'Existing session', 'active', 'foreground', 'idle',
+                '{}', ?, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        pinned = conn.execute(
+            "select pinned from agent_sessions where id = 'ses_existing'"
+        ).fetchone()
+        indexes = {
+            row[1] for row in conn.execute("pragma index_list('agent_sessions')")
+        }
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert pinned == (0,)
+    assert "ix_agent_sessions_scope_status_pinned_activity" in indexes
+    assert version == (HEAD_REVISION,)
 
 
 def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp_path: Path) -> None:

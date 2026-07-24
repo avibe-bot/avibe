@@ -85,6 +85,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "reasoning_effort": row.get("reasoning_effort"),
         "status": row.get("status"),
         "visibility": row.get("visibility") or "foreground",
+        "pinned": bool(row.get("pinned")),
         # Live agent-runtime status (idle/running/failed), separate from the
         # lifecycle ``status``. Older rows predating the column read as ``idle``.
         "agent_status": row.get("agent_status") or "idle",
@@ -124,9 +125,10 @@ def list_sessions(
 ) -> dict[str, Any]:
     """Return sessions for the workbench list. Cursor pagination via ``before_id``.
 
-    ``status`` accepts ``active`` / ``archived`` (or omit for both). The
-    cursor is the row id; results are sorted by ``last_active_at DESC``
-    so the cursor row is "the last id you already saw".
+    ``status`` accepts ``active`` / ``archived`` (or omit for both). Project
+    lists put pinned sessions first, then preserve the existing activity order
+    inside each group. The cursor is the row id and resolves the complete sort
+    tuple so a page can cross the pinned/unpinned boundary without skipping.
 
     ``title_query`` powers the chat composer ``#``-mention global search: a
     case-insensitive title LIKE match (LIKE metacharacters escaped).
@@ -143,17 +145,22 @@ def list_sessions(
         like = escape_sql_like(title_query.strip())
         if like:
             query = query.where(agent_sessions.c.title.ilike(f"%{like}%", escape="\\"))
+    order_by_pinned = scope_id is not None
     if before_id is not None:
         cursor_row = conn.execute(
-            select(agent_sessions.c.last_active_at, agent_sessions.c.created_at).where(agent_sessions.c.id == before_id)
+            select(
+                agent_sessions.c.pinned,
+                agent_sessions.c.last_active_at,
+                agent_sessions.c.created_at,
+            ).where(agent_sessions.c.id == before_id)
         ).first()
         if cursor_row is not None:
-            cursor_active, cursor_created = cursor_row
+            cursor_pinned, cursor_active, cursor_created = cursor_row
             # ``last_active_at`` + ``created_at`` are both second-granularity
             # ISO strings, so multiple sessions can share the same pair and
             # become unreachable on later pages without an ``id`` tie-breaker
             # that matches the ORDER BY shape.
-            query = query.where(
+            activity_after_cursor = (
                 (agent_sessions.c.last_active_at < cursor_active)
                 | (
                     (agent_sessions.c.last_active_at == cursor_active)
@@ -165,15 +172,29 @@ def list_sessions(
                     & (agent_sessions.c.id < before_id)
                 )
             )
+            if order_by_pinned:
+                pinned_value = int(cursor_pinned or 0)
+                query = query.where(
+                    (agent_sessions.c.pinned < pinned_value)
+                    | (
+                        (agent_sessions.c.pinned == pinned_value)
+                        & activity_after_cursor
+                    )
+                )
+            else:
+                query = query.where(activity_after_cursor)
     effective_limit = min(max(int(limit), 1), 200)
-    query = (
-        query.order_by(
+    order_columns = []
+    if order_by_pinned:
+        order_columns.append(agent_sessions.c.pinned.desc())
+    order_columns.extend(
+        [
             agent_sessions.c.last_active_at.desc(),
             agent_sessions.c.created_at.desc(),
             agent_sessions.c.id.desc(),
-        )
-        .limit(effective_limit)
+        ]
     )
+    query = query.order_by(*order_columns).limit(effective_limit)
     rows = [dict(row) for row in conn.execute(query).mappings().all()]
     sessions = [_row_to_payload(row) for row in rows]
     # Use the clamped page size for the cursor check — comparing against
@@ -376,6 +397,7 @@ def update_session(
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
     visibility: Any = _UNSET,
+    pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
 ) -> dict[str, Any]:
     existing = conn.execute(
@@ -465,6 +487,10 @@ def update_session(
         if visibility_value not in SESSION_VISIBILITIES:
             raise ValueError(f"invalid session visibility: {visibility!r}")
         values["visibility"] = visibility_value
+    if pinned is not _UNSET:
+        if not isinstance(pinned, bool):
+            raise ValueError("pinned must be a boolean")
+        values["pinned"] = int(pinned)
     if scope_id is not _UNSET:
         target_scope_id = str(scope_id) if scope_id is not None else None
         target_scope = None

@@ -754,6 +754,7 @@ export type WorkbenchSession = {
   model: string | null;
   reasoning_effort: string | null;
   status: string;
+  pinned: boolean;
   /** Live agent-runtime status driving the sidebar dot: idle (gray) /
    *  running (green) / failed (red). Distinct from the lifecycle ``status``. */
   agent_status: 'idle' | 'running' | 'failed';
@@ -787,6 +788,7 @@ export type WorkbenchSessionUpdate = {
   agent_variant: string;
   model: string | null;
   reasoning_effort: string | null;
+  pinned: boolean;
 };
 
 // One Vibe Agent row from ``/agents`` (brief view used in list rendering).
@@ -941,6 +943,7 @@ export type WorkbenchEventHandlers = {
     event: string;
     title?: string | null;
     visibility?: 'foreground' | 'background';
+    pinned?: boolean;
     // Client-synthesized marker (never on a real backend event): a foreground
     // restore, so the projects tree grows its window to bring the row back.
     restored?: boolean;

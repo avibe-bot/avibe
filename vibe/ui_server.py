@@ -6371,6 +6371,7 @@ def _publish_session_update_activity(
             "event": "updated",
             "title": session.get("title"),
             "visibility": session.get("visibility"),
+            "pinned": bool(session.get("pinned")),
         },
     )
     if previous_session is None:
@@ -6431,6 +6432,7 @@ async def sessions_update(session_id: str):
             "model",
             "reasoning_effort",
             "visibility",
+            "pinned",
             "scope_id",
         )
         if key in payload

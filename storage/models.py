@@ -121,6 +121,7 @@ agent_sessions = Table(
     Column("title", Text, nullable=True),
     Column("status", String, nullable=False),
     Column("visibility", String, nullable=False, server_default="foreground"),
+    Column("pinned", Integer, nullable=False, server_default="0"),
     # Live agent-runtime status, distinct from the lifecycle ``status``
     # (active/archived). One of ``idle`` / ``running`` / ``failed`` —
     # ``running`` while a turn is in flight, ``failed`` when the most recent
@@ -135,6 +136,15 @@ agent_sessions = Table(
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
     Index("ix_agent_sessions_visibility", "visibility"),
     Index("ix_agent_sessions_scope_status_activity", "scope_id", "status", "last_active_at", "created_at", "id"),
+    Index(
+        "ix_agent_sessions_scope_status_pinned_activity",
+        "scope_id",
+        "status",
+        "pinned",
+        "last_active_at",
+        "created_at",
+        "id",
+    ),
     Index("ix_agent_sessions_native_session", "native_session_id"),
 )
 
