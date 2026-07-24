@@ -35,7 +35,7 @@ interface TelegramConfigProps {
 }
 
 // Mirrors design.pen XCWAT (Slack creds wizard step) adapted for Telegram.
-// 920-wide WizardCard, mint eyebrow, 5-step accordion with mint accent on active row.
+// 920-wide WizardCard, mint eyebrow, 4-step accordion with mint accent on active row.
 export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -52,7 +52,6 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
     2: true,
     3: false,
     4: false,
-    5: false,
   });
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
 
@@ -64,7 +63,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
 
   useEffect(() => {
     if ((authResult?.ok || hasSavedToken) && !expandedSteps[3]) {
-      setExpandedSteps((prev) => ({ ...prev, 2: false, 3: true, 4: true, 5: true }));
+      setExpandedSteps((prev) => ({ ...prev, 2: false, 3: true, 4: true }));
     }
   }, [authResult?.ok, hasSavedToken, expandedSteps]);
 
@@ -108,7 +107,6 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
     hasUsableSecret(data.telegram, 'bot_token', botToken),
     isValid,
     Boolean(copiedCommand),
-    expandedSteps[4],
     Boolean(requireMention || forumAutoTopic),
   ].filter(Boolean).length;
 
@@ -315,43 +313,18 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
             )}
           </StepShell>
 
-          {/* Step 4: Add bot to group */}
+          {/* Step 4: Behavior toggles */}
           <StepShell active={expandedSteps[4]}>
             <StepHeader
               step={4}
               title={t('telegramConfig.step4Title')}
-              icon={<ExternalLink size={16} className="text-cyan" />}
+              icon={<Settings2 size={16} className="text-cyan" />}
               expanded={expandedSteps[4]}
               onToggle={() => toggleStep(4)}
             />
             {expandedSteps[4] && (
-              <div className="space-y-4 border-t border-border px-5 py-4">
-                <p className="text-[13px] leading-[1.55] text-muted">{t('telegramConfig.step4Description')}</p>
-                <ol className="list-inside list-decimal space-y-1.5 pl-1 text-[12px] leading-[1.55] text-muted">
-                  <li>{t('telegramConfig.step4Item1')}</li>
-                  <li>{t('telegramConfig.step4Item2')}</li>
-                  <li>{t('telegramConfig.step4Item3')}</li>
-                  <li>{t('telegramConfig.step4Item4')}</li>
-                </ol>
-                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan">
-                  <strong>{t('slackConfig.tip')}:</strong> {t('telegramConfig.step4Tip')}
-                </div>
-              </div>
-            )}
-          </StepShell>
-
-          {/* Step 5: Behavior toggles */}
-          <StepShell active={expandedSteps[5]}>
-            <StepHeader
-              step={5}
-              title={t('telegramConfig.step5Title')}
-              icon={<Settings2 size={16} className="text-cyan" />}
-              expanded={expandedSteps[5]}
-              onToggle={() => toggleStep(5)}
-            />
-            {expandedSteps[5] && (
               <div className="space-y-3 border-t border-border px-5 py-4">
-                <p className="text-[13px] leading-[1.55] text-muted">{t('telegramConfig.step5Description')}</p>
+                <p className="text-[13px] leading-[1.55] text-muted">{t('telegramConfig.step4Description')}</p>
 
                 <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2.5">
                   <div>
@@ -388,7 +361,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
   if (embedded) {
     return (
       <EmbeddedConfigShell
-        total={5}
+        total={4}
         completed={completedCount}
         canApply={isValid}
         applying={applying}
@@ -415,10 +388,10 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
             <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
-              {completedCount} / 5
+              {completedCount} / 4
             </span>
             <div className="flex gap-1">
-              {[0, 1, 2, 3, 4].map((i) => (
+              {[0, 1, 2, 3].map((i) => (
                 <span
                   key={i}
                   className={clsx(
