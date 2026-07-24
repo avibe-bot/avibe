@@ -3019,8 +3019,6 @@ def config_get():
     return jsonify(api.config_to_payload(config))
 
 
-_MODEL_HUB_ENGINE_ADAPTER = None
-_MODEL_HUB_NATIVE_OAUTH_ADAPTER = None
 _MODEL_HUB_SERVICE = None
 
 
@@ -3029,10 +3027,7 @@ def _model_hub_service():
 
     global _MODEL_HUB_SERVICE
     if _MODEL_HUB_SERVICE is None:
-        _MODEL_HUB_SERVICE = create_default_service(
-            adapter=_MODEL_HUB_ENGINE_ADAPTER,
-            native_oauth_adapter=_MODEL_HUB_NATIVE_OAUTH_ADAPTER,
-        )
+        _MODEL_HUB_SERVICE = create_default_service()
     return _MODEL_HUB_SERVICE
 
 

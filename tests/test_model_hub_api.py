@@ -20,10 +20,11 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
 from vibe.ui_server import app
@@ -185,6 +186,112 @@ def _service(tmp_path):
 def _assert_envelope(payload: dict, *, ok: bool = True):
     assert payload["ok"] is ok
     assert payload["contract_version"] == 1
+
+
+def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
+    from vibe.model_hub_runtime import adapter as runtime_adapter
+    from vibe.model_hub_runtime import supervisor as runtime_supervisor
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    monkeypatch.setattr(runtime_adapter, "_adapter", None)
+    monkeypatch.setattr(runtime_supervisor, "_supervisor", None)
+
+    service = create_default_service()
+
+    assert isinstance(service.adapter, CLIProxyEngineAdapter)
+    assert service.adapter.supervisor.state_store.root.is_relative_to(tmp_path)
+
+
+def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
+    class LifecycleAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.start_calls = 0
+
+        async def start(self):
+            self.start_calls += 1
+            return await super().start()
+
+    adapter = LifecycleAdapter()
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert adapter.start_calls == 1
+    assert runtime["status"]["health"] == "ok"
+    assert runtime["status"]["verified"] is True
+
+
+def test_runtime_status_falls_back_when_engine_cannot_start(tmp_path):
+    class StartFailureAdapter(FakeAdapter):
+        async def start(self):
+            raise RuntimeError("engine cannot start")
+
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_INSTALLED,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=StartFailureAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert runtime["status"] == {
+        "installed_version": None,
+        "verified": False,
+        "listening": None,
+        "health": "not_installed",
+        "last_check": None,
+    }
+
+
+def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
+    class DiscoveryFailureAdapter(FakeAdapter):
+        async def discover_models(self, vendor, protocol, base_url, credential_ref):
+            raise ModelDiscoveryError("upstream rejected the credential")
+
+    store = MemoryStore()
+    adapter = DiscoveryFailureAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "openai",
+                    "key": "sk-test-invalid-but-syntactically-valid",
+                }
+            )
+        )
+
+    assert error.value.code == "discovery_failed"
+    assert adapter.revoked == ["cred_test123"]
+    assert store.config.sources == []
 
 
 def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):

@@ -257,9 +257,7 @@ class ModelHubRuntimeRouter:
         native_cli_ready: Callable[[BackendName], bool] | None = None,
     ) -> None:
         if service is None:
-            from vibe.model_hub_runtime import get_model_hub_engine_adapter
-
-            service = create_default_service(adapter=get_model_hub_engine_adapter())
+            service = create_default_service()
         self.service = service
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
         self.native_cli_ready = native_cli_ready or self._default_native_cli_ready

@@ -648,9 +648,8 @@
         "hub": "中枢 Hub",
         "direct": "直连 Direct"
       },
-      "menuKind": {
-        "fixed": "菜单固定",
-        "open": "菜单开放"
+      "errors": {
+        "engineDown": "模型引擎未就绪,请稍后重试"
       },
       "experimental": "实验",
       "agents": {
@@ -702,7 +701,6 @@
         "discovered": "连接成功 · 发现 {{count}} 个可用模型，已加入供应清单",
         "failed": "连接失败：{{detail}}",
         "testing": "连接中…",
-        "vaultNote": "只存本机，可入 Vault",
         "vendors": {
           "custom": "自定义 · OpenAI / Anthropic 兼容",
           "anthropic": "Anthropic",
