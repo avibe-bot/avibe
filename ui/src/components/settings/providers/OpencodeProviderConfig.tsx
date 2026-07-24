@@ -32,6 +32,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { OpencodeProviderTestPanel } from '../OpencodeProviderTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
+import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
+import { MODEL_HUB_NAV_ENABLED } from '../models/featureFlags';
 import { OpencodePermissionSetup } from '../shared/OpencodePermissionSetup';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOpencodePermission } from '../shared/useOpencodePermission';
@@ -794,6 +796,9 @@ export const OpencodeProviderConfig: React.FC<{
           />
         }
       />
+
+      {/* Model Hub 供给方式 card (L5); flag-gated until the hub feature is advertised. */}
+      {MODEL_HUB_NAV_ENABLED && <BackendSupplyModeCard backend="opencode" />}
 
       {/* Card 2 — provider catalog. */}
       <Card>

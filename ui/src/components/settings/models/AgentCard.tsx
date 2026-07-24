@@ -21,18 +21,21 @@ const AgentRow: React.FC<{
   agent: AgentSupply;
   sources: Source[];
   onConnectHub: (agent: AgentSupply) => void;
+  onOpenMenu?: (agent: AgentSupply) => void;
   connecting: boolean;
-}> = ({ agent, sources, onConnectHub, connecting }) => {
+}> = ({ agent, sources, onConnectHub, onOpenMenu, connecting }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(agent.backend);
 
   const openMenu = () => {
-    if (!MODEL_MENUS_ENABLED) {
+    // L5's mapping / menu drawers are gated by MODEL_MENUS_ENABLED; until it
+    // flips, keep the buttons visible (pixel fidelity) but explain themselves.
+    if (!MODEL_MENUS_ENABLED || !onOpenMenu) {
       showToast(t('settings.models.agents.menuComingSoon') as string, 'warning');
       return;
     }
-    // L5 owns the mapping / menu drawers; wired when MODEL_MENUS_ENABLED flips.
+    onOpenMenu(agent);
   };
 
   // Composite pill content. Fixed-menu → model ｜ source; open-menu → count ｜
@@ -99,8 +102,9 @@ export const AgentCard: React.FC<{
   agents: AgentSupply[];
   sources: Source[];
   onConnectHub: (agent: AgentSupply) => void;
+  onOpenMenu?: (agent: AgentSupply) => void;
   connectingBackend: string | null;
-}> = ({ agents, sources, onConnectHub, connectingBackend }) => {
+}> = ({ agents, sources, onConnectHub, onOpenMenu, connectingBackend }) => {
   const { t } = useTranslation();
   return (
     <section className="rounded-xl border border-border bg-background">
@@ -124,6 +128,7 @@ export const AgentCard: React.FC<{
             agent={agent}
             sources={sources}
             onConnectHub={onConnectHub}
+            onOpenMenu={onOpenMenu}
             connecting={connectingBackend === agent.backend}
           />
         ))}

@@ -13,6 +13,8 @@ import { useToast } from '@/context/ToastContext';
 import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
+import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
+import { MODEL_HUB_NAV_ENABLED } from '../models/featureFlags';
 import { SegmentedRadio } from '../shared/SegmentedRadio';
 import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
@@ -222,6 +224,9 @@ export const CodexProviderConfig: React.FC<{
         runtime={runtime}
         hideEnableToggle={hideEnableToggle}
       />
+
+      {/* Model Hub 供给方式 card (L5); flag-gated until the hub feature is advertised. */}
+      {MODEL_HUB_NAV_ENABLED && <BackendSupplyModeCard backend="codex" />}
 
       <Card>
         <CardContent className="flex flex-col gap-5 p-6">
