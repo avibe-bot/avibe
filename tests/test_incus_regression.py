@@ -1586,6 +1586,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", record("ensure_project_and_instance"))
     monkeypatch.setattr(incus_regression, "stop_service_for_update", record("stop_service_for_update"))
     monkeypatch.setattr(incus_regression, "write_runtime_env", record("write_runtime_env"))
+    monkeypatch.setattr(incus_regression, "migrate_legacy_backend_runtimes", record("migrate_legacy_backend_runtimes"))
     monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
     monkeypatch.setattr(incus_regression, "sync_source", record("sync_source"))
     monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
@@ -1623,7 +1624,14 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     )
 
     assert incus_regression.cmd_up(args) == 0
-    assert calls[:3] == ["ensure_project_and_instance", "stop_service_for_update", "write_runtime_env"]
+    assert calls[:4] == [
+        "ensure_project_and_instance",
+        "stop_service_for_update",
+        "write_runtime_env",
+        "migrate_legacy_backend_runtimes",
+    ]
+    assert calls.index("stop_service_for_update") < calls.index("migrate_legacy_backend_runtimes")
+    assert calls.index("migrate_legacy_backend_runtimes") < calls.index("sync_source")
     assert calls.index("sync_source") < calls.index("update_dependencies_and_build")
     assert calls.index("normalize_runtime_config") < calls.index("restart_and_verify")
     assert calls.index("prepare_show_runtime") < calls.index("restart_and_verify")
@@ -1913,6 +1921,38 @@ def test_stop_service_for_update_ignores_missing_service() -> None:
     joined = " ".join(commands[0][0])
     assert "systemctl stop avibe-regression.service || true" in joined
     assert commands[0][1] is False
+
+
+def test_migrate_legacy_backend_runtimes_uses_user_owned_layout() -> None:
+    commands = []
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.migrate_legacy_backend_runtimes(RecordingRunner(), target, remote=None)
+
+    joined = " ".join(commands[0])
+    assert "sudo -H -u avibe" in joined
+    assert '[ ! -x "$user_bin/claude" ]' in joined
+    assert '[ ! -x "$user_bin/codex" ]' in joined
+    assert '[ ! -x "$user_bin/opencode" ]' in joined
+    assert 'npm config set prefix "$npm_prefix" --location=user' in joined
+    assert 'npm install --global --prefix "$npm_prefix" "${npm_packages[@]}"' in joined
+    assert "HOME=/home/avibe bash -s -- --no-modify-path" in joined
+    assert "/home/avibe/.npm-global/bin/claude" not in joined
+    assert "/home/avibe/.npm-global/bin/codex" not in joined
 
 
 def test_update_builds_ui_before_editable_install() -> None:

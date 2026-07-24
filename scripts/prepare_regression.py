@@ -54,11 +54,10 @@ RESET_MODES = {"none", "config", "all"}
 CONTAINER_HOME = Path("/home/avibe")
 CONTAINER_AVIBE_HOME = CONTAINER_HOME / ".avibe"
 DEFAULT_CWD = str(CONTAINER_AVIBE_HOME / "workdir")
-# OpenCode is a bare PATH-resolved name (the system default; claude/codex too).
-# The service PATH prefers ~/.local/bin, where build-base installs the user-owned,
-# self-updatable binary; on a not-yet-rebuilt base it still resolves the old
-# /usr/local/bin copy. Bare avoids pinning an absolute path that may be absent on
-# a given instance (the cause of breakage across base-image generations).
+# Backends use bare PATH-resolved names. The service PATH prefers ~/.local/bin,
+# where build-base and the legacy-instance migration install user-owned,
+# self-updatable binaries. Bare names keep preserved config portable across base
+# image generations and install-layout migrations.
 CONTAINER_OPENCODE_CLI = "opencode"
 ENV_PREFIX = "REGRESSION_"
 
@@ -633,28 +632,43 @@ def _normalize_config_payload(path: Path) -> None:
     agents = payload.get("agents")
     if not isinstance(agents, dict):
         return
-    opencode = agents.get("opencode")
-    if not isinstance(opencode, dict):
-        return
-    cli_path = str(opencode.get("cli_path") or "")
-    # Migrate any recognized opencode install location to the bare PATH-resolved
-    # name. Pinning an absolute path breaks across base-image generations: the
-    # pre-#545 root-global /usr/local/bin/opencode and the user-owned
-    # ~/.local/bin/opencode (or its ~/.opencode source) do not both exist on every
-    # instance, so a preserved-state config could point at a path that is absent.
-    # A custom user-set path is left untouched.
-    known_opencode_paths = {
-        "",
-        "opencode",
-        "/usr/local/bin/opencode",
-        str(CONTAINER_HOME / ".opencode" / "bin" / "opencode"),
-        str(CONTAINER_HOME / ".local" / "bin" / "opencode"),
+    known_backend_paths = {
+        "opencode": {
+            "",
+            "opencode",
+            "/usr/bin/opencode",
+            "/usr/local/bin/opencode",
+            str(CONTAINER_HOME / ".opencode" / "bin" / "opencode"),
+            str(CONTAINER_HOME / ".local" / "bin" / "opencode"),
+        },
+        "claude": {
+            "",
+            "claude",
+            "/usr/bin/claude",
+            "/usr/local/bin/claude",
+            str(CONTAINER_HOME / ".npm-global" / "bin" / "claude"),
+            str(CONTAINER_HOME / ".local" / "bin" / "claude"),
+        },
+        "codex": {
+            "",
+            "codex",
+            "/usr/bin/codex",
+            "/usr/local/bin/codex",
+            str(CONTAINER_HOME / ".npm-global" / "bin" / "codex"),
+            str(CONTAINER_HOME / ".local" / "bin" / "codex"),
+        },
     }
-    if cli_path not in known_opencode_paths:
-        return
-
-    opencode["cli_path"] = CONTAINER_OPENCODE_CLI
-    _write_json(path, payload)
+    changed = False
+    for backend, known_paths in known_backend_paths.items():
+        config = agents.get(backend)
+        if not isinstance(config, dict):
+            continue
+        if str(config.get("cli_path") or "") not in known_paths:
+            continue
+        config["cli_path"] = backend
+        changed = True
+    if changed:
+        _write_json(path, payload)
 
 
 def _normalize_existing_state(vibe_dir: Path) -> None:
