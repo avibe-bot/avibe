@@ -121,21 +121,89 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
                 "sha256": "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
             },
             {
+                "platform": "darwin-x64",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_amd64.tar.gz",
+                "size_bytes": 15372282,
+                "sha256": "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
+            },
+            {
                 "platform": "linux-amd64",
                 "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_amd64.tar.gz",
                 "size_bytes": 15401775,
                 "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
             },
+            {
+                "platform": "linux-arm64",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_aarch64.tar.gz",
+                "size_bytes": 14062559,
+                "sha256": "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
+            },
         ],
     }
 
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "darwin-x64")
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
     unsupported = EngineRuntimeManager(
         runtime_dir=tmp_path / "unsupported-runtime",
         offline=True,
     ).ensure()
     assert unsupported["ok"] is False
     assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
+
+
+@pytest.mark.parametrize(
+    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
+    [
+        (
+            "darwin-arm64",
+            "darwin-arm64",
+            14384655,
+            "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
+            "ad81a4c82700bf96eaa4cf5811690b0498ebcfe6087e26ffc0498b8fc8e867af",
+        ),
+        (
+            "darwin-x64",
+            "darwin-x64",
+            15372282,
+            "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
+            "6b5d209c3bc6adcff035060a862b9fe6eccf8f4ca3c8c0bb7fc88c0b625d38d5",
+        ),
+        (
+            "linux-x64",
+            "linux-amd64",
+            15401775,
+            "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
+            "2be8e4581fe802fe522126b273bc099c01910b6179dca4a4e1b451dd0c80a1c0",
+        ),
+        (
+            "linux-arm64",
+            "linux-arm64",
+            14062559,
+            "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
+            "647a48ab6b2f5520d1279061c4a7aa7ff65729a68614495b1e431debbf4f8706",
+        ),
+    ],
+)
+def test_engine_installer_selects_verified_packaged_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_platform: str,
+    asset_platform: str,
+    size_bytes: int,
+    archive_sha256: str,
+    binary_sha256: str,
+) -> None:
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: host_platform)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / host_platform, offline=True)
+
+    manifest = manager._load_manifest(allow_network=False)
+
+    assert manifest is not None
+    archive = manager._manifest_archive_for_platform(manifest)
+    assert archive is not None
+    assert archive.platform == asset_platform
+    assert archive.size == size_bytes
+    assert archive.sha256 == archive_sha256
+    assert archive.binary_sha256 == binary_sha256
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
