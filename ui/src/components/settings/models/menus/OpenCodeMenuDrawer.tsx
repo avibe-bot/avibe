@@ -242,6 +242,16 @@ export const OpenCodeMenuDrawer: React.FC<{
           if (!editTarget) setChecked((prev) => new Set(prev).add(identifier));
           onRefresh();
         }}
+        onDeleted={(identifier) => {
+          // Drop the removed model from the menu selection so 完成 doesn't try to
+          // re-check a now-nonexistent identifier (set_opencode_menu would reject).
+          setChecked((prev) => {
+            const next = new Set(prev);
+            next.delete(identifier);
+            return next;
+          });
+          onRefresh();
+        }}
       />
     </>
   );

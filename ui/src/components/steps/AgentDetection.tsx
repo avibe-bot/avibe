@@ -19,6 +19,7 @@ import { BackendLifecycleChip } from '../settings/BackendLifecycleChip';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { BackendProviderConfig } from '../settings/providers/BackendProviderConfig';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
+import { MigrationBanner } from '../settings/models/MigrationBanner';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
@@ -250,6 +251,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // Page mode keeps the existing settings shell — render the inner content only
   const Inner = (
     <>
+      {/* Setup-wizard migration trigger (spec §5-03): offer to import pre-existing
+          native CLI configs into the Hub. Wizard-only — the Settings → Backends
+          page already surfaces this via BackendSupplyModeCard. Self-hides when
+          nothing is importable or the hub isn't reachable yet. */}
+      {!isPage && <MigrationBanner />}
+
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">

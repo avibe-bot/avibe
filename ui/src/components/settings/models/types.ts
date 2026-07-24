@@ -192,6 +192,9 @@ export type OAuthPresentation = {
 
 export type OAuthFlow = {
   flow_id: string;
+  /** Pending Source this flow binds to (deterministic association; hub-channel
+   *  flows always set it). The server derives the created source's id from it. */
+  source_id?: string | null;
   vendor: string;
   channel: SupplyChannel;
   state: OAuthFlowState;
@@ -240,6 +243,27 @@ export type ApiKeySourceCreate = {
   vendor: string;
   base_url?: string | null;
   key: string;
+};
+
+/** POST /api/models/sources — finalize a completed subscription OAuth flow into
+ *  a persisted Source. `oauth_flow_ref` is the flow id; the server derives the
+ *  source id from the flow binding and rejects credential/state fields, so the
+ *  UI never sends them. `experimental_consent` is sent only for the consent-
+ *  gated hub-held channel. */
+export type OAuthSourceCreate = {
+  kind: 'subscription';
+  vendor: string;
+  oauth_flow_ref: string;
+  supply_channel: SupplyChannel;
+  display_name?: string;
+  experimental_consent?: boolean;
+};
+
+/** PATCH /api/models/sources/<id> — display_name and/or base_url only
+ *  (contract: never accepts credential material). */
+export type SourcePatch = {
+  display_name?: string;
+  base_url?: string | null;
 };
 
 /** POST /api/models/custom-models — appends a manual-provenance model entry to

@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { BillingChip, ExperimentalChip, StateChip } from './chips';
 import { SupplyTooltip } from './SupplyTooltip';
+import { SourceRowMenu } from './SourceRowMenu';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
 import { cooldownEtaMinutes, formatSpend } from './format';
 import type { Source } from './types';
@@ -65,14 +66,16 @@ export const SourceRow: React.FC<{
   source: Source;
   priority: number;
   onDragHandlePointerDown: (e: React.PointerEvent) => void;
-}> = ({ source, priority, onDragHandlePointerDown }) => {
+  /** Re-fetch after a row action (rename / re-discover / delete). */
+  onChanged: () => void;
+}> = ({ source, priority, onDragHandlePointerDown, onChanged }) => {
   const { t } = useTranslation();
   const { Icon, accent } = sourceVisual(source);
   const subline = useSubline(source);
   const isExperimental = source.kind === 'subscription' && source.supply_channel === 'hub';
 
   return (
-    <div className="flex items-center gap-3 border-b border-border px-5 py-3.5 last:border-b-0">
+    <div className="group flex items-center gap-3 border-b border-border px-5 py-3.5 last:border-b-0">
       <button
         type="button"
         aria-label={t('settings.models.source.reorder') as string}
@@ -103,6 +106,7 @@ export const SourceRow: React.FC<{
         <UsageCell source={source} />
         <BillingChip billing={source.billing} />
         <StateChip state={source.state} />
+        <SourceRowMenu source={source} onChanged={onChanged} />
       </div>
     </div>
   );

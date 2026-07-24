@@ -662,7 +662,8 @@
         "menuComingSoon": "模型菜单即将上线（随下一个里程碑发布）",
         "modelCount": "{{count}} 个模型",
         "multiSource": "多来源",
-        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义"
+        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义",
+        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）"
       },
       "recent": {
         "title": "最近切换",
@@ -737,12 +738,15 @@
           "awaitingPaste": "等待授权 · {{time}} 后超时",
           "awaitingDevice": "等待完成 · 自动检测，无需回填",
           "verifying": "验证中…",
-          "success": "连接成功"
+          "success": "连接成功",
+          "finalizing": "正在创建来源…"
         },
         "error": {
           "start": "无法开始授权，请重试",
           "timeout": "授权超时，请重新连接",
-          "generic": "连接失败，请重试"
+          "generic": "连接失败，请重试",
+          "finalize": "已完成授权，但创建来源失败，请重试",
+          "consent": "需要先同意实验条款才能连接"
         },
         "hubOption": {
           "title": "由中枢托管此订阅（实验）",
@@ -765,7 +769,8 @@
         "reorderFailed": "顺序保存失败",
         "connected": "已接入中枢",
         "connectFailed": "接入失败，请重试",
-        "refreshFailed": "刷新失败，请重试"
+        "refreshFailed": "刷新失败，请重试",
+        "connectedNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连"
       },
       "menus": {
         "done": "完成",
@@ -812,7 +817,12 @@
           "previewEmpty": "填入模型 ID 后预览",
           "previewHint": "provider 段自动选：可识别厂商用标准 ID（与 OpenCode 原生一致），识别不了归 custom/；来源增减、模式切换都不影响标识。",
           "add": "添加到菜单",
-          "failed": "添加失败，请重试"
+          "failed": "添加失败，请重试",
+          "delete": "删除模型",
+          "deleteConfirmTitle": "移除自定义模型？",
+          "deleteConfirmBody": "将从「{{source}}」的清单移除 {{model}}。",
+          "deleted": "已移除自定义模型",
+          "deleteFailed": "移除失败，请重试"
         }
       },
       "supplyMode": {
@@ -833,7 +843,9 @@
           "description": "{{backend}} 使用自己的原生配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不代管模型。适合排查问题，或想完全自管配置的用户。",
           "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
           "import": "导入中枢…"
-        }
+        },
+        "switchedHubNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连",
+        "hubNoSupply": "已选中枢，但还没有可供给本后端的来源，当前仍走直连。去「模型」页添加或启用来源后即生效。"
       },
       "migration": {
         "title": "接入模型中枢",
@@ -862,6 +874,33 @@
         "claude": "Claude Code",
         "codex": "Codex",
         "opencode": "OpenCode"
+      },
+      "sourceActions": {
+        "more": "更多操作",
+        "rename": "重命名",
+        "rediscover": "重新发现模型",
+        "delete": "删除来源",
+        "renameTitle": "重命名来源",
+        "renameLabel": "显示名",
+        "renamePlaceholder": "例如 生产环境 Key",
+        "renamed": "已重命名",
+        "renameFailed": "重命名失败，请重试",
+        "rediscovered": "已重新发现 {{count}} 个模型",
+        "rediscoverFailed": "重新发现失败，请重试",
+        "deleteTitle": "删除来源？",
+        "deleteBody": "将从中枢移除「{{name}}」并撤销其凭证，此操作不可撤销。",
+        "deleteConfirm": "删除",
+        "deleteForceTitle": "仍要删除该来源？",
+        "deleteForceBody": "「{{name}}」是某个已选模型的唯一供给，删除后相关 Agent 将无来源可用。确认强制删除？",
+        "deleteForceConfirm": "强制删除",
+        "deleted": "已删除来源",
+        "deleteFailed": "删除失败，请重试"
+      },
+      "migrationBanner": {
+        "title": "发现可导入中枢的原生配置",
+        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢，三个 Agent 共用一份来源和优先级。",
+        "import": "导入中枢",
+        "dismiss": "忽略"
       }
     }
   },
