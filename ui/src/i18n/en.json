@@ -746,7 +746,7 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
-          "consent": "Experimental consent is required to connect"
+          "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
         },
         "hubOption": {
           "title": "Let the Hub hold this subscription (experimental)",

@@ -170,13 +170,18 @@ export const OAuthConnectDialog: React.FC<{
     finalizedRef.current = false;
     void (async () => {
       try {
-        const started = await modelsApi.startOAuth(vendor, channel);
+        // A hub-held subscription connect (channel === 'hub' only when the user
+        // has confirmed the experimental consent below) must carry consent, or
+        // the server returns consent_required.
+        const started = await modelsApi.startOAuth(vendor, channel, channel === 'hub');
         if (cancelled) return;
         apply(started);
         if (started.expires_at) deadline = new Date(started.expires_at).getTime() + 60_000;
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
-      } catch {
-        if (!cancelled) setErrorKey('settings.models.oauth.error.start');
+      } catch (err) {
+        if (cancelled) return;
+        const code = (err as { code?: string } | null)?.code;
+        setErrorKey(code === 'consent_required' ? 'settings.models.oauth.error.consent' : 'settings.models.oauth.error.start');
       }
     })();
 

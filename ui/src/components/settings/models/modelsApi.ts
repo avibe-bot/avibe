@@ -60,7 +60,9 @@ export type ModelsApi = {
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
   listEvents(limit?: number): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
-  startOAuth(vendor: string, channel: SupplyChannel): Promise<OAuthFlow>;
+  /** `experimentalConsent` MUST be true for a consent-gated hub-held
+   *  subscription connect, or the server returns consent_required. */
+  startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean): Promise<OAuthFlow>;
   getOAuthStatus(flowId: string): Promise<OAuthFlow>;
   submitOAuth(flowId: string, value: string): Promise<OAuthFlow>;
   cancelOAuth(flowId: string): Promise<void>;
@@ -118,7 +120,11 @@ const liveApi: ModelsApi = {
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
   listEvents: (limit = 20) => call<{ events: ResolutionEvent[] }>(`/api/models/events?limit=${limit}`).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
-  startOAuth: (vendor, channel) => call<{ flow?: OAuthFlow } & OAuthFlow>('/api/models/oauth/start', jsonInit('POST', { vendor, channel })).then((r) => (r.flow ?? r) as OAuthFlow),
+  startOAuth: (vendor, channel, experimentalConsent) =>
+    call<{ flow?: OAuthFlow } & OAuthFlow>(
+      '/api/models/oauth/start',
+      jsonInit('POST', { vendor, channel, ...(experimentalConsent ? { experimental_consent: true } : {}) }),
+    ).then((r) => (r.flow ?? r) as OAuthFlow),
   getOAuthStatus: (flowId) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then((r) => (r.flow ?? r) as OAuthFlow),
   submitOAuth: (flowId, value) => call<{ flow?: OAuthFlow } & OAuthFlow>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then((r) => (r.flow ?? r) as OAuthFlow),
   cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(() => undefined),
@@ -311,7 +317,9 @@ class MockStore {
     return delay(structuredClone(this.runtime));
   }
 
-  startOAuth(vendor: string, channel: SupplyChannel) {
+  startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean) {
+    // Mirror the server: a hub-held subscription connect requires recorded consent.
+    if (channel === 'hub' && !experimentalConsent) throw new ApiCallError('consent_required');
     const isDevice = vendor === 'openai';
     const flow: OAuthFlow = {
       flow_id: rid('oaf'),
@@ -485,7 +493,7 @@ const mockApi: ModelsApi = {
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
   listEvents: (limit) => mockStore.listEvents(limit),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
-  startOAuth: (vendor, channel) => mockStore.startOAuth(vendor, channel),
+  startOAuth: (vendor, channel, experimentalConsent) => mockStore.startOAuth(vendor, channel, experimentalConsent),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
   submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),
   cancelOAuth: (flowId) => mockStore.cancelOAuth(flowId),
