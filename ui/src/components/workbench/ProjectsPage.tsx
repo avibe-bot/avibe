@@ -13,6 +13,8 @@ import {
   GitFork,
   Loader2,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RotateCw,
   Settings2,
@@ -246,7 +248,7 @@ const MobileSessionRow: React.FC<{
   onOpen: () => void;
 }> = ({ projectId, session, unread, onOpen }) => {
   const { t } = useTranslation();
-  const { renameSession, archiveSession, forkSession } = useWorkbenchProjectsTree();
+  const { renameSession, setSessionPinned, archiveSession, forkSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -255,6 +257,7 @@ const MobileSessionRow: React.FC<{
   const inputRef = useRef<HTMLInputElement | null>(null);
   const handledRef = useRef(false);
   const forkingRef = useRef(false);
+  const pinningRef = useRef(false);
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -309,6 +312,15 @@ const MobileSessionRow: React.FC<{
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
           {session.title || `#${session.id.slice(-6)}`}
         </span>
+        {session.pinned && (
+          <span
+            className="flex shrink-0 text-cyan"
+            aria-label={t('workbench.sessionPinned')}
+            title={t('workbench.sessionPinned')}
+          >
+            <Pin className="size-3.5" aria-hidden="true" />
+          </span>
+        )}
         {unread > 0 ? (
           <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-background">
             {unread > 99 ? '99+' : unread}
@@ -332,6 +344,23 @@ const MobileSessionRow: React.FC<{
           </Button>
         </PopoverTrigger>
         <PopoverContent align="end" className="w-[176px] p-1">
+          <MenuItem
+            icon={session.pinned ? PinOff : Pin}
+            onClick={() => {
+              setMenuOpen(false);
+              if (pinningRef.current) return;
+              pinningRef.current = true;
+              void setSessionPinned(projectId, session.id, !session.pinned)
+                .catch(() => {
+                  // apiFetch already surfaced the error toast.
+                })
+                .finally(() => {
+                  pinningRef.current = false;
+                });
+            }}
+          >
+            {t(session.pinned ? 'workbench.sessionUnpin' : 'workbench.sessionPin')}
+          </MenuItem>
           <MenuItem
             icon={Pencil}
             onClick={() => {

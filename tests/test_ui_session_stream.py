@@ -890,6 +890,54 @@ def test_patch_session_visibility_and_scope_are_independent(isolated_state, tmp_
     assert activity[-1]["scope_id"] == original_scope_id
 
 
+def test_patch_session_pin_persists_and_broadcasts(isolated_state, tmp_path, monkeypatch):
+    import vibe.sse_broker as sse_broker
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(tmp_path)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(sse_broker.broker, "publish", lambda topic, data: published.append((topic, data)))
+
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"pinned": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["pinned"] is True
+    activity = [data for topic, data in published if topic == "session.activity"]
+    assert activity == [
+        {
+            "session_id": session_id,
+            "scope_id": scope_id,
+            "event": "updated",
+            "title": None,
+            "visibility": "foreground",
+            "pinned": True,
+        }
+    ]
+
+    get_response = client.get(f"/api/sessions/{session_id}")
+    assert get_response.get_json()["pinned"] is True
+
+
+def test_patch_session_rejects_non_boolean_pin(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"pinned": "true"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "pinned must be a boolean"
+
+
 def test_patch_session_rejects_invalid_visibility(isolated_state, tmp_path):
     from vibe.ui_server import app
 

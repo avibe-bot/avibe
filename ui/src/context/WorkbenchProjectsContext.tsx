@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { useApi } from './ApiContext';
 import type { ProjectDefaultAgent, WorkbenchProject, WorkbenchSession, WorkbenchSessionCreate } from './ApiContext';
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
+import { orderProjectSessions } from '../lib/sessionPinning';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -65,6 +66,8 @@ export interface WorkbenchProjectsTree {
   archiveProject: (projectId: string) => Promise<void>;
   /** Throws on failure so the row's inline editor can fall back; patches title on success. */
   renameSession: (projectId: string, sessionId: string, title: string) => Promise<void>;
+  /** Persist pin state and keep the session in the project's pinned-first order. */
+  setSessionPinned: (projectId: string, sessionId: string, pinned: boolean) => Promise<void>;
   /** Permanently archive a session: calls the API (which reclaims its bound
    *  tasks/watches/runs) then drops the row from the tree. Throws on failure. */
   archiveSession: (projectId: string, sessionId: string) => Promise<void>;
@@ -80,6 +83,7 @@ function patchSessionRow(
   prev: Record<string, ProjectSessionsState>,
   sessionId: string,
   patch: (session: WorkbenchSession) => WorkbenchSession,
+  reorder = false,
 ): Record<string, ProjectSessionsState> {
   let changed = false;
   const next: Record<string, ProjectSessionsState> = {};
@@ -95,7 +99,9 @@ function patchSessionRow(
       if (updated !== s) rowChanged = true;
       return updated;
     });
-    next[projectId] = rowChanged ? { ...state, sessions: rows } : state;
+    next[projectId] = rowChanged
+      ? { ...state, sessions: reorder ? orderProjectSessions(rows) : rows }
+      : state;
     if (rowChanged) changed = true;
   }
   return changed ? next : prev;
@@ -403,11 +409,35 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           setSessions((prev) => removeSessionRow(prev, data.session_id));
           return;
         }
-        if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) {
+        if (data.event === 'updated') {
+          const hasTitle = Object.prototype.hasOwnProperty.call(data, 'title');
+          const hasPinned = typeof data.pinned === 'boolean';
+          if (!hasTitle && !hasPinned) return;
           const nextTitle = data.title ?? null;
           setSessions((prev) =>
-            patchSessionRow(prev, data.session_id, (s) => (s.title === nextTitle ? s : { ...s, title: nextTitle })),
+            patchSessionRow(
+              prev,
+              data.session_id,
+              (session) => {
+                const titleChanged = hasTitle && session.title !== nextTitle;
+                const pinnedChanged = hasPinned && session.pinned !== data.pinned;
+                if (!titleChanged && !pinnedChanged) return session;
+                return {
+                  ...session,
+                  ...(titleChanged ? { title: nextTitle } : {}),
+                  ...(pinnedChanged ? { pinned: data.pinned as boolean } : {}),
+                };
+              },
+              hasPinned,
+            ),
           );
+          if (hasPinned) {
+            const projectId = projectsRef.current?.find((project) => project.scope_id === data.scope_id)?.id;
+            if (projectId) {
+              const loaded = sessionsRef.current[projectId]?.sessions?.length ?? 0;
+              void reconcileSessions(projectId, { minCount: loaded });
+            }
+          }
           return;
         }
         if (!REORDER_ACTIVITY_EVENTS.has(data.event)) return;
@@ -475,7 +505,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           setSessions((prev) => {
             const cur = prev[projectId] ?? EMPTY_SESSIONS;
             const rows = cur.sessions ?? [];
-            return { ...prev, [projectId]: { ...cur, sessions: [session, ...rows.filter((s) => s.id !== session.id)] } };
+            return {
+              ...prev,
+              [projectId]: {
+                ...cur,
+                sessions: orderProjectSessions([session, ...rows.filter((s) => s.id !== session.id)]),
+              },
+            };
           });
         }
         setExpanded((prev) => {
@@ -521,7 +557,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           setSessions((prev) => {
             const cur = prev[projectId] ?? EMPTY_SESSIONS;
             const rows = cur.sessions ?? [];
-            return { ...prev, [projectId]: { ...cur, sessions: [session, ...rows.filter((s) => s.id !== session.id)] } };
+            return {
+              ...prev,
+              [projectId]: {
+                ...cur,
+                sessions: orderProjectSessions([session, ...rows.filter((s) => s.id !== session.id)]),
+              },
+            };
           });
         }
         setExpanded((prev) => {
@@ -596,6 +638,16 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [api],
   );
 
+  const setSessionPinned = useCallback(
+    async (projectId: string, sessionId: string, pinned: boolean) => {
+      const updated = await api.updateSession(sessionId, { pinned });
+      setSessions((prev) => patchSessionRow(prev, sessionId, () => updated, true));
+      const loaded = sessionsRef.current[projectId]?.sessions?.length ?? 0;
+      void reconcileSessions(projectId, { minCount: loaded });
+    },
+    [api, reconcileSessions],
+  );
+
   const archiveSession = useCallback(
     async (projectId: string, sessionId: string) => {
       // Archive is terminal — the API reclaims bound tasks/watches/runs server-side.
@@ -655,6 +707,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       setProjectDefaultAgent,
       archiveProject,
       renameSession,
+      setSessionPinned,
       archiveSession,
       upsertProjectToTop,
     }),
@@ -675,6 +728,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       setProjectDefaultAgent,
       archiveProject,
       renameSession,
+      setSessionPinned,
       archiveSession,
       upsertProjectToTop,
     ],
