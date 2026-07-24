@@ -52,7 +52,9 @@
           "uniqueItems": true
         }
       }
-    }
+    },
+    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): fixed-menu backends only — real built-in model ids, server-populated from vibe/backend_model_catalog.py; null for open-menu backends. UI must not hardcode menus." },
+    "standard_vendors": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): opencode only — server-populated mirror of STANDARD_OPENCODE_VENDOR_IDS (core/handlers/model_hub/identifiers.py) so the UI never hand-mirrors vendor lists; null otherwise." }
   },
   "examples": [
     {
@@ -61,7 +63,9 @@
       "menu_kind": "fixed",
       "current": { "model_id": "claude-opus-4-6", "source_id": "src_claudepro1", "channel": "native_cli" },
       "mappings": [ { "builtin_id": "claude-opus-4-6", "target_model_id": "glm-5.2", "enabled": false } ],
-      "menu": null
+      "menu": null,
+      "builtin_models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+      "standard_vendors": null
     },
     {
       "backend": "opencode",
@@ -69,7 +73,9 @@
       "menu_kind": "open",
       "current": { "model_id": "glm-5.2", "source_id": "src_zhipukey01", "channel": "hub" },
       "mappings": [],
-      "menu": { "view": "featured", "checked": ["anthropic/claude-opus-4-6", "openai/gpt-5.6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air"] }
+      "menu": { "view": "featured", "checked": ["anthropic/claude-opus-4-6", "openai/gpt-5.6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air"] },
+      "builtin_models": null,
+      "standard_vendors": ["anthropic", "deepseek", "github-copilot", "google", "groq", "kimi", "minimax", "mistral", "moonshot", "openai", "openrouter", "together", "xai", "zhipuai"]
     }
   ]
 }

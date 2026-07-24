@@ -1,34 +1,35 @@
 // Model Hub UI — feature flags.
 //
-// This lane (L4) lands ahead of its backend dependencies (L2 REST API, L3
-// backend injection, L5 model-menu drawers). The flags below keep the surface
-// reviewable and pixel-checkable now while preventing fabricated data from
-// reaching end users until the real endpoints exist.
-//
-// Flip sequence when dependencies merge (orchestrator):
-//   1. L2 API merged      → set MODELS_API_MODE = 'live'
-//   2. L2/L3 both merged   → set MODEL_HUB_NAV_ENABLED = true (advertise nav)
-//   3. L5 menus merged     → set MODEL_MENUS_ENABLED = true (wire 模型菜单)
+// All feature lanes are merged (L2 REST API #963, L3 injection #976, L4 page
+// #966, L5 menus #977) and the integration seams are closed (agent-supply v1.2
+// builtin_models / standard_vendors, so the UI no longer hardcodes any menu or
+// vendor list). The documented flip sequence below is therefore complete — the
+// surfaces ship ON against the real endpoints (integration LI, 2026-07-24):
+//   1. L2 API merged       → MODELS_API_MODE = 'live'          ✓ (done here)
+//   2. L2/L3 both merged    → MODEL_HUB_NAV_ENABLED = true      ✓ (done here)
+//   3. L5 menus merged      → MODEL_MENUS_ENABLED = true        ✓ (done here)
+// subscription_hub_experimental stays OFF — it is a consent-gated behavior, not
+// a UI-readiness flag. Live end-to-end verification is the post-merge Incus pass.
 
 /**
- * Advertises the 设置 → 模型 entry in the admin sidebar. OFF by default so we
- * do not surface mock-backed data as a first-class destination. The route is
- * always registered (reachable by direct URL) for review + pixel verification.
+ * Advertises the 设置 → 模型 entry in the admin sidebar. ON now that the surface
+ * is backed by the real endpoints; the route is also reachable by direct URL.
  */
-export const MODEL_HUB_NAV_ENABLED = false;
+export const MODEL_HUB_NAV_ENABLED = true;
 
 /**
  * 'mock' serves typed fixtures from `mockData.ts`; 'live' calls the real
- * `/api/models/*` endpoints (L2). The client module switches on this value.
+ * `/api/models/*` endpoints (L2). Now 'live': all backend lanes are merged, so
+ * shipping the nav must serve real data — never fabricated mock sources. (Flip
+ * to 'mock' only for hermetic pixel/screenshot runs with no backend.)
  */
-export const MODELS_API_MODE: 'mock' | 'live' = 'mock';
+export const MODELS_API_MODE: 'mock' | 'live' = 'live';
 
 /**
  * Wires the 模型菜单 buttons on the Agent card to L5's mapping / menu drawers.
- * OFF until L5 lands — the buttons stay visible (pixel fidelity) but explain
- * that the menus are coming rather than opening a non-existent drawer.
+ * ON now that L5 is merged.
  */
-export const MODEL_MENUS_ENABLED = false;
+export const MODEL_MENUS_ENABLED = true;
 
 /**
  * Offers the consent-gated hub-held subscription option (`subscription_hub_

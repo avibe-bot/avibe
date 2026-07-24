@@ -142,6 +142,10 @@ export function buildMockAgents(): AgentSupply[] {
         { builtin_id: 'claude-haiku-4-5', target_model_id: '', enabled: false },
       ],
       menu: null,
+      // Fixed-menu backends carry the server-populated built-in catalog
+      // (agent-supply v1.2); the mapping drawer renders these rows.
+      builtin_models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+      standard_vendors: null,
     },
     {
       backend: 'codex',
@@ -153,6 +157,8 @@ export function buildMockAgents(): AgentSupply[] {
         { builtin_id: 'gpt-5.6-mini', target_model_id: '', enabled: false },
       ],
       menu: null,
+      builtin_models: ['gpt-5.6', 'gpt-5.6-mini'],
+      standard_vendors: null,
     },
     {
       backend: 'opencode',
@@ -175,6 +181,14 @@ export function buildMockAgents(): AgentSupply[] {
           'zhipuai/glm-5-flash',
         ],
       },
+      builtin_models: null,
+      // Server mirror of STANDARD_OPENCODE_VENDOR_IDS (agent-supply v1.2), so the
+      // menu / custom-model identifiers byte-match the backend's opencode_model_id.
+      standard_vendors: [
+        'anthropic', 'deepseek', 'github-copilot', 'google', 'groq', 'kimi',
+        'minimax', 'mistral', 'moonshot', 'openai', 'openrouter', 'together',
+        'xai', 'zhipuai',
+      ],
     },
   ];
 }

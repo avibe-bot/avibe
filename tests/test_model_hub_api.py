@@ -187,6 +187,29 @@ def _assert_envelope(payload: dict, *, ok: bool = True):
     assert payload["contract_version"] == 1
 
 
+def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
+    """Integration (2026-07-24): list_agents() carries the read-only builtin_models /
+    standard_vendors projections straight from the backend modules, so the UI never
+    hand-mirrors a fixed menu or the OpenCode vendor list (agent-supply v1.2)."""
+    from core.handlers.model_hub.identifiers import STANDARD_OPENCODE_VENDOR_IDS
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+
+    service, _store, _adapter = _service(tmp_path)
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+    for agent in agents.values():
+        _assert_valid("agent-supply.schema.json", agent)
+
+    catalog = load_bundled_catalog()
+    for backend in ("claude", "codex"):
+        expected = [entry["id"] for entry in backend_model_entries(backend, catalog)]
+        assert expected, f"bundled catalog must list built-in {backend} models"
+        assert agents[backend]["builtin_models"] == expected
+        assert agents[backend]["standard_vendors"] is None
+
+    assert agents["opencode"]["builtin_models"] is None
+    assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
+
+
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     """Scenarios: MH-PRI-001, MH-OAUTH-A-001, MH-OAUTH-ERR-001."""
 

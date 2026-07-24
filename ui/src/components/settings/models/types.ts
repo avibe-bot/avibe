@@ -107,6 +107,14 @@ export type AgentSupply = {
   current?: AgentCurrent | null;
   mappings?: AgentMapping[];
   menu?: AgentMenu | null;
+  /** v1.2 read-only projection: fixed-menu backends only — the backend's real
+   *  built-in model ids (from vibe/backend_model_catalog.py). null for open-menu
+   *  backends. The mapping drawer renders these; the UI never hardcodes menus. */
+  builtin_models?: string[] | null;
+  /** v1.2 read-only projection: opencode only — server mirror of
+   *  STANDARD_OPENCODE_VENDOR_IDS, so the UI never hand-mirrors vendor prefixes.
+   *  null otherwise. */
+  standard_vendors?: string[] | null;
 };
 
 // ── migration-scan.schema.json ──────────────────────────────────────────

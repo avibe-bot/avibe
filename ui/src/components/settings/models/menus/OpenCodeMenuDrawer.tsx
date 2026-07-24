@@ -72,12 +72,16 @@ export const OpenCodeMenuDrawer: React.FC<{
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual('opencode');
 
+  // Standard OpenCode vendor prefixes, server-populated (agent-supply v1.2) so
+  // identifiers byte-match the backend's opencode_model_id — never hand-mirrored.
+  const standardVendors = React.useMemo(() => new Set(agent.standard_vendors ?? []), [agent.standard_vendors]);
+
   // Only OpenCode-eligible sources materialize as providers (isSourceEligible):
   // API-key sources only — subscriptions (native_cli AND hub-held experimental)
   // are excluded, matching the backend predicate, so we never offer a row the
   // live `set_opencode_menu` would reject.
   const eligibleSources = React.useMemo(() => sources.filter((s) => isSourceEligible(s, 'opencode')), [sources]);
-  const groups = React.useMemo(() => buildMenuGroups(eligibleSources), [eligibleSources]);
+  const groups = React.useMemo(() => buildMenuGroups(eligibleSources, standardVendors), [eligibleSources, standardVendors]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
@@ -228,6 +232,7 @@ export const OpenCodeMenuDrawer: React.FC<{
       <AddCustomModelDialog
         open={customOpen}
         sources={eligibleSources}
+        standardVendors={standardVendors}
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onSaved={(identifier) => {
