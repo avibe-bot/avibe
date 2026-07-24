@@ -9,29 +9,12 @@ import type { Accent } from '../vendorMeta';
 import { sourceAccent } from '../vendorMeta';
 import type { AgentBackend, Source } from '../types';
 
-// Standard vendor ids that map 1:1 to an OpenCode provider prefix (identical to
-// native OpenCode usage — no `avibe-` namespace).
-//
-// MOCK MIRROR of the backend `STANDARD_OPENCODE_VENDOR_IDS`
-// (core/handlers/model_hub/identifiers.py). ESCALATED (2026-07-23): the UI
-// cannot import the Python list, so any divergence makes `set_opencode_menu`
-// reject identifiers in live mode. Authoritative source should be the backend
-// in the integration pass (surfaced via contract, like `builtin_models`); this
-// set is the interim mirror and the single swap point.
-const STANDARD_OPENCODE_VENDORS = new Set([
-  'anthropic',
-  'openai',
-  'zhipuai',
-  'kimi',
-  'moonshot',
-  'xai',
-  'google',
-  'deepseek',
-  'mistral',
-  'groq',
-  'openrouter',
-  'together',
-]);
+// The standard OpenCode vendor ids come from the backend via the opencode
+// agent's `standard_vendors` projection (agent-supply v1.2), server-populated
+// from STANDARD_OPENCODE_VENDOR_IDS (core/handlers/model_hub/identifiers.py).
+// The UI threads that set through — it no longer hand-mirrors the list, so a
+// divergence that would make `set_opencode_menu` reject identifiers can't arise.
+export type StandardVendors = ReadonlySet<string>;
 
 /**
  * Provider segment for a source's model, per the FROZEN opencode-overlay.md
@@ -42,13 +25,13 @@ const STANDARD_OPENCODE_VENDORS = new Set([
  * `mapping_target_unavailable`. So `relay.example` (vendor `custom`) supplying
  * `glm-5.2-air` yields `custom/glm-5.2-air` (not `zhipuai/…`).
  */
-export function inferProvider(sourceVendor: string): string {
-  return STANDARD_OPENCODE_VENDORS.has(sourceVendor) ? sourceVendor : 'custom';
+export function inferProvider(sourceVendor: string, standardVendors: StandardVendors): string {
+  return standardVendors.has(sourceVendor) ? sourceVendor : 'custom';
 }
 
 /** Full prefixed identifier for a (source vendor, model id). */
-export function buildIdentifier(sourceVendor: string, modelId: string): string {
-  return `${inferProvider(sourceVendor)}/${modelId}`;
+export function buildIdentifier(sourceVendor: string, modelId: string, standardVendors: StandardVendors): string {
+  return `${inferProvider(sourceVendor, standardVendors)}/${modelId}`;
 }
 
 // Which backend a fixed-menu backend's own native subscription belongs to
@@ -108,11 +91,11 @@ export type MenuGroup = {
  * order track the 来源 band. The same identifier supplied by several sources
  * collapses into one row carrying every supplying source.
  */
-export function buildMenuGroups(sources: Source[]): MenuGroup[] {
+export function buildMenuGroups(sources: Source[], standardVendors: StandardVendors): MenuGroup[] {
   const byIdentifier = new Map<string, MenuModelRow>();
   for (const source of sources) {
     for (const model of source.models) {
-      const identifier = buildIdentifier(source.vendor, model.id);
+      const identifier = buildIdentifier(source.vendor, model.id, standardVendors);
       let row = byIdentifier.get(identifier);
       if (!row) {
         row = {

@@ -44,7 +44,12 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .identifiers import opencode_model_id, opencode_provider_id, parse_opencode_model_id
+from .identifiers import (
+    STANDARD_OPENCODE_VENDOR_IDS,
+    opencode_model_id,
+    opencode_provider_id,
+    parse_opencode_model_id,
+)
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -267,12 +272,22 @@ def _validated_base_url(value: object) -> Optional[str]:
     return value
 
 
+def _builtin_model_ids(backend: str) -> tuple[str, ...]:
+    """Real built-in model ids for a fixed-menu backend, from the bundled catalog.
+
+    Single source of truth for both the native-subscription supply list
+    (_native_model_ids) and the agents endpoint's read-only builtin_models
+    projection (agent-supply.schema.json v1.2), so the two never diverge.
+    """
+    catalog = load_bundled_catalog()
+    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+
+
 def _native_model_ids(vendor: str) -> tuple[str, ...]:
     backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
     if backend is None:
         return ()
-    catalog = load_bundled_catalog()
-    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+    return _builtin_model_ids(backend)
 
 
 def _default_protocol(vendor: str) -> str:
@@ -919,9 +934,8 @@ class ModelHubService:
 
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         current = None
-        if agent.mode == "hub":
-            if agent.backend == "opencode" and (agent.menu is None or not agent.menu.checked):
-                return {**agent.to_payload(), "current": None}
+        opencode_menu_empty = agent.backend == "opencode" and (agent.menu is None or not agent.menu.checked)
+        if agent.mode == "hub" and not opencode_menu_empty:
             provider = None
             target = next((mapping.target_model_id for mapping in agent.mappings if mapping.enabled), None)
             if target is None and agent.menu and agent.menu.checked:
@@ -942,7 +956,19 @@ class ModelHubService:
                 if model is not None:
                     current = {"model_id": model.id, "source_id": source.id, "channel": source.supply_channel}
                     break
-        return {**agent.to_payload(), "current": current}
+        # Read-only projections (agent-supply.schema.json v1.2, integration 2026-07-24):
+        # fixed-menu backends expose their built-in catalog; opencode exposes the
+        # standard vendor prefixes. Both are populated straight from the backend
+        # modules so the UI never hand-mirrors a menu or vendor list. Not persisted
+        # config — injected here exactly like `current`.
+        builtin_models = list(_builtin_model_ids(agent.backend)) if agent.menu_kind == "fixed" else None
+        standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
+        return {
+            **agent.to_payload(),
+            "current": current,
+            "builtin_models": builtin_models,
+            "standard_vendors": standard_vendors,
+        }
 
     def list_agents(self) -> list[dict]:
         config = self.store.load()

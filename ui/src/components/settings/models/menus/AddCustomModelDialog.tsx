@@ -23,7 +23,7 @@ import { useToast } from '@/context/ToastContext';
 import { modelsApi } from '../modelsApi';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from '../vendorMeta';
 import type { Source } from '../types';
-import { buildIdentifier } from './identifiers';
+import { buildIdentifier, type StandardVendors } from './identifiers';
 
 const FieldLabel: React.FC<{ mono?: boolean; children: React.ReactNode }> = ({ mono, children }) => (
   <span
@@ -108,11 +108,14 @@ const SourceSelect: React.FC<{
 export const AddCustomModelDialog: React.FC<{
   open: boolean;
   sources: Source[];
+  /** Server-populated standard OpenCode vendor prefixes (agent-supply v1.2),
+   *  so the live identifier preview byte-matches the backend. */
+  standardVendors: StandardVendors;
   /** When set, prefill for editing an existing custom entry. */
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
-}> = ({ open, sources, edit, onClose, onSaved }) => {
+}> = ({ open, sources, standardVendors, edit, onClose, onSaved }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -135,7 +138,7 @@ export const AddCustomModelDialog: React.FC<{
   }, [open]);
 
   const trimmedId = modelId.trim();
-  const identifier = source && trimmedId ? buildIdentifier(source.vendor, trimmedId) : '';
+  const identifier = source && trimmedId ? buildIdentifier(source.vendor, trimmedId, standardVendors) : '';
 
   const copyIdentifier = () => {
     if (!identifier || !navigator.clipboard?.writeText) {
