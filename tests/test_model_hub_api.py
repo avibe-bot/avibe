@@ -572,7 +572,9 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     consented_source = response.get_json()["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
-    assert service.oauth_flows.channel(hub_flow["flow_id"]) is None
+    completed_binding = service.oauth_flows.binding(hub_flow["flow_id"])
+    assert completed_binding is not None
+    assert completed_binding.completed is True
 
     scan = client.post("/api/models/migration/scan", headers=headers, base_url=base_url).get_json()
     _assert_valid("migration-scan.schema.json", {"items": scan["items"]})

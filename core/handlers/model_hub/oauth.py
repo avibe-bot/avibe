@@ -22,6 +22,7 @@ class OAuthFlowBinding:
     source_id: Optional[str]
     vendor: Optional[str]
     experimental_consent: bool = False
+    completed: bool = False
 
 
 class OAuthAdapter(Protocol):
@@ -70,7 +71,7 @@ class UnavailableNativeOAuthAdapter:
 
 
 class OAuthFlowRegistry:
-    """Persist non-secret source identity and consent for each in-flight flow."""
+    """Persist non-secret source identity, consent, and completion state."""
 
     def __init__(self, path: Path, *, max_entries: int = 100):
         self.path = path
@@ -99,17 +100,20 @@ class OAuthFlowRegistry:
             source_id = value.get("source_id")
             vendor = value.get("vendor")
             experimental_consent = value.get("experimental_consent", False)
+            completed = value.get("completed", False)
             if (
                 channel in {"native_cli", "hub"}
                 and (source_id is None or (isinstance(source_id, str) and source_id))
                 and (vendor is None or (isinstance(vendor, str) and vendor))
                 and isinstance(experimental_consent, bool)
+                and isinstance(completed, bool)
             ):
                 flows[flow_id] = OAuthFlowBinding(
                     channel,
                     source_id,
                     vendor,
                     experimental_consent,
+                    completed,
                 )
         return flows
 
@@ -123,6 +127,7 @@ class OAuthFlowRegistry:
                     "source_id": binding.source_id,
                     "vendor": binding.vendor,
                     "experimental_consent": binding.experimental_consent,
+                    "completed": binding.completed,
                 }
                 for flow_id, binding in bounded.items()
             },
@@ -154,6 +159,21 @@ class OAuthFlowRegistry:
                 source_id,
                 vendor,
                 experimental_consent,
+            )
+            self._write(flows)
+
+    def complete(self, flow_id: str) -> None:
+        with self._lock:
+            flows = self._read()
+            binding = flows.get(flow_id)
+            if binding is None:
+                raise KeyError(flow_id)
+            flows[flow_id] = OAuthFlowBinding(
+                binding.channel,
+                binding.source_id,
+                binding.vendor,
+                binding.experimental_consent,
+                True,
             )
             self._write(flows)
 

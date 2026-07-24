@@ -160,7 +160,10 @@ class AgentAuthNativeOAuthAdapter:
             if result.get("error") == "flow_not_found":
                 self._flows.pop(flow_id, None)
                 raise KeyError(flow_id)
-            raise NativeOAuthUnavailableError
+            # AgentAuthService leaves malformed/failed Claude submissions
+            # retryable. Return its current declaration so the dialog stays on
+            # the paste-code form instead of turning a typo into engine_down.
+            return await self.oauth_status(flow_id)
         return await self.oauth_status(flow_id)
 
     async def cancel_oauth(self, flow_id: str) -> None:

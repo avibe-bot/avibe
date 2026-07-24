@@ -69,6 +69,8 @@ class FakeAgentAuthService:
         flow = self.flows.get(flow_id)
         if flow is None:
             return {"ok": False, "error": "flow_not_found"}
+        if "#" not in code:
+            return {"ok": False, "error": "invalid_format"}
         self.submissions.append((flow_id, code))
         flow.state = "verifying"
         return {"ok": True}

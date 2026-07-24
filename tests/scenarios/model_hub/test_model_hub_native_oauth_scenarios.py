@@ -38,6 +38,16 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
         "instructions_key": "settings.models.oauth.pasteCode.hint",
     }
 
+    invalid = client.post(
+        "/api/models/oauth/submit",
+        json={"flow_id": started["flow_id"], "value": "not-a-callback"},
+        headers=headers,
+        base_url=BASE_URL,
+    )
+    assert invalid.status_code == 200
+    assert invalid.get_json()["flow"]["state"] == "awaiting_action"
+    assert harness.agent_auth.submissions == []
+
     submitted = client.post(
         "/api/models/oauth/submit",
         json={"flow_id": started["flow_id"], "value": "code-value#state-value"},
@@ -61,6 +71,15 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     assert sources[0]["account_label"] is None
     assert sources[0]["credential_ref"] is None
     assert harness.store.config.sources[0].id == started["source_id"]
+    harness.adapter._flows.clear()
+    harness.agent_auth.flows.clear()
+    repeated = client.get(
+        f"/api/models/oauth/status/{started['flow_id']}",
+        base_url=BASE_URL,
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json()["flow"]["state"] == "success"
+    assert len(client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"]) == 1
     claude = next(
         agent
         for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
@@ -220,3 +239,12 @@ def test_mh_oauth_consent_001_is_required_and_persisted(monkeypatch, tmp_path):
     assert source["id"] == started["source_id"]
     assert source["supply_channel"] == "hub"
     assert source["experimental_consent_at"] == "2026-07-25T00:00:00+00:00"
+
+    harness.adapter.flows.clear()
+    repeated = client.get(
+        f"/api/models/oauth/status/{started['flow_id']}",
+        base_url=BASE_URL,
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json()["flow"]["state"] == "success"
+    assert len(client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"]) == 1

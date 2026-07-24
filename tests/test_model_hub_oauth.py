@@ -21,7 +21,13 @@ def test_flow_registry_persists_experimental_consent(tmp_path):
     binding = OAuthFlowRegistry(path).binding("oaf_consent01")
     assert binding is not None
     assert binding.experimental_consent is True
+    assert binding.completed is False
     assert json.loads(path.read_text(encoding="utf-8"))["oaf_consent01"]["experimental_consent"] is True
+
+    OAuthFlowRegistry(path).complete("oaf_consent01")
+    completed = OAuthFlowRegistry(path).binding("oaf_consent01")
+    assert completed is not None
+    assert completed.completed is True
 
 
 def test_flow_registry_defaults_legacy_bindings_to_no_consent(tmp_path):
@@ -42,6 +48,7 @@ def test_flow_registry_defaults_legacy_bindings_to_no_consent(tmp_path):
     binding = OAuthFlowRegistry(path).binding("oaf_legacy01")
     assert binding is not None
     assert binding.experimental_consent is False
+    assert binding.completed is False
 
 
 def test_native_status_trusts_codex_keyring_success_but_not_active_api_keys():
