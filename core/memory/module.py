@@ -522,6 +522,8 @@ class MemoryModule:
             return "memory_invalid_input"
         if not self._valid_identifier(request.source_message_id) or not self._valid_identifier(request.session_id):
             return "memory_invalid_input"
+        if not is_principal_id(request.principal_id) or request.provenance not in {"user_input", "agent"}:
+            return "memory_invalid_input"
         if not isinstance(request.occurred_at_ms, int) or isinstance(request.occurred_at_ms, bool):
             return "memory_invalid_input"
         if request.occurred_at_ms < 0 or request.occurred_at_ms > MAX_PROVIDER_TIMESTAMP_MS:

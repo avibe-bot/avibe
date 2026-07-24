@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import threading
 from types import SimpleNamespace
@@ -87,6 +88,49 @@ def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tm
     restart_supervisor.schedule_restart(delay_seconds=2, vibe_path="/bin/vibe", trigger="upgrade", prepare_show_runtime=True)
 
     assert "--prepare-show-runtime" in calls["command"]
+
+
+def test_schedule_restart_passes_memory_ui_secret_only_through_stdin(monkeypatch, tmp_path):
+    from core.memory.ui_access import MEMORY_UI_SECRET_STDIN_ENV
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = {}
+    secret = "test-memory-ui-secret"
+
+    monkeypatch.setattr(
+        restart_supervisor,
+        "get_restart_invocation_command",
+        lambda vibe_path=None: ["/bin/vibe", "restart"],
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "get_restart_environment",
+        lambda vibe_path=None: {"PATH": "/bin"},
+    )
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+
+    def fake_popen(command, **kwargs):
+        calls["kwargs"] = kwargs
+        return SimpleNamespace(pid=45678, stdin=io.BytesIO())
+
+    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
+
+    restart_supervisor.schedule_restart(
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="web-ui",
+        scope="service",
+        memory_ui_secret=secret,
+    )
+
+    assert calls["kwargs"]["stdin"] is restart_supervisor.subprocess.PIPE
+    assert calls["kwargs"]["env"] == {
+        "PATH": "/bin",
+        MEMORY_UI_SECRET_STDIN_ENV: "1",
+    }
+    assert secret not in calls["kwargs"]["env"].values()
 
 
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
@@ -466,8 +510,8 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runtime,
         "start_service",
-        lambda wait_for_ready=True, initial_ready_timeout=5.0: calls.append(
-            ("start_service", wait_for_ready, initial_ready_timeout)
+        lambda wait_for_ready=True, initial_ready_timeout=5.0, **kwargs: calls.append(
+            ("start_service", wait_for_ready, initial_ready_timeout, kwargs)
         )
         or 222,
     )
@@ -475,7 +519,10 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runtime,
         "start_ui",
-        lambda host, port, wait_for_ready=True: calls.append(("start_ui", host, port, wait_for_ready)) or 333,
+        lambda host, port, wait_for_ready=True, **kwargs: calls.append(
+            ("start_ui", host, port, wait_for_ready, kwargs)
+        )
+        or 333,
     )
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
@@ -484,13 +531,11 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
 
     assert service_pid == 222
     assert ui_pid == 333
-    assert calls == [
-        "ensure_data_dirs",
-        "load_config",
-        ("start_service", False, 0),
-        ("bind_host", config),
-        ("start_ui", "0.0.0.0", 5123, False),
-    ]
+    assert calls[:2] == ["ensure_data_dirs", "load_config"]
+    assert calls[2][:3] == ("start_service", False, 0)
+    assert calls[3] == ("bind_host", config)
+    assert calls[4][:4] == ("start_ui", "0.0.0.0", 5123, False)
+    assert calls[2][3]["memory_ui_secret"] == calls[4][4]["memory_ui_secret"]
     status = runtime.read_status()
     assert status["state"] == "running"
     assert status["service_pid"] == 222

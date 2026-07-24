@@ -200,6 +200,8 @@ def test_create_app_exposes_minimal_endpoints():
 
 
 def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
     controller = _build_controller_double()
     calls: list[tuple[str, object]] = []
     capture_finished = asyncio.Event()
@@ -254,12 +256,30 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     )
     controller.reconcile_memory = reconcile_memory
     monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured-memory"))
-    app = internal_server.create_app(controller)
+    memory_ui_secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=memory_ui_secret)
 
     async def _go():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            user_headers = {"X-Avibe-Memory-User-Key": "avibe:local"}
+            user_headers = {
+                "X-Avibe-Memory-User-Key": "avibe:local",
+                MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                    memory_ui_secret,
+                    method="GET",
+                    path="/internal/memory/profile",
+                    user_key="avibe:local",
+                ),
+            }
+            search_headers = {
+                "X-Avibe-Memory-User-Key": "avibe:local",
+                MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                    memory_ui_secret,
+                    method="POST",
+                    path="/internal/memory/search",
+                    user_key="avibe:local",
+                ),
+            }
             capability_headers = {
                 "X-Avibe-Caller-Session": "session-1",
                 "X-Avibe-Memory-Capability": capability,
@@ -271,7 +291,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.post(
                     "/internal/memory/search",
                     json={"query": "safe query", "limit": 3},
-                    headers=user_headers,
+                    headers=search_headers,
                 ),
                 await client.post(
                     "/internal/memory/remember",
@@ -281,7 +301,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.post("/internal/memory/clear", json={"confirm": True}),
                 await client.post("/internal/memory/install-runtime"),
                 await client.post("/internal/reconcile-memory"),
-                await client.post("/internal/memory/search", json=[], headers=user_headers),
+                await client.post("/internal/memory/search", json=[], headers=search_headers),
                 await client.post(
                     "/internal/memory/remember",
                     json={"text": ""},
@@ -378,6 +398,48 @@ def test_memory_internal_reads_accept_a_session_bound_agent_capability():
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "items": []}
     controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id)
+
+
+def test_memory_internal_read_rejects_agent_token_with_forged_local_owner_header():
+    from core.memory.cli_access import (
+        CALLER_SESSION_HEADER,
+        MEMORY_CAPABILITY_HEADER,
+        MEMORY_USER_KEY_HEADER,
+        MemoryCliAccessRegistry,
+    )
+
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value="u-11111111111111111111111111111111"),
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []}),
+    )
+    controller.memory_cli_access = MemoryCliAccessRegistry()
+    capability = controller.memory_cli_access.grant(
+        "ses-user-b",
+        "u-22222222222222222222222222222222",
+    )
+    app = internal_server.create_app(
+        controller,
+        memory_ui_secret="test-ui-controller-secret",
+    )
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    CALLER_SESSION_HEADER: "ses-user-b",
+                    MEMORY_CAPABILITY_HEADER: capability,
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 403
+    controller.memory_runtime.principal_for_user_key.assert_not_called()
+    controller.memory_runtime.profile_payload.assert_not_awaited()
 
 
 def test_memory_internal_reads_keep_two_capability_principals_isolated():
@@ -1054,9 +1116,11 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     session_id = session["id"]
 
     seen_texts: list[str] = []
+    seen_contexts: list[MessageContext] = []
 
     async def handler(ctx, text):
         seen_texts.append(text)
+        seen_contexts.append(ctx)
         # Simulate the user queueing two messages WHILE the first turn runs (the
         # real flow — queued rows only exist during an active turn).
         if text == "first turn":
@@ -1074,6 +1138,7 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                     metadata={
                         "_web_push_user_key": "remote:user-a",
                         "_memory_user_id": "remote:user-a",
+                        "_memory_ordinary_text": True,
                     },
                 )
                 messages_service.append(
@@ -1085,7 +1150,12 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                     source="user",
                     message_type=messages_service.QUEUED_TYPE,
                     text="q2",
-                    metadata={"_memory_user_id": "remote:user-a"},
+                    author_id="push:loopback",
+                    metadata={
+                        "_web_push_user_key": "push:loopback",
+                        "_memory_user_id": "remote:user-a",
+                        "_memory_ordinary_text": True,
+                    },
                 )
         controller.mark_turn_complete(ctx)  # release each turn immediately
         return None
@@ -1106,12 +1176,17 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     asyncio.run(_go())
     # First the user's turn, then ONE merged flush turn for the two queued msgs.
     assert seen_texts == ["first turn", "q1\nq2"]
+    assert seen_contexts[1].user_id == "remote:user-a"
+    assert seen_contexts[1].is_ordinary_text is True
     with engine.connect() as conn:
         assert messages_service.list_queued(conn, session_id) == []
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert [m["text"] for m in transcript["messages"]] == ["q1\nq2"], "the flush persisted one merged user row"
-    assert transcript["messages"][0]["author_id"] == "remote:user-a"
-    assert transcript["messages"][0]["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert transcript["messages"][0]["author_id"] is None
+    assert transcript["messages"][0]["metadata"]["_web_push_user_keys"] == [
+        "remote:user-a",
+        "push:loopback",
+    ]
 
 
 def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
@@ -1867,7 +1942,10 @@ def _seed_avibe_session_with_queue(queued):
                 metadata=(
                     {session_turns.SCHEDULED_PROVENANCE_KEY: prov}
                     if prov is not None
-                    else {session_turns.MEMORY_USER_ID_METADATA: "local"}
+                    else {
+                        session_turns.MEMORY_USER_ID_METADATA: "local",
+                        session_turns.MEMORY_ORDINARY_TEXT_METADATA: True,
+                    }
                 ),
                 native_message_id=(prov or {}).get("message_id") if prov is not None else None,
             )

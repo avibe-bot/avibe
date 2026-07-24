@@ -161,10 +161,14 @@ def _runtime_ready_for_config(config) -> bool:
 
 
 def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
+    from core.memory.ui_access import generate_ui_read_secret, process_ui_read_secret
     from core.services import settings as settings_service
 
     paths.ensure_data_dirs()
     config = settings_service.load_config(default_factory=settings_service.default_config)
+    memory_ui_secret = process_ui_read_secret()
+    if memory_ui_secret is None and start_ui:
+        memory_ui_secret = generate_ui_read_secret()
 
     # Service-only restart: the UI process was never stopped, so carry its
     # existing pid through EVERY status write — including the early
@@ -177,10 +181,19 @@ def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
     else:
         runtime.write_status("setup", "missing platform credentials", None, preserved_ui_pid)
 
-    service_pid = runtime.start_service(wait_for_ready=False, initial_ready_timeout=0)
+    service_pid = runtime.start_service(
+        wait_for_ready=False,
+        initial_ready_timeout=0,
+        memory_ui_secret=memory_ui_secret,
+    )
     if start_ui:
         bind_host = runtime.effective_ui_bind_host(config)
-        ui_pid = runtime.start_ui(bind_host, config.ui.setup_port, wait_for_ready=False)
+        ui_pid = runtime.start_ui(
+            bind_host,
+            config.ui.setup_port,
+            wait_for_ready=False,
+            memory_ui_secret=memory_ui_secret,
+        )
     else:
         ui_pid = preserved_ui_pid
 
@@ -437,9 +450,12 @@ def schedule_restart(
     trigger: str = "cli",
     scope: str = "all",
     prepare_show_runtime: bool = False,
+    memory_ui_secret: str | None = None,
 ) -> dict:
+    from core.memory.ui_access import process_ui_read_secret
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
+    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
     invocation = get_restart_invocation_command(vibe_path=vibe_path)
@@ -484,13 +500,18 @@ def schedule_restart(
             log.flush()
             process = subprocess.Popen(
                 command,
+                stdin=subprocess.PIPE if memory_ui_secret is not None else None,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 close_fds=True,
                 cwd=get_safe_cwd(),
-                env=env,
+                env=runtime._memory_ui_child_env(
+                    env,
+                    memory_ui_secret=memory_ui_secret,
+                ),
             )
+            runtime._spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     except OSError as exc:
         # The seed status above is now "scheduled"; if the job can't be spawned
         # (bad cached vibe path, missing executable, permission/log-open error) no
@@ -508,6 +529,9 @@ def schedule_restart(
 
 
 def main(argv: list[str] | None = None) -> int:
+    from core.memory.ui_access import initialize_process_ui_read_secret
+
+    initialize_process_ui_read_secret()
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--delay-seconds", type=float, default=0.0)

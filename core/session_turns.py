@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA
+from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
@@ -85,6 +85,7 @@ _FLUSH_REBUILT_KEYS = frozenset(
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 MEMORY_USER_ID_METADATA = "_memory_user_id"
+MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -999,13 +1000,36 @@ class SessionTurnManager:
                     ]
                     if not texts and not queued_attachments:
                         return False
-                    user_owner = segment_owner
+                    memory_user = segment_owner
+                    web_push_owners = list(
+                        dict.fromkeys(
+                            owner.strip()
+                            for row in segment
+                            if isinstance(
+                                (owner := (row.get("metadata") or {}).get(WEB_PUSH_USER_KEY_METADATA)),
+                                str,
+                            )
+                            and owner.strip()
+                        )
+                    )
+                    web_push_owner = web_push_owners[0] if len(web_push_owners) == 1 else None
                     memory_cli_admitted = all(
                         (row.get("metadata") or {}).get("_memory_cli_admitted") is True for row in segment
                     )
-                    user_metadata = None
-                    if user_owner:
-                        user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
+                    memory_ordinary_text = all(
+                        (row.get("metadata") or {}).get(MEMORY_ORDINARY_TEXT_METADATA) is True
+                        for row in segment
+                    )
+                    user_metadata = {
+                        MEMORY_ORDINARY_TEXT_METADATA: memory_ordinary_text,
+                        "_memory_cli_admitted": memory_cli_admitted,
+                    }
+                    if memory_user:
+                        user_metadata[MEMORY_USER_ID_METADATA] = memory_user
+                    if web_push_owner:
+                        user_metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_owner
+                    elif web_push_owners:
+                        user_metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_owners
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )
@@ -1020,7 +1044,7 @@ class SessionTurnManager:
                         text="\n".join(texts),
                         content={"attachments": queued_attachments} if queued_attachments else None,
                         metadata=user_metadata,
-                        author_id=user_owner,
+                        author_id=web_push_owner,
                     )
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
         except Exception:
@@ -1044,9 +1068,9 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
-            context.user_id = user_owner or "workbench"
+            context.user_id = memory_user or "workbench"
             context.message_id = str(segment[-1]["id"])
-            context.is_ordinary_text = True
+            context.is_ordinary_text = memory_ordinary_text
             if context.platform_specific is None:
                 context.platform_specific = {}
             if memory_cli_admitted:

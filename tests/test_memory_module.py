@@ -80,13 +80,14 @@ def _request(
     text: str = "remember this",
     occurred_at_ms: int = 1_000,
     attachments: tuple[CaptureAttachment, ...] = (),
+    principal_id: str = "u-11111111111111111111111111111111",
 ):
     from core.memory.types import CaptureRequest
 
     return CaptureRequest(
         source_message_id=source,
         session_id=session,
-        principal_id="u-11111111111111111111111111111111",
+        principal_id=principal_id,
         provenance="user_input",
         text=text,
         occurred_at_ms=occurred_at_ms,
@@ -1405,6 +1406,15 @@ async def test_whitespace_only_capture_identifiers_are_invalid(tmp_path: Path) -
     assert await module.capture(_request(source="   ")) == CaptureSkipped(reason="memory_invalid_input")
     assert await module.capture(_request(session="\t\n")) == CaptureSkipped(reason="memory_invalid_input")
     assert store.ensure_meta().missed_count == 2
+
+
+async def test_invalid_capture_principal_is_classified_as_invalid_input(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    assert await module.capture(_request(principal_id="avibe:local")) == CaptureSkipped(
+        reason="memory_invalid_input"
+    )
+    assert store.ensure_meta().missed_count == 1
 
 
 def test_provider_port_is_not_part_of_the_public_memory_package() -> None:

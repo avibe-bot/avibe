@@ -4784,13 +4784,19 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
+        from core.memory.ui_access import process_ui_read_secret
 
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
+        memory_ui_secret = process_ui_read_secret()
+        spawn_kwargs = (
+            {"memory_ui_secret": memory_ui_secret} if memory_ui_secret is not None else {}
+        )
         pid = runtime.spawn_background(
             [sys.executable, "-c", command],
             config_paths.get_runtime_ui_pid_path(),
             "ui_stdout.log",
             "ui_stderr.log",
+            **spawn_kwargs,
         )
         runtime.write_status(
             status.get("state", "running"),
@@ -6966,6 +6972,18 @@ def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     return value if is_memory_error_code(value) else fallback
 
 
+def _workbench_memory_is_ordinary_text(payload: object, quick_reply_for: object) -> bool:
+    if not isinstance(payload, dict) or quick_reply_for or payload.get("files"):
+        return False
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return False
+    return True
+
+
 @app.get("/api/memory/settings", include_in_schema=False)
 async def memory_settings_get(starlette_request: FastAPIRequest):
     async def handler():
@@ -7839,6 +7857,7 @@ async def sessions_messages_create(session_id: str):
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
+    memory_ordinary_text = _workbench_memory_is_ordinary_text(payload, quick_reply_for)
     web_push_user_key = _web_push_user_key()
 
     engine = _projects_engine()
@@ -7909,6 +7928,7 @@ async def sessions_messages_create(session_id: str):
                     "_web_push_user_key": web_push_user_key,
                     "_memory_user_id": memory_user_id,
                     "_memory_cli_admitted": memory_cli_admitted,
+                    "_memory_ordinary_text": memory_ordinary_text,
                 },
                 author_id=web_push_user_key,
                 author_name=payload.get("author_name"),
@@ -7975,6 +7995,7 @@ async def sessions_messages_create(session_id: str):
         "user_id": memory_user_id,
         "message_id": message.get("id"),
         "memory_cli_admitted": memory_cli_admitted,
+        "is_ordinary_text": memory_ordinary_text,
     }
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
@@ -10746,6 +10767,10 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
+
+    from core.memory.ui_access import initialize_process_ui_read_secret
+
+    initialize_process_ui_read_secret()
     global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn

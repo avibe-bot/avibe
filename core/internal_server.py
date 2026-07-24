@@ -70,7 +70,11 @@ def default_socket_path() -> Path:
     return paths.get_state_dir() / "dispatch.sock"
 
 
-def create_app(controller: "Controller") -> FastAPI:
+def create_app(
+    controller: "Controller",
+    *,
+    memory_ui_secret: str | None = None,
+) -> FastAPI:
     """Build the minimal FastAPI app the internal server exposes.
 
     Factored out so tests can mount the same routes against a fake
@@ -79,6 +83,10 @@ def create_app(controller: "Controller") -> FastAPI:
     from core.inbox_events import bus, mark_controller_process
 
     mark_controller_process()
+    if memory_ui_secret is None:
+        from core.memory.ui_access import process_ui_read_secret
+
+        memory_ui_secret = process_ui_read_secret()
 
     app = FastAPI(
         title="avibe internal dispatch",
@@ -485,6 +493,17 @@ def create_app(controller: "Controller") -> FastAPI:
         user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
         if user_key:
             if session_id or capability or user_key != "avibe:local":
+                return None
+            from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+
+            proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
+            if memory_ui_secret is None or not verify_ui_read_proof(
+                memory_ui_secret,
+                proof,
+                method=request.method,
+                path=request.url.path,
+                user_key=user_key,
+            ):
                 return None
             runtime = _memory_runtime()
             try:
@@ -928,6 +947,7 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         message_id=payload.get("message_id"),
         files=files,
         memory_cli_admitted=payload.get("memory_cli_admitted") is True,
+        is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
     return text, context
 
@@ -942,6 +962,7 @@ def _build_session_context(
     message_id: Optional[str] = None,
     files: Optional[list] = None,
     memory_cli_admitted: bool = False,
+    is_ordinary_text: bool = False,
 ) -> MessageContext:
     """Build the avibe ``MessageContext`` for a workbench session.
 
@@ -993,7 +1014,7 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
-        is_ordinary_text=True,
+        is_ordinary_text=is_ordinary_text,
     )
 
 

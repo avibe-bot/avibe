@@ -392,7 +392,11 @@ async def memory_profile(
     return await _memory_request(
         "GET",
         "/internal/memory/profile",
-        headers=_memory_user_key_headers(user_key),
+        headers=_memory_user_key_headers(
+            "GET",
+            "/internal/memory/profile",
+            user_key,
+        ),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -410,7 +414,11 @@ async def memory_search(
         "POST",
         "/internal/memory/search",
         payload={"query": query, "limit": limit},
-        headers=_memory_user_key_headers(user_key),
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/search",
+            user_key,
+        ),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -566,10 +574,24 @@ def _memory_cli_access_headers(session_id: str | None, capability: str | None) -
     return headers
 
 
-def _memory_user_key_headers(user_key: str) -> dict[str, str]:
+def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
     from core.memory.cli_access import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import (
+        MEMORY_UI_PROOF_HEADER,
+        build_ui_read_proof,
+        process_ui_read_secret,
+    )
 
-    return {MEMORY_USER_KEY_HEADER: user_key}
+    headers = {MEMORY_USER_KEY_HEADER: user_key}
+    secret = process_ui_read_secret()
+    if secret:
+        headers[MEMORY_UI_PROOF_HEADER] = build_ui_read_proof(
+            secret,
+            method=method,
+            path=path,
+            user_key=user_key,
+        )
+    return headers
 
 
 async def notify_vault_request_created(

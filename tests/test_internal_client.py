@@ -283,6 +283,38 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
     ]
 
 
+def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(200, json={"status": "ok", "items": []})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_profile(
+                user_key="avibe:local",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+
+    assert result["status_code"] == 200
+    assert captured["x-avibe-memory-user-key"] == "avibe:local"
+    assert captured["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret",
+        method="GET",
+        path="/internal/memory/profile",
+        user_key="avibe:local",
+    )
+
+
 def test_memory_sync_read_helper_sends_agent_capability_headers(socket_path):
     captured: dict[str, str] = {}
 

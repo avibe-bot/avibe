@@ -1244,8 +1244,7 @@
       "agents": "Agents",
       "skills": "Skills",
       "harness": "Harness",
-      "vaults": "Vaults",
-      "memory": "Memory"
+      "vaults": "Vaults"
     },
     "search": {
       "roleYou": "You",
@@ -1329,11 +1328,6 @@
         "eyebrow": "Vaults",
         "title": "Vaults",
         "description": "Secrets and API keys that the Agent can pull into ENV / .env without you copy-pasting."
-      },
-      "memory": {
-        "eyebrow": "Memory",
-        "title": "Memory",
-        "description": "A personal memory distilled from your Workbench and private-IM messages — review it, search it, or clear it."
       }
     }
   },

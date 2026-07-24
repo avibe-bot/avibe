@@ -1244,8 +1244,7 @@
       "agents": "Agents",
       "skills": "Skills",
       "harness": "Harness",
-      "vaults": "Vaults",
-      "memory": "记忆"
+      "vaults": "Vaults"
     },
     "search": {
       "roleYou": "你",
@@ -1329,11 +1328,6 @@
         "eyebrow": "Vaults",
         "title": "Vaults",
         "description": "secrets 和 API key,Agent 可以直接写进 ENV / .env,不用你复制粘贴。"
-      },
-      "memory": {
-        "eyebrow": "记忆",
-        "title": "记忆",
-        "description": "从你的 Workbench 和私聊消息中提炼出的个人记忆——在这里查看、搜索或清除。"
       }
     }
   },

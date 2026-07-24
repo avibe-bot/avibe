@@ -895,7 +895,10 @@ export const SettingsMemoryPage: React.FC = () => {
         setRuntimeInstalled(true);
       }
     } catch {
-      // Best-effort: leave the prior readiness rather than falsely blocking the toggle.
+      // Older/unavailable dependency APIs must not leave the whole page in its
+      // initial loading state. Fail open like the absent-row compatibility path.
+      setRuntimeInstalled(true);
+      setDependencyReady(true);
     }
   }, [api]);
 

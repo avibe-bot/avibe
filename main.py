@@ -135,6 +135,9 @@ def main():
     lock_acquired = False
     macos_session_diagnostics = None
     try:
+        from core.memory.ui_access import initialize_process_ui_read_secret
+
+        initialize_process_ui_read_secret()
         acquire_service_instance_lock()
         lock_acquired = True
 

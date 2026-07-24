@@ -9848,9 +9848,19 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    service_pid = runtime.start_service(wait_for_ready=False)
+    from core.memory.ui_access import generate_ui_read_secret
+
+    memory_ui_secret = generate_ui_read_secret()
+    service_pid = runtime.start_service(
+        wait_for_ready=False,
+        memory_ui_secret=memory_ui_secret,
+    )
     bind_host = runtime.effective_ui_bind_host(config)
-    ui_pid = runtime.start_ui(bind_host, config.ui.setup_port)
+    ui_pid = runtime.start_ui(
+        bind_host,
+        config.ui.setup_port,
+        memory_ui_secret=memory_ui_secret,
+    )
     service_ready = runtime.service_pid_recorded(service_pid)
     if not service_ready:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)

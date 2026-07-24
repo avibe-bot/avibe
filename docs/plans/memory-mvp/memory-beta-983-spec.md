@@ -267,9 +267,13 @@ scope from exactly one of two trusted carriers:
    agent sessions.
 2. **Server-resolved Workbench identity** (Settings page): `ui_server`
    passes the server-resolved `user_key` (always `avibe:local` for
-   Settings, per section 1) over the UDS in an internal header; the
-   **controller** derives the principal from it using `scope_key`, so the
-   UI process never holds Memory secrets or touches the store. The
+   Settings, per section 1) over the UDS in an internal header plus an HMAC
+   proof bound to the HTTP method, path, and user key. The launcher delivers
+   the proof secret once to the UI and controller processes without placing
+   it in agent-inherited environment variables. A user-key header without a
+   valid proof is refused, including when the caller also holds another
+   user's capability. The **controller** derives the principal using
+   `scope_key`, so the UI process never touches the Memory store. The
    browser-facing `/api/memory/*` routes accept no user parameter and keep
    their existing `is_direct_loopback_memory_request` admission.
 
@@ -408,6 +412,10 @@ new `/internal/memory/remember` handler (thin wrapper over
   `/memory` handling remain; deleted tests removed rather than skipped
 - **UI**: `cd ui && npm run build`; staged-rendering states of
   `SettingsMemoryPage` covered by existing component-test patterns
+- **Settings read proof**: a caller holding user B's valid capability but
+  forging `X-Avibe-Memory-User-Key: avibe:local` receives 403; valid proofs
+  are bound to method/path/user-key and the proof secret is not present in
+  the child process environment
 - **manual (Incus regression)**: Workbench capture without the admin flag,
   IM DM capture as a non-admin user, the local owner's Settings page
   showing only `avibe:local` memory, a second (IM) user reading only their

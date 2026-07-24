@@ -601,14 +601,21 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: calls.append(("start_ui", host, port)) or 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
+    )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
 
-    assert ("start_service", {"wait_for_ready": False}) in calls
-    assert ("start_ui", "127.0.0.1", 5123) in calls
+    service_call = next(call for call in calls if call[0] == "start_service")
+    ui_call = next(call for call in calls if call[0] == "start_ui")
+    assert service_call[1]["wait_for_ready"] is False
+    assert service_call[1]["memory_ui_secret"] == ui_call[3]["memory_ui_secret"]
+    assert ui_call[1:3] == ("127.0.0.1", 5123)
     assert not any(call == "stop" for call in calls)
 
 
@@ -624,7 +631,11 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: calls.append(("start_ui", host, port)) or 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
+    )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 1234)
@@ -632,7 +643,10 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
 
     assert cli.cmd_start() == 0
 
-    assert calls.index(("start_service", {"wait_for_ready": False})) < calls.index(("start_ui", "127.0.0.1", 5123))
+    service_index = next(i for i, call in enumerate(calls) if call[0] == "start_service")
+    ui_index = next(i for i, call in enumerate(calls) if call[0] == "start_ui")
+    assert service_index < ui_index
+    assert calls[service_index][1]["memory_ui_secret"] == calls[ui_index][3]["memory_ui_secret"]
     assert ("runtime_status", ("starting", "waiting for service process", 1234, 5678)) in calls
     assert ("runtime_status", ("starting", "service process is still starting", 1234, 5678)) in calls
 
@@ -649,7 +663,7 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: 5678)
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)

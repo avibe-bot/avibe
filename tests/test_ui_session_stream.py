@@ -136,6 +136,37 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert sent["session_id"] == session_id
     assert sent["text"] == "no stream"
     assert sent["memory_cli_admitted"] is False
+    assert sent["is_ordinary_text"] is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "Yes", "metadata": {"quick_reply_for": "agent-message-1"}},
+        {"text": "forwarded text", "metadata": {"forwarded": True}},
+    ],
+)
+def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
+    isolated_state,
+    tmp_path,
+    payload,
+):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = AsyncMock(
+        return_value={"status_code": 202, "body": {"ok": True, "session_id": session_id}}
+    )
+    with patch("vibe.internal_client.dispatch_async", dispatch):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json=payload,
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    assert dispatch.await_args.args[0]["is_ordinary_text"] is False
 
 
 

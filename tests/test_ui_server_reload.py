@@ -137,16 +137,32 @@ def test_ui_reload_uses_requested_host_when_tunnel_disabled(monkeypatch):
 
 def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypatch):
     captured: dict = {}
+    memory_ui_secret = "test-memory-ui-secret"
     monkeypatch.setattr(
         "core.services.settings.load_config",
         lambda *a, **k: _config_with_tunnel(enabled=False),
     )
+    monkeypatch.setattr("core.memory.ui_access._process_secret", memory_ui_secret)
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
     monkeypatch.setattr(runtime, "write_status", lambda *args: captured.setdefault("status", args))
 
-    def fake_spawn(args, pid_path, stdout_name, stderr_name, env=None):
-        captured["spawn"] = (args, pid_path, stdout_name, stderr_name, env)
+    def fake_spawn(
+        args,
+        pid_path,
+        stdout_name,
+        stderr_name,
+        env=None,
+        memory_ui_secret=None,
+    ):
+        captured["spawn"] = (
+            args,
+            pid_path,
+            stdout_name,
+            stderr_name,
+            env,
+            memory_ui_secret,
+        )
         return 222
 
     monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
@@ -162,4 +178,5 @@ def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypat
     assert response.status_code == 200
     assert captured["spawn"][1] == runtime.paths.get_runtime_ui_pid_path()
     assert captured["spawn"][2:4] == ("ui_stdout.log", "ui_stderr.log")
+    assert captured["spawn"][5] == memory_ui_secret
     assert captured["status"][-1] == 222
