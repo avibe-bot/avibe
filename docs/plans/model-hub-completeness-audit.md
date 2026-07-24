@@ -1,7 +1,9 @@
 # Model Hub completeness audit
 
-Status: **master static audit complete**  
-Baseline: `cf1b4314d04e871d5072ddeed9c74a402983efb4` (`origin/master`, 2026-07-25)  
+Status: **master static audit complete**
+
+Baseline: `cf1b4314d04e871d5072ddeed9c74a402983efb4` (`origin/master`, 2026-07-25)
+
 Scope: signed behavior spec `model-hub.md` sections 4-5 and frozen contracts under
 `model-hub-contracts/`. F1/F2 worktrees were not inspected. No runtime, VM,
 container, network, or production-state probe was performed.
