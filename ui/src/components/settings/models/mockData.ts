@@ -4,12 +4,14 @@
 // time so the 最近切换 list always renders 今天 / 昨天 correctly.
 import type {
   AgentSupply,
+  MigrationScan,
   Priority,
   ResolutionEvent,
   RuntimeDependency,
   Source,
 } from './types';
 import { CONTRACT_VERSION } from './types';
+import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
 const MIN = 60_000;
@@ -132,7 +134,13 @@ export function buildMockAgents(): AgentSupply[] {
       mode: 'hub',
       menu_kind: 'fixed',
       current: { model_id: 'claude-opus-4-6', source_id: 'src_claudepro1', channel: 'native_cli' },
-      mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: false }],
+      // Fixed-menu backends surface their full built-in id list as mappings; an
+      // enabled entry is an override (frame 04), disabled = 跟随原生 (identity).
+      mappings: [
+        { builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: true },
+        { builtin_id: 'claude-sonnet-4-6', target_model_id: '', enabled: false },
+        { builtin_id: 'claude-haiku-4-5', target_model_id: '', enabled: false },
+      ],
       menu: null,
     },
     {
@@ -140,7 +148,10 @@ export function buildMockAgents(): AgentSupply[] {
       mode: 'direct',
       menu_kind: 'fixed',
       current: null,
-      mappings: [],
+      mappings: [
+        { builtin_id: 'gpt-5.6', target_model_id: '', enabled: false },
+        { builtin_id: 'gpt-5.6-mini', target_model_id: '', enabled: false },
+      ],
       menu: null,
     },
     {
@@ -149,14 +160,19 @@ export function buildMockAgents(): AgentSupply[] {
       menu_kind: 'open',
       current: { model_id: 'glm-5.2', source_id: 'src_zhipukey01', channel: 'hub' },
       mappings: [],
+      // Prefixed identifiers (opencode-overlay.md): provider = the SOURCE's
+      // vendor (custom fallback), and only hub-channel sources materialize as
+      // OpenCode providers — so every checked id is backed by a hub source in
+      // buildMockSources (the two native_cli subscriptions never appear here).
+      // checked = 精选 (in the picker); the rest live under 全量.
       menu: {
         view: 'featured',
         checked: [
-          'anthropic/claude-opus-4-6', 'anthropic/claude-sonnet-4-6', 'anthropic/claude-haiku-4-5',
-          'openai/gpt-5.6', 'openai/gpt-5.6-mini',
-          'zhipuai/glm-5.2', 'zhipuai/glm-5.2-air', 'zhipuai/glm-5-flash',
-          // …trimmed; menu.checked.length drives the "N 个模型" count.
-          ...Array.from({ length: 17 }, (_, i) => `zhipuai/extra-${i}`),
+          'anthropic/claude-opus-4-6',
+          'anthropic/claude-sonnet-4-6',
+          'zhipuai/glm-5.2',
+          'zhipuai/glm-5.2-air',
+          'zhipuai/glm-5-flash',
         ],
       },
     },
@@ -223,6 +239,60 @@ export function buildMockRuntime(): RuntimeDependency {
       health: 'ok',
       last_check: iso(-3 * MIN),
     },
+  };
+}
+
+// Migration scan fixture (frame 03). Mirrors the frozen migration-scan schema
+// example, adapted to the mock backends. Per spec v1.1 + the 2026-07-23 L6
+// finding: API keys / base URLs → import; subscription OAuth (Claude account +
+// Codex auth.json) → keep_native ALWAYS (controlled_import is deferred — adapter
+// v1.2 forbids OAuth material in provision_credential). When the experimental
+// flag is on, those rows only add a "re-authorize inside the hub" hint; they
+// never become an import. So this fixture emits only import / keep_native.
+export function buildMockMigration(): MigrationScan {
+  // Subscription-OAuth rows stay native; the flag only swaps their hint line.
+  const oauthNote = SUBSCRIPTION_HUB_EXPERIMENTAL
+    ? 'settings.models.migration.notes.keepNativeReauthHint'
+    : 'settings.models.migration.notes.keepNativeSanctioned';
+  return {
+    items: [
+      {
+        id: 'mig_claude_key',
+        backend: 'claude',
+        kind: 'api_key',
+        masked_detail: 'Anthropic API Key · sk-…dd3c',
+        proposed_action: 'import',
+        selected: true,
+        notes_key: 'settings.models.migration.notes.customBaseUrl',
+      },
+      {
+        id: 'mig_claude_oauth',
+        backend: 'claude',
+        kind: 'oauth_native',
+        masked_detail: 'Claude 账号登录（OAuth）',
+        proposed_action: 'keep_native',
+        selected: false,
+        notes_key: oauthNote,
+      },
+      {
+        id: 'mig_codex_auth',
+        backend: 'codex',
+        kind: 'oauth_native',
+        masked_detail: 'ChatGPT 登录 · auth.json',
+        proposed_action: 'keep_native',
+        selected: false,
+        notes_key: oauthNote,
+      },
+      {
+        id: 'mig_opencode_zhipu',
+        backend: 'opencode',
+        kind: 'opencode_provider',
+        masked_detail: '智谱 API Key · glm-…c31b',
+        proposed_action: 'import',
+        selected: true,
+        notes_key: 'settings.models.migration.notes.fromOpencode',
+      },
+    ],
   };
 }
 

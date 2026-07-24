@@ -767,6 +767,97 @@
         "connectFailed": "接入失败，请重试",
         "refreshFailed": "刷新失败，请重试"
       },
+      "menus": {
+        "done": "完成",
+        "resetAll": "恢复全部默认",
+        "saveFailed": "保存失败，请重试",
+        "mapping": {
+          "title": "{{backend}} · 模型菜单",
+          "subtitle": "菜单固定：{{backend}} 只认这些内置 model ID；每个 ID 可改写为其他模型供给，只影响 {{backend}}。",
+          "builtinCol": "内置 MODEL ID",
+          "supplyCol": "实际供给",
+          "followNative": "跟随原生 · 按优先级供给",
+          "candidates": "来源按优先级 · {{sources}}",
+          "candidatesUnavailable": "暂无来源可供给此模型",
+          "warning": "改写后思维链、缓存与工具语义与原生不完全等价",
+          "resetRow": "恢复默认",
+          "footnote": "改写只影响 {{backend}} 的这个 ID；协议转换由中枢自动完成。"
+        },
+        "opencode": {
+          "title": "OpenCode · 模型菜单",
+          "subtitle": "菜单开放：按 provider 前缀分组，前缀 + 模型 ID = 完整标识，与 OpenCode 原生写法一致。勾选 = 出现在模型选择里。",
+          "viewLabel": "菜单范围",
+          "featured": "精选 · {{count}}",
+          "full": "全量 · {{count}}",
+          "addCustom": "自定义模型",
+          "empty": "这里还没有模型。",
+          "footnote": "前缀 = 厂商标准 ID（与 OpenCode 原生一致，识别不了归 custom/）；中枢 / 直连切换不改变标识；圆点 = 可供来源。",
+          "customBadge": "自定义",
+          "provider": {
+            "anthropic": "Anthropic 协议 · Claude 系",
+            "openai": "OpenAI 协议 · GPT 系",
+            "zhipuai": "OpenAI 兼容 · GLM 系",
+            "custom": "自定义端点"
+          }
+        },
+        "custom": {
+          "title": "添加自定义模型",
+          "subtitle": "补登来源清单里没有的模型，加入 OpenCode 菜单。",
+          "sourceLabel": "来源（它能供应这个模型）",
+          "modelIdLabel": "模型 ID",
+          "modelIdPlaceholder": "glm-5.2-air",
+          "displayNameLabel": "显示名（可选）",
+          "displayNamePlaceholder": "GLM 5.2 Air",
+          "previewLabel": "OPENCODE 标识 · 自动生成",
+          "previewEmpty": "填入模型 ID 后预览",
+          "previewHint": "provider 段自动选：可识别厂商用标准 ID（与 OpenCode 原生一致），识别不了归 custom/；来源增减、模式切换都不影响标识。",
+          "add": "添加到菜单",
+          "failed": "添加失败，请重试"
+        }
+      },
+      "supplyMode": {
+        "title": "供给方式",
+        "currentHub": "当前：中枢 Hub",
+        "currentDirect": "当前：直连 Direct",
+        "switchedHub": "已切换到中枢 Hub",
+        "switchedDirect": "已切换到直连 Direct",
+        "switchFailed": "切换失败，请重试",
+        "hub": {
+          "title": "中枢模式 · Hub",
+          "recommended": "推荐 · 默认",
+          "openModels": "打开模型页",
+          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、优先级、映射都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
+        },
+        "direct": {
+          "title": "直连模式 · Direct",
+          "description": "{{backend}} 使用自己的原生配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不代管模型。适合排查问题，或想完全自管配置的用户。",
+          "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
+          "import": "导入中枢…"
+        }
+      },
+      "migration": {
+        "title": "接入模型中枢",
+        "subtitle": "把现有的登录和 API Key 一次搬进「模型」中枢，三个 Agent 共用一份来源和优先级。",
+        "empty": "没有检测到可迁移的原生配置。",
+        "scanFailed": "扫描原生配置失败，请重试",
+        "applyFailed": "导入失败，请重试",
+        "applied": "已导入 {{count}} 项",
+        "later": "稍后再说",
+        "apply": "导入 {{count}} 项并启用中枢",
+        "nonDestructive": "非破坏迁移：原生配置不改动、不删除，导入只是复制；随时可在「后端」页切回直连。",
+        "action": {
+          "import": "导入为来源",
+          "controlledImport": "受控导入 · 实验",
+          "keepNative": "保留原生",
+          "reauth": "需重新授权 · 浏览器一键"
+        },
+        "notes": {
+          "customBaseUrl": "含自定义 Base URL",
+          "keepNativeSanctioned": "保留在 CLI 自己的凭据库（受官方认可）",
+          "keepNativeReauthHint": "保持原生；可在中枢内重新授权以托管（实验）",
+          "fromOpencode": "来自 opencode 配置"
+        }
+      },
       "backends": {
         "claude": "Claude Code",
         "codex": "Codex",
