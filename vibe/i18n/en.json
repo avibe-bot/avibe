@@ -15,7 +15,15 @@
   "harness": {
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
-      "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup."
+      "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",
+      "unknownSupervisorFailure": "Unknown supervisor failure.",
+      "protocolErrors": {
+        "specTooLarge": "The watch worker specification is too large.",
+        "invalidEncoding": "The watch worker specification is not valid UTF-8.",
+        "invalidJson": "The watch worker specification is not valid JSON.",
+        "unsupportedVersion": "The watch worker specification version is unsupported.",
+        "invalidCommand": "The watch worker command is invalid."
+      }
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",

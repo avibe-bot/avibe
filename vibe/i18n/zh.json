@@ -15,7 +15,15 @@
   "harness": {
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
-      "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。"
+      "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
+      "unknownSupervisorFailure": "未知的监控进程错误。",
+      "protocolErrors": {
+        "specTooLarge": "Watch 工作进程配置过大。",
+        "invalidEncoding": "Watch 工作进程配置不是有效的 UTF-8。",
+        "invalidJson": "Watch 工作进程配置不是有效的 JSON。",
+        "unsupportedVersion": "不支持此 Watch 工作进程配置版本。",
+        "invalidCommand": "Watch 工作进程命令无效。"
+      }
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] 同一个 watch/task callback 在滚动 {window} 秒窗口内触发了 {count} 次。已将这些排队 callback 合并为一次 Agent turn。",

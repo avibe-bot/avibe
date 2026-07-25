@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -11,7 +12,12 @@ import psutil
 import pytest
 
 from core import watch_worker
-from core.process_isolation import PROCESS_IDENTITY_ENV
+from core.process_isolation import (
+    PROCESS_IDENTITY_ENV,
+    PersistedProcessIdentity,
+    fingerprint_process_marker,
+    process_group_identity_status,
+)
 
 
 def _supervisor_command() -> list[str]:
@@ -74,8 +80,48 @@ def test_watch_worker_rejects_invalid_specification() -> None:
     )
 
     assert result.returncode == 1
-    assert result.stderr.decode().startswith(watch_worker.WATCH_WORKER_ERROR_PREFIX)
-    assert "invalid watch worker command" in result.stderr.decode()
+    assert watch_worker.decode_watch_worker_error(result.stderr.decode()) == (
+        "invalidCommand",
+        None,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX surrogateescape contract")
+@pytest.mark.parametrize("use_shell", [False, True])
+def test_posix_watch_worker_preserves_non_utf8_arguments(use_shell: bool) -> None:
+    value = os.fsdecode(b"watch-\xff")
+    if use_shell:
+        import shlex
+
+        command = []
+        shell_command = (
+            f"{shlex.quote(sys.executable)} -c "
+            f"{shlex.quote('import os,sys; print(os.fsencode(sys.argv[1]).hex())')} "
+            f"{shlex.quote(value)}"
+        )
+    else:
+        command = [
+            sys.executable,
+            "-c",
+            "import os,sys; print(os.fsencode(sys.argv[1]).hex())",
+            value,
+        ]
+        shell_command = None
+
+    result = subprocess.run(
+        _supervisor_command(),
+        input=watch_worker.encode_watch_worker_spec(
+            command=command,
+            shell_command=shell_command,
+        ),
+        capture_output=True,
+        timeout=10,
+        check=False,
+        **_supervisor_isolation_kwargs(),
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.decode().strip() == b"watch-\xff".hex()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signal exit contract")
@@ -180,6 +226,73 @@ def test_posix_watch_worker_waits_for_descendant_after_command_root_exits() -> N
             process.wait(timeout=10)
         if psutil.pid_exists(descendant_pid):
             psutil.Process(descendant_pid).kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process group identity contract")
+def test_posix_watch_worker_leaves_identity_anchor_if_supervisor_is_killed(
+    tmp_path: Path,
+) -> None:
+    marker = "surviving-anchor-marker"
+    env = dict(os.environ)
+    env[watch_worker.PROCESS_IDENTITY_ENV] = marker
+    waiter_pid_path = tmp_path / "waiter.pid"
+    process = subprocess.Popen(
+        _supervisor_command(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        **_supervisor_isolation_kwargs(),
+    )
+    assert process.stdin is not None
+    process.stdin.write(
+        watch_worker.encode_watch_worker_spec(
+            command=[
+                sys.executable,
+                "-c",
+                (
+                    "import os,signal,time; from pathlib import Path; "
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    f"Path({str(waiter_pid_path)!r}).write_text(str(os.getpid())); "
+                    "time.sleep(30)"
+                ),
+            ],
+            shell_command=None,
+        )
+    )
+    process.stdin.close()
+
+    try:
+        deadline = time.monotonic() + 5
+        while not waiter_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        waiter_pid = int(waiter_pid_path.read_text())
+        identity = psutil.Process(process.pid)
+        expected = PersistedProcessIdentity(
+            pid=process.pid,
+            create_time=identity.create_time(),
+            worker_fingerprint=fingerprint_process_marker(marker),
+        )
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+        assert psutil.pid_exists(waiter_pid)
+        assert (
+            process_group_identity_status(
+                process.pid,
+                expected,
+                logging.getLogger(__name__),
+                "test watch",
+            )
+            == "match"
+        )
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
+            process.wait(timeout=10)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object contract")

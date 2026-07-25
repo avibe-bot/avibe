@@ -20,6 +20,12 @@ WATCH_WORKER_ERROR_PREFIX = "AVIBE_WATCH_WORKER_ERROR:"
 _MAX_SPEC_BYTES = 16 * 1024 * 1024
 
 
+class WatchWorkerProtocolError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 def encode_watch_worker_spec(
     *,
     command: list[str],
@@ -30,22 +36,47 @@ def encode_watch_worker_spec(
         "command": command,
         "shell_command": shell_command,
     }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
-def decode_watch_worker_error(stderr: str) -> str | None:
+def encode_watch_worker_error(code: str, detail: str | None = None) -> str:
+    payload = {"code": code}
+    if detail:
+        payload["detail"] = detail
+    return WATCH_WORKER_ERROR_PREFIX + json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def decode_watch_worker_error(stderr: str) -> tuple[str, str | None] | None:
     if not stderr.startswith(WATCH_WORKER_ERROR_PREFIX):
         return None
-    return stderr[len(WATCH_WORKER_ERROR_PREFIX) :].strip()
+    try:
+        payload = json.loads(stderr[len(WATCH_WORKER_ERROR_PREFIX) :].strip())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ("supervisorFailed", None)
+    if not isinstance(payload, dict) or not isinstance(payload.get("code"), str):
+        return ("supervisorFailed", None)
+    detail = payload.get("detail")
+    return payload["code"], detail if isinstance(detail, str) else None
 
 
 def _read_watch_worker_spec() -> tuple[list[str], str | None]:
     payload = sys.stdin.buffer.read(_MAX_SPEC_BYTES + 1)
     if len(payload) > _MAX_SPEC_BYTES:
-        raise ValueError("watch worker specification is too large")
-    parsed = json.loads(payload.decode("utf-8"))
+        raise WatchWorkerProtocolError("specTooLarge")
+    try:
+        decoded = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise WatchWorkerProtocolError("invalidEncoding") from exc
+    try:
+        parsed = json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise WatchWorkerProtocolError("invalidJson") from exc
     if not isinstance(parsed, dict) or parsed.get("version") != WATCH_WORKER_PROTOCOL_VERSION:
-        raise ValueError("unsupported watch worker specification")
+        raise WatchWorkerProtocolError("unsupportedVersion")
 
     command = parsed.get("command")
     shell_command = parsed.get("shell_command")
@@ -57,7 +88,7 @@ def _read_watch_worker_spec() -> tuple[list[str], str | None]:
         or (command and not command[0])
         or (isinstance(shell_command, str) and not shell_command.strip())
     ):
-        raise ValueError("invalid watch worker command")
+        raise WatchWorkerProtocolError("invalidCommand")
     return command, shell_command
 
 
@@ -158,7 +189,7 @@ def _install_posix_supervisor_signal_handlers() -> None:
         signal.signal(signal.SIGTERM, _handle_posix_termination)
 
 
-def _posix_process_group_has_other_members() -> bool:
+def _posix_process_group_has_other_members(identity_anchor_pid: int | None = None) -> bool:
     if os.name == "nt":
         return False
     own_pid = os.getpid()
@@ -167,7 +198,13 @@ def _posix_process_group_has_other_members() -> bool:
         processes = psutil.process_iter(["pid"])
         for process in processes:
             pid = process.info.get("pid")
-            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == own_pid:
+            if (
+                not isinstance(pid, int)
+                or isinstance(pid, bool)
+                or pid <= 0
+                or pid == own_pid
+                or pid == identity_anchor_pid
+            ):
                 continue
             try:
                 if os.getpgid(pid) == own_pgid:
@@ -181,9 +218,35 @@ def _posix_process_group_has_other_members() -> bool:
     return False
 
 
-def _wait_for_posix_process_group_exit() -> None:
-    while _posix_process_group_has_other_members():
+def _wait_for_posix_process_group_exit(identity_anchor_pid: int | None = None) -> None:
+    while _posix_process_group_has_other_members(identity_anchor_pid):
         time.sleep(0.1)
+
+
+def _run_posix_identity_anchor() -> int:
+    signal.signal(signal.SIGTERM, _handle_posix_termination)
+    while True:
+        signal.pause()
+
+
+def _start_posix_identity_anchor() -> subprocess.Popen[bytes] | None:
+    marker = os.environ.get(PROCESS_IDENTITY_ENV)
+    if os.name == "nt" or not marker:
+        return None
+    return subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--identity-anchor"],
+        env={PROCESS_IDENTITY_ENV: marker},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _stop_posix_identity_anchor(anchor: subprocess.Popen[bytes] | None) -> None:
+    if anchor is None or anchor.poll() is not None:
+        return
+    anchor.kill()
+    anchor.wait()
 
 
 def _run_watch_worker() -> int:
@@ -194,43 +257,58 @@ def _run_watch_worker() -> int:
     command, shell_command = _read_watch_worker_spec()
     child_env = dict(os.environ)
     child_env.pop(PROCESS_IDENTITY_ENV, None)
+    identity_anchor = _start_posix_identity_anchor()
 
-    popen_args: Any = shell_command if shell_command is not None else command
-    process = subprocess.Popen(
-        popen_args,
-        shell=shell_command is not None,
-        env=child_env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if process.stdout is None or process.stderr is None:
-        raise RuntimeError("watch worker output pipes are unavailable")
+    try:
+        popen_args: Any = shell_command if shell_command is not None else command
+        process = subprocess.Popen(
+            popen_args,
+            shell=shell_command is not None,
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("watch worker output pipes are unavailable")
 
-    stdout_thread = threading.Thread(
-        target=_forward_stream,
-        args=(process.stdout, sys.stdout.buffer),
-        daemon=False,
-    )
-    stderr_thread = threading.Thread(
-        target=_forward_stream,
-        args=(process.stderr, sys.stderr.buffer),
-        daemon=False,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-    return_code = process.wait()
-    stdout_thread.join()
-    stderr_thread.join()
-    _wait_for_posix_process_group_exit()
-    return return_code
+        stdout_thread = threading.Thread(
+            target=_forward_stream,
+            args=(process.stdout, sys.stdout.buffer),
+            daemon=False,
+        )
+        stderr_thread = threading.Thread(
+            target=_forward_stream,
+            args=(process.stderr, sys.stderr.buffer),
+            daemon=False,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        return_code = process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        _wait_for_posix_process_group_exit(
+            identity_anchor.pid if identity_anchor is not None else None
+        )
+        return return_code
+    finally:
+        _stop_posix_identity_anchor(identity_anchor)
 
 
 def main() -> int:
+    if os.name != "nt" and sys.argv[1:] == ["--identity-anchor"]:
+        return _run_posix_identity_anchor()
     try:
         return_code = _run_watch_worker()
+    except WatchWorkerProtocolError as exc:
+        print(encode_watch_worker_error(exc.code), file=sys.stderr, flush=True)
+        return 1
     except Exception as exc:
-        print(f"{WATCH_WORKER_ERROR_PREFIX}{exc}", file=sys.stderr, flush=True)
+        print(
+            encode_watch_worker_error("supervisorFailed", str(exc)),
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
 
     if os.name == "nt":

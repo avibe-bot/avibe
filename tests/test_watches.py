@@ -391,10 +391,7 @@ def test_managed_watch_localizes_supervisor_startup_failure(tmp_path: Path, monk
     )
     process = _FakeProcess(
         stdin=_BrokenStdin(),
-        stderr=(
-            f"{watch_worker.WATCH_WORKER_ERROR_PREFIX}"
-            "invalid watch worker command"
-        ).encode(),
+        stderr=watch_worker.encode_watch_worker_error("invalidCommand").encode(),
     )
 
     async def fake_create_subprocess_exec(*_args, **_kwargs):
@@ -402,7 +399,7 @@ def test_managed_watch_localizes_supervisor_startup_failure(tmp_path: Path, monk
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    with pytest.raises(RuntimeError, match="Watch 监控进程失败：invalid watch worker command"):
+    with pytest.raises(RuntimeError, match="Watch 监控进程失败：Watch 工作进程命令无效。"):
         asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
 

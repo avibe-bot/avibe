@@ -576,9 +576,21 @@ class ManagedWatchService:
         return i18n_t(key, language, **kwargs)
 
     def _localize_watch_worker_error(self, stderr: str) -> str:
-        detail = watch_worker.decode_watch_worker_error(stderr)
-        if detail is None:
+        error = watch_worker.decode_watch_worker_error(stderr)
+        if error is None:
             return stderr
+        code, detail = error
+        protocol_error_keys = {
+            "specTooLarge": "harness.watch.protocolErrors.specTooLarge",
+            "invalidEncoding": "harness.watch.protocolErrors.invalidEncoding",
+            "invalidJson": "harness.watch.protocolErrors.invalidJson",
+            "unsupportedVersion": "harness.watch.protocolErrors.unsupportedVersion",
+            "invalidCommand": "harness.watch.protocolErrors.invalidCommand",
+        }
+        if code in protocol_error_keys:
+            detail = self._t(protocol_error_keys[code])
+        elif not detail:
+            detail = self._t("harness.watch.unknownSupervisorFailure")
         return self._t("harness.watch.supervisorFailed", detail=detail)
 
     def active_process_pids(self) -> set[int]:
