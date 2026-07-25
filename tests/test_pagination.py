@@ -24,5 +24,3 @@ def test_make_page_request_validates_bounds() -> None:
 
     with pytest.raises(ValueError, match="limit must be <= 100"):
         make_page_request(limit=101)
-
-    assert make_page_request(all_items=True) is None

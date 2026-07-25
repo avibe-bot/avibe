@@ -125,7 +125,7 @@ def test_watch_list_help_describes_bounded_history(capsys) -> None:
     assert "--include-finished" in captured.out
     assert "--page" in captured.out
     assert "--limit" in captured.out
-    assert "--all" in captured.out
+    assert "--all" not in captured.out
 
 
 def test_watch_add_parser_keeps_top_level_command_name() -> None:
@@ -881,6 +881,26 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
     assert failed.id not in ids
 
 
+def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_test_watch(store, name="Resumable")
+    store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
+
+    store.set_enabled(watch.id, True)
+    store.set_enabled(watch.id, False)
+
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        assert cli.cmd_watch_list() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in payload["watches"]] == [watch.id]
+    assert payload["watches"][0]["state"] == "paused"
+
+
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -902,7 +922,7 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         "returned": 20,
         "has_more": True,
         "next_page": 2,
-        "next_command": "vibe watch list --brief --page 2 --limit 20",
+        "next_command": "vibe watch list --page 2 --limit 20",
     }
 
 
@@ -916,7 +936,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
     for index in range(3):
         _add_test_watch(store, name=f"Watch {index}")
 
-    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--brief", "--limit", "2"])
+    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--limit", "2"])
     with (
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
@@ -927,7 +947,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["watches"]) == 2
-    assert payload["pagination"]["next_command"] == "vibe watch list --brief --page 2 --limit 2"
+    assert payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
 
 
 def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
@@ -952,7 +972,7 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
     assert len(payload["watches"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
-        "vibe watch list --include-finished --brief --page 2 --limit 2"
+        "vibe watch list --include-finished --page 2 --limit 2"
     )
 
 

@@ -2514,6 +2514,43 @@ def test_show_marks_filters_resolved_and_unmark_reports_partial_success(monkeypa
         store.close()
 
 
+def test_show_marks_uses_shared_pagination(monkeypatch, tmp_path, capsys):
+    from core.show_session_events import ShowSessionEventStore, stable_assistant_mark_id
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    _seed_show_cli_session()
+    store = ShowSessionEventStore()
+    try:
+        for index in range(25):
+            target = f"#mark-{index:02d}"
+            store.append(
+                "ses123",
+                {
+                    "type": "assistant.mark.created",
+                    "mark": {
+                        "id": stable_assistant_mark_id(scope="default", target=target),
+                        "target": target,
+                        "body": f"Mark {index}",
+                    },
+                },
+            )
+    finally:
+        store.close()
+
+    args = cli.build_parser().parse_args(
+        ["show", "marks", "--session-id", "ses123", "--json"]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["marks"]) == 20
+    assert payload["pagination"]["next_command"] == (
+        "vibe show marks --session-id ses123 --json --page 2 --limit 20"
+    )
+
+
 def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
     from sqlalchemy import select
 

@@ -66,7 +66,14 @@ from vibe.upgrade import (
 from storage.db import create_sqlite_engine
 from storage.background import compute_next_run_at, normalize_run_status
 from storage.models import scope_settings, scopes
-from storage.pagination import DEFAULT_PAGE_LIMIT, PageRequest, make_page_request, page_sequence, pagination_payload
+from storage.pagination import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    PageRequest,
+    make_page_request,
+    page_sequence,
+    pagination_payload,
+)
 from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
 from storage.settings_service import make_scope_id
 
@@ -207,13 +214,12 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _add_pagination_args(parser, *, help_command: str, all_help: str | None = None) -> None:
+def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument("--page", type=int, help="Page number to return. Defaults to 1.")
-    parser.add_argument("--limit", type=int, help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}.")
     parser.add_argument(
-        "--all",
-        action="store_true",
-        help=all_help or "Return all matching rows without pagination.",
+        "--limit",
+        type=int,
+        help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}; maximum {MAX_PAGE_LIMIT}.",
     )
     parser.error_help_command = help_command
 
@@ -235,12 +241,11 @@ def _add_vault_approval_wait_args(parser, *, default_seconds: int = DEFAULT_VAUL
     )
 
 
-def _page_request_from_args(args, *, help_command: str) -> PageRequest | None:
+def _page_request_from_args(args, *, help_command: str) -> PageRequest:
     try:
         return make_page_request(
             page=getattr(args, "page", None),
             limit=getattr(args, "limit", None),
-            all_items=bool(getattr(args, "all", False)),
         )
     except ValueError as exc:
         raise TaskCliError(str(exc), code="invalid_pagination", help_command=help_command) from exc
@@ -251,8 +256,8 @@ def _add_optional_arg(parts: list[str], flag: str, value: object) -> None:
         parts.extend([flag, str(value)])
 
 
-def _next_command(parts: list[str], page_result, *, include_all: bool = False) -> str | None:
-    if include_all or page_result.next_page is None:
+def _next_command(parts: list[str], page_result) -> str | None:
+    if page_result.next_page is None:
         return None
     command = [*parts, "--page", str(page_result.next_page), "--limit", str(page_result.limit)]
     return shlex.join(command)
@@ -267,29 +272,33 @@ def _pagination_message(page_payload: dict) -> str | None:
     return "More records are available. Add --page to continue."
 
 
+def _paginated_fields(page_result, *, command: list[str], include_next_command: bool = True) -> dict:
+    page_payload = pagination_payload(
+        page_result,
+        next_command=_next_command(command, page_result) if include_next_command else None,
+    )
+    fields = {"pagination": page_payload}
+    message = _pagination_message(page_payload)
+    if message:
+        fields["message"] = message
+    return fields
+
+
 def _print_definition_list_payload(
     items,
     *,
     items_key: str,
     payload_for_item,
     command: list[str],
-    include_all: bool,
-    page_request: PageRequest | None,
+    page_request: PageRequest,
 ) -> None:
-    result = page_sequence(items, None if include_all else (page_request or PageRequest()))
+    result = page_sequence(items, page_request)
     item_payloads = [payload_for_item(item) for item in result.items]
-    page_payload = pagination_payload(
-        result,
-        next_command=_next_command(command, result, include_all=include_all),
-    )
     payload = {
         "definitions": item_payloads,
         items_key: item_payloads,
-        "pagination": page_payload,
+        **_paginated_fields(result, command=command),
     }
-    message = _pagination_message(page_payload)
-    if message:
-        payload["message"] = message
     _print_cli_payload("run_definitions", **payload)
 
 
@@ -428,7 +437,7 @@ def _watch_examples_text() -> str:
           vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
           vibe watch add --create-session --scope-id slack::channel::C123 --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
           vibe watch add --session-id sesk8m4q2p7x --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
-          vibe watch list --brief
+          vibe watch list
           vibe watch show 12ab34cd56ef
           vibe watch pause 12ab34cd56ef
         """
@@ -1519,21 +1528,6 @@ def _task_schedule_summary(task) -> str:
     return task.schedule_type
 
 
-def _task_next_run_sort_key(task):
-    next_run_at = _task_next_run_at(task)
-    if not next_run_at:
-        return (True, datetime.max.replace(tzinfo=timezone.utc))
-    try:
-        instant = datetime.fromisoformat(next_run_at)
-        if instant.tzinfo is None:
-            instant = instant.replace(tzinfo=timezone.utc)
-        else:
-            instant = instant.astimezone(timezone.utc)
-    except ValueError:
-        return (True, datetime.max.replace(tzinfo=timezone.utc))
-    return (False, instant)
-
-
 def _task_payload(task, *, brief: bool = False):
     derived = {
         "display_name": _task_display_name(task),
@@ -1567,14 +1561,9 @@ def _task_payload(task, *, brief: bool = False):
 
 
 def _sort_tasks_for_display(tasks):
-    return sorted(
-        tasks,
-        key=lambda item: (
-            *_task_next_run_sort_key(item),
-            item.created_at,
-            item.id,
-        ),
-    )
+    # Offset pagination requires an order that does not change merely because
+    # wall-clock time crossed a cron boundary between page requests.
+    return sorted(tasks, key=lambda item: (item.created_at, item.id))
 
 
 def _task_store() -> ScheduledTaskStore:
@@ -2637,27 +2626,23 @@ def cmd_task_add(args):
 
 def cmd_task_list(
     *,
-    include_all: bool = False,
     include_finished: bool = False,
-    brief: bool = False,
-    page_request: PageRequest | None = None,
+    brief: bool = True,
+    page_request: PageRequest = PageRequest(),
 ):
     store = _task_store()
     tasks = store.list_tasks()
-    if not include_all and not include_finished:
+    if not include_finished:
         tasks = [task for task in tasks if not _is_completed_one_shot(task)]
     tasks = _sort_tasks_for_display(tasks)
     command = ["vibe", "task", "list"]
     if include_finished:
         command.append("--include-finished")
-    if brief:
-        command.append("--brief")
     _print_definition_list_payload(
         tasks,
         items_key="tasks",
-        payload_for_item=lambda task: _task_payload(task, brief=brief),
+        payload_for_item=lambda task: _task_payload(task, brief=True),
         command=command,
-        include_all=include_all,
         page_request=page_request,
     )
     return 0
@@ -3182,20 +3167,33 @@ def _add_json_noop(parser) -> None:
 
 
 def cmd_agent_list(args):
-    store = _agent_store()
-    backend = getattr(args, "backend", None)
-    if getattr(args, "disabled", False):
-        include_disabled = True
-    else:
-        include_disabled = bool(getattr(args, "all", False))
-    agents = store.list_agents(include_disabled=include_disabled)
-    if backend:
-        agents = [agent for agent in agents if agent.backend == backend]
-    if getattr(args, "disabled", False):
-        agents = [agent for agent in agents if not agent.enabled]
-    agents = [_agent_payload(agent, brief=getattr(args, "brief", False)) for agent in agents]
-    _print_cli_payload("agents", agents=agents)
-    return 0
+    try:
+        page_request = _page_request_from_args(args, help_command="vibe agent list --help")
+        store = _agent_store()
+        backend = getattr(args, "backend", None)
+        disabled_only = bool(getattr(args, "disabled", False))
+        include_disabled = disabled_only or bool(getattr(args, "include_disabled", False))
+        agents = store.list_agents(include_disabled=include_disabled)
+        if backend:
+            agents = [agent for agent in agents if agent.backend == backend]
+        if disabled_only:
+            agents = [agent for agent in agents if not agent.enabled]
+        result = page_sequence(agents, page_request)
+        command = ["vibe", "agent", "list"]
+        _add_optional_arg(command, "--backend", backend)
+        if disabled_only:
+            command.append("--disabled")
+        elif include_disabled:
+            command.append("--include-disabled")
+        _print_cli_payload(
+            "agents",
+            agents=[_agent_payload(agent, brief=True) for agent in result.items],
+            **_paginated_fields(result, command=command),
+        )
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe agent list --help")
+        return 1
 
 
 def cmd_agent_show(args):
@@ -3297,6 +3295,15 @@ def cmd_agent_models(args):
         models = options.get("models", [])
         if model:
             models = [entry for entry in models if entry.get("value") == model]
+        page_request = _page_request_from_args(args, help_command="vibe agent models --help")
+        result = page_sequence(models, page_request)
+        command = ["vibe", "agent", "models"]
+        if name:
+            command.append(name)
+        else:
+            _add_optional_arg(command, "--backend", backend_arg)
+        _add_optional_arg(command, "--provider", provider)
+        _add_optional_arg(command, "--model", model)
         _print_cli_payload(
             "agent_models",
             agent=agent.name if agent else None,
@@ -3304,10 +3311,11 @@ def cmd_agent_models(args):
             current=current,
             default_model=options.get("default_model"),
             providers=options.get("providers"),
-            models=models,
+            models=result.items,
             source=options.get("source"),
             live=options.get("live", False),
             notes=options.get("notes"),
+            **_paginated_fields(result, command=command),
         )
         return 0
     except Exception as exc:
@@ -4417,14 +4425,10 @@ def cmd_runs_list(args):
         _add_optional_arg(command, "--q", getattr(args, "query", None))
         if getattr(args, "brief", False):
             command.append("--brief")
-        page_payload = pagination_payload(result, next_command=_next_command(command, result, include_all=bool(getattr(args, "all", False))))
-        message = _pagination_message(page_payload)
         payload = {
-            "runs": [_run_payload(run, brief=getattr(args, "brief", False)) for run in result.items],
-            "pagination": page_payload,
+            "runs": [_run_payload(run, brief=True) for run in result.items],
+            **_paginated_fields(result, command=command),
         }
-        if message:
-            payload["message"] = message
         _print_cli_payload("agent_runs", **payload)
         return 0
     except Exception as exc:
@@ -4651,22 +4655,15 @@ def cmd_data_query(args):
         elif sql_file and sql_file != "-":
             _add_optional_arg(command, "--sql-file", sql_file)
         omit_next_command = bool(sql_file == "-")
-        page_payload = pagination_payload(
-            result.pagination,
-            next_command=_next_command(
-                command,
-                result.pagination,
-                include_all=bool(getattr(args, "all", False)) or omit_next_command,
-            ),
-        )
-        message = _pagination_message(page_payload)
         payload = {
             "columns": result.columns,
             "rows": result.rows,
-            "pagination": page_payload,
+            **_paginated_fields(
+                result.pagination,
+                command=command,
+                include_next_command=not omit_next_command,
+            ),
         }
-        if message:
-            payload["message"] = message
         _print_cli_payload("data_query", **payload)
         return 0
     except ReadOnlyQueryError as exc:
@@ -4681,7 +4678,6 @@ def cmd_data_query(args):
 # read-only; ``update`` edits title, visibility, or scope placement. All three go through the shared
 # ``core.services.sessions`` business API (same entry the UI server uses) and
 # never surface archived (soft-deleted) sessions.
-_SESSION_PAGE_SIZE = 10
 # Lean list row: enough to locate a session and tell whether it is busy.
 _SESSION_LIST_FIELDS = (
     "id",
@@ -4747,29 +4743,29 @@ def cmd_session_list(args):
         platform = getattr(args, "type", None)
         if platform:
             _validate_session_type(platform)
-        page = getattr(args, "page", None)
-        page = int(page) if page is not None else 1
-        if page < 1:
-            raise TaskCliError("page must be >= 1", code="invalid_pagination", help_command="vibe session list --help")
+        page_request = _page_request_from_args(args, help_command="vibe session list --help")
         from core.services import sessions as sessions_service
 
         engine = _open_session_engine()
         with engine.connect() as conn:
             result = sessions_service.list_sessions_page(
-                conn, platform=platform, page=page, limit=_SESSION_PAGE_SIZE
+                conn,
+                platform=platform,
+                page=page_request.page,
+                limit=page_request.limit,
             )
         command = ["vibe", "session", "list"]
         _add_optional_arg(command, "--type", platform)
-        next_command = (
-            shlex.join([*command, "--page", str(result.next_page)])
-            if result.next_page is not None
-            else None
-        )
+        page_fields = _paginated_fields(result, command=command)
+        pagination_message = page_fields.pop("message", None)
+        message = _session_list_hint()
+        if pagination_message:
+            message = f"{pagination_message} {message}"
         _print_cli_payload(
             "agent_sessions",
             sessions=[_session_row(row, brief=True) for row in result.items],
-            pagination=pagination_payload(result, next_command=next_command),
-            message=_session_list_hint(),
+            **page_fields,
+            message=message,
         )
         return 0
     except Exception as exc:
@@ -5199,11 +5195,8 @@ def _vault_page_payload(
 ) -> tuple[list[dict], dict, str | None]:
     page_request = _page_request_from_args(args, help_command=help_command)
     result = page_sequence(items, page_request)
-    page_payload = pagination_payload(
-        result,
-        next_command=_next_command(command, result, include_all=bool(getattr(args, "all", False))),
-    )
-    return result.items, page_payload, _pagination_message(page_payload)
+    fields = _paginated_fields(result, command=command)
+    return result.items, fields["pagination"], fields.get("message")
 
 
 def _vault_lookup_next_steps(*, has_more: bool, has_filters: bool) -> list[str]:
@@ -7788,28 +7781,24 @@ def cmd_watch_add(args):
 
 def cmd_watch_list(
     *,
-    include_all: bool = False,
     include_finished: bool = False,
-    brief: bool = False,
-    page_request: PageRequest | None = None,
+    brief: bool = True,
+    page_request: PageRequest = PageRequest(),
 ):
     store = _watch_store()
     runtime_state = _watch_runtime_store().load().get("watches", {})
     watches = store.list_watches()
-    if not include_all and not include_finished:
+    if not include_finished:
         watches = [watch for watch in watches if not _is_finished_one_shot_watch(watch)]
     watches.sort(key=lambda item: (item.enabled is False, item.created_at, item.id))
     command = ["vibe", "watch", "list"]
     if include_finished:
         command.append("--include-finished")
-    if brief:
-        command.append("--brief")
     _print_definition_list_payload(
         watches,
         items_key="watches",
-        payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=brief),
+        payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=True),
         command=command,
-        include_all=include_all,
         page_request=page_request,
     )
     return 0
@@ -10318,18 +10307,14 @@ def cmd_show_list(args):
         _add_optional_arg(command, "--q", getattr(args, "query", None))
         if getattr(args, "json", False):
             command.append("--json")
-        page_payload = pagination_payload(result, next_command=_next_command(command, result, include_all=bool(getattr(args, "all", False))))
-        message = _pagination_message(page_payload)
         payload = {
             "ok": True,
             "count": len(result.items),
             "visibility": getattr(args, "visibility", None),
             "pages": [show_page_payload(page) for page in result.items],
-            "pagination": page_payload,
+            **_paginated_fields(result, command=command),
             "url_guidance": avibe_cloud_connect_guidance(),
         }
-        if message:
-            payload["message"] = message
         if getattr(args, "json", False):
             _print_json(payload)
         else:
@@ -10948,24 +10933,33 @@ def cmd_show_marks(args):
     event_store = ShowSessionEventStore()
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show marks --help")
+        page_request = _page_request_from_args(args, help_command="vibe show marks --help")
         marks = [_show_mark_listing(mark) for mark in event_store.active_marks(session_id)]
+        page = page_sequence(marks, page_request)
+        command = ["vibe", "show", "marks", "--session-id", session_id]
+        if getattr(args, "json", False):
+            command.append("--json")
         result = {
             "ok": True,
             "session_id": session_id,
-            "count": len(marks),
-            "marks": marks,
+            "count": len(page.items),
+            "marks": page.items,
+            **_paginated_fields(page, command=command),
             **({"session_default_notice": session_default_notice} if session_default_notice else {}),
         }
         if getattr(args, "json", False):
             _print_json(result)
         else:
-            print(f"Assistant marks ({len(marks)} active):")
-            if not marks:
+            print(f"Assistant marks ({len(page.items)} shown):")
+            if not page.items:
                 print("  none")
-            for mark in marks:
+            for mark in page.items:
                 print(f"- {mark['id']}  {mark['kind']}  {mark['read_state']}")
                 print(f"  Target: {mark['target']}")
                 print(f"  Body: {mark['body_head']}")
+            if result.get("message"):
+                print("")
+                print(result["message"])
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -11893,10 +11887,15 @@ def build_parser():
     agent_subparsers.required = True
 
     agent_list_parser = agent_subparsers.add_parser("list", help="List Avibe Agents")
-    agent_list_parser.add_argument("--brief", action="store_true", help="Show compact Agent rows")
+    agent_list_parser.add_argument("--brief", action="store_true", help=argparse.SUPPRESS)
     agent_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
-    agent_list_parser.add_argument("--all", action="store_true", help="Include disabled Agents")
+    agent_list_parser.add_argument(
+        "--include-disabled",
+        action="store_true",
+        help="Include disabled Agents while keeping pagination",
+    )
     agent_list_parser.add_argument("--disabled", action="store_true", help="Show only disabled Agents")
+    _add_pagination_args(agent_list_parser, help_command="vibe agent list --help")
     _add_json_noop(agent_list_parser)
 
     agent_show_parser = agent_subparsers.add_parser("show", help="Show one Avibe Agent")
@@ -11928,6 +11927,7 @@ def build_parser():
         "--provider", help="Filter to one OpenCode provider id (OpenCode backend only)."
     )
     agent_models_parser.add_argument("--model", help="Only show reasoning efforts for this model id.")
+    _add_pagination_args(agent_models_parser, help_command="vibe agent models --help")
     _add_json_noop(agent_models_parser)
 
     agent_create_parser = agent_subparsers.add_parser("create", help="Create an Avibe Agent")
@@ -12067,7 +12067,7 @@ def build_parser():
     runs_list_parser.add_argument("--created-after", help="Filter by created_at >= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--created-before", help="Filter by created_at <= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--q", dest="query", help="Search common run text fields")
-    runs_list_parser.add_argument("--brief", action="store_true", help="Show compact run rows")
+    runs_list_parser.add_argument("--brief", action="store_true", help=argparse.SUPPRESS)
     _add_pagination_args(runs_list_parser, help_command="vibe runs list --help")
     _add_json_noop(runs_list_parser)
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
@@ -12094,7 +12094,10 @@ def build_parser():
     session_list_parser = session_subparsers.add_parser(
         "list",
         help="List active sessions, most-recently-active first",
-        description="List active (non-archived) Agent sessions, 10 per page, newest activity first.",
+        description=(
+            f"List active (non-archived) Agent sessions, {DEFAULT_PAGE_LIMIT} per page, "
+            "newest activity first."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session list --help",
     )
@@ -12102,7 +12105,7 @@ def build_parser():
         "--type",
         help="Filter by platform: avibe (Web/Workbench), slack, discord, telegram, lark, wechat.",
     )
-    session_list_parser.add_argument("--page", type=int, help="Page number to return (10 per page). Defaults to 1.")
+    _add_pagination_args(session_list_parser, help_command="vibe session list --help")
     _add_json_noop(session_list_parser)
     session_get_parser = session_subparsers.add_parser(
         "get",
@@ -12617,6 +12620,7 @@ def build_parser():
         error_help_command="vibe show marks --help",
     )
     show_marks_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
+    _add_pagination_args(show_marks_parser, help_command="vibe show marks --help")
     show_marks_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     show_unmark_parser = show_subparsers.add_parser(
@@ -12788,7 +12792,7 @@ def build_parser():
         help="List scheduled tasks",
         description=(
             f"List stored scheduled tasks, {DEFAULT_PAGE_LIMIT} per page. Finished one-shot tasks are hidden by default; "
-            "use --include-finished to page through them or --all for an explicit unbounded result."
+            "use --include-finished to page through their history."
         ),
         epilog="Use the returned task IDs with 'vibe task show', 'vibe task update', 'vibe task run', 'vibe task pause', 'vibe task resume', or 'vibe task remove'.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -12803,13 +12807,9 @@ def build_parser():
     task_list_parser.add_argument(
         "--brief",
         action="store_true",
-        help="Show a compact scheduling-focused view instead of the full stored task payload",
+        help=argparse.SUPPRESS,
     )
-    _add_pagination_args(
-        task_list_parser,
-        help_command="vibe task list --help",
-        all_help="Return every stored task without pagination, including finished one-shot tasks.",
-    )
+    _add_pagination_args(task_list_parser, help_command="vibe task list --help")
     _add_json_noop(task_list_parser)
     _add_hidden_task_alias(task_subparsers, "ls", task_list_parser)
 
@@ -13094,7 +13094,7 @@ def build_parser():
         help="List background watches",
         description=(
             f"List stored managed background watches, {DEFAULT_PAGE_LIMIT} per page. Finished one-shot watches are hidden "
-            "by default; use --include-finished to page through them or --all for an explicit unbounded result."
+            "by default; use --include-finished to page through their history."
         ),
         epilog="Use the returned watch IDs with 'vibe watch show', 'vibe watch update', 'vibe watch pause', 'vibe watch resume', or 'vibe watch remove'.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -13108,13 +13108,9 @@ def build_parser():
     watch_list_parser.add_argument(
         "--brief",
         action="store_true",
-        help="Show a compact watcher-focused view instead of the full stored watch payload",
+        help=argparse.SUPPRESS,
     )
-    _add_pagination_args(
-        watch_list_parser,
-        help_command="vibe watch list --help",
-        all_help="Return every stored watch without pagination, including finished one-shot watches.",
-    )
+    _add_pagination_args(watch_list_parser, help_command="vibe watch list --help")
     _add_json_noop(watch_list_parser)
     _add_hidden_task_alias(watch_subparsers, "ls", watch_list_parser)
 
@@ -13321,9 +13317,8 @@ def main():
                 sys.exit(1)
             sys.exit(
                 cmd_task_list(
-                    include_all=getattr(args, "all", False),
                     include_finished=getattr(args, "include_finished", False),
-                    brief=getattr(args, "brief", False),
+                    brief=True,
                     page_request=page_request,
                 )
             )
@@ -13355,9 +13350,8 @@ def main():
                 sys.exit(1)
             sys.exit(
                 cmd_watch_list(
-                    include_all=getattr(args, "all", False),
                     include_finished=getattr(args, "include_finished", False),
-                    brief=getattr(args, "brief", False),
+                    brief=True,
                     page_request=page_request,
                 )
             )

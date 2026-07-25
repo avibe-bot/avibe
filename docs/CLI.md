@@ -14,6 +14,16 @@ vibe stop         # Stop all services
 
 ## Commands
 
+### Bounded list output
+
+Agent-facing collection commands share one pagination contract: `vibe agent list`,
+`vibe agent models`, `vibe runs list`, `vibe session list`, Vault list/find/tags,
+Show Page list/marks, `vibe data query`, `vibe task list`, and `vibe watch list`.
+They return 20 rows by default, accept `--page` and `--limit`, cap a page at 100,
+and never provide an unpaginated `--all` bypass. Follow
+`pagination.next_command` for the next page and use the corresponding `show` or
+`get` command for full record detail.
+
 ## Remote Web UI Access
 
 By default, the Web UI binds to `127.0.0.1:5123` on the machine where Avibe is running.
@@ -217,7 +227,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
-vibe task list --brief
+vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
 vibe task remove <task-id>
@@ -295,7 +305,7 @@ vibe watch add \
   --message 'Build done. Summarize.' \
   --shell 'make build && ./scripts/post_build.sh'
 
-vibe watch list --brief
+vibe watch list
 vibe watch show <watch-id>
 vibe watch update <watch-id> --name 'Watch deployment' --timeout 1200
 vibe watch pause <watch-id>
@@ -306,7 +316,7 @@ vibe watch remove <watch-id>
 `vibe task list` and `vibe watch list` return 20 definitions per page and
 include `pagination.next_command` when more rows exist. Finished one-shot
 definitions are hidden by default. Add `--include-finished` to page through
-history, or use `--all` only for an intentional unpaginated export.
+history. List output is always bounded; there is no unpaginated `--all` mode.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,

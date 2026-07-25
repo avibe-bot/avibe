@@ -808,9 +808,9 @@ Operational guidance:
 - if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches accept additional flags like `--shell`, `--timeout` (per-cycle), `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay`
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
-- `vibe task list` and `vibe watch list` return 20 definitions per page; follow `pagination.next_command` when more rows exist
-- use `--brief` for scheduling-focused summaries and `--include-finished` for paginated one-shot history
-- both list commands hide finished one-shot definitions by default; use `--all` only when you intentionally need the complete unpaginated history
+- Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
+- use `--include-finished` for paginated task/watch one-shot history
+- both list commands hide finished one-shot definitions by default; use `--include-finished` and follow `pagination.next_command` for bounded history
 - use `vibe task show <id>`, `vibe watch show <id>`, or `vibe runs show <run-id>` to inspect stored fields and runtime state
 - use `vibe task pause` / `vibe task resume` and `vibe watch pause` / `vibe watch resume` to disable a task or watch without deleting it
 - treat `warnings` from task, watch, agent-run, or runs commands as delivery-risk hints to fix proactively
@@ -958,7 +958,7 @@ Screenshots:
 
 Scheduled tasks:
 
-- `vibe task add`, `vibe task update`, `vibe task list [--brief] [--include-finished] [--page N] [--limit N] [--all]`, `vibe task show <id>`, `vibe task run <id>`, `vibe task pause <id>`, `vibe task resume <id>`, `vibe task remove <id>`
+- `vibe task add`, `vibe task update`, `vibe task list [--include-finished] [--page N] [--limit N]`, `vibe task show <id>`, `vibe task run <id>`, `vibe task pause <id>`, `vibe task resume <id>`, `vibe task remove <id>`
 
 Agent runs:
 
@@ -967,7 +967,7 @@ Agent runs:
 
 Watches:
 
-- `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--brief] [--include-finished] [--page N] [--limit N] [--all]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
+- `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--include-finished] [--page N] [--limit N]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
 
 For any subcommand, prefer `<command> --help` before composing a new invocation. Harness commands default to this Agent Session inside an Avibe-injected Agent shell. Use `--session-id` only to target a different existing Session, `--same-scope` or `--scope-id` when creating a Session in a visible scope, and `--no-callback` only when an async Agent run will be inspected later through `vibe runs`. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--sync`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). Do not copy flags between task, watch, and agent-run commands without checking help.
 

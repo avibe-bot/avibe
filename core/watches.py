@@ -261,6 +261,15 @@ class ManagedWatchStore:
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         watch = self._watches[watch_id]
+        if enabled and not watch.enabled and watch.mode == "once":
+            # A resumed one-shot starts a new lifecycle. Keep historical runs in
+            # the run store, but do not let the prior cycle make a later pause
+            # look completed and disappear from the default definition list.
+            watch.last_started_at = None
+            watch.last_finished_at = None
+            watch.last_event_at = None
+            watch.last_exit_code = None
+            watch.last_error = None
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:

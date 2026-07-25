@@ -492,6 +492,10 @@ bind vr-a3x9k2
 
 `vibe` 可执行文件负责管理本地服务与异步自动化能力。
 
+所有面向 Agent 的集合命令都使用 `--page` / `--limit`，默认返回 20 条紧凑记录，
+单页最多 100 条，并且不提供无分页的 `--all` 模式。按
+`pagination.next_command` 继续翻页；单条完整详情通过对应的 `show` 或 `get` 命令获取。
+
 ## 5.1 顶层 CLI 命令
 
 | 命令 | 作用 |
@@ -737,8 +741,11 @@ vibe task update <task_id> [options]
 ### `vibe task list`
 
 ```bash
-vibe task list [--all] [--brief]
+vibe task list [--include-finished] [--page N] [--limit N]
 ```
+
+默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
+继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
 
 ### `vibe task show`
 
@@ -887,6 +894,6 @@ fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`
 vibe
 vibe status
 vibe doctor
-vibe task list --brief
+vibe task list
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

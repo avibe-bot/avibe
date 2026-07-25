@@ -62,6 +62,35 @@ def test_cmd_agent_models_by_backend(monkeypatch):
     assert payload["models"][0]["value"] == "gpt-5.5"
 
 
+def test_cmd_agent_models_uses_shared_pagination(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "agent_model_options",
+        lambda *a, **k: {
+            "ok": True,
+            "backend": "codex",
+            "default_model": None,
+            "models": [
+                {"value": f"gpt-{index:02d}", "default": False, "reasoning_efforts": ["high"]}
+                for index in range(25)
+            ],
+            "providers": None,
+            "source": "test catalog",
+            "live": False,
+            "notes": None,
+        },
+    )
+    args = cli.build_parser().parse_args(["agent", "models", "--backend", "codex"])
+
+    code, payload = _run(cli.cmd_agent_models, args)
+
+    assert code == 0
+    assert len(payload["models"]) == 20
+    assert payload["pagination"]["next_command"] == (
+        "vibe agent models --backend codex --page 2 --limit 20"
+    )
+
+
 def test_cmd_agent_models_requires_exactly_one_target():
     code, payload = _run(cli.cmd_agent_models, _models_ns())
     assert code == 1
