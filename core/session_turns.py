@@ -1839,12 +1839,21 @@ class SessionTurnManager:
 
         This is a fallback for stop paths that successfully interrupt a backend
         but do not emit a terminal result. It only releases the dispatch waiter;
-        run completion is still owned by the backend's terminal emit. Current
-        live backends emit that terminal before ``handle_stop`` returns, and the
-        bound stop context carries the original agent-run attribution so the emit
-        records the run terminal. The identity guard is intentionally object-based
-        so a late stop cannot complete a newer sink registered under the same
-        session key.
+        run completion is still owned by the backend's terminal emit when one
+        arrives, and the bound stop context carries the original agent-run
+        attribution so that emit records the run terminal. The identity guard is
+        intentionally object-based so a late stop cannot complete a newer sink
+        registered under the same session key.
+
+        Ordering against a real terminal result is resolved by precedence, not by
+        timing luck. A terminal that lands *before* this call finds ``done`` already
+        set and we bail out, leaving ``settled_by="terminal_result"`` so the run
+        settles from its true result. A terminal that lands *after* the stop was
+        acknowledged loses to the ``canceled`` settlement
+        (``SETTLEMENT_TERMINAL_STATUS``), because both writers are scoped to
+        ``queued|running``. That is deliberate: for a run the user explicitly
+        stopped, ``canceled`` is true either way, and the late result's text is
+        still recorded in the run's outputs.
         """
         if not isinstance(binding, dict):
             return False

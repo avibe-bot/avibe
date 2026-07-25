@@ -32,6 +32,7 @@ from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLEMENT_I18N_KEYS,
+    SETTLEMENT_TERMINAL_STATUS,
 )
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
@@ -1181,21 +1182,23 @@ class TaskExecutionStore:
         self,
         run_id: str,
         *,
+        terminal_status: str = "failed",
         error: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> Optional[str]:
         """Terminalize a still-open run whose turn produced no terminal result.
 
-        Returns the status actually written (``failed``, or ``canceled`` when the
-        run had a cancel pending), or ``None`` when nothing was written because the
-        row is missing, already terminal, or holds a deferred terminal status.
+        Returns the status actually written (``terminal_status``, or ``canceled``
+        when a ``failed`` settlement met a pending cancel), or ``None`` when nothing
+        was written because the row is missing, already terminal, or holds a
+        deferred terminal status.
         """
 
         if self._sqlite is None:
             return None
         return self._sqlite.settle_run_terminal(
             run_id,
-            terminal_status="failed",
+            terminal_status=terminal_status,
             error=error,
             metadata=metadata,
         )
@@ -2728,6 +2731,9 @@ class ScheduledTaskService:
         settled. ``settle_without_result`` is scoped to ``queued|running`` and maps a
         cancel-requested run to ``canceled`` inside its own transaction.
 
+        The terminal status comes from ``SETTLEMENT_TERMINAL_STATUS``: an explicit
+        user stop is ``canceled``, an infrastructure fault is ``failed``.
+
         Returns ``True`` when this store owns the terminal write (whether or not this
         call is the one that performed it — an already-terminal row is settled too),
         and ``False`` only when the store has no guarded writer at all.
@@ -2737,6 +2743,7 @@ class ScheduledTaskService:
             return False
         settled = self.request_store.settle_without_result(
             execution_id,
+            terminal_status=SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed"),
             error=error,
             metadata={"interrupt_reason": settled_by},
         )

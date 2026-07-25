@@ -166,6 +166,13 @@ At `core/scheduled_tasks.py:2610`, replace the unconditional
 - any other `settled_by` (`no_terminal_result` / `stopped` /
   `refused_concurrent_turn`) → settle the run now (§3.3.1) with an i18n'd `error` and
   `metadata.interrupt_reason` set to that same value.
+- **Revised during implementation (post-review):** the terminal *status* is no longer
+  uniformly `failed`. `SETTLEMENT_TERMINAL_STATUS` (`core/run_settlement.py`) maps
+  `stopped` → `canceled` and the rest → `failed`. `stopped` is the one settlement
+  carrying explicit user intent (Running-tab End), and `canceled` is already in the
+  closed vocabulary for exactly that — a stopped run did not break, it was called off.
+  This also disarms the `settle_bound_turn_sink` ordering race (§3.5): whichever way
+  it falls, the row reads something true.
 - `settled_by is None` → non-streaming caller, unreachable from this path; settle as
   `no_terminal_result` and `logger.warning` rather than leaving the run open. Never
   return `complete_on_return=False` for an unknown settlement.
@@ -231,6 +238,35 @@ result never passes through `dispatch_turn`, so there is no `settled_by` to bran
 Threading a settlement through `SessionTurnGate.submit` → `manager.submit` is a larger
 refactor of a second dispatch lane. Gap B's B3 orphan sweep is the backstop for a
 stranded row on that lane; §3.4's door checks remove the one reachable instance.
+
+### 3.5 Ordering against a real terminal result (added post-review)
+
+The review flagged the one place where PR-A changes a *consequence* rather than only
+fixing a zombie: `settled_by == "stopped"`. `_stop_active_agent`
+(`core/services/running_agents.py:983-990`) awaits `handle_stop`, then calls
+`settle_bound_turn_sink`. Before PR-A, a terminal result that landed after that point
+still won and the row read `succeeded`; PR-A settles the row the moment the stop
+releases the waiter, and both writers are scoped to `queued|running`, so whichever
+lands first wins permanently.
+
+Resolved by precedence rather than by a timing assumption or a timer (a turn-duration
+timeout is explicitly out of this design):
+
+- **Terminal lands first** — `settle_bound_turn_sink` finds `done` already set and
+  returns `False` without stamping, so `settled_by` stays `terminal_result` and the
+  run settles from its true result. This is the common case and it is now pinned by
+  `test_stop_defers_to_a_terminal_result_that_already_landed`.
+- **Terminal lands after the stop was acknowledged** — the `canceled` settlement wins
+  and `record_run_output`'s terminal write becomes a no-op. That is deliberate:
+  `canceled` is true of a run the user stopped regardless of what the backend was
+  about to say, and the late text is still appended to the run's outputs
+  (`record_run_output` returns `recorded=True, terminal_transition=False`). Pinned by
+  `test_late_terminal_result_cannot_reopen_a_stopped_run` so a future change to either
+  writer's guard is a test failure, not a silent flip in who wins.
+
+The docstring on `settle_bound_turn_sink` now states this rule instead of asserting
+that live backends always emit before `handle_stop` returns — that was an unenforced
+claim about async backend timing, and the settlement layer should not depend on it.
 
 ## 4. Design — Gap B: evidence-based staleness sweep
 
@@ -387,6 +423,13 @@ Delivered (all verified to FAIL with the fix reverted, so none is a tautology):
     `cancel_requested` → `canceled` mapping
   - `test_agent_run_with_blank_message_fails_instead_of_hanging` — covers both the
     store-level door and a legacy pre-guard row
+  - `test_agent_run_stopped_by_user_settles_canceled` — §3.5's status mapping, driven
+    through the *real* `settle_bound_turn_sink` (`_StopSinkSettler` borrows the actual
+    methods) so the stamp site and its guards are under test, not a hand-written string
+  - `test_stop_defers_to_a_terminal_result_that_already_landed` — the safe half of the
+    stop race; fails if the `done.is_set()` bail-out is removed
+  - `test_late_terminal_result_cannot_reopen_a_stopped_run` — the lossy half, pinned as
+    deliberate precedence; fails if `record_run_output`'s terminal guard is widened
   - `test_drain_requests_agent_run_passes_agent_name` — **updated**: it used to assert
     the run stays in `processing`, which encoded the zombie for the legacy file store.
     It now asserts the run is completed with the settlement reason.
@@ -399,6 +442,14 @@ Delivered (all verified to FAIL with the fix reverted, so none is a tautology):
 
 Deferred to PR-B (they test the sweep, which PR-B introduces): every `test_sweep_*`
 case and `test_stranded_queued_run_does_not_trigger_repeated_metadata_writes`.
+
+Mutation evidence for the §3.5 additions (each mutation reverted after the run):
+
+| Mutation | Tests killed |
+| --- | --- |
+| `SETTLEMENT_TERMINAL_STATUS[stopped]` → `failed` | `..._stopped_by_user_settles_canceled`, `..._late_terminal_result_cannot_reopen...` |
+| drop the `done.is_set()` bail-out in `settle_bound_turn_sink` | `..._stop_defers_to_a_terminal_result_that_already_landed` |
+| widen `record_run_output`'s terminal guard to include `canceled` | `..._late_terminal_result_cannot_reopen_a_stopped_run` |
 
 Also verified green (no behavior regressions): `test_message_dispatcher_scheduled.py`,
 `test_controller_dispatch_loop.py`, `test_internal_server.py`, `test_inbox_events.py`,

@@ -71,3 +71,23 @@ SETTLEMENT_I18N_KEYS: Final = {
     SETTLED_BY_STOPPED: "harness.run.interrupted.stopped",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.run.interrupted.refusedConcurrentTurn",
 }
+
+
+# ----- which terminal status each settlement writes -----------------------
+#
+# ``stopped`` is the one settlement that carries explicit user intent: someone
+# pressed End/Stop on a running agent. ``canceled`` — already in the closed
+# vocabulary for exactly that — is the honest terminal, not ``failed``: the run
+# did not break, it was called off. This also makes the narrow race in
+# ``settle_bound_turn_sink`` benign in both directions. If the backend's terminal
+# result lands first, the honest ``succeeded`` write wins and this settlement is a
+# no-op; if it lands after the stop was acknowledged, the row reads ``canceled``,
+# which is still true of a run the user stopped.
+#
+# The other settlements are infrastructure faults with no user intent behind
+# them, so they stay ``failed`` and remain visible to a failure counter.
+SETTLEMENT_TERMINAL_STATUS: Final = {
+    SETTLED_BY_NO_TERMINAL_RESULT: "failed",
+    SETTLED_BY_STOPPED: "canceled",
+    SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
+}

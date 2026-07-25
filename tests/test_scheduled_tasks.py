@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from config.v2_settings import make_thread_native_id
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.session_activities import SessionActivityRegistry
+from core.session_turns import SessionTurnManager
 from core.scheduled_tasks import (
     ParsedSessionKey,
     ScheduledTaskService,
@@ -2445,6 +2447,160 @@ def test_agent_run_cancel_requested_settles_canceled_not_failed(tmp_path: Path, 
     assert settled["status"] == "canceled"
     assert settled["completed_at"] is not None
     assert settled["metadata"]["interrupt_reason"] == "no_terminal_result"
+
+
+class _StopSinkSettler:
+    """Drives a stop through the REAL ``settle_bound_turn_sink``.
+
+    Hand-stamping ``settled_by="stopped"`` would test the string, not the stamp
+    site. Borrowing the actual methods keeps the ``done.is_set()`` bail-out and the
+    object identity guard under test, which is what decides the ordering against a
+    real terminal result.
+    """
+
+    bind_context_to_turn_sink = SessionTurnManager.bind_context_to_turn_sink
+    settle_bound_turn_sink = SessionTurnManager.settle_bound_turn_sink
+    # Re-wrap: the real one is a staticmethod, and a bare function assigned to a
+    # class attribute would bind ``self`` as its first argument.
+    _sink_identity_matches = staticmethod(SessionTurnManager._sink_identity_matches)
+
+    def __init__(self, controller) -> None:
+        self.controller = controller
+        self.active_turn_sinks = controller.active_turn_sinks
+
+
+def test_agent_run_stopped_by_user_settles_canceled(tmp_path: Path, monkeypatch) -> None:
+    """Running-tab End on an agent run terminalizes it as ``canceled``.
+
+    The backend was interrupted without emitting a terminal result, so nothing else
+    will ever write this row. ``canceled`` (not ``failed``) is the honest status:
+    the run did not break, the user called it off.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+
+    async def _stop_mid_turn(controller, context, _message) -> None:
+        settler = _StopSinkSettler(controller)
+        binding = settler.bind_context_to_turn_sink(context)
+        assert binding is not None
+        assert settler.settle_bound_turn_sink(binding) is True
+
+    controller = _SettlementControllerDouble(on_turn=_stop_mid_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "canceled", "an explicit stop is a cancellation, not a failure"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "stopped"
+
+
+def test_stop_defers_to_a_terminal_result_that_already_landed(tmp_path: Path, monkeypatch) -> None:
+    """A stop racing a terminal result that arrived FIRST must not steal the run.
+
+    This is the safe half of the stop race: the backend emitted its result (setting
+    the done event and stamping the honest settlement) before the stop fallback ran.
+    ``settle_bound_turn_sink`` must decline, leaving the out-of-band terminal writer
+    the owner — otherwise a run that really finished would report ``canceled``.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+    declined: list[bool] = []
+
+    async def _terminal_then_stop(controller, context, _message) -> None:
+        session_key = controller._get_session_key(context)
+        # The real terminal emit: stamp the honest settlement and release the waiter.
+        sink = controller.active_turn_sinks[session_key]
+        sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
+        sink["done_event"].set()
+        # The stop fallback fires afterwards and must be a no-op.
+        settler = _StopSinkSettler(controller)
+        binding = settler.bind_context_to_turn_sink(context)
+        declined.append(settler.settle_bound_turn_sink(binding) is False)
+        assert sink["settled_by"] == SETTLED_BY_TERMINAL_RESULT
+
+    controller = _SettlementControllerDouble(on_turn=_terminal_then_stop)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    assert declined == [True], "a stop after the result landed must not re-settle the sink"
+    still_open = request_store.get_run(request.id)
+    assert still_open is not None
+    assert still_open["status"] == "running", "the terminal result's own writer owns this row"
+    assert still_open["metadata"].get("interrupt_reason") is None
+
+
+def test_late_terminal_result_cannot_reopen_a_stopped_run(tmp_path: Path, monkeypatch) -> None:
+    """The lossy half of the stop race, pinned as deliberate precedence.
+
+    If the backend's terminal result lands only AFTER the stop was acknowledged and
+    the run settled, the terminal write loses — both writers are scoped to
+    ``queued|running``. The row stays ``canceled``, which is still true of a run the
+    user stopped, and the late text is still appended to the run's outputs rather
+    than dropped. Pinned so a future change to either writer's guard is a visible
+    test failure, not a silent flip in who wins.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+
+    async def _stop_mid_turn(controller, context, _message) -> None:
+        settler = _StopSinkSettler(controller)
+        assert settler.settle_bound_turn_sink(settler.bind_context_to_turn_sink(context)) is True
+
+    controller = _SettlementControllerDouble(on_turn=_stop_mid_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+    assert request_store.get_run(request.id)["status"] == "canceled"
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    recorded = sqlite_store.record_run_output(
+        request.id,
+        output_id="late-terminal",
+        text="the answer that arrived too late",
+        terminal_status="succeeded",
+    )
+
+    assert recorded["recorded"] is True, "the late text is still appended, not dropped"
+    assert recorded["terminal_transition"] is False, "but it must not re-terminalize the row"
+    final = request_store.get_run(request.id)
+    assert final is not None
+    assert final["status"] == "canceled", "a stop already settled this run; the late result loses"
+    assert final["metadata"]["interrupt_reason"] == "stopped"
 
 
 def test_agent_run_with_blank_message_fails_instead_of_hanging(tmp_path: Path, monkeypatch) -> None:

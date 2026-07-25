@@ -22,7 +22,7 @@
     "run": {
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] This run ended without the Agent producing a result. The turn was released before the Agent replied, so no output was recorded. Check the Agent logs, then run it again if the work still needs doing.",
-        "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result. Any work already done was not recorded as output.",
+        "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
         "refusedConcurrentTurn": "[Avibe Harness] This run was skipped because another turn was already in flight for the same session. A session runs one turn at a time; trigger it again once the current turn finishes."
       }
     }
