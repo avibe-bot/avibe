@@ -278,6 +278,48 @@ def test_list_skills_filters_private_public_scope_and_missing_group_context(monk
     assert missing_groups["summary"] == {"global": 1, "project": 0}
 
 
+def test_check_skills_filters_acl_rows_and_recomputes_summary(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "private-skill", access_level="private")
+            _seed_skill_policy(connection, "public-skill", access_level="public")
+            _seed_skill_policy(
+                connection,
+                "scoped-skill",
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+        rec = _Recorder(
+            {
+                "ok": True,
+                "summary": {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0},
+                "skills": [
+                    {"name": "private-skill", "scope": "global", "status": "update_available"},
+                    {"name": "public-skill", "scope": "global", "status": "up_to_date"},
+                    {"name": "scoped-skill", "scope": "global", "status": "update_available"},
+                ],
+            }
+        )
+        monkeypatch.setattr(skills, "_run_askill", rec)
+
+        member = _run(skills.check("askill", scope="global", user_context=_organization_context("member-1")))
+        missing_groups = _run(
+            skills.check(
+                "askill",
+                scope="global",
+                user_context=_organization_context("member-2", group_ids=None),
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert [skill["name"] for skill in member["skills"]] == ["public-skill", "scoped-skill"]
+    assert member["summary"] == {"total": 2, "updateAvailable": 1, "upToDate": 1, "uncheckable": 0}
+    assert [skill["name"] for skill in missing_groups["skills"]] == ["public-skill"]
+    assert missing_groups["summary"] == {"total": 1, "updateAvailable": 0, "upToDate": 1, "uncheckable": 0}
+
+
 def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     listing = {"ok": True, "skills": [_skill_row("private-skill")]}

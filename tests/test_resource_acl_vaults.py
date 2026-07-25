@@ -160,6 +160,40 @@ def test_inaccessible_vault_requests_and_grants_fail_before_mutating_state(vault
     assert grants == []
 
 
+def test_vault_request_reads_and_denial_enforce_member_secret_acls(vault) -> None:
+    owner = _context("owner-1")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "PRIVATE_REQUEST", protection="protected")
+        _create_secret(conn, "PUBLIC_REQUEST", protection="protected")
+        _set_policy(conn, "PRIVATE_REQUEST", access_level="private")
+        _set_policy(conn, "PUBLIC_REQUEST", access_level="public")
+        private_request = vault_service.create_access_request(conn, "PRIVATE_REQUEST", user_context=owner)
+        public_request = vault_service.create_access_request(conn, "PUBLIC_REQUEST", user_context=owner)
+
+        visible = vault_service.list_requests(conn, user_context=member)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.get_request(conn, private_request["id"], user_context=member)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.deny_request(conn, private_request["id"], user_context=member)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.deny_request(conn, public_request["id"], user_context=member)
+
+        statuses_before_owner_decision = dict(
+            conn.execute(select(vault_requests.c.id, vault_requests.c.status)).all()
+        )
+        owner_payload = vault_service.get_request(conn, private_request["id"], user_context=owner)
+        denied = vault_service.deny_request(conn, private_request["id"], user_context=owner)
+
+    assert [request["id"] for request in visible] == [public_request["id"]]
+    assert "secret_unlock_material" in owner_payload["card"]
+    assert statuses_before_owner_decision == {
+        private_request["id"]: "pending",
+        public_request["id"]: "pending",
+    }
+    assert denied["status"] == "denied"
+
+
 @pytest.mark.parametrize(
     "selector",
     [

@@ -1490,6 +1490,36 @@ def _request_member_names(row: dict[str, Any]) -> list[str]:
     return sorted(set(members))
 
 
+def _require_request_secret_access(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    user_context: Any = None,
+    management: bool = False,
+) -> None:
+    """Authorize a request before hydrating or mutating its member secrets."""
+
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local:
+        return
+    member_names = _request_member_names(row)
+    if not member_names:
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    secret_rows = {
+        str(secret_row["name"]): dict(secret_row)
+        for secret_row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(member_names))).mappings()
+    }
+    if set(secret_rows) != set(member_names):
+        # Provision requests legitimately precede the secret. Only the paired
+        # instance owner may inspect or decide those owner-level requests.
+        if context.is_instance_owner and row.get("request_type") == "provision":
+            return
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    require = _require_secret_resource_management if management else _require_secret_resource_access
+    for name in member_names:
+        require(conn, secret_rows[name], context)
+
+
 def _request_covers_any_member(row: dict[str, Any], members: set[str]) -> bool:
     if not members:
         return False
@@ -3329,8 +3359,15 @@ def complete_sign_request(
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
-def get_request(conn: Connection, request_id: str, *, audience: str | None = REQUEST_AUDIENCE_UI) -> dict[str, Any]:
+def get_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    audience: str | None = REQUEST_AUDIENCE_UI,
+    user_context: Any = None,
+) -> dict[str, Any]:
     row_dict = _load_request_row(conn, request_id)
+    _require_request_secret_access(conn, row_dict, user_context=user_context)
     return _request_row_payload(row_dict, conn=conn, audience=audience)
 
 
@@ -3529,7 +3566,10 @@ def deny_request(
     *,
     requester: Any = None,
     reason: str | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
+    request_row = _load_request_row(conn, request_id)
+    _require_request_secret_access(conn, request_row, user_context=user_context, management=True)
     row_dict = _load_request_for_transition(
         conn,
         request_id,
@@ -3569,6 +3609,7 @@ def list_requests(
     request_type: str | None = None,
     limit: int = 100,
     session: str | None = None,
+    user_context: Any = None,
 ) -> list[dict[str, Any]]:
     _expire_pending_requests(conn)
     query = select(vault_requests).order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
@@ -3583,6 +3624,16 @@ def list_requests(
     rows = [dict(row) for row in conn.execute(query).mappings()]
     if session is not None:
         rows = [row for row in rows if _request_session_id(row) == session][:limit]
+    context = resolve_resource_access_context(user_context)
+    if not context.is_trusted_local:
+        accessible_rows: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                _require_request_secret_access(conn, row, user_context=context)
+            except VaultSecretAccessError:
+                continue
+            accessible_rows.append(row)
+        rows = accessible_rows
     return [_request_row_payload(row, conn=conn, audience=REQUEST_AUDIENCE_UI) for row in rows]
 
 

@@ -1242,14 +1242,14 @@ def upload_show_page_icon(
     return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def get_dock() -> dict:
+def get_dock(*, user_context: Any = None) -> dict:
     """The workbench Dock document — resident-tile order + pinned Show Pages."""
     from core.dock_store import load_dock
 
-    return {"ok": True, "dock": load_dock()}
+    return {"ok": True, "dock": load_dock(user_context=user_context)}
 
 
-def pin_dock_show_page(session_id: str) -> dict:
+def pin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Pin a session's Show Page to the Dock (idempotent).
 
     Raises ``ShowPageError`` (malformed id → 400) or ``DockError`` (no Show Page
@@ -1257,24 +1257,29 @@ def pin_dock_show_page(session_id: str) -> dict:
     """
     from core.dock_store import pin_show_page
 
-    return {"ok": True, "dock": pin_show_page(session_id)}
+    return {"ok": True, "dock": pin_show_page(session_id, user_context=user_context)}
 
 
-def unpin_dock_show_page(session_id: str) -> dict:
+def unpin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Unpin a Show Page from the Dock (idempotent; leaves the page untouched)."""
     from core.dock_store import unpin_show_page
 
-    return {"ok": True, "dock": unpin_show_page(session_id)}
+    return {"ok": True, "dock": unpin_show_page(session_id, user_context=user_context)}
 
 
-def set_dock_order(order: list, known: list | None = None) -> dict:
+def set_dock_order(
+    order: list,
+    known: list | None = None,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Persist a new resident-tile (docked-subset) order. ``known`` is the
     client's optimistic-concurrency baseline id set; when it no longer matches the
     server's, the write is rejected as stale so a stale tab can't silently undock a
     newer pin. Raises ``DockError`` for an invalid/stale order, mapped to a 400."""
     from core.dock_store import set_dock_order as _set_dock_order
 
-    return {"ok": True, "dock": _set_dock_order(order, known=known)}
+    return {"ok": True, "dock": _set_dock_order(order, known=known, user_context=user_context)}
 
 
 def get_workbench_prefs() -> dict:
@@ -2757,6 +2762,8 @@ def get_vault_request(request_id: str, *, audience: str | None = None) -> dict:
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     payload = {"ok": True, "request": request}
     if result is not None:
         payload["result"] = result
@@ -2941,6 +2948,8 @@ def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
             )
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     _publish_vaults_updated(
@@ -11392,8 +11401,21 @@ async def find_skills(query: str = "") -> dict:
     return await _skills_guarded(lambda askill, svc: svc.find_skills(askill, query))
 
 
-async def check_skills(*, scope: str = "project", project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.check(askill, scope=scope, project_dir=project_dir))
+async def check_skills(
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.check(
+            askill,
+            scope=scope,
+            project_dir=project_dir,
+            user_context=context,
+        )
+    )
 
 
 async def update_skill(

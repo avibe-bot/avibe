@@ -4039,7 +4039,12 @@ def _dock_error_response(exc):
     # A missing Show Page (nothing to pin) is a 404; a malformed id or a bad
     # order is a 400. Structured ``error`` so the Web UI's shared handler can
     # localize via ``errors.<code>`` and fall back to the human message.
-    status = 404 if code in {"show_page_not_found", "session_not_found"} else 400
+    if code == "resource_access_forbidden":
+        status = 403
+    elif code in {"show_page_not_found", "session_not_found"}:
+        status = 404
+    else:
+        status = 400
     message = str(exc)
     return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
 
@@ -4079,6 +4084,7 @@ def dock_unpin_delete(session_id):
 @app.route("/api/dock/order", methods=["PUT"])
 def dock_order_put():
     from core.dock_store import DockError
+    from core.show_pages import ShowPageError
     from vibe import api
 
     payload = request.json or {}
@@ -4088,7 +4094,7 @@ def dock_order_put():
         # longer matches the server's, so a stale tab can't silently undock a pin
         # another tab installed.
         return jsonify(api.set_dock_order(payload.get("order"), known=payload.get("known")))
-    except DockError as exc:
+    except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
 

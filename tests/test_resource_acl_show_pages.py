@@ -6,7 +6,7 @@ from core.show_pages import ShowPageError, ShowPageStore, public_url
 from storage import resource_access_service
 from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import remote_access
+from vibe import api, remote_access
 from vibe.ui_server import app
 
 
@@ -181,3 +181,40 @@ def test_show_page_scope_without_group_context_fails_closed(monkeypatch, tmp_pat
         store.close()
 
     assert excinfo.value.code == "resource_access_forbidden"
+
+
+def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    store = _seed_show_pages_with_policies()
+    store.close()
+    owner = _organization_context("owner-1")
+    member = _organization_context("member-1")
+    for session_id in ("ses-private", "ses-public", "ses-scope"):
+        api.pin_dock_show_page(session_id, user_context=owner)
+
+    dock = api.get_dock(user_context=member)["dock"]
+    visible_ids = {pin["session_id"] for pin in dock["pins"]}
+    assert visible_ids == {"ses-public", "ses-scope"}
+    assert "show:ses-private" not in dock["order"]
+    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+        api.pin_dock_show_page("ses-private", user_context=member)
+    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+        api.unpin_dock_show_page("ses-public", user_context=member)
+    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+        api.set_dock_order([], user_context=member)
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+        domain="alex.avibe.bot",
+    )
+    response = client.delete(
+        "/api/dock/pins/ses-public",
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "resource_access_forbidden"

@@ -773,6 +773,7 @@ async def check(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Check installed skills for available updates (no install).
 
@@ -781,7 +782,26 @@ async def check(
     ``uncheckable``) plus ``localVersion`` / ``remoteVersion``.
     """
     args = ["check", *_target_scope_flag(scope)]
-    return await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
+    result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
+    context = resolve_resource_access_context(user_context)
+    filtered = _filter_skill_listing(
+        result,
+        scope=scope,
+        project_dir=project_dir,
+        backends=list(BACKEND_TO_AGENT),
+        user_context=context,
+    )
+    if context.is_trusted_local or not isinstance(filtered.get("summary"), dict):
+        return filtered
+    skills = filtered.get("skills") if isinstance(filtered.get("skills"), list) else []
+    statuses = [str(skill.get("status") or "") for skill in skills if isinstance(skill, dict)]
+    filtered["summary"] = {
+        "total": len(skills),
+        "updateAvailable": statuses.count("update_available"),
+        "upToDate": statuses.count("up_to_date"),
+        "uncheckable": statuses.count("uncheckable"),
+    }
+    return filtered
 
 
 async def update(
