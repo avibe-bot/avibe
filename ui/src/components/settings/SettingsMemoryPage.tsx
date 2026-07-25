@@ -1,801 +1,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import type { TFunction } from 'i18next';
-import {
-  AlertTriangle,
-  ArrowUpRight,
-  Brain,
-  Clock,
-  Copy,
-  Database,
-  Loader2,
-  Lock,
-  RefreshCw,
-  Search as SearchIcon,
-  ShieldAlert,
-  Trash2,
-  X,
-} from 'lucide-react';
+import { ArrowUpRight, Brain, Loader2, ShieldAlert } from 'lucide-react';
 
 import { SettingsPageShell } from './SettingsPageShell';
-import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
-import { Card, CardContent } from '../ui/card';
-import { Checkbox } from '../ui/checkbox';
 import { ConfirmDialog } from '../ui/confirm-dialog';
-import { Input } from '../ui/input';
-import { Label } from '../ui/label';
 import { SegmentedRadio } from '../ui/segmented';
-import { Switch } from '../ui/switch';
+import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
+import { MemorySearchPanel } from './memory/MemorySearchPanel';
+import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
+import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
+import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
 import type {
-  MemoryEndpointConfig,
   MemoryFailureLogEntry,
-  MemoryItem,
-  MemorySettings,
-  MemorySettingsPatch,
+  MemoryFailureLogResult,
+  MemorySettingsResult,
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { buildEndpointPatch, draftFromConfig, memorySetupStage } from '../../lib/memorySettings';
-import type { EndpointDraft } from '../../lib/memorySettings';
+import { memorySetupStage } from '../../lib/memorySettings';
+import { memoryErrorMessage } from '../../lib/memoryRead';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
 
-// Status precedence mirrors the backend contract exactly; this map
-// is display-only; the actual precedence is computed server-side.
-const STATE_BADGE_VARIANT: Record<MemoryStatus['state'], 'success' | 'warning' | 'destructive' | 'info' | 'secondary'> = {
-  disabled: 'secondary',
-  starting: 'info',
-  ready: 'success',
-  syncing: 'info',
-  degraded: 'warning',
-  down: 'destructive',
-  clearing: 'warning',
-  error: 'destructive',
-};
+type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
+type MemoryFailureLogOk = Extract<MemoryFailureLogResult, { items: MemoryFailureLogEntry[] }>;
 
 const POLL_MS = 4000;
 
-const errorMessage = (t: TFunction, code: string | null | undefined): string =>
-  code ? t(`errors.${code}`, { defaultValue: code }) : t('common.unknown');
+const DEFAULT_FAILURE_RETENTION_DAYS = 90;
 
-// Backend forbidden path (`_memory_forbidden_response`) returns exactly this closed shape for
-// every Memory route when the request isn't direct-loopback (e.g. opened via Avibe Cloud). It is
-// otherwise never produced by a settings/status/profile/search/clear success or config-disabled
-// path, so it's a safe signal to render the "available on this device only" static state instead
-// of a generic error.
-const isForbiddenResult = (value: unknown): boolean =>
-  !!value &&
-  typeof value === 'object' &&
-  (value as { status?: string; error?: string }).status === 'failed' &&
-  (value as { status?: string; error?: string }).error === 'memory_disabled';
-
-// Every Memory route body is discriminated: `status: 'ok'` on success, `status: 'failed'` with a
-// closed error code otherwise. A dependency-missing failure from the internal handler carries only
-// `error`, so require the tag rather than merely rejecting 'failed'.
-const isMemoryOk = <T,>(value: T): value is Extract<T, { status: 'ok' }> =>
-  !!value && typeof value === 'object' && (value as { status?: unknown }).status === 'ok';
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KiB', 'MiB', 'GiB'];
-  let value = bytes / 1024;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-// One LLM/embedding endpoint's fields. `locked` disables base_url/model edits — used for the
-// embedding endpoint once memory data exists, because changing it would mix vector spaces.
-const EndpointFields: React.FC<{
-  title: string;
-  draft: EndpointDraft;
-  original: MemoryEndpointConfig;
-  onChange: (next: EndpointDraft) => void;
-  disabled: boolean;
-  locked: boolean;
-  lockedHint?: string;
-  canClearKey: boolean;
-}> = ({ title, draft, original, onChange, disabled, locked, lockedHint, canClearKey }) => {
-  const { t } = useTranslation();
-  const identityFieldsDisabled = disabled || locked;
-  return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
-      <div className="flex items-center gap-2">
-        <span className="text-[13px] font-semibold text-foreground">{title}</span>
-        {original.has_api_key ? (
-          <Badge variant="success">{t('memory.settings.apiKeySet')}</Badge>
-        ) : (
-          <Badge variant="secondary">{t('memory.settings.apiKeyNotSet')}</Badge>
-        )}
-        {locked ? (
-          <Badge variant="warning" className="gap-1">
-            <Lock className="size-3" />
-            {t('common.locked')}
-          </Badge>
-        ) : null}
-      </div>
-      {lockedHint ? <p className="text-[11.5px] leading-snug text-muted">{lockedHint}</p> : null}
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="flex flex-col gap-1.5">
-          <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
-          <Input
-            value={draft.baseUrl}
-            disabled={identityFieldsDisabled}
-            placeholder={t('memory.settings.baseUrlPlaceholder')}
-            onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
-            className="text-[13px]"
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
-          <Input
-            value={draft.model}
-            disabled={identityFieldsDisabled}
-            placeholder={t('memory.settings.modelPlaceholder')}
-            onChange={(e) => onChange({ ...draft, model: e.target.value })}
-            className="text-[13px]"
-          />
-        </div>
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-[12px] text-muted">{t('memory.settings.apiKey')}</Label>
-        <Input
-          type="password"
-          autoComplete="off"
-          value={draft.apiKey}
-          disabled={disabled || draft.clearKey}
-          placeholder={t('memory.settings.apiKeyPlaceholder')}
-          onChange={(e) => onChange({ ...draft, apiKey: e.target.value, clearKey: false })}
-          className="text-[13px]"
-        />
-        <p className="text-[11px] text-muted">{t('memory.settings.apiKeyClearHint')}</p>
-        {canClearKey && original.has_api_key ? (
-          <button
-            type="button"
-            role="checkbox"
-            aria-checked={draft.clearKey}
-            aria-label={t('memory.settings.clearKeyLabel')}
-            disabled={disabled}
-            onClick={() => onChange({ ...draft, clearKey: !draft.clearKey, apiKey: '' })}
-            className="mt-0.5 flex w-fit items-center gap-2 text-[11.5px] text-muted disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Checkbox
-              presentational
-              checked={draft.clearKey}
-              disabled={disabled}
-              className="size-3.5"
-            />
-            {t('memory.settings.clearKeyLabel')}
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-};
-
-const StatusPanel: React.FC<{
-  status: MemoryStatus | null;
-  failures: MemoryFailureLogEntry[];
-  failureRetentionDays: number;
-  failuresError: string | null;
-  loading: boolean;
-  error: string | null;
-  onRefresh: () => void;
-  onOpenSettings: () => void;
-  onRepair: () => void;
-  repairing: boolean;
-}> = ({
-  status,
-  failures,
-  failureRetentionDays,
-  failuresError,
-  loading,
-  error,
-  onRefresh,
-  onOpenSettings,
-  onRepair,
-  repairing,
-}) => {
-  const { t } = useTranslation();
-  const faultKey = status?.processing_fault_kind
-    ? `${status.processing_fault_kind}:${status.processing_fault_since ?? ''}`
-    : null;
-  const [dismissedFault, setDismissedFault] = useState<string | null>(null);
-
-  if (loading && !status) {
-    return (
-      <div className="flex items-center gap-2 px-1 text-sm text-muted">
-        <Loader2 className="size-4 animate-spin" />
-        {t('memory.status.loading')}
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-        {error}
-      </div>
-    );
-  }
-  if (!status) return null;
-
-  const buckets = status.buckets;
-  const stats: Array<{ key: string; label: string; value: React.ReactNode; description?: string }> = [
-    {
-      key: 'syncing',
-      label: t('memory.status.syncing'),
-      value: buckets.syncing,
-    },
-    { key: 'succeeded', label: t('memory.status.succeeded'), value: buckets.succeeded },
-    {
-      key: 'unknown',
-      label: t('memory.status.receiptUnknown'),
-      value: buckets.unknown,
-      description: t('memory.status.receiptUnknownHint'),
-    },
-    { key: 'failed', label: t('memory.status.distillFailed'), value: buckets.failed },
-    {
-      key: 'dead',
-      label: t('memory.status.dead'),
-      value: buckets.dead,
-      description: t('memory.status.deadHint'),
-    },
-    { key: 'missed', label: t('memory.status.missed'), value: buckets.missed },
-  ];
-  const showFault = faultKey && faultKey !== dismissedFault;
-  const faultKind = status.processing_fault_kind;
-
-  return (
-    <div className="flex flex-col gap-3">
-      {showFault && faultKind ? (
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] text-foreground">
-          <div className="flex min-w-0 items-start gap-2.5">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
-            <div className="flex min-w-0 flex-col gap-2">
-              <span>{t(`memory.status.fault.${faultKind}`)}</span>
-              <Button
-                variant="secondary"
-                size="xs"
-                className="w-fit"
-                onClick={faultKind === 'credential' ? onOpenSettings : onRepair}
-                disabled={repairing}
-              >
-                {faultKind === 'engine' && repairing ? <Loader2 className="animate-spin" /> : null}
-                {t(`memory.status.faultAction.${faultKind}`)}
-              </Button>
-            </div>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="-mr-2 -mt-2 size-8"
-            aria-label={t('memory.status.dismissFault')}
-            onClick={() => setDismissedFault(faultKey)}
-          >
-            <X className="size-4" />
-          </Button>
-        </div>
-      ) : null}
-      <Card>
-        <CardContent className="flex flex-col gap-4 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Badge variant={STATE_BADGE_VARIANT[status.state]} className="text-[12px]">
-                {t(`memory.status.state.${status.state}`)}
-              </Badge>
-              {status.error ? (
-                <span className="flex items-center gap-1 text-[12px] text-destructive">
-                  <AlertTriangle className="size-3.5" />
-                  {errorMessage(t, status.error)}
-                </span>
-              ) : null}
-            </div>
-            <Button variant="ghost" size="sm" onClick={onRefresh}>
-              <RefreshCw className="size-3.5" />
-              {t('memory.status.refresh')}
-            </Button>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            {stats.map((s) => (
-              <div key={s.key} className="rounded-lg border border-border bg-surface px-3 py-2.5">
-                <div className="text-[10px] uppercase tracking-[0.08em] text-muted">{s.label}</div>
-                <div className="text-[18px] font-semibold text-foreground">{s.value}</div>
-                {s.description ? <div className="mt-1 text-[10.5px] leading-snug text-muted">{s.description}</div> : null}
-              </div>
-            ))}
-          </div>
-
-          <div className="flex flex-col gap-2 border-t border-border pt-3 text-[12.5px]">
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-1.5 text-muted">
-                <Clock className="size-3.5" />
-                {t('memory.status.lastSuccess')}
-              </span>
-              <span className="font-mono text-foreground">
-                {status.last_success_at ? new Date(status.last_success_at).toLocaleString() : t('memory.status.lastSuccessNever')}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-1.5 text-muted">
-                <Database className="size-3.5" />
-                {t('memory.status.storageUsed')}
-              </span>
-              <span className="font-mono text-foreground">{formatBytes(status.provider_disk_bytes)}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-muted">{t('memory.status.queueBytes')}</span>
-              <span className="font-mono text-foreground">{formatBytes(status.queue_plaintext_bytes)}</span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="flex flex-col gap-3 py-4 text-[12.5px]">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-semibold text-foreground">{t('memory.status.providerTitle')}</div>
-              <div className="text-[11px] text-muted">{t('memory.status.providerSubtitle')}</div>
-            </div>
-            <Badge variant="secondary">
-              {status.last_flush_observation
-                ? t(`memory.status.observation.${status.last_flush_observation}`)
-                : '—'}
-            </Badge>
-          </div>
-          <div className="grid gap-2 border-t border-border pt-3 sm:grid-cols-2">
-            <ObservationValue label={t('memory.status.flushStatus')} value={status.last_flush_status} />
-            <ObservationValue label={t('memory.status.flushError')} value={status.last_flush_error_code} />
-            <ObservationValue
-              label={t('memory.status.flushAt')}
-              value={status.last_flush_at ? new Date(status.last_flush_at).toLocaleString() : null}
-            />
-            <div className="flex min-w-0 items-center justify-between gap-3">
-              <span className="text-muted">{t('memory.status.requestId')}</span>
-              <div className="flex min-w-0 items-center gap-1">
-                <span className="truncate font-mono text-foreground">{status.last_flush_request_id ?? '—'}</span>
-                {status.last_flush_request_id ? (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    aria-label={t('memory.status.copyRequestId')}
-                    onClick={() => void navigator.clipboard.writeText(status.last_flush_request_id ?? '')}
-                  >
-                    <Copy className="size-3.5" />
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="flex flex-col gap-3 py-4 text-[12.5px]">
-          <div>
-            <div className="text-[13px] font-semibold text-foreground">{t('memory.status.failureLog.title')}</div>
-            <div className="text-[11px] text-muted">
-              {t('memory.status.failureLog.subtitle', { days: failureRetentionDays })}
-            </div>
-          </div>
-          <div className="border-t border-border pt-1">
-            {failuresError ? (
-              <div className="py-3 text-destructive">{failuresError}</div>
-            ) : failures.length === 0 ? (
-              <div className="py-3 text-muted">{t('memory.status.failureLog.empty')}</div>
-            ) : (
-              failures.map((entry, index) => (
-                <div
-                  key={`${entry.kind}:${entry.occurred_at}:${entry.request_id ?? index}`}
-                  className="flex flex-col gap-2 border-b border-border py-3 last:border-b-0 sm:flex-row sm:items-start sm:justify-between"
-                >
-                  <div className="flex min-w-0 items-start gap-2.5">
-                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
-                    <div className="min-w-0">
-                      <div className="font-medium text-foreground">
-                        {t(`memory.status.failureLog.kind.${entry.kind}`)}
-                      </div>
-                      <div className="mt-0.5 font-mono text-[11px] text-muted">
-                        {new Date(entry.occurred_at).toLocaleString()}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="grid min-w-0 gap-1 text-[11px] sm:min-w-[280px]">
-                    <ObservationValue label={t('memory.status.failureLog.errorCode')} value={entry.error_code} />
-                    <ObservationValue
-                      label={t('memory.status.failureLog.attempts')}
-                      value={String(entry.attempts)}
-                    />
-                    <div className="flex min-w-0 items-center justify-between gap-3">
-                      <span className="text-muted">{t('memory.status.requestId')}</span>
-                      <div className="flex min-w-0 items-center gap-1">
-                        <span className="truncate font-mono text-foreground">{entry.request_id ?? '—'}</span>
-                        {entry.request_id ? (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-7"
-                            aria-label={t('memory.status.copyRequestId')}
-                            onClick={() => void navigator.clipboard.writeText(entry.request_id ?? '')}
-                          >
-                            <Copy className="size-3.5" />
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-};
-
-const ObservationValue: React.FC<{ label: string; value: string | null }> = ({ label, value }) => (
-  <div className="flex min-w-0 items-center justify-between gap-3">
-    <span className="text-muted">{label}</span>
-    <span className="truncate font-mono text-foreground">{value ?? '—'}</span>
-  </div>
-);
-
-const ProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
-  const { t } = useTranslation();
-  const api = useApi();
-  const [loading, setLoading] = useState(false);
-  const [items, setItems] = useState<MemoryItem[] | null>(null);
-  const [warning, setWarning] = useState<'empty' | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    if (!enabled) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await api.getMemoryProfile();
-      if (isMemoryOk(res)) {
-        // Only a SUCCESSFUL response is the benign Provider-A case: `profile_warning:'empty'`
-        // (or simply zero items) renders as the graceful "not available"/empty copy.
-        setItems(res.items);
-        setWarning(res.profile_warning ?? null);
-        setError(null);
-      } else {
-        // A closed failure — sidecar down, provider outage, timeout, etc. — is a real ERROR, not
-        // the accepted empty-profile warning. Surface it distinctly per its code.
-        setItems(null);
-        setWarning(null);
-        setError(errorMessage(t, (res as { error?: string })?.error) || t('memory.profile.loadFailed'));
-      }
-    } catch {
-      setItems(null);
-      setWarning(null);
-      setError(t('memory.profile.loadFailed'));
-    } finally {
-      setLoading(false);
-    }
-  }, [api, enabled, t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  if (!enabled) {
-    return <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">{t('memory.profile.disabledHint')}</div>;
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-[12.5px] text-muted">{t('memory.profile.description')}</p>
-        <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
-          {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-          {t('memory.profile.refresh')}
-        </Button>
-      </div>
-      {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
-      ) : loading && items === null ? (
-        <div className="flex items-center gap-2 px-1 text-sm text-muted">
-          <Loader2 className="size-4 animate-spin" />
-          {t('memory.profile.loading')}
-        </div>
-      ) : warning === 'empty' ? (
-        <div className="rounded-2xl border border-gold/30 bg-gold/[0.06] p-6 text-center text-[13px] text-foreground">
-          {t('memory.profile.warningUnavailable')}
-        </div>
-      ) : !items || items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
-          {t('memory.profile.empty')}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {items.map((item, idx) => (
-            // Inert text nodes only; never use Markdown/HTML rendering for provider content.
-            <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
-              <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
-                {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
-              </div>
-              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
-            </div>
-          ))}
-          <p className="px-1 text-[11px] text-muted">{t('memory.profile.sourceNote')}</p>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const SearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
-  const { t } = useTranslation();
-  const api = useApi();
-  const [query, setQuery] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [items, setItems] = useState<MemoryItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [searched, setSearched] = useState(false);
-
-  const runSearch = useCallback(async () => {
-    const trimmed = query.trim();
-    if (!trimmed) return;
-    setSearching(true);
-    setError(null);
-    try {
-      const res = await api.searchMemory(trimmed, 20);
-      if (isMemoryOk(res)) {
-        setItems(res.items);
-      } else {
-        setItems([]);
-        setError(errorMessage(t, res.error));
-      }
-    } catch {
-      setError(t('memory.search.searchFailed'));
-    } finally {
-      setSearching(false);
-      setSearched(true);
-    }
-  }, [api, query, t]);
-
-  if (!enabled) {
-    return <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">{t('memory.search.disabledHint')}</div>;
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-[12.5px] text-muted">{t('memory.search.description')}</p>
-      <div className="flex gap-2">
-        <div className="relative flex-1">
-          <SearchIcon size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void runSearch();
-            }}
-            placeholder={t('memory.search.placeholder')}
-            className="pl-9 text-[13px]"
-          />
-        </div>
-        <Button onClick={() => void runSearch()} disabled={searching || !query.trim()}>
-          {searching ? <Loader2 className="size-3.5 animate-spin" /> : null}
-          {searching ? t('memory.search.searching') : t('memory.search.button')}
-        </Button>
-      </div>
-      {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
-      ) : !searched ? null : !items || items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
-          {t('memory.search.empty')}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {items.map((item, idx) => (
-            <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
-              <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
-                {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
-              </div>
-              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
-            </div>
-          ))}
-          <p className="px-1 text-[11px] text-muted">{t('memory.search.sourceNote')}</p>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const SettingsPanel: React.FC<{
-  settings: MemorySettings;
-  status: MemoryStatus | null;
-  dependencyReady: boolean;
-  onSaved: (next: MemorySettings) => void;
-  onReloadStatus: () => void;
-  onClearAll: () => void;
-  clearing: boolean;
-}> = ({ settings, status, dependencyReady, onSaved, onReloadStatus, onClearAll, clearing }) => {
-  const { t } = useTranslation();
-  const api = useApi();
-  const { showToast } = useToast();
-  const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
-  const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
-  const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
-  useEffect(() => {
-    setEnabledDraft(settings.enabled);
-    setLlmDraft(draftFromConfig(settings.processing.llm));
-    setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
-  }, [settings]);
-
-  // `data_exists` is only known once status resolves. Settings can render first (the two loads run
-  // concurrently), so until status is known we must NOT let the embedding endpoint be edited: a
-  // change made in that window would be silently discarded once the lock activates yet still report
-  // success. Fail closed — treat the embedding endpoint as locked while status is unknown, and only
-  // unlock it after a resolved status reports data_exists=false.
-  const statusKnown = status != null;
-  // Data already exists in the local Memory root: changing the embedding endpoint/model would mix
-  // vector spaces, so the backend rejects it; lock those fields here too, proactively.
-  const embeddingDataLock = !!status?.data_exists;
-  const embeddingLocked = !statusKnown || embeddingDataLock;
-  const canClearKeys = !enabledDraft;
-
-  // If data_exists transitions to true while the user has an unsaved embedding draft
-  // (e.g. they edited it while data_exists was false, then a poll reports data_exists
-  // true), discard that draft back to the persisted settings. Otherwise save() would
-  // drop the embedding patch (locked) yet report success — a silent discard.
-  useEffect(() => {
-    if (embeddingDataLock) {
-      setEmbeddingDraft((draft) => ({
-        ...draftFromConfig(settings.processing.embedding),
-        apiKey: draft.apiKey,
-        clearKey: draft.clearKey,
-      }));
-    }
-  }, [embeddingDataLock, settings]);
-
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const patch: MemorySettingsPatch = {};
-      if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-      // A key clear is accepted only while the resulting state stays disabled.
-      const allowClear = !enabledDraft;
-      const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
-      const embeddingPatch = buildEndpointPatch(
-        embeddingDraft,
-        settings.processing.embedding,
-        allowClear,
-        embeddingLocked,
-      );
-      if (llmPatch || embeddingPatch) {
-        patch.processing = {};
-        if (llmPatch) patch.processing.llm = llmPatch;
-        if (embeddingPatch) patch.processing.embedding = embeddingPatch;
-      }
-      if (Object.keys(patch).length === 0) {
-        showToast(t('memory.settings.saved'), 'success');
-        return;
-      }
-      const res = await api.saveMemorySettings(patch);
-      if (isMemoryOk(res)) {
-        onSaved(res);
-        showToast(t('memory.settings.saved'), 'success');
-      } else {
-        setError(errorMessage(t, (res as { error?: string })?.error));
-        // A failed enable did not persist — revert the toggle to the stored state so it reflects
-        // reality, and refresh status so a runtime-dependency blocker (and its Dependencies
-        // affordance) reappears instead of a stale "enabled" toggle hiding it.
-        setEnabledDraft(settings.enabled);
-        onReloadStatus();
-      }
-    } catch {
-      setError(t('memory.settings.saveFailed'));
-      setEnabledDraft(settings.enabled);
-      onReloadStatus();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-surface px-4 py-3.5">
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.enableLabel')}</span>
-          <span className="text-[11.5px] leading-snug text-muted">{t('memory.settings.enableHint')}</span>
-          {!dependencyReady && !enabledDraft ? (
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11.5px] text-gold">
-              <ShieldAlert className="size-3.5 shrink-0" />
-              {t('memory.settings.dependencyNotReady')}
-              <Button asChild variant="secondary" size="xs">
-                <Link to="/admin/settings/dependencies">
-                  {t('memory.settings.goToDependencies')}
-                  <ArrowUpRight className="size-3.5" />
-                </Link>
-              </Button>
-            </div>
-          ) : null}
-        </div>
-        <Switch
-          checked={enabledDraft}
-          onCheckedChange={setEnabledDraft}
-          disabled={saving || (!enabledDraft && !dependencyReady)}
-          label={t('memory.settings.enableLabel')}
-        />
-      </div>
-
-      <EndpointFields
-        title={t('memory.settings.llmTitle')}
-        draft={llmDraft}
-        original={settings.processing.llm}
-        onChange={setLlmDraft}
-        disabled={saving}
-        locked={false}
-        canClearKey={canClearKeys}
-      />
-      <EndpointFields
-        title={t('memory.settings.embeddingTitle')}
-        draft={embeddingDraft}
-        original={settings.processing.embedding}
-        onChange={setEmbeddingDraft}
-        disabled={saving}
-        locked={embeddingLocked}
-        // Distinguish the two lock reasons: data-exists (permanent until Clear all) vs status not
-        // yet resolved (transient — re-enables once status confirms no data exists).
-        lockedHint={
-          embeddingDataLock
-            ? t('memory.settings.embeddingLocked')
-            : !statusKnown
-              ? t('memory.settings.embeddingStatusPending')
-              : undefined
-        }
-        canClearKey={canClearKeys}
-      />
-
-      {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
-      ) : null}
-
-      <div className="flex items-center justify-between gap-3">
-        <Button onClick={() => void save()} disabled={saving}>
-          {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-          {saving ? t('memory.settings.saving') : t('memory.settings.save')}
-        </Button>
-        <Button variant="destructive" size="sm" onClick={onClearAll} disabled={clearing}>
-          <Trash2 className="size-3.5" />
-          {t('memory.clear.button')}
-        </Button>
-      </div>
-
-      <div className="rounded-xl border border-border bg-surface p-4">
-        <h3 className="mb-2 text-[13px] font-semibold text-foreground">{t('memory.settings.disclosureTitle')}</h3>
-        <ul className="flex flex-col gap-1.5">
-          {(t('memory.settings.disclosure', { returnObjects: true }) as string[]).map((line, idx) => (
-            <li key={idx} className="flex gap-2 text-[11.5px] leading-snug text-muted">
-              <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-              {line}
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-};
+// The failure log is the one Memory route that answers success untagged.
+const hasFailureItems = (value: unknown): boolean =>
+  Array.isArray((value as { items?: unknown } | null | undefined)?.items);
 
 export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
@@ -803,76 +42,34 @@ export const SettingsMemoryPage: React.FC = () => {
   const { showToast } = useToast();
 
   const [tab, setTab] = useState<MemoryTab>('status');
-  const [remoteUnavailable, setRemoteUnavailable] = useState(false);
-  const [settings, setSettings] = useState<MemorySettings | null>(null);
-  const [settingsError, setSettingsError] = useState<string | null>(null);
-  const [status, setStatus] = useState<MemoryStatus | null>(null);
-  const [statusError, setStatusError] = useState<string | null>(null);
-  const [failures, setFailures] = useState<MemoryFailureLogEntry[]>([]);
-  const [failureRetentionDays, setFailureRetentionDays] = useState(90);
-  const [failuresError, setFailuresError] = useState<string | null>(null);
-  const [loadingSettings, setLoadingSettings] = useState(true);
-  const [loadingStatus, setLoadingStatus] = useState(true);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [repairing, setRepairing] = useState(false);
 
-  const loadSettings = useCallback(async () => {
-    setLoadingSettings(true);
-    try {
-      const res = await api.getMemorySettings();
-      if (isForbiddenResult(res)) {
-        setRemoteUnavailable(true);
-      } else if (isMemoryOk(res)) {
-        setSettings(res);
-        setSettingsError(null);
-      } else {
-        setSettingsError(errorMessage(t, (res as { error?: string })?.error));
-      }
-    } catch {
-      setSettingsError(t('memory.settings.loadFailed'));
-    } finally {
-      setLoadingSettings(false);
-    }
-  }, [api, t]);
+  const settingsRead = useMemoryResource<MemorySettingsOk>({
+    read: api.getMemorySettings,
+    failureMessageKey: 'memory.settings.loadFailed',
+  });
+  const statusRead = useMemoryResource<MemoryStatus>({
+    read: api.getMemoryStatus,
+    failureMessageKey: 'memory.status.loadFailed',
+  });
+  const failuresRead = useMemoryResource<MemoryFailureLogOk>({
+    read: api.getMemoryFailures,
+    accept: hasFailureItems,
+    failureMessageKey: 'memory.status.failureLog.loadFailed',
+  });
 
-  const loadStatus = useCallback(async () => {
-    try {
-      const res = await api.getMemoryStatus();
-      if (isForbiddenResult(res)) {
-        setRemoteUnavailable(true);
-      } else if (isMemoryOk(res)) {
-        setStatus(res);
-        setStatusError(null);
-      } else {
-        setStatusError(errorMessage(t, (res as { error?: string })?.error));
-      }
-    } catch {
-      setStatusError(t('memory.status.loadFailed'));
-    } finally {
-      setLoadingStatus(false);
-    }
-  }, [api, t]);
-
-  const loadFailures = useCallback(async () => {
-    try {
-      const res = await api.getMemoryFailures();
-      if (isForbiddenResult(res)) {
-        setRemoteUnavailable(true);
-      } else if (res && typeof res === 'object' && Array.isArray((res as { items?: unknown }).items)) {
-        const payload = res as { items: MemoryFailureLogEntry[]; retention_days?: number };
-        setFailures(payload.items);
-        if (typeof payload.retention_days === 'number') setFailureRetentionDays(payload.retention_days);
-        setFailuresError(null);
-      } else {
-        setFailuresError(errorMessage(t, (res as { error?: string })?.error));
-      }
-    } catch {
-      setFailuresError(t('memory.status.failureLog.loadFailed'));
-    }
-  }, [api, t]);
+  const { reload: loadSettings, setData: setSettings } = settingsRead;
+  const { reload: loadStatus } = statusRead;
+  const { reload: loadFailures } = failuresRead;
+  const settings = settingsRead.data;
+  const status = statusRead.data;
+  // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
+  // sticky per resource, so the static state never flickers away on a later request.
+  const remoteUnavailable = settingsRead.forbidden || statusRead.forbidden || failuresRead.forbidden;
 
   // Dependency readiness comes from the authoritative Dependencies source (plan §5), NOT the
   // memory status: after a failed enable the backend rolls the setting back to disabled and a
@@ -925,7 +122,7 @@ export const SettingsMemoryPage: React.FC = () => {
         void loadStatus();
         void loadSettings();
       } else {
-        showToast(errorMessage(t, res.error), 'error');
+        showToast(memoryErrorMessage(t, res.error), 'error');
       }
     } catch {
       showToast(t('memory.clear.failed'), 'error');
@@ -963,6 +160,26 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const setupStage = memorySetupStage(runtimeInstalled, settings?.enabled ?? null);
 
+  const settingsPanel = settings ? (
+    <MemorySettingsPanel
+      settings={settings}
+      status={status}
+      dependencyReady={dependencyReady}
+      onSaved={(next) => {
+        setSettings(next);
+        window.dispatchEvent(new Event('avibe:memory-settings-changed'));
+        void loadStatus();
+        void loadDependency();
+      }}
+      onReloadStatus={() => {
+        void loadStatus();
+        void loadDependency();
+      }}
+      onClearAll={() => setClearOpen(true)}
+      clearing={clearing}
+    />
+  ) : null;
+
   return (
     <SettingsPageShell
       activeTab="memory"
@@ -990,9 +207,9 @@ export const SettingsMemoryPage: React.FC = () => {
           </Button>
         </div>
       ) : setupStage === 'loading' ? (
-        settingsError && !settings ? (
+        settingsRead.error && !settings ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {settingsError}
+            {settingsRead.error}
           </div>
         ) : (
           <div className="flex items-center gap-2 px-1 text-sm text-muted">
@@ -1001,35 +218,19 @@ export const SettingsMemoryPage: React.FC = () => {
           </div>
         )
       ) : setupStage === 'setup' && settings ? (
-        <SettingsPanel
-          settings={settings}
-          status={status}
-          dependencyReady={dependencyReady}
-          onSaved={(next) => {
-            setSettings(next);
-            window.dispatchEvent(new Event('avibe:memory-settings-changed'));
-            void loadStatus();
-            void loadDependency();
-          }}
-          onReloadStatus={() => {
-            void loadStatus();
-            void loadDependency();
-          }}
-          onClearAll={() => setClearOpen(true)}
-          clearing={clearing}
-        />
+        settingsPanel
       ) : (
         <>
           <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
 
           {tab === 'status' && (
-            <StatusPanel
+            <MemoryStatusPanel
               status={status}
-              failures={failures}
-              failureRetentionDays={failureRetentionDays}
-              failuresError={failuresError}
-              loading={loadingStatus}
-              error={statusError}
+              failures={failuresRead.data?.items ?? []}
+              failureRetentionDays={failuresRead.data?.retention_days ?? DEFAULT_FAILURE_RETENTION_DAYS}
+              failuresError={failuresRead.error}
+              loading={!statusRead.loaded}
+              error={statusRead.error}
               onRefresh={() => {
                 void loadStatus();
                 void loadFailures();
@@ -1040,39 +241,23 @@ export const SettingsMemoryPage: React.FC = () => {
             />
           )}
 
-          {tab === 'profile' && <ProfilePanel enabled={!!settings?.enabled} />}
+          {tab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
 
-          {tab === 'search' && <SearchPanel enabled={!!settings?.enabled} />}
+          {tab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
 
           {tab === 'settings' &&
-            (loadingSettings && !settings ? (
+            (!settingsRead.loaded && !settings ? (
               <div className="flex items-center gap-2 px-1 text-sm text-muted">
                 <Loader2 className="size-4 animate-spin" />
                 {t('memory.settings.loading')}
               </div>
-            ) : settingsError && !settings ? (
+            ) : settingsRead.error && !settings ? (
               <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                {settingsError}
+                {settingsRead.error}
               </div>
-            ) : settings ? (
-              <SettingsPanel
-                settings={settings}
-                status={status}
-                dependencyReady={dependencyReady}
-                onSaved={(next) => {
-                  setSettings(next);
-                  window.dispatchEvent(new Event('avibe:memory-settings-changed'));
-                  void loadStatus();
-                  void loadDependency();
-                }}
-                onReloadStatus={() => {
-                  void loadStatus();
-                  void loadDependency();
-                }}
-                onClearAll={() => setClearOpen(true)}
-                clearing={clearing}
-              />
-            ) : null)}
+            ) : (
+              settingsPanel
+            ))}
         </>
       )}
 
