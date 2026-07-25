@@ -53,7 +53,7 @@ export const AddSourceMenu: React.FC<{
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" className="border-mint/40 bg-mint-soft/50 text-mint hover:bg-mint-soft">
+        <Button variant="outline" size="sm" className="h-10 border-mint/40 bg-mint-soft/50 text-mint hover:bg-mint-soft sm:h-9">
           <Plus className="size-4" />
           {t('settings.models.addSource')}
         </Button>
@@ -61,7 +61,10 @@ export const AddSourceMenu: React.FC<{
       <PopoverContent
         align="end"
         sideOffset={8}
-        className="w-[360px] overflow-hidden border-border bg-card p-0 text-foreground shadow-lg"
+        collisionPadding={12}
+        // Never wider than the phone viewport (the fixed 360px overflowed a 360px
+        // device once collision padding was applied).
+        className="w-[min(360px,calc(100vw-1.5rem))] overflow-hidden border-border bg-card p-0 text-foreground shadow-lg sm:w-[360px]"
       >
         <MenuItem
           Icon={Sparkles}

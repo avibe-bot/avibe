@@ -2,7 +2,10 @@ import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const backendTarget = 'http://localhost:5100'
+// Point the dev proxy at any running Avibe instance — e.g. the Incus regression
+// environment — with VIBE_UI_BACKEND=http://127.0.0.1:15130 npm run dev, so UI
+// work can be driven against real data without restarting the local service.
+const backendTarget = process.env.VIBE_UI_BACKEND ?? 'http://localhost:5100'
 
 const backendProxy = () => ({
   target: backendTarget,

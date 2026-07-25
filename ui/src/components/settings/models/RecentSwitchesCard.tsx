@@ -46,24 +46,24 @@ export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ ev
 
   return (
     <section className="rounded-xl border border-border bg-background">
-      <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
+      <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-4 sm:px-5">
         <h2 className="text-[15px] font-semibold text-foreground">{t('settings.models.recent.title')}</h2>
         {canExpand && (
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
-            className="text-[13px] font-medium text-mint transition-colors hover:text-mint/80"
+            className="inline-flex min-h-10 items-center text-[13px] font-medium text-mint transition-colors hover:text-mint/80 sm:min-h-0"
           >
             {expanded ? t('settings.models.recent.collapse') : t('settings.models.recent.viewAll')}
           </button>
         )}
       </div>
       {shown.length === 0 ? (
-        <div className="px-5 py-8 text-center text-[13px] text-muted">{t('settings.models.recent.empty')}</div>
+        <div className="px-4 py-8 text-center sm:px-5 text-[13px] text-muted">{t('settings.models.recent.empty')}</div>
       ) : (
         <div className="flex flex-col">
           {shown.map((event) => (
-            <div key={event.id} className="flex items-start gap-3 border-b border-border px-5 py-3 last:border-b-0">
+            <div key={event.id} className="flex items-start gap-3 border-b border-border px-4 py-3 last:border-b-0 sm:px-5">
               <span className="w-[92px] shrink-0 pt-0.5 font-mono text-[12px] text-muted">{formatTime(event.ts)}</span>
               <Dot accent={eventAccent(event)} className="mt-[7px]" />
               <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-foreground">

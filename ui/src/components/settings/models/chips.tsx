@@ -98,12 +98,14 @@ export const ExperimentalChip: React.FC = () => {
  * `N 个模型 ｜ ● 多来源…`.
  */
 export const CompositePill: React.FC<{ left: string; dot: Accent; right: string }> = ({ left, dot, right }) => (
-  <div className="inline-flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-[13px]">
-    <span className="font-mono font-medium text-foreground">{left}</span>
-    <span className="h-3.5 w-px bg-border-strong" aria-hidden />
-    <span className="inline-flex items-center gap-1.5 text-muted">
+  // max-w-full + truncating halves: on a phone the model id would otherwise wrap
+  // to three lines and blow the Agent row's height open.
+  <div className="inline-flex max-w-full items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-[13px]">
+    <span className="truncate font-mono font-medium text-foreground">{left}</span>
+    <span className="h-3.5 w-px shrink-0 bg-border-strong" aria-hidden />
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-muted">
       <Dot accent={dot} />
-      {right}
+      <span className="truncate">{right}</span>
     </span>
   </div>
 );

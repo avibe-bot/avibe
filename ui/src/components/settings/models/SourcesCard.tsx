@@ -53,7 +53,7 @@ export const SourcesCard: React.FC<{
   return (
     // Not overflow-hidden: the row supply tooltip must escape the card bounds.
     <section className="rounded-xl border border-border bg-background">
-      <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+      <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-4 sm:px-5">
         <div className="flex min-w-0 flex-col gap-1">
           <h2 className="text-[15px] font-semibold text-foreground">{t('settings.models.sources.title')}</h2>
           <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.sources.subtitle')}</p>
@@ -66,7 +66,7 @@ export const SourcesCard: React.FC<{
       </div>
 
       {ids.length === 0 ? (
-        <div className="px-5 py-12 text-center text-[13px] text-muted">{t('settings.models.sources.empty')}</div>
+        <div className="px-4 py-12 text-center sm:px-5 text-[13px] text-muted">{t('settings.models.sources.empty')}</div>
       ) : (
         <Reorder.Group axis="y" values={ids} onReorder={onReorderPreview} className="flex flex-col">
           {sources.map((source, index) => (

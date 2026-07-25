@@ -75,27 +75,32 @@ const AgentRow: React.FC<{
   }
 
   return (
-    <div className="flex items-center gap-4 border-b border-border px-5 py-4 last:border-b-0">
-      <span className={cn('flex size-11 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
-        <Icon size={22} className={ACCENT_ICON[accent]} />
-      </span>
-
-      <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
-        <span className="text-[15px] font-semibold text-foreground">
-          {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
+    // Mobile: identity above, mode chip + action on their own line. Squeezed into
+    // one row at 390px the mode chip overlapped the composite pill and the pill's
+    // model id wrapped to three lines.
+    <div className="flex flex-col gap-3 border-b border-border px-4 py-4 last:border-b-0 sm:flex-row sm:items-center sm:gap-4 sm:px-5">
+      <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
+        <span className={cn('flex size-11 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
+          <Icon size={22} className={ACCENT_ICON[accent]} />
         </span>
-        {pill}
+
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
+          <span className="text-[15px] font-semibold text-foreground">
+            {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
+          </span>
+          {pill}
+        </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-2.5">
+      <div className="flex items-center gap-2.5 sm:shrink-0">
         <ModeChip mode={agent.mode} />
         {agent.mode === 'hub' ? (
-          <Button variant="secondary" size="sm" onClick={openMenu}>
+          <Button variant="secondary" size="sm" className="ml-auto h-10 sm:ml-0 sm:h-9" onClick={openMenu}>
             {t('settings.models.agents.modelMenu')}
             <ChevronRight className="size-3.5" />
           </Button>
         ) : (
-          <Button variant="brand" size="sm" onClick={() => onConnectHub(agent)} disabled={connecting}>
+          <Button variant="brand" size="sm" className="ml-auto h-10 sm:ml-0 sm:h-9" onClick={() => onConnectHub(agent)} disabled={connecting}>
             <ArrowDownToLine className="size-3.5" />
             {t('settings.models.agents.connectHub')}
           </Button>
@@ -115,14 +120,14 @@ export const AgentCard: React.FC<{
   const { t } = useTranslation();
   return (
     <section className="rounded-xl border border-border bg-background">
-      <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+      <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-4 sm:px-5">
         <div className="flex min-w-0 flex-col gap-1">
           <h2 className="text-[15px] font-semibold text-foreground">{t('settings.models.agents.title')}</h2>
           <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.agents.subtitle')}</p>
         </div>
         <Link
           to="/admin/settings/backends"
-          className="inline-flex shrink-0 items-center gap-1 text-[13px] font-medium text-mint transition-colors hover:text-mint/80"
+          className="inline-flex min-h-10 shrink-0 items-center gap-1 text-[13px] font-medium text-mint transition-colors hover:text-mint/80 sm:min-h-0"
         >
           {t('settings.models.agents.backendSettings')}
           <ArrowRight className="size-3.5" />

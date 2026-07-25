@@ -28,7 +28,8 @@ const MenuAction: React.FC<{
     type="button"
     onClick={onClick}
     className={cn(
-      'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors',
+      // min-h-11 keeps each action a comfortable thumb target on phones.
+      'flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors sm:min-h-0',
       destructive ? 'text-destructive hover:bg-destructive/[0.08]' : 'text-foreground hover:bg-surface-2',
     )}
   >
@@ -141,7 +142,7 @@ export const SourceRowMenu: React.FC<{
             type="button"
             aria-label={t('settings.models.sourceActions.more') as string}
             className={cn(
-              'flex size-8 shrink-0 items-center justify-center rounded-md text-muted transition-all hover:bg-surface-2 hover:text-foreground',
+              'flex size-10 shrink-0 items-center justify-center rounded-md text-muted transition-all hover:bg-surface-2 hover:text-foreground sm:size-8',
               // Quiet on desktop (revealed on row hover / focus / when open),
               // always reachable on touch where hover doesn't exist.
               menuOpen ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100',
@@ -182,12 +183,13 @@ export const SourceRowMenu: React.FC<{
             />
           </div>
           <DialogFooter className="sm:justify-end">
-            <Button variant="outline" size="sm" onClick={() => setRenameOpen(false)} disabled={renaming}>
+            <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={() => setRenameOpen(false)} disabled={renaming}>
               {t('common.cancel')}
             </Button>
             <Button
               variant="brand"
               size="sm"
+              className="h-10 sm:h-9"
               onClick={() => void submitRename()}
               disabled={renaming || !renameValue.trim() || renameValue.trim() === source.display_name}
             >
