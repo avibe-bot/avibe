@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -8,6 +8,7 @@ import { MODEL_HUB_NAV_ENABLED } from './settings/models/featureFlags';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { AccountMenu } from './AccountMenu';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
@@ -215,6 +216,7 @@ export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { totalUnread } = useWorkbenchInbox();
+  const { capabilities } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
@@ -235,11 +237,12 @@ export const AppShell: React.FC = () => {
   useViewportHeightVar();
 
   useEffect(() => {
+    if (!capabilities.can_manage_instance) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
-  }, [api]);
+  }, [api, capabilities.can_manage_instance]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
   // everywhere (it's a deliberate command, so it wins even from the composer);
@@ -264,6 +267,23 @@ export const AppShell: React.FC = () => {
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const isRunning = status.state === 'running';
+
+  const ownerOnlyPath =
+    location.pathname === '/setup' ||
+    location.pathname.startsWith('/admin') ||
+    ['/agents', '/skills', '/harness', '/vaults', '/apps/library'].some(
+      (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
+    );
+  const fileOnlyPath =
+    location.pathname.startsWith('/apps/files') || location.pathname.startsWith('/apps/editor');
+  const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
+  if (
+    (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    (fileOnlyPath && !capabilities.can_use_files) ||
+    (terminalOnlyPath && !capabilities.can_use_terminal)
+  ) {
+    return <Navigate to="/" replace />;
+  }
 
   if (location.pathname === '/setup') {
     return <Outlet />;
@@ -371,16 +391,18 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    {
+    ...(capabilities.can_manage_agents ? [{
       to: '/agents',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
-      match: (p) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
-    },
+      match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
+    }] : []),
     // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
     // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
     // it from Capabilities' `layout-grid`.
-    { label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen },
+    ...(capabilities.can_use_system
+      ? [{ label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen }]
+      : []),
   ];
 
   // Chat is a full-screen detail (own composer) and Search is a full-screen
@@ -461,8 +483,8 @@ export const AppShell: React.FC = () => {
                 centered Chat composer. Workbench → Settings (control panel);
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
-              <AppsLauncher />
-              {shellMode === 'workbench' && (
+              {capabilities.can_use_system && <AppsLauncher />}
+              {shellMode === 'workbench' && capabilities.can_manage_instance && (
                 <Link
                   to="/admin/dashboard"
                   title={t('appShell.openControlPanel')}
@@ -517,7 +539,7 @@ export const AppShell: React.FC = () => {
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}
               </span>
-              <VersionBadge openUpward />
+              {capabilities.can_manage_instance && <VersionBadge openUpward />}
             </div>
           </div>
         </div>
@@ -569,7 +591,9 @@ export const AppShell: React.FC = () => {
         ) : (
           <MobileTabBar
             items={workbenchTabs}
-            center={{ onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }}
+            center={capabilities.can_chat
+              ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
+              : undefined}
           />
         )
       )}
@@ -610,15 +634,17 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && (
+      {shellMode === 'workbench' && capabilities.can_use_system && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
-      <NewSessionSheet
-        open={newSessionOpen}
-        onClose={() => setNewSessionOpen(false)}
-        onOpen={() => setNewSessionOpen(true)}
-      />
+      {capabilities.can_chat && (
+        <NewSessionSheet
+          open={newSessionOpen}
+          onClose={() => setNewSessionOpen(false)}
+          onOpen={() => setNewSessionOpen(true)}
+        />
+      )}
 
       {/* ⌘K message-search palette. Mounted shell-wide so the shortcut works from
           both Workbench and Control Panel; the sidebar field is the workbench
@@ -631,7 +657,7 @@ export const AppShell: React.FC = () => {
           second launcher on top in full-screen anymore (product: avoid the fullscreen floating
           button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
           the sidebar launcher. */}
-      <WindowLayer />
+      {capabilities.can_use_system && <WindowLayer />}
     </div>
     </DockProvider>
     </WindowManagerProvider>

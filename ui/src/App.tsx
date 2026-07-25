@@ -36,6 +36,8 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { StatusProvider } from './context/StatusContext';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
+import type { SessionInfo } from './context/ApiContext';
+import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationContext';
 import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -227,6 +229,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
+    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
     const bypassSetupGuard = LOGIN_CHECK_PATHS.has(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
@@ -266,10 +269,6 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         let cancelled = false;
 
-        if (bypassSetupGuard) {
-            return;
-        }
-
         // Reset to loading while (re)validating. On the setup-boundary
         // re-run this prevents a one-frame bounce: a stale `needs-setup`
         // on a non-/setup route would otherwise redirect to /setup before
@@ -279,8 +278,17 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
 
         getAuthSession().then(session => {
             if (cancelled) return;
+            setAuthorizationSession(session);
             if (session.remote && !session.authenticated) {
                 setGuardStatus('remote-login-required');
+                return null;
+            }
+            if (session.remote && session.authenticated && !session.capabilities.can_manage_instance) {
+                setGuardStatus('ready');
+                return null;
+            }
+            if (bypassSetupGuard) {
+                setGuardStatus('ready');
                 return null;
             }
             return getConfig().then(config => {
@@ -295,6 +303,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
             if (cancelled) return;
             const session = await getAuthSession().catch(() => null);
             if (cancelled) return;
+            if (session) setAuthorizationSession(session);
             if (session?.remote && !session.authenticated) {
                 setGuardStatus('remote-login-required');
                 return;
@@ -326,7 +335,6 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // shell behind the Loading state).
     }, [authCheckVersion, bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
 
-    if (bypassSetupGuard) return children;
     if (guardStatus === 'loading') {
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
@@ -337,7 +345,9 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         return <AccessBlocked code={blockedCode} />;
     }
     if (guardStatus === 'needs-setup') {
-        if (location.pathname === '/setup') return children;
+        if (location.pathname === '/setup' && authorizationSession) {
+            return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
+        }
         // A wizard finish navigates from /setup to / before the re-validation
         // effect can flip `guardStatus` to loading. Without this render-time
         // bridge, the stale setup-required state immediately redirects back to
@@ -348,7 +358,10 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         }
         return <Navigate to="/setup" replace />;
     }
-    return children;
+    if (!authorizationSession) {
+        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+    }
+    return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
 };
 
 // Brief fallback while a lazy Apps route chunk loads (the pages render their own

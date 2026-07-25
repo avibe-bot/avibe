@@ -4,6 +4,7 @@ import clsx from 'clsx';
 
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 interface ProjectPickerProps {
   projects: WorkbenchProject[];
@@ -20,6 +21,7 @@ interface ProjectPickerProps {
 // reachable) plus a New Project chip; the active chip is the resolved target.
 export const ProjectPicker: React.FC<ProjectPickerProps> = ({ projects, targetId, onSelect, onNewProject, disabled }) => {
   const { t } = useTranslation();
+  const { capabilities } = useInstanceAuthorization();
   return (
     // min-w-0 lets this shrink inside the sheet's CSS grid so the chip row
     // scrolls horizontally instead of stretching the whole sheet wide.
@@ -48,17 +50,19 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({ projects, targetId
             </Button>
           );
         })}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={onNewProject}
-          disabled={disabled}
-          className="h-auto shrink-0 gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium text-muted"
-        >
-          <FolderPlus className="size-3.5" />
-          {t('newSession.newProject')}
-        </Button>
+        {capabilities.can_manage_projects && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onNewProject}
+            disabled={disabled}
+            className="h-auto shrink-0 gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium text-muted"
+          >
+            <FolderPlus className="size-3.5" />
+            {t('newSession.newProject')}
+          </Button>
+        )}
       </div>
     </div>
   );

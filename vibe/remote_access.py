@@ -29,7 +29,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import jwt
 import requests
@@ -45,7 +45,16 @@ logger = logging.getLogger(__name__)
 CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
 SESSION_TTL_SECONDS = 24 * 60 * 60
+SESSION_AUTHORIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
+# Keep enough headroom for the cookie name and attributes under the common
+# 4096-byte per-cookie browser limit.
+SESSION_COOKIE_MAX_VALUE_BYTES = 3800
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
+_INSTANCE_ACCESS_SOURCES = frozenset(
+    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+)
+_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
@@ -601,7 +610,11 @@ def cloud_token_for_request(
     """
     config = config or V2Config.load()
     payload = parse_session_cookie(config, cookie_value)
-    if payload is None:
+    if payload is None or session_needs_authorization_refresh(payload):
+        return None
+    from vibe.authorization import context_from_session_payload
+
+    if not context_from_session_payload(payload).can_chat:
         return None
     email = str(payload.get("email", "")).strip()
     sub = str(payload.get("sub", "")).strip()
@@ -1915,7 +1928,94 @@ def _session_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def make_session_cookie(config: V2Config, email: str, subject: str) -> str:
+_ORGANIZATION_SESSION_CLAIM_KEYS = (
+    "vibe_organization_id",
+    "vibe_organization_member_id",
+    "vibe_organization_role",
+    "vibe_group_ids",
+    "vibe_membership_version",
+)
+
+
+def _oidc_claim_string(value: Any, *, reason: str, limit: int = 200) -> str:
+    if not isinstance(value, str):
+        raise OAuthCodeExchangeError(reason)
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > limit or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        raise OAuthCodeExchangeError(reason)
+    return cleaned
+
+
+def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and select the authorization claims retained in the local cookie."""
+
+    instance_id = _oidc_claim_string(claims.get("vibe_instance_id"), reason="invalid_instance_id")
+    if instance_id != config.remote_access.vibe_cloud.instance_id:
+        raise OAuthCodeExchangeError("invalid_instance_id")
+    instance_role = _oidc_claim_string(claims.get("vibe_instance_role"), reason="invalid_instance_role")
+    if instance_role not in _INSTANCE_ACCESS_ROLES:
+        raise OAuthCodeExchangeError("invalid_instance_role")
+    access_source = _oidc_claim_string(
+        claims.get("vibe_instance_access_source"),
+        reason="invalid_instance_access_source",
+    )
+    if access_source not in _INSTANCE_ACCESS_SOURCES:
+        raise OAuthCodeExchangeError("invalid_instance_access_source")
+
+    session_claims: dict[str, Any] = {
+        "vibe_instance_id": instance_id,
+        "vibe_instance_role": instance_role,
+        "vibe_instance_access_source": access_source,
+    }
+    if not any(key in claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS):
+        return session_claims
+
+    organization_id = _oidc_claim_string(
+        claims.get("vibe_organization_id"), reason="invalid_organization_claims"
+    )
+    member_id = _oidc_claim_string(
+        claims.get("vibe_organization_member_id"), reason="invalid_organization_claims"
+    )
+    organization_role = _oidc_claim_string(
+        claims.get("vibe_organization_role"), reason="invalid_organization_claims"
+    )
+    if organization_role not in _ORGANIZATION_ROLES:
+        raise OAuthCodeExchangeError("invalid_organization_claims")
+    raw_group_ids = claims.get("vibe_group_ids")
+    if not isinstance(raw_group_ids, list) or len(raw_group_ids) > 256:
+        raise OAuthCodeExchangeError("invalid_organization_claims")
+    group_ids = [
+        _oidc_claim_string(group_id, reason="invalid_organization_claims")
+        for group_id in raw_group_ids
+    ]
+    if len(set(group_ids)) != len(group_ids):
+        raise OAuthCodeExchangeError("invalid_organization_claims")
+    session_claims.update(
+        {
+            "vibe_organization_id": organization_id,
+            "vibe_organization_member_id": member_id,
+            "vibe_organization_role": organization_role,
+            "vibe_group_ids": group_ids,
+        }
+    )
+    membership_version = claims.get("vibe_membership_version")
+    if membership_version is not None:
+        if isinstance(membership_version, int) and not isinstance(membership_version, bool):
+            membership_version = str(membership_version)
+        session_claims["vibe_membership_version"] = _oidc_claim_string(
+            membership_version,
+            reason="invalid_organization_claims",
+        )
+    return session_claims
+
+
+def make_session_cookie(
+    config: V2Config,
+    email: str,
+    subject: str,
+    *,
+    session_claims: Mapping[str, Any],
+) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
         raise ValueError("Remote access session secret is not configured")
@@ -1927,13 +2027,20 @@ def make_session_cookie(config: V2Config, email: str, subject: str) -> str:
         "iat": issued_at,
         "exp": issued_at + SESSION_TTL_SECONDS,
     }
+    payload.update(session_claims_from_oidc(config, session_claims))
+    payload["claims_issued_at"] = issued_at
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _session_signature(cloud.session_secret, payload_text)
-    return f"{payload_text}.{signature}"
+    cookie_value = f"{payload_text}.{signature}"
+    if len(cookie_value.encode("ascii")) > SESSION_COOKIE_MAX_VALUE_BYTES:
+        raise OAuthCodeExchangeError("session_cookie_too_large")
+    return cookie_value
 
 
 def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
     if not cookie_value or "." not in cookie_value:
+        return None
+    if len(cookie_value.encode("utf-8")) > SESSION_COOKIE_MAX_VALUE_BYTES:
         return None
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -1946,9 +2053,18 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
         payload = json.loads(urllib.parse.unquote(payload_text))
     except Exception:
         return None
+    if not isinstance(payload, dict):
+        return None
     if payload.get("instance_id") != cloud.instance_id:
         return None
     if int(payload.get("exp", 0)) <= int(time.time()):
+        return None
+    try:
+        session_claims_from_oidc(config, payload)
+        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
+    except (OAuthCodeExchangeError, TypeError, ValueError):
+        return None
+    if claims_issued_at <= 0:
         return None
     return payload
 
@@ -1966,6 +2082,17 @@ def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bo
     """
     current = now if now is not None else int(time.time())
     return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
+
+
+def session_needs_authorization_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
+    """Return whether authorization claims must be refreshed through OIDC."""
+
+    current = now if now is not None else int(time.time())
+    try:
+        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
+    except (TypeError, ValueError):
+        return True
+    return claims_issued_at <= 0 or current - claims_issued_at >= SESSION_AUTHORIZATION_REFRESH_SECONDS
 
 
 def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: str) -> str:
@@ -2043,7 +2170,8 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
         raise OAuthCodeExchangeError("invalid_instance_id")
     if not claims.get("email_verified"):
         raise OAuthCodeExchangeError("email_not_verified")
-    return {"claims": claims, "token": token_payload}
+    session_claims = session_claims_from_oidc(config, claims)
+    return {"claims": claims, "session_claims": session_claims, "token": token_payload}
 
 
 # --- OAuth handshake store -------------------------------------------------

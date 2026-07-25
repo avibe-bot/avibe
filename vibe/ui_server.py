@@ -2085,10 +2085,13 @@ def enforce_remote_access_cookie():
     config = _load_remote_access_config()
     if _remote_auth_exempt_before_host_validation():
         return None
+    from vibe.authorization import context_from_session_payload, trusted_local_context
+
     local_request = _is_local_request(config)
     docker_probe_request = _is_trusted_docker_loopback_probe()
     if config is None:
         if local_request or docker_probe_request:
+            g.authorization_context = trusted_local_context()
             return None
         return jsonify({"ok": False, "error": "remote_access_config_unavailable"}), 503
     if _remote_access_public_url_invalid(config) and not (local_request or docker_probe_request):
@@ -2096,11 +2099,14 @@ def enforce_remote_access_cookie():
     remote_request = _is_remote_access_request(config)
     if not remote_request:
         if _is_loopback_origin_proxy_request():
+            g.authorization_context = trusted_local_context()
             return None
         if not local_request and not docker_probe_request:
             return jsonify({"ok": False, "error": "remote_access_host_mismatch"}), 503
+        g.authorization_context = trusted_local_context()
         return None
     if _trusted_public_origin_local_request(config):
+        g.authorization_context = trusted_local_context()
         return None
     if _remote_auth_exempt_path():
         return None
@@ -2112,8 +2118,15 @@ def enforce_remote_access_cookie():
         return jsonify({"ok": False, "error": "remote_access_session_secret_missing"}), 503
     payload = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
     if payload is not None:
+        if remote_access.session_needs_authorization_refresh(payload):
+            if request.method == "GET" and not request.path.startswith("/api/"):
+                if _auth_rate_limited():
+                    return _auth_rate_limit_response()
+                return _redirect_to_vibe_cloud_login(config)
+            return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
+        g.authorization_context = context_from_session_payload(payload)
         if remote_access.session_needs_renewal(payload):
-            g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
+            g.remote_session_renew = payload
         return None
     if request.method == "GET":
         # Bound unauthenticated login-start floods at the door (this writes a
@@ -2122,6 +2135,27 @@ def enforce_remote_access_cookie():
             return _auth_rate_limit_response()
         return _redirect_to_vibe_cloud_login(config)
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
+
+
+@app.before_request
+def enforce_instance_role_capabilities():
+    if _remote_auth_exempt_path():
+        return None
+    from vibe.authorization import required_instance_role
+
+    minimum_role = required_instance_role(request.method, request.path)
+    if minimum_role is None:
+        return None
+    context = getattr(g, "authorization_context", None)
+    if context is None or not context.has_role(minimum_role):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "instance_access_forbidden",
+                "required_role": minimum_role,
+            }
+        ), 403
+    return None
 
 
 @app.before_request
@@ -2244,10 +2278,13 @@ def renew_remote_access_cookie(response: Response) -> Response:
         return response
     from vibe import remote_access
 
-    email, subject = renew
+    if not isinstance(renew, dict):
+        return response
+    email = str(renew.get("email", ""))
+    subject = str(renew.get("sub", ""))
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, email, subject),
+        remote_access.make_session_cookie(config, email, subject, session_claims=renew),
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -2404,7 +2441,7 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     if not _show_runtime_hmr_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
-    if not _show_runtime_websocket_authorized(websocket):
+    if not _show_runtime_websocket_authorized(websocket, minimum_role="viewer"):
         await websocket.close(code=1008)
         return
 
@@ -2471,7 +2508,7 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
-    if not _show_runtime_websocket_authorized(websocket):
+    if not _show_runtime_websocket_authorized(websocket, minimum_role="owner"):
         await websocket.close(code=1008)
         return
 
@@ -2514,7 +2551,7 @@ async def terminal_session_delete(session_id: str):
     terminal_request = _terminal_http_request_adapter()
     if not _terminal_origin_allowed(terminal_request):
         return jsonify({"ok": False, "error": "terminal_origin_forbidden"}), 403
-    if not _show_runtime_websocket_authorized(terminal_request):
+    if not _show_runtime_websocket_authorized(terminal_request, minimum_role="owner"):
         return jsonify({"ok": False, "error": "terminal_unauthorized"}), 403
 
     remote_subject = _remote_access_websocket_subject(terminal_request)
@@ -2538,7 +2575,7 @@ def _terminal_http_request_adapter() -> SimpleNamespace:
     )
 
 
-def _show_runtime_websocket_authorized(websocket: Any) -> bool:
+def _show_runtime_websocket_authorized(websocket: Any, *, minimum_role: str = "viewer") -> bool:
     config = _load_remote_access_config()
     if config is None:
         return _websocket_is_local_request(websocket)
@@ -2546,7 +2583,12 @@ def _show_runtime_websocket_authorized(websocket: Any) -> bool:
         return True
     if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
         return False
-    return _remote_access_websocket_session_payload(websocket, config) is not None
+    payload = _remote_access_websocket_session_payload(websocket, config)
+    if payload is None:
+        return False
+    from vibe.authorization import context_from_session_payload
+
+    return context_from_session_payload(payload).has_role(minimum_role)
 
 
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
@@ -2565,10 +2607,13 @@ def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | 
 
     if not config.remote_access.vibe_cloud.enabled or not config.remote_access.vibe_cloud.session_secret:
         return None
-    return remote_access.parse_session_cookie(
+    payload = remote_access.parse_session_cookie(
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
     )
+    if payload is None or remote_access.session_needs_authorization_refresh(payload):
+        return None
+    return payload
 
 
 def _remote_access_websocket_subject(websocket: Any) -> str | None:
@@ -3016,7 +3061,31 @@ def config_get():
     # default is never mistaken for a completed setup. The write side
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
-    return jsonify(api.config_to_payload(config))
+    payload = api.config_to_payload(config)
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is not None and authorization_context.can_manage_instance:
+        return jsonify(payload)
+
+    ui_payload = payload.get("ui")
+    return jsonify(
+        {
+            "mode": payload.get("mode"),
+            "version": payload.get("version"),
+            "setup_state": payload.get("setup_state"),
+            "language": payload.get("language"),
+            "ui": {
+                key: ui_payload[key]
+                for key in (
+                    "instance_name",
+                    "default_instance_name",
+                    "chat_message_font_size",
+                    "show_agent_activity",
+                    "show_tool_calls",
+                )
+                if isinstance(ui_payload, dict) and key in ui_payload
+            },
+        }
+    )
 
 
 _MODEL_HUB_SERVICE = None
@@ -4087,7 +4156,11 @@ def _web_push_user_key() -> str:
             payload = remote_access.parse_session_cookie(
                 config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
             )
-            if payload and payload.get("sub"):
+            if (
+                payload
+                and not remote_access.session_needs_authorization_refresh(payload)
+                and payload.get("sub")
+            ):
                 return f"remote:{payload['sub']}"
         except Exception:
             logger.debug("web push: could not resolve remote user key", exc_info=True)
@@ -4637,6 +4710,9 @@ def remote_access_auth_callback():
     try:
         result = remote_access.exchange_oauth_code(config, _oauth_callback_arg("code") or "", code_verifier)
         claims = result["claims"]
+        session_claims = result.get("session_claims")
+        if not isinstance(session_claims, dict):
+            raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
@@ -4645,11 +4721,23 @@ def remote_access_auth_callback():
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
+    try:
+        session_cookie = remote_access.make_session_cookie(
+            config,
+            str(claims.get("email", "")),
+            str(claims.get("sub", "")),
+            session_claims=session_claims,
+        )
+    except Exception as exc:
+        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
+        _log_oauth_diag("exchange_failed", "vibe cloud session cookie creation failed: reason=%s", reason)
+        error, diagnostics = _oauth_exchange_error_diagnostics(exc)
+        return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     response = Response(status=302)
     response.headers["Location"] = _safe_remote_redirect_target(next_target)
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, str(claims.get("email", "")), str(claims.get("sub", ""))),
+        session_cookie,
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -4663,23 +4751,42 @@ def remote_access_auth_callback():
 @app.route("/api/session", methods=["GET"])
 def api_session():
     from vibe import remote_access
+    from vibe.authorization import context_from_session_payload, trusted_local_context
 
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
-        response = jsonify({"remote": False})
+        context = trusted_local_context()
+        response = jsonify(
+            {
+                "remote": False,
+                "instance_role": "owner",
+                "capabilities": context.capability_projection(),
+            }
+        )
     else:
         payload = remote_access.parse_session_cookie(
             config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
         )
         if payload is None:
             response = jsonify({"remote": True, "authenticated": False})
+        elif remote_access.session_needs_authorization_refresh(payload):
+            response = jsonify(
+                {
+                    "remote": True,
+                    "authenticated": False,
+                    "authorization_refresh_required": True,
+                }
+            )
         else:
+            context = context_from_session_payload(payload)
             response = jsonify(
                 {
                     "remote": True,
                     "authenticated": True,
                     "email": str(payload.get("email", "")),
                     "sub": str(payload.get("sub", "")),
+                    "instance_role": context.instance_role,
+                    "capabilities": context.capability_projection(),
                 }
             )
     # Identity payload must never be cached by intermediaries (Cloudflare etc.).
@@ -5648,7 +5755,12 @@ def projects_create():
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            project = projects_service.create_project(conn, folder_path, display_name=display_name)
+            project = projects_service.create_project(
+                conn,
+                folder_path,
+                display_name=display_name,
+                authorization_context=getattr(g, "authorization_context", None),
+            )
     except (FileNotFoundError, NotADirectoryError) as err:
         return jsonify({"error": str(err)}), 400
     return jsonify(project), 201
@@ -5691,6 +5803,7 @@ def projects_update(project_id: str):
                 project_id,
                 display_name=display_name,
                 folder_path=folder_path,
+                authorization_context=getattr(g, "authorization_context", None),
                 **agent_kwargs,
             )
     except LookupError as err:
@@ -5714,7 +5827,11 @@ def projects_archive(project_id: str):
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            project = projects_service.archive_project(conn, project_id)
+            project = projects_service.archive_project(
+                conn,
+                project_id,
+                authorization_context=getattr(g, "authorization_context", None),
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     return jsonify(project)
@@ -6119,6 +6236,7 @@ def sessions_create():
                 reasoning_effort=payload.get("reasoning_effort"),
                 title=payload.get("title"),
                 metadata=metadata,
+                authorization_context=getattr(g, "authorization_context", None),
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -6173,6 +6291,7 @@ def _reserve_forked_session_for_ui(
     *,
     trim_latest_running_turn: bool,
     native_turn_started: bool,
+    authorization_context,
 ) -> dict:
     from core.services import sessions as workbench_sessions_service
     from core.services import settings as settings_service
@@ -6184,6 +6303,7 @@ def _reserve_forked_session_for_ui(
         title_lang=title_lang,
         trim_latest_running_turn=trim_latest_running_turn,
         native_turn_started=native_turn_started,
+        authorization_context=authorization_context,
     )
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -6196,12 +6316,14 @@ async def sessions_fork(session_id: str):
     from vibe.sse_broker import broker
 
     try:
+        authorization_context = getattr(g, "authorization_context", None)
         fork_turn_state = await _session_turn_state_for_fork(session_id)
         session = await asyncio.to_thread(
             _reserve_forked_session_for_ui,
             session_id,
             trim_latest_running_turn=bool(fork_turn_state.get("trim_latest_running_turn")),
             native_turn_started=bool(fork_turn_state.get("native_turn_started")),
+            authorization_context=authorization_context,
         )
     except SessionForkError as err:
         return _session_fork_error_response(err)
@@ -6295,6 +6417,11 @@ async def sessions_bootstrap(session_id: str):
     from vibe import api as vibe_api
     from vibe import internal_client
 
+    authorization_context = getattr(g, "authorization_context", None)
+    can_chat = bool(authorization_context and authorization_context.can_chat)
+    can_manage_instance = bool(
+        authorization_context and authorization_context.can_manage_instance
+    )
     engine = _projects_engine()
     with engine.connect() as conn:
         try:
@@ -6312,35 +6439,48 @@ async def sessions_bootstrap(session_id: str):
         queued = messages_service.list_queued(conn, session_id)
         draft = messages_service.get_draft(conn, session_id)
 
-    try:
-        agents_payload = vibe_api.get_vibe_agents(include_disabled=False)
-    except Exception:
-        logger.exception("sessions_bootstrap: failed to load Vibe Agents")
-        agents_payload = {"agents": [], "default_agent_name": None}
+    agents_payload = {"agents": [], "default_agent_name": None}
+    if can_chat:
+        try:
+            agents_payload = vibe_api.get_vibe_agents(include_disabled=False)
+        except Exception:
+            logger.exception("sessions_bootstrap: failed to load Vibe Agents")
 
     try:
         config_payload = vibe_api.config_to_payload(settings_service.load_config_or_default())
     except Exception:
         logger.exception("sessions_bootstrap: failed to load config")
         config_payload = None
+    if config_payload is not None and not can_manage_instance:
+        ui_payload = config_payload.get("ui")
+        config_payload = {
+            "ui": {
+                key: ui_payload[key]
+                for key in ("chat_message_font_size", "show_agent_activity", "show_tool_calls")
+                if isinstance(ui_payload, dict) and key in ui_payload
+            }
+        }
+
+    visible_queued = queued if can_chat else []
+    visible_draft = draft if can_chat else None
 
     try:
         turn_result = await internal_client.turn_state(session_id)
         turn_body = turn_result.get("body") or {}
         turn_state = _session_runtime_projection(
             turn_body,
-            pending_input_count=len(queued),
+            pending_input_count=len(visible_queued),
         )
     except internal_client.InternalServerUnavailable:
         turn_state = _session_runtime_projection(
             None,
-            pending_input_count=len(queued),
+            pending_input_count=len(visible_queued),
             controller_available=False,
         )
     except internal_client.InternalServerTimeout:
         turn_state = _session_runtime_projection(
             None,
-            pending_input_count=len(queued),
+            pending_input_count=len(visible_queued),
             controller_available=None,
         )
 
@@ -6353,8 +6493,8 @@ async def sessions_bootstrap(session_id: str):
             "messages": messages_result["messages"],
             "next_after_id": messages_result.get("next_after_id"),
             "next_before_id": messages_result.get("next_before_id"),
-            "queued": queued,
-            "draft": {"text": (draft or {}).get("text") or ""},
+            "queued": visible_queued,
+            "draft": {"text": (visible_draft or {}).get("text") or ""},
             "turn_state": turn_state,
         }
     )
@@ -6508,7 +6648,12 @@ async def sessions_update(session_id: str):
                 if {"visibility", "scope_id"}.intersection(updatable)
                 else None
             )
-            session = workbench_sessions_service.update_session(conn, session_id, **updatable)
+            session = workbench_sessions_service.update_session(
+                conn,
+                session_id,
+                authorization_context=getattr(g, "authorization_context", None),
+                **updatable,
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except (ValueError, PermissionError) as err:
@@ -6625,7 +6770,11 @@ async def sessions_archive(session_id: str):
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            session = workbench_sessions_service.archive_session(conn, session_id)
+            session = workbench_sessions_service.archive_session(
+                conn,
+                session_id,
+                authorization_context=getattr(g, "authorization_context", None),
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
@@ -8938,6 +9087,7 @@ def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, An
 
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     from vibe import remote_access
+    from vibe.authorization import context_from_session_payload
 
     config = _load_remote_access_config()
     if config is not None:
@@ -8945,8 +9095,13 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
             config,
             request.cookies.get(remote_access.SESSION_COOKIE_NAME),
         )
-        email = str(session.get("email", "")).strip() if session is not None else ""
-        if email:
+        context = (
+            context_from_session_payload(session)
+            if session is not None and not remote_access.session_needs_authorization_refresh(session)
+            else None
+        )
+        email = str(session.get("email", "")).strip() if context is not None else ""
+        if email and context.has_role("editor"):
             return {"kind": "user", "email": email}
 
         cloud = config.remote_access.vibe_cloud

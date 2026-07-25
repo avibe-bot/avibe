@@ -1389,12 +1389,32 @@ export type RunningAgentsResult =
   | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
   | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
 
+export type InstanceCapabilities = {
+  is_instance_owner: boolean;
+  can_read_instance: boolean;
+  can_chat: boolean;
+  can_manage_projects: boolean;
+  can_manage_agents: boolean;
+  can_manage_instance: boolean;
+  can_use_terminal_files: boolean;
+  can_use_terminal: boolean;
+  can_use_files: boolean;
+  can_use_system: boolean;
+};
+
 export type SessionInfo =
-  | { remote: false }
-  | { remote: true; authenticated: false }
+  | { remote: false; instance_role?: 'owner'; capabilities?: InstanceCapabilities }
+  | { remote: true; authenticated: false; authorization_refresh_required?: boolean }
   // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
   // be absent or shared across subjects).
-  | { remote: true; authenticated: true; email: string; sub?: string };
+  | {
+      remote: true;
+      authenticated: true;
+      email: string;
+      sub?: string;
+      instance_role: 'owner' | 'editor' | 'viewer';
+      capabilities: InstanceCapabilities;
+    };
 
 export type LogEntry = {
   timestamp: string;

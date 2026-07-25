@@ -33,7 +33,7 @@ from core.show_runtime import (
     set_show_runtime_manager_for_tests,
 )
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
 
@@ -1020,7 +1020,7 @@ def test_public_show_page_injects_auth_aware_annotation_config(monkeypatch, tmp_
     if authenticated:
         client.set_cookie(
             remote_access.SESSION_COOKIE_NAME,
-            remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+            remote_session_cookie(config, "alex@example.com", "user-1"),
             domain="alex.avibe.bot",
         )
     try:
@@ -1915,7 +1915,7 @@ def test_public_show_me_accepts_valid_workbench_session(monkeypatch, tmp_path):
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -1932,6 +1932,32 @@ def test_public_show_me_accepts_valid_workbench_session(monkeypatch, tmp_path):
         "writeToken": show_public_event_write_token(share_id, "ses123"),
     }
     assert response.get_json()["writeToken"] != show_event_write_token("ses123")
+
+
+def test_public_show_me_treats_viewer_as_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        f"/p/{share_id}/__show/me",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"authenticated": False, "canAnnotate": False}
 
 
 def test_public_show_me_treats_no_oauth_local_access_as_authenticated(monkeypatch, tmp_path):
@@ -2206,7 +2232,7 @@ def test_private_show_page_records_remote_oauth_author(monkeypatch, tmp_path):
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -2256,7 +2282,7 @@ def test_private_show_page_accepts_mark_read_receipt_and_records_reader(monkeypa
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "reader@example.com", "user-1"),
+        remote_session_cookie(config, "reader@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     response = client.post(
@@ -2794,7 +2820,7 @@ def test_public_show_page_events_require_share_token(monkeypatch, tmp_path):
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -2829,7 +2855,7 @@ def test_public_show_page_events_require_matching_share_referer(monkeypatch, tmp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     headers = _public_show_write_headers(share_id)
@@ -2858,7 +2884,7 @@ def test_public_show_page_events_reject_cross_share_token(monkeypatch, tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -2882,7 +2908,7 @@ def test_public_show_page_events_reject_token_from_previous_share_owner(monkeypa
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -2908,7 +2934,7 @@ def test_public_show_page_events_accept_oauth_user_and_record_author(monkeypatch
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -2957,7 +2983,7 @@ def test_public_show_page_redacts_materialized_screenshot_path(monkeypatch, tmp_
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3050,7 +3076,7 @@ def test_public_show_page_accepts_mark_read_receipt_and_records_reader(monkeypat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "reader@example.com", "user-2"),
+        remote_session_cookie(config, "reader@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
     response = client.post(
@@ -3095,7 +3121,7 @@ def test_public_show_page_rejects_resolution_for_unknown_mark(monkeypatch, tmp_p
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "reader@example.com", "user-2"),
+        remote_session_cookie(config, "reader@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3130,7 +3156,7 @@ def test_public_show_page_events_accept_injected_share_session_id(monkeypatch, t
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3159,7 +3185,7 @@ def test_public_show_page_intent_fallback_does_not_expose_author_email(monkeypat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3193,7 +3219,7 @@ def test_public_show_page_events_ignore_client_event_id_and_dispatch(monkeypatch
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3227,7 +3253,7 @@ def test_public_show_page_events_reject_non_human_types(monkeypatch, tmp_path, e
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -4657,7 +4683,7 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     try:
