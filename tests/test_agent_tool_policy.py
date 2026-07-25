@@ -53,9 +53,36 @@ def test_durable_or_synchronous_calls_are_allowed(tool_name, tool_input):
     assert policy.check_tool_call(tool_name, tool_input, env={}).allowed
 
 
-@pytest.mark.parametrize("tool_name", ["Bash", "Read", "Write", "TaskCreate", ""])
+@pytest.mark.parametrize("tool_name", ["Read", "Write", "TaskCreate", "WebFetch", ""])
 def test_unrelated_tools_are_untouched(tool_name):
-    assert policy.check_tool_call(tool_name, {"run_in_background": True}, env={}).allowed
+    decision = policy.check_tool_call(tool_name, {"run_in_background": True}, env={})
+    assert decision.allowed
+    assert not decision.advice
+
+
+def test_background_shell_is_advised_not_denied():
+    decision = policy.check_tool_call("Bash", {"command": "make", "run_in_background": True}, env={})
+    assert decision.allowed  # a hard block would cost more than it saves
+    assert "vibe watch add" in decision.advice
+    assert "nohup" in decision.advice  # detaching escapes the check entirely
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"command": "ls"},
+        {"command": "ls", "run_in_background": False},
+    ],
+)
+def test_foreground_shell_gets_no_advice(tool_input):
+    decision = policy.check_tool_call("Bash", tool_input, env={})
+    assert decision.allowed
+    assert not decision.advice
+
+
+def test_bash_is_never_denied_under_any_input():
+    for tool_input in ({}, {"run_in_background": True}, {"run_in_background": "yes"}):
+        assert policy.check_tool_call("Bash", tool_input, env={}).allowed
 
 
 def test_missing_tool_input_is_treated_as_the_tool_default():
@@ -67,6 +94,8 @@ def test_env_escape_hatch_restores_backend_native_behavior():
     assert policy.check_tool_call("Agent", {}, env=env).allowed
     assert policy.check_tool_call("Workflow", {}, env=env).allowed
     assert policy.native_background_tools_allowed(env) is True
+    # The advisory is part of the same policy, so it goes quiet too.
+    assert not policy.check_tool_call("Bash", {"run_in_background": True}, env=env).advice
 
 
 def test_blank_escape_hatch_does_not_disable_the_policy():
@@ -78,9 +107,11 @@ def test_blank_escape_hatch_does_not_disable_the_policy():
 def test_always_session_only_names_are_a_subset_of_the_policy():
     covered = set(policy.session_only_background_tool_names())
     assert set(policy.ALWAYS_SESSION_ONLY_TOOL_NAMES) <= covered
-    # Names with a legitimate non-background form must not be blocked by name.
+    # Names with a legitimate non-background form must not be blocked by name,
+    # and an advisory-only tool must never reach a deny list at all.
     assert "Agent" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
     assert "CronCreate" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+    assert "Bash" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
 
 
 # --------------------------------------------------------------------------
@@ -129,7 +160,21 @@ def test_guard_allows_a_synchronous_subagent():
 
 
 def test_guard_allows_unrelated_tools():
+    assert _run_guard("Read", {"file_path": "/tmp/x"}) == {}
+
+
+def test_guard_stays_silent_on_a_foreground_shell():
     assert _run_guard("Bash", {"command": "ls"}) == {}
+
+
+def test_guard_advises_on_a_background_shell_without_granting_permission():
+    out = _run_guard("Bash", {"command": "make", "run_in_background": True})
+    specific = out["hookSpecificOutput"]
+    assert specific["hookEventName"] == "PreToolUse"
+    assert "vibe watch add" in specific["additionalContext"]
+    # Injecting context must not double as an approval: an explicit "allow" here
+    # would override any permission hook the user configured for Bash.
+    assert "permissionDecision" not in specific
 
 
 def test_guard_never_raises_on_a_malformed_payload():

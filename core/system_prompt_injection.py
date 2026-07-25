@@ -214,6 +214,8 @@ Avibe Harness is the first-choice automation layer. For Agent workflows, recurri
 
 Backend-native background work is blocked at the tool layer, because its result is delivered only while this agent process is alive and is lost without warning otherwise. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, and a native multi-agent workflow are all denied, and the denial names the `vibe` command to run instead. A synchronous subagent that returns inside the current turn is still available.
 
+A background shell is session-only for the same reason but is not blocked, because most of them finish inside the turn. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it.
+
 Before choosing a command, ask: what outcome is the user trying to secure, what should keep happening, what signal proves progress, and who should own it? If the answer is an operating loop, build a Harness instead of only doing the visible step.
 
 ### Mental model

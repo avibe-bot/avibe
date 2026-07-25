@@ -398,6 +398,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Use backend-native config, skills, subagents, or workflow tools only when the user explicitly asks for backend-native behavior", prompt)
         self.assertIn("Backend-native background work is blocked at the tool layer", prompt)
         self.assertIn("A synchronous subagent that returns inside the current turn is still available", prompt)
+        self.assertIn("A background shell is session-only for the same reason but is not blocked", prompt)
+        self.assertIn("Never detach with `nohup` or a trailing `&` for work whose result you need", prompt)
         self.assertIn("what outcome is the user trying to secure", prompt)
         self.assertIn("If the answer is an operating loop, build a Harness instead of only doing the visible step", prompt)
         self.assertIn("### Mental model", prompt)

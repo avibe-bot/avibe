@@ -13,6 +13,11 @@ system prompt asks agents to prefer the Harness, but instruction alone is not
 enough: an agent that reaches for the backend-native tool anyway produces work
 that quietly disappears.
 
+A background shell is session-only for the same reason, but its background form
+is overwhelmingly used for work that finishes inside the turn, so it is advised
+rather than denied: the call proceeds with a note pointing at `vibe watch add`
+for anything that might outlive the turn.
+
 This module owns the decision. Backends adapt it to whatever enforcement seam
 they have:
 
@@ -46,10 +51,17 @@ _HARNESS_HINT = (
 
 @dataclass(frozen=True)
 class ToolPolicyDecision:
-    """Outcome of a policy check for one tool call."""
+    """Outcome of a policy check for one tool call.
+
+    Three shapes: allowed and silent, allowed with ``advice`` attached, or
+    denied with a ``reason``. The middle one exists for tools whose background
+    form is legitimate inside a turn but lossy across one — a hard block there
+    would cost more than it saves.
+    """
 
     allowed: bool
     reason: str = ""
+    advice: str = ""
 
     @property
     def denied(self) -> bool:
@@ -61,6 +73,10 @@ ALLOWED = ToolPolicyDecision(allowed=True)
 
 def _deny(reason: str) -> ToolPolicyDecision:
     return ToolPolicyDecision(allowed=False, reason=reason)
+
+
+def _advise(advice: str) -> ToolPolicyDecision:
+    return ToolPolicyDecision(allowed=True, advice=advice)
 
 
 def _check_agent(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
@@ -107,6 +123,26 @@ def _check_cron_create(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
     )
 
 
+def _check_bash(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
+    # A background shell is session-only too, but unlike the tools above it is
+    # overwhelmingly used for work that finishes inside the turn (a build, a
+    # push, a test run). Denying all of it would cost more than the occasional
+    # lost result, so this advises instead of blocking.
+    if tool_input.get("run_in_background") is not True:
+        return ALLOWED
+    return _advise(
+        "This background shell is session-only: it dies with the agent process, "
+        "and its output is lost if the session ends before it finishes. That is "
+        "fine for work that completes inside this turn. If it may outlive the "
+        "turn — a long build, a deploy, a CI or review wait, a remote job — run "
+        "it under a durable watch instead:\n"
+        "  vibe watch add --name <label> --message <what to do with the result> "
+        "-- <command>\n"
+        "Note that `nohup ... &` or a detached `&` inside the command escapes "
+        "this check entirely and is never recoverable; prefer the watch."
+    )
+
+
 def _check_workflow(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
     return _deny(
         "A backend-native workflow runs in the background and is scoped to "
@@ -123,6 +159,7 @@ def _check_workflow(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
 # background primitive needs; every adapter picks it up automatically.
 _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyDecision]] = {
     "Agent": _check_agent,
+    "Bash": _check_bash,  # advisory only
     "ScheduleWakeup": _check_schedule_wakeup,
     "CronCreate": _check_cron_create,
     "Workflow": _check_workflow,
@@ -131,7 +168,7 @@ _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyD
 # Tools that are session-only under every input, so a name-level deny list is a
 # faithful backstop for them. `Agent` and `CronCreate` are excluded because they
 # have legitimate non-background forms that only argument inspection can tell
-# apart.
+# apart, and `Bash` because this policy never denies it.
 ALWAYS_SESSION_ONLY_TOOL_NAMES: Tuple[str, ...] = ("ScheduleWakeup", "Workflow")
 
 
@@ -155,7 +192,7 @@ def check_tool_call(
     """Decide whether one tool call may proceed.
 
     Unknown tools and every tool outside the session-only background family are
-    allowed; this policy only ever narrows the four registered names.
+    allowed unconditionally; this policy only ever acts on a registered name.
     """
     if native_background_tools_allowed(env):
         return ALLOWED

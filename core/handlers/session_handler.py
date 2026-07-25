@@ -527,18 +527,29 @@ class SessionHandler(BaseHandler):
         tool_use_id: Optional[str],
         context: Any,
     ) -> Dict[str, Any]:
-        """PreToolUse hook denying backend-native, session-only background work.
+        """PreToolUse hook governing backend-native, session-only background work.
 
         Runs in-process, so it needs no file in the user's `~/.claude`. The deny
         reason names the durable `vibe ...` equivalent, which lets the agent
         self-correct within the same turn instead of just failing.
+
+        An advisory outcome deliberately omits `permissionDecision`: injecting
+        context must not double as an approval, or this hook would override a
+        permission hook the user configured for the same tool.
         """
         try:
             tool_name = str(input_data.get("tool_name") or "")
             tool_input = input_data.get("tool_input") or {}
             decision = check_tool_call(tool_name, tool_input)
             if decision.allowed:
-                return {}
+                if not decision.advice:
+                    return {}
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": decision.advice,
+                    }
+                }
             logger.info(
                 "Blocking session-only background tool %s; redirecting to the Avibe Harness",
                 tool_name,
