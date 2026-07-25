@@ -165,3 +165,17 @@ cross-thread `future.result(timeout=90)` handoff in
 - **The activation flake** described above.
 - **Profile and search still repeat the item-list markup.** Second occurrence,
   not third; extract on the next repeat.
+- **`isMemoryForbidden` is a shape probe, not a discriminant.** It matches the
+  loopback-403 body (`status: "failed"` with `error: "memory_disabled"`) because
+  `getJson({handleError: false})` discards the HTTP status. Replacing it properly
+  means exposing the status code from the API layer.
+
+## One behavior nuance worth recording
+
+`failureRetentionDays` used to be sticky: the page updated it only when a
+response carried a numeric `retention_days`, otherwise it kept the previous
+value. It is now `failuresRead.data?.retention_days ?? 90`. The two differ only
+for a response that carries items but omits `retention_days`, which
+`core/memory/runtime.py` never sends and `MemoryFailureLogResult` types as
+required — equivalent under the declared contract, but not literally identical
+code.
