@@ -38,6 +38,20 @@ SETTLED_BY_STOPPED: Final = "stopped"
 #: and returned before any sink existed.
 SETTLED_BY_REFUSED_CONCURRENT_TURN: Final = "refused_concurrent_turn"
 
+#: A REAL terminal output released the turn while deliberately keeping the run's
+#: ownership somewhere else, so no run settlement is owed here. The Claude
+#: Activity delivery-failure path is the live case: when a completion cannot be
+#: persisted or delivered it emits a silent ``result`` with
+#: ``MessageOutput(completes_turn=True, completes_run=False)`` to close the origin
+#: turn while the REQUEUED Activity keeps the run and retries. Reading that as
+#: "no terminal result" would settle an Activity-owned run ``failed`` — and fire
+#: its callback — before the retry ever ran.
+#:
+#: This value never reaches a row: it is not in ``SETTLEMENTS_WITHOUT_RESULT``, so
+#: it has no terminal status and no user-visible text, exactly like
+#: ``SETTLED_BY_TERMINAL_RESULT``.
+SETTLED_BY_TURN_ONLY_RESULT: Final = "turn_only_result"
+
 #: An agent-runtime refresh retired the turn: ``release_for_backend_refresh``
 #: cancels in-flight turns of a backend whose cached process state is about to
 #: disappear (an ``agents.*`` save's rolling reconciliation, a Codex runtime
@@ -51,7 +65,10 @@ SETTLED_BY_REFUSED_CONCURRENT_TURN: Final = "refused_concurrent_turn"
 #: healthy process and does not.
 SETTLED_BY_BACKEND_REFRESH: Final = "backend_refresh"
 
-#: Settlements that mean "no terminal result will ever arrive for this run".
+#: Settlements that mean "no terminal result will ever arrive for this run" — the
+#: ONLY ones a caller may terminalize a row from. Both settlement lanes test
+#: membership here rather than excluding ``SETTLED_BY_TERMINAL_RESULT``, so a new
+#: "the turn ended but the run lives on" value can never be mistaken for a zombie.
 SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
     {
         SETTLED_BY_NO_TERMINAL_RESULT,

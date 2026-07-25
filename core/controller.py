@@ -1104,7 +1104,12 @@ class Controller:
     def settle_bound_turn_sink(self, binding: Optional[Dict[str, Any]]) -> bool:
         return self.session_turns.settle_bound_turn_sink(binding)
 
-    def mark_turn_complete(self, context: Optional[MessageContext] = None) -> None:
+    def mark_turn_complete(
+        self,
+        context: Optional[MessageContext] = None,
+        *,
+        settled_by: str = SETTLED_BY_NO_TERMINAL_RESULT,
+    ) -> None:
         """Release a streaming turn sink whose turn finished WITHOUT emitting a
         result (missing/disabled backend, dedup, inline-stop, error, or any
         synchronous no-agent path) so the SSE dispatch closes promptly instead
@@ -1125,13 +1130,19 @@ class Controller:
 
         if not emit_matches_active_turn(sink, context):
             return
-        # Record that this turn produced NO terminal result, so ``dispatch_turn``
-        # can tell its caller. An ``agent_run`` whose waiter is released this way
-        # must be settled by the caller: nothing else will ever terminalize it
-        # (see docs/plans/agent-run-zombie-settlement.md). ``setdefault`` keeps a
-        # real terminal result — which always runs before this ``finally`` — as the
+        # Record WHY the waiter is being released, so ``dispatch_turn`` can tell its
+        # caller. An ``agent_run`` released with a no-result settlement must be
+        # terminalized by that caller: nothing else will ever do it (see
+        # docs/plans/agent-run-zombie-settlement.md). ``setdefault`` keeps a real
+        # terminal result — which always runs before this ``finally`` — as the
         # winning settlement.
-        sink.setdefault("settled_by", SETTLED_BY_NO_TERMINAL_RESULT)
+        #
+        # The default is the no-dispatch case this method was written for (blank
+        # prompt, dedup, inline stop). A caller that IS a terminal output overrides
+        # it: the dispatcher passes ``SETTLED_BY_TURN_ONLY_RESULT`` when the output
+        # completes the turn but deliberately leaves the run to another owner (a
+        # requeued Claude Activity), which must NOT be settled here (Codex P1).
+        sink.setdefault("settled_by", settled_by or SETTLED_BY_NO_TERMINAL_RESULT)
         done = sink.get("done_event")
         if done is not None:
             done.set()

@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.run_settlement import (
+    SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -658,15 +659,19 @@ class SessionTurnManager:
         until the staleness sweep relabels it ``orphaned`` — or forever when the sweep
         is disabled.
 
-        Only a real terminal result may leave the row alone; every other settlement
-        means no result is coming. ``None`` means no sink existed, so there is nothing
-        to conclude — do not guess. A coalesced turn settles EVERY id it owns, matching
+        Only a settlement that means "no result is coming" may terminalize the row —
+        membership in ``SETTLEMENTS_WITHOUT_RESULT``, not "anything but
+        ``terminal_result``". A real terminal output that completes the turn while
+        leaving the run to another owner (``turn_only_result``: the requeued Activity
+        behind a Claude delivery failure) must be left alone, or its run is failed and
+        its callback fired before the retry runs (Codex P1). ``None`` means no sink
+        existed, so there is nothing to conclude — do not guess. A coalesced turn settles EVERY id it owns, matching
         ``owned_agent_run_ids``. A plain Chat turn carries no run attribution and no-ops
         here. The write itself is the guarded first-writer-wins one, so racing an honest
         terminal result is safe in both directions.
         """
 
-        if settled_by is None or settled_by == SETTLED_BY_TERMINAL_RESULT:
+        if settled_by not in SETTLEMENTS_WITHOUT_RESULT:
             return
         run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
         if not run_ids:

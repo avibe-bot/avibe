@@ -771,6 +771,44 @@ this interrupts a live turn inside a healthy process and does not.
 | --- | --- |
 | M22 collapse the cancellation attribution back to `SETTLED_BY_STOPPED` (the reported bug) | KILLED (HFR-029) |
 
+### 5.8 Review round 6 (avibe-bot/avibe#1005) — "the turn ended" is not "the Run ended"
+
+**P1 — a run another owner was still retrying got failed (HFR-030/031/032).**
+`_settle_activity_turn_after_delivery_failure` (`modules/agents/claude_agent.py:1898`)
+closes its origin turn with a silent terminal `result` carrying
+`MessageOutput(completes_turn=True, completes_run=False)`: the completion could not be
+persisted or delivered, so the **REQUEUED Activity keeps the run** and retries it. That
+emit still sets `mutates_turn_lifecycle`, so the release ran through
+`_signal_turn_complete` → `Controller.mark_turn_complete`, whose own default reason is the
+no-dispatch case (`no_terminal_result`). Both settlement lanes then read a settlement that
+means "no result is coming" and terminalized a **live, Activity-owned** run `failed`,
+firing its terminal callback before the retry ever ran.
+
+Two halves, because either alone leaves the hole open:
+
+1. The release site supplies the reason. `mark_turn_complete` takes
+   `settled_by=` (defaulting to `no_terminal_result` for genuine no-dispatch callers) and
+   `_signal_turn_complete` — every one of whose four call sites is a terminal-result emit —
+   defaults to `SETTLED_BY_TERMINAL_RESULT`, resolving per-emit through
+   `_turn_release_settlement(output_semantics)`: `settles_run` → `terminal_result`,
+   otherwise the new `SETTLED_BY_TURN_ONLY_RESULT`. A `TypeError` fallback keeps older
+   controllers/test doubles releasing the waiter.
+2. Both lanes flip from deny-list to allow-list. `core/scheduled_tasks.py` and
+   `core/session_turns.py` now require membership in `SETTLEMENTS_WITHOUT_RESULT` before
+   touching a row, instead of "anything but `terminal_result` is a zombie". So the next
+   "turn ended, run lives on" reason cannot repeat this failure by omission.
+
+`SETTLED_BY_TURN_ONLY_RESULT = "turn_only_result"` is deliberately absent from
+`SETTLEMENTS_WITHOUT_RESULT`, `SETTLEMENT_I18N_KEYS`, and `SETTLEMENT_TERMINAL_STATUS`: like
+`terminal_result` it never reaches a row, so it needs no terminal status and no
+user-visible text.
+
+| Mutation | Verdict |
+| --- | --- |
+| M23 drop the `settled_by` propagation in `_signal_turn_complete` (the reported bug) | KILLED (HFR-030) |
+| M24 turn lane back to `settled_by == terminal_result` deny-list | KILLED (HFR-031) |
+| M25 drain lane back to `settled_by == terminal_result` deny-list | KILLED (HFR-032) |
+
 ## 6. Staging
 
 - **PR-A (Gap A)** — §3.1–3.4. Small, no new config, no sweep. Independently

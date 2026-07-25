@@ -7,6 +7,7 @@ capability:
     - tests/test_agent_service.py
     - tests/test_scheduled_tasks.py
     - tests/test_dispatcher_stream_chunk.py
+    - tests/test_message_dispatcher_result_fallback.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -215,6 +216,27 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop
+  - id: HFR-030
+    name: terminal output that keeps the Run elsewhere is stamped turn-only
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_turn_only_terminal_release_does_not_claim_the_run
+  - id: HFR-031
+    name: turn lane leaves an Activity-owned Run running
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_turn_only_result_leaves_an_activity_owned_run_alone
+  - id: HFR-032
+    name: drain lane leaves an Activity-owned Run running
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

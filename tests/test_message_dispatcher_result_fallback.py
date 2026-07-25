@@ -10,6 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
+from core.run_settlement import (
+    SETTLED_BY_TERMINAL_RESULT,
+    SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENTS_WITHOUT_RESULT,
+)
 from modules.im import MessageContext
 
 
@@ -317,8 +322,88 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         dispatcher._collapse_status_bubble.assert_awaited_once()
         dispatcher._clear_consolidated_state.assert_awaited_once_with(context)
-        controller.mark_turn_complete.assert_called_once_with(context)
+        controller.mark_turn_complete.assert_called_once_with(
+            context,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+        )
         controller.agent_service.release_runtime_turn.assert_called_once_with(context)
+
+    def _terminal_lifecycle_controller(self):
+        controller = _StubController(platform="slack")
+        controller.agent_service = type(
+            "Service",
+            (),
+            {
+                "emit_matches_runtime_turn": lambda self, context: True,
+                "release_runtime_turn": mock.Mock(),
+            },
+        )()
+        controller.session_turns = type(
+            "Turns",
+            (),
+            {"on_terminal_result": mock.Mock()},
+        )()
+        controller.mark_turn_complete = mock.Mock()
+        return controller
+
+    async def _emit_silent_terminal(self, controller, *, completes_run: bool):
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        dispatcher._clear_consolidated_state = mock.AsyncMock()
+        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-1",
+            },
+        )
+        await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "",
+            level="silent",
+            output=MessageOutput(completes_turn=True, completes_run=completes_run),
+        )
+        return dispatcher, context
+
+    async def test_turn_only_terminal_release_does_not_claim_the_run(self):
+        """HFR-030: a terminal result that completes the turn but NOT the run stamps
+        ``turn_only_result``, so no settlement lane may terminalize the row.
+
+        This is the Claude Activity delivery-failure emit: the origin turn is closed
+        while the REQUEUED Activity keeps the run and retries. Stamping the
+        no-dispatch default here failed an Activity-owned run — and fired its
+        callback — before the retry ever ran.
+        """
+        controller = self._terminal_lifecycle_controller()
+
+        dispatcher, context = await self._emit_silent_terminal(controller, completes_run=False)
+
+        controller.mark_turn_complete.assert_called_once_with(
+            context,
+            settled_by=SETTLED_BY_TURN_ONLY_RESULT,
+        )
+        # The run's terminal state was never written here either — same owner rule.
+        dispatcher._record_agent_run_terminal_result.assert_not_called()
+        self.assertNotIn(SETTLED_BY_TURN_ONLY_RESULT, SETTLEMENTS_WITHOUT_RESULT)
+
+    async def test_run_settling_terminal_release_stamps_terminal_result(self):
+        """HFR-030 (other half): when the same emit DOES own the run, the stamp is
+        the honest ``terminal_result`` — otherwise a durable caller would re-settle a
+        run its backend already completed."""
+        controller = self._terminal_lifecycle_controller()
+
+        dispatcher, context = await self._emit_silent_terminal(controller, completes_run=True)
+
+        controller.mark_turn_complete.assert_called_once_with(
+            context,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+        )
+        dispatcher._record_agent_run_terminal_result.assert_called_once()
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()

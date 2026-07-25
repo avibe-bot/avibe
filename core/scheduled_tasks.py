@@ -36,8 +36,8 @@ from core.message_context import (
 )
 from core.reply_enhancer import strip_silent_blocks
 from core.run_settlement import (
+    SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_NO_TERMINAL_RESULT,
-    SETTLED_BY_TERMINAL_RESULT,
     SETTLEMENT_I18N_KEYS,
     SETTLEMENT_TERMINAL_STATUS,
     SWEEP_I18N_KEYS,
@@ -2965,9 +2965,14 @@ class ScheduledTaskService:
         )
         if outcome.error:
             return AgentRunExecutionResult(error=str(outcome.error), complete_on_return=True)
-        if outcome.settled_by == SETTLED_BY_TERMINAL_RESULT:
-            # The honest path: the backend emitted its terminal result, whose
-            # out-of-band writer owns this run's terminal state.
+        if outcome.settled_by is not None and outcome.settled_by not in SETTLEMENTS_WITHOUT_RESULT:
+            # Somebody else owns this run's terminal state: either the backend emitted
+            # its real terminal result (``terminal_result``), or a terminal output
+            # closed the turn while deliberately keeping the run elsewhere
+            # (``turn_only_result`` — the requeued Activity behind a Claude delivery
+            # failure). Tested as membership rather than "anything but
+            # ``terminal_result``" so a future release reason cannot be misread as a
+            # zombie (Codex P1).
             return AgentRunExecutionResult(error=None, complete_on_return=False)
         settled_by = outcome.settled_by or SETTLED_BY_NO_TERMINAL_RESULT
         if outcome.settled_by is None:

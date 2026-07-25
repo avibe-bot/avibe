@@ -20,6 +20,7 @@ from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
+    SETTLED_BY_TURN_ONLY_RESULT,
 )
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
@@ -2334,6 +2335,50 @@ def test_agent_run_settles_failed_when_sink_released_without_terminal_result(
     assert settled["metadata"]["interrupt_reason"] == "no_terminal_result"
 
 
+def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-032: the drain lane must allow-list the settlements, not exclude one value.
+
+    A released waiter usually means "no result is coming", but not always: the Claude
+    Activity delivery-failure path closes its origin turn with ``turn_only_result``
+    while the requeued Activity keeps the run. Testing "anything but
+    ``terminal_result`` is a zombie" settled that live run ``failed`` and fired its
+    terminal callback before the retry ran, so the lane tests membership in
+    ``SETTLEMENTS_WITHOUT_RESULT`` instead.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="delivery failed, activity requeued",
+        agent_name="claude",
+    )
+
+    async def _keep_the_run(controller, context, _message) -> None:
+        sink = controller.get_turn_sink(controller._get_session_key(context))
+        assert sink is not None
+        sink["settled_by"] = SETTLED_BY_TURN_ONLY_RESULT
+
+    controller = _SettlementControllerDouble(on_turn=_keep_the_run)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    kept = request_store.get_run(request.id)
+    assert kept is not None
+    assert kept["status"] == "running"
+    assert kept["completed_at"] is None
+    assert not kept["error"]
+    assert not (kept["metadata"] or {}).get("interrupt_reason")
+
+
 def test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn(
     tmp_path: Path,
     monkeypatch,
@@ -3298,6 +3343,72 @@ def test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop(
     assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_BACKEND_REFRESH
     assert settled["error"]
     assert "stop" not in settled["error"].lower()
+
+
+def test_turn_only_result_leaves_an_activity_owned_run_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-031: "the turn ended" is not "the run ended" — leave a run somebody still owns.
+
+    The Claude Activity delivery-failure path closes its origin turn with a silent
+    terminal ``result`` carrying ``completes_run=False`` while the REQUEUED Activity
+    keeps the run and retries. That release stamps ``turn_only_result``, which is
+    deliberately NOT in ``SETTLEMENTS_WITHOUT_RESULT``: settling here would fail a
+    live Activity-owned run and fire its terminal callback before the retry ran.
+    Both lanes therefore allow-list the settlements that mean "no result is coming"
+    instead of treating everything but ``terminal_result`` as a zombie.
+    """
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = request_store.enqueue_agent_run(
+        session_id=session_id, message="delivery failed, activity requeued", agent_name="claude"
+    ).id
+    _force_run_columns(request_store, run_id, status="running", started_at=_ago(30))
+
+    async def _turn_closed_run_kept(_controller, _context, _text, **_kwargs):
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TURN_ONLY_RESULT)
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _turn_closed_run_kept)
+
+    manager = SessionTurnManager(controller=None)
+    manager.controller = SimpleNamespace(
+        scheduled_task_service=service,
+        session_turns=manager,
+        set_agent_status=lambda *_args, **_kwargs: None,
+        _get_session_key=lambda ctx: f"avibe::{ctx.channel_id}",
+    )
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "task_execution_id": run_id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _exercise() -> None:
+        assert (
+            await manager.submit(
+                session_id, context, "delivery failed, activity requeued", source=SOURCE_SCHEDULED
+            )
+            == "ran"
+        )
+        for _ in range(400):
+            if session_id not in manager.in_flight:
+                break
+            await asyncio.sleep(0.005)
+        assert session_id not in manager.in_flight
+
+    asyncio.run(_exercise())
+
+    kept = request_store.get_run(run_id)
+    # Still owned, still running: the retry gets to write the honest terminal state.
+    assert kept["status"] == "running"
+    assert not (kept["metadata"] or {}).get("interrupt_reason")
+    assert not kept["error"]
 
 
 def test_sweep_retires_the_queue_segment_of_the_run_it_expired(

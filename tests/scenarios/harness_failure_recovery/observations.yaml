@@ -202,3 +202,20 @@ observations:
       the turn is popped. The default reading of a bare cancellation stays stopped,
       because a plain Stop and send-now are the paths that legitimately have no
       more specific reason.
+  - id: HFR-OBS-019
+    date: 2026-07-25
+    source: review of both settlement lanes against the Claude Activity delivery-failure emit
+    result: confirmed
+    detail: >-
+      "The turn ended" is not "the Run ended". _settle_activity_turn_after_delivery_failure
+      closes its origin turn with a silent terminal result carrying
+      completes_run=False, because the REQUEUED Activity keeps the Run and retries
+      it. That emit still mutates the turn lifecycle, so the release ran through
+      mark_turn_complete, whose own default reason is the no-dispatch case: both
+      lanes then read no_terminal_result and failed a live Activity-owned Run,
+      firing its terminal callback before the retry ever ran. The release site is
+      the only party that knows whether it also owns the Run, so it must supply the
+      reason, and both lanes must allow-list the settlements that genuinely mean no
+      result is coming (SETTLEMENTS_WITHOUT_RESULT) rather than treating everything
+      except terminal_result as a zombie -- otherwise the next "turn ended, run
+      lives on" reason repeats the same failure.
