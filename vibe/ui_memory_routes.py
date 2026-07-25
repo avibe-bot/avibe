@@ -140,6 +140,98 @@ def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     return value if is_memory_error_code(value) else fallback
 
 
+_settings_write_lock: asyncio.Lock | None = None
+_settings_write_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _memory_settings_write_lock() -> asyncio.Lock:
+    """Return this process' Memory settings write lock, bound to the live loop.
+
+    Created lazily instead of at import time: ``asyncio.Lock`` binds itself to
+    the first loop that awaits it, while the UI app object outlives individual
+    loops (in-process restart, test clients), so a module-level lock would start
+    raising once a new loop took over.
+    """
+
+    global _settings_write_lock, _settings_write_lock_loop
+
+    loop = asyncio.get_running_loop()
+    if _settings_write_lock is None or _settings_write_lock_loop is not loop:
+        _settings_write_lock = asyncio.Lock()
+        _settings_write_lock_loop = loop
+    return _settings_write_lock
+
+
+async def _apply_memory_settings_patch(patch_payload: object) -> Response:
+    """Persist one Memory settings patch, reconcile it, or roll the save back.
+
+    The whole read -> save -> reconcile -> rollback sequence runs under one
+    process lock. Reconciliation awaits the controller, so two overlapping tabs
+    would otherwise interleave: the later request could persist and reconcile
+    successfully, and then a late-failing earlier request would restore its own
+    stale snapshot over it and reconcile that instead - after its caller had
+    already been told the newer settings were saved. Serializing also makes the
+    second request read the first one's persisted result as its baseline.
+    """
+
+    from vibe import api, internal_client
+    from config.v2_config import memory_config_to_payload
+
+    async with _memory_settings_write_lock():
+        try:
+            current = await asyncio.to_thread(V2Config.load)
+            target_payload = _memory_settings_patch(current, patch_payload)
+            candidate = _memory_candidate_config(current, target_payload)
+            embedding_change_pending = (
+                current.memory.embedding_change_pending
+                or _memory_embedding_configuration_changed(current, candidate)
+            )
+        except (TypeError, ValueError):
+            return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+
+        try:
+            # Persist a durable marker before asking the controller to inspect
+            # the root. If Avibe exits in this interval, startup must re-run
+            # the same guarded inspection instead of treating the candidate as
+            # its own embedding baseline.
+            saved = await asyncio.to_thread(
+                api.save_memory_config,
+                target_payload,
+                embedding_change_pending=embedding_change_pending,
+            )
+        except ValueError:
+            return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+        except Exception:
+            return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
+        response = await _memory_internal_response(internal_client.reconcile_memory)
+        runtime_payload = _memory_response_body(response)
+        if response.status_code != 200 or runtime_payload.get("ok") is not True:
+            # Persisted settings must not outrun the controller's closed
+            # compatibility decision, including while memory is disabled.
+            try:
+                await asyncio.to_thread(
+                    api.save_memory_config,
+                    memory_config_to_payload(current.memory, include_secrets=True),
+                    embedding_change_pending=current.memory.embedding_change_pending,
+                )
+                await _memory_internal_response(internal_client.reconcile_memory)
+            except Exception:
+                pass
+            return _memory_response(
+                {
+                    "status": "failed",
+                    "error": _memory_closed_error(runtime_payload, fallback="memory_sidecar_unavailable"),
+                },
+                status_code=409,
+            )
+        if response.status_code >= 500:
+            return response
+        payload = memory_config_to_payload(saved.memory)
+        payload["runtime"] = runtime_payload
+        payload["status"] = "ok"
+        return _memory_response(payload)
+
+
 def register_memory_routes(app) -> None:
     """Attach the Memory routes to the UI app."""
 
@@ -162,65 +254,9 @@ def register_memory_routes(app) -> None:
                 return _memory_forbidden_response()
             try:
                 patch_payload = await starlette_request.json()
-                current = await asyncio.to_thread(V2Config.load)
-                target_payload = _memory_settings_patch(current, patch_payload)
-                candidate = _memory_candidate_config(current, target_payload)
-                embedding_change_pending = (
-                    current.memory.embedding_change_pending
-                    or _memory_embedding_configuration_changed(current, candidate)
-                )
             except (TypeError, ValueError):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-
-            from vibe import internal_client
-
-            from vibe import api
-
-            try:
-                # Persist a durable marker before asking the controller to inspect
-                # the root. If Avibe exits in this interval, startup must re-run
-                # the same guarded inspection instead of treating the candidate as
-                # its own embedding baseline.
-                saved = await asyncio.to_thread(
-                    api.save_memory_config,
-                    target_payload,
-                    embedding_change_pending=embedding_change_pending,
-                )
-            except ValueError:
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            except Exception:
-                return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
-            response = await _memory_internal_response(internal_client.reconcile_memory)
-            runtime_payload = _memory_response_body(response)
-            if response.status_code != 200 or runtime_payload.get("ok") is not True:
-                # Persisted settings must not outrun the controller's closed
-                # compatibility decision, including while memory is disabled.
-                try:
-                    from config.v2_config import memory_config_to_payload
-
-                    await asyncio.to_thread(
-                        api.save_memory_config,
-                        memory_config_to_payload(current.memory, include_secrets=True),
-                        embedding_change_pending=current.memory.embedding_change_pending,
-                    )
-                    await _memory_internal_response(internal_client.reconcile_memory)
-                except Exception:
-                    pass
-                return _memory_response(
-                    {
-                        "status": "failed",
-                        "error": _memory_closed_error(runtime_payload, fallback="memory_sidecar_unavailable"),
-                    },
-                    status_code=409,
-                )
-            if response.status_code >= 500:
-                return response
-            from config.v2_config import memory_config_to_payload
-
-            payload = memory_config_to_payload(saved.memory)
-            payload["runtime"] = runtime_payload
-            payload["status"] = "ok"
-            return _memory_response(payload)
+            return await _apply_memory_settings_patch(patch_payload)
 
         return await app.dispatch_native_request(starlette_request, handler)
 

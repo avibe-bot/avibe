@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from config.v2_config import (
     AgentsConfig,
     MemoryConfig,
@@ -10,7 +12,7 @@ from config.v2_config import (
     V2Config,
 )
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import internal_client, ui_server
+from vibe import api, internal_client, ui_memory_routes, ui_server
 from vibe.ui_server import app
 
 
@@ -319,6 +321,77 @@ def test_memory_embedding_change_delegates_marker_settlement_to_controller(monke
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v2"
     assert persisted.embedding_change_pending is False
+
+
+def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    baseline = V2Config.load()
+    baseline.memory = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    baseline.save()
+    observed: list[str] = []
+    first_reconcile_entered = asyncio.Event()
+    release_first_reconcile = asyncio.Event()
+    accepted_persisted = asyncio.Event()
+    save_memory_config = api.save_memory_config
+
+    def save(memory_payload, **kwargs):
+        saved = save_memory_config(memory_payload, **kwargs)
+        if saved.memory.processing.embedding.model == "embed-accepted":
+            accepted_persisted.set()
+        return saved
+
+    async def reconcile():
+        model = V2Config.load().memory.processing.embedding.model
+        observed.append(model)
+        if not first_reconcile_entered.is_set():
+            first_reconcile_entered.set()
+            await release_first_reconcile.wait()
+        if model == "embed-rejected":
+            return {"status_code": 200, "body": {"ok": False, "error": "memory_clear_failed"}}
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(api, "save_memory_config", save)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+
+    async def scenario():
+        rejected = asyncio.create_task(
+            ui_memory_routes._apply_memory_settings_patch(
+                {"processing": {"embedding": {"model": "embed-rejected"}}}
+            )
+        )
+        await first_reconcile_entered.wait()
+        accepted = asyncio.create_task(
+            ui_memory_routes._apply_memory_settings_patch(
+                {"processing": {"embedding": {"model": "embed-accepted"}}}
+            )
+        )
+        # Give the second request every chance to persist while the first is
+        # still inside reconciliation: without serialization it lands here and
+        # the first request's rollback then overwrites it. The wait must time
+        # out once the sequence is serialized, so keep it short.
+        try:
+            await asyncio.wait_for(accepted_persisted.wait(), timeout=0.5)
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+        release_first_reconcile.set()
+        return await rejected, await accepted
+
+    rejected_response, accepted_response = asyncio.run(scenario())
+
+    assert rejected_response.status_code == 409
+    assert accepted_response.status_code == 200
+    # The rejected request rolls its own candidate back and the accepted request
+    # then starts from that restored baseline; neither observes the other's
+    # half-applied state.
+    assert observed == ["embed-rejected", "embed-v1", "embed-accepted"]
+    assert V2Config.load().memory.processing.embedding.model == "embed-accepted"
 
 
 def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> None:
