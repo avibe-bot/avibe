@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -69,6 +69,9 @@ SUPPORTED_SIGNATURE_SCHEMES = {
 REQUEST_AUDIENCE_AGENT = "agent"
 REQUEST_AUDIENCE_UI = "ui"
 REQUEST_AUDIENCES = {REQUEST_AUDIENCE_AGENT, REQUEST_AUDIENCE_UI}
+_AUDIT_ACCESS_SNAPSHOT_KEY = "_resource_access_snapshot"
+_REMOTE_AUDIT_MIN_BATCH_SIZE = 25
+_REMOTE_AUDIT_MAX_BATCH_SIZE = 200
 PROVISION_SPEC_FORBIDDEN_KEYS = {
     "value",
     "sealed",
@@ -1641,6 +1644,66 @@ def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
         raise KeypairNotValueDeliverableError(f"{name} is a signing key; use vault_sign instead of value delivery")
 
 
+def _audit_reference_secret_names(
+    conn: Connection,
+    *,
+    secret_name: str | None,
+    request_id: str | None,
+    grant_id: str | None,
+) -> list[str]:
+    names = {str(secret_name)} if secret_name else set()
+    if request_id:
+        request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+        if request_row is not None:
+            names.update(_request_member_names(dict(request_row)))
+    if grant_id:
+        grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+        if grant_row is not None:
+            names.update(_grant_member_names(dict(grant_row)))
+    return sorted(name for name in names if name)
+
+
+def _build_audit_access_snapshot(conn: Connection, names: list[str]) -> dict[str, Any] | None:
+    from storage import resource_access_service
+
+    normalized_names = sorted({str(name) for name in names if str(name)})
+    if not normalized_names:
+        return None
+    secret_rows = {
+        str(row["name"]): dict(row)
+        for row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(normalized_names))).mappings()
+    }
+    resources: list[dict[str, Any]] = []
+    for name in normalized_names:
+        secret_row = secret_rows.get(name)
+        if secret_row is None:
+            continue
+        resource_id = str(secret_row.get("id") or "")
+        if not resource_id:
+            continue
+        resources.append(
+            {
+                "name": name,
+                "resource_id": resource_id,
+                "policy": resource_access_service.get_resource_policy(
+                    "vault_secret",
+                    resource_id,
+                    connection=conn,
+                ),
+            }
+        )
+    return {"version": 1, "resources": resources} if resources else None
+
+
+def _audit_public_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    delivery = _loads(payload.get("delivery"))
+    if isinstance(delivery, dict) and _AUDIT_ACCESS_SNAPSHOT_KEY in delivery:
+        delivery.pop(_AUDIT_ACCESS_SNAPSHOT_KEY, None)
+        payload["delivery"] = json.dumps(delivery) if delivery else None
+    return payload
+
+
 def audit(
     conn: Connection,
     event: str,
@@ -1650,8 +1713,22 @@ def audit(
     delivery: Any = None,
     request_id: str | None = None,
     grant_id: str | None = None,
+    access_snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Append one audit row. Callers pass only non-secret summaries."""
+    snapshot = access_snapshot or _build_audit_access_snapshot(
+        conn,
+        _audit_reference_secret_names(
+            conn,
+            secret_name=secret_name,
+            request_id=request_id,
+            grant_id=grant_id,
+        ),
+    )
+    stored_delivery = delivery
+    if snapshot is not None and (delivery is None or isinstance(delivery, dict)):
+        stored_delivery = dict(delivery or {})
+        stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = snapshot
     conn.execute(
         vault_audit.insert().values(
             id=_id("vau"),
@@ -1659,7 +1736,7 @@ def audit(
             event=event,
             secret_name=secret_name,
             requester=json.dumps(requester) if requester is not None else None,
-            delivery=json.dumps(delivery) if delivery is not None else None,
+            delivery=json.dumps(stored_delivery) if stored_delivery is not None else None,
             request_id=request_id,
             grant_id=grant_id,
         )
@@ -2666,13 +2743,14 @@ def delete_secret(
 
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
+    audit_snapshot = _build_audit_access_snapshot(conn, [name])
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
     resource_access_service.delete_resource_policy(conn, "vault_secret", str(row["id"]))
     if row.get("protection") == "protected":
         _disable_webauthn_factors_if_vault_deestablished(conn)
-    audit(conn, "deleted", secret_name=name)
+    audit(conn, "deleted", secret_name=name, access_snapshot=audit_snapshot)
 
 
 def get_secret_policy(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
@@ -4669,36 +4747,178 @@ def resolve_secret_access(
     return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 
 
-def _require_audit_row_access(conn: Connection, row: dict[str, Any], *, user_context: Any = None) -> None:
+def _audit_access_snapshot(row: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+    delivery = _loads(row.get("delivery"))
+    if not isinstance(delivery, dict) or _AUDIT_ACCESS_SNAPSHOT_KEY not in delivery:
+        return False, None
+    snapshot = delivery.get(_AUDIT_ACCESS_SNAPSHOT_KEY)
+    if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or not isinstance(snapshot.get("resources"), list):
+        return True, None
+    return True, snapshot
+
+
+def _audit_snapshot_allows(context: Any, snapshot: dict[str, Any]) -> bool:
+    from storage import resource_access_service
+
+    resources = snapshot.get("resources")
+    if not isinstance(resources, list) or not resources:
+        return False
+    for resource in resources:
+        if not isinstance(resource, dict) or not str(resource.get("name") or "") or not str(resource.get("resource_id") or ""):
+            return False
+        policy = resource.get("policy")
+        if not (
+            resource_access_service.can_use_resource_policy_snapshot(context, policy)
+            or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
+        ):
+            return False
+    return True
+
+
+def _audit_reference_names_for_row(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    request_members: dict[str, list[str] | None],
+    grant_members: dict[str, list[str] | None],
+) -> list[str]:
+    names = {str(row.get("secret_name") or "")} - {""}
+    request_id = str(row.get("request_id") or "")
+    if request_id:
+        if request_id not in request_members:
+            request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+            request_members[request_id] = _request_member_names(dict(request_row)) if request_row is not None else None
+        members = request_members[request_id]
+        if members is None:
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        names.update(members)
+
+    grant_id = str(row.get("grant_id") or "")
+    if grant_id:
+        if grant_id not in grant_members:
+            grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+            grant_members[grant_id] = _grant_member_names(dict(grant_row)) if grant_row is not None else None
+        members = grant_members[grant_id]
+        if members is None:
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        names.update(members)
+    return sorted(names)
+
+
+def _deleted_audit_policy_snapshot(
+    conn: Connection,
+    name: str,
+    *,
+    tombstone_policies: dict[str, tuple[bool, Any]],
+) -> tuple[bool, Any]:
+    if name in tombstone_policies:
+        return tombstone_policies[name]
+    row = (
+        conn.execute(
+            select(vault_audit)
+            .where(vault_audit.c.secret_name == name, vault_audit.c.event == "deleted")
+            .order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is not None:
+        present, snapshot = _audit_access_snapshot(dict(row))
+        if present and snapshot is not None:
+            for resource in snapshot["resources"]:
+                if isinstance(resource, dict) and resource.get("name") == name:
+                    result = (True, resource.get("policy"))
+                    tombstone_policies[name] = result
+                    return result
+    result = (False, None)
+    tombstone_policies[name] = result
+    return result
+
+
+def _audit_secret_name_allowed(
+    conn: Connection,
+    name: str,
+    *,
+    context: Any,
+    access_by_name: dict[str, bool],
+    tombstone_policies: dict[str, tuple[bool, Any]],
+) -> bool:
+    from storage import resource_access_service
+
+    if name in access_by_name:
+        return access_by_name[name]
+    secret_row = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name).limit(1)).first()
+    if secret_row is not None:
+        policy = resource_access_service.get_resource_policy(
+            "vault_secret",
+            str(secret_row.id),
+            connection=conn,
+        )
+        allowed = bool(
+            resource_access_service.can_use_resource_policy_snapshot(context, policy)
+            or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
+        )
+    else:
+        has_tombstone, policy = _deleted_audit_policy_snapshot(
+            conn,
+            name,
+            tombstone_policies=tombstone_policies,
+        )
+        allowed = bool(
+            has_tombstone
+            and (
+                resource_access_service.can_use_resource_policy_snapshot(context, policy)
+                or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
+            )
+        )
+        if not has_tombstone:
+            allowed = bool(context.is_instance_owner)
+    access_by_name[name] = allowed
+    return allowed
+
+
+def _require_audit_row_access(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    user_context: Any = None,
+    request_members: dict[str, list[str] | None] | None = None,
+    grant_members: dict[str, list[str] | None] | None = None,
+    access_by_name: dict[str, bool] | None = None,
+    tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
+) -> None:
     context = resolve_resource_access_context(user_context)
     if context.is_trusted_local:
         return
 
-    covered_names: set[str] = set()
-    request_id = str(row.get("request_id") or "")
-    if request_id:
-        request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
-        if request_row is None:
+    snapshot_present, snapshot = _audit_access_snapshot(row)
+    if snapshot_present:
+        if snapshot is None or not _audit_snapshot_allows(context, snapshot):
             raise VaultSecretAccessError("Vault secret access is not permitted.")
-        request_dict = dict(request_row)
-        _require_request_secret_access(conn, request_dict, user_context=context)
-        covered_names.update(_request_member_names(request_dict))
+        return
 
-    grant_id = str(row.get("grant_id") or "")
-    if grant_id:
-        grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
-        if grant_row is None:
-            raise VaultSecretAccessError("Vault secret access is not permitted.")
-        grant_dict = dict(grant_row)
-        _require_grant_secret_access(conn, grant_dict, user_context=context)
-        covered_names.update(_grant_member_names(grant_dict))
-
-    direct_name = str(row.get("secret_name") or "")
-    if direct_name and direct_name not in covered_names:
-        _require_secret_names_access(conn, [direct_name], user_context=context)
-        covered_names.add(direct_name)
-    if not covered_names and not context.is_instance_owner:
+    names = _audit_reference_names_for_row(
+        conn,
+        row,
+        request_members=request_members if request_members is not None else {},
+        grant_members=grant_members if grant_members is not None else {},
+    )
+    if not names:
+        if context.is_instance_owner:
+            return
         raise VaultSecretAccessError("Vault secret access is not permitted.")
+    name_access = access_by_name if access_by_name is not None else {}
+    tombstones = tombstone_policies if tombstone_policies is not None else {}
+    for name in names:
+        if not _audit_secret_name_allowed(
+            conn,
+            name,
+            context=context,
+            access_by_name=name_access,
+            tombstone_policies=tombstones,
+        ):
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
 
 
 def list_audit(
@@ -4709,19 +4929,58 @@ def list_audit(
     user_context: Any = None,
 ) -> list[dict[str, Any]]:
     context = resolve_resource_access_context(user_context)
-    query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
-    if secret_name is not None:
-        query = query.where(vault_audit.c.secret_name == secret_name)
+    requested_limit = max(0, limit)
+    if requested_limit == 0:
+        return []
     if context.is_trusted_local:
-        query = query.limit(limit)
-    rows = [dict(row) for row in conn.execute(query).mappings()]
-    if not context.is_trusted_local:
-        accessible_rows: list[dict[str, Any]] = []
-        for row in rows:
+        query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
+        if secret_name is not None:
+            query = query.where(vault_audit.c.secret_name == secret_name)
+        rows = [dict(row) for row in conn.execute(query.limit(requested_limit)).mappings()]
+        return [_audit_public_row(row) for row in rows]
+
+    batch_size = max(
+        _REMOTE_AUDIT_MIN_BATCH_SIZE,
+        min(_REMOTE_AUDIT_MAX_BATCH_SIZE, requested_limit * 2),
+    )
+    accessible_rows: list[dict[str, Any]] = []
+    cursor: tuple[str, str] | None = None
+    request_members: dict[str, list[str] | None] = {}
+    grant_members: dict[str, list[str] | None] = {}
+    access_by_name: dict[str, bool] = {}
+    tombstone_policies: dict[str, tuple[bool, Any]] = {}
+    while len(accessible_rows) < requested_limit:
+        query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
+        if secret_name is not None:
+            query = query.where(vault_audit.c.secret_name == secret_name)
+        if cursor is not None:
+            cursor_ts, cursor_id = cursor
+            query = query.where(
+                or_(
+                    vault_audit.c.ts < cursor_ts,
+                    and_(vault_audit.c.ts == cursor_ts, vault_audit.c.id < cursor_id),
+                )
+            )
+        batch = [dict(row) for row in conn.execute(query.limit(batch_size)).mappings()]
+        if not batch:
+            break
+        cursor = (str(batch[-1]["ts"]), str(batch[-1]["id"]))
+        for row in batch:
             try:
-                _require_audit_row_access(conn, row, user_context=context)
+                _require_audit_row_access(
+                    conn,
+                    row,
+                    user_context=context,
+                    request_members=request_members,
+                    grant_members=grant_members,
+                    access_by_name=access_by_name,
+                    tombstone_policies=tombstone_policies,
+                )
             except VaultSecretAccessError:
                 continue
             accessible_rows.append(row)
-        rows = accessible_rows[:limit]
-    return rows
+            if len(accessible_rows) >= requested_limit:
+                break
+        if len(batch) < batch_size:
+            break
+    return [_audit_public_row(row) for row in accessible_rows]

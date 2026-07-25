@@ -593,6 +593,47 @@ def _policy_allows(context: ResourceUserContext, policy: Mapping[str, Any] | Non
     return False
 
 
+def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
+    if context.is_trusted_local:
+        return True
+    if policy is None:
+        return context.is_instance_owner
+    owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
+    if owner_user_id and context.subject and owner_user_id == context.subject:
+        return True
+    return bool(
+        context.is_active_organization_member
+        and context.organization_id == _clean_optional_string(policy.get("organization_id"))
+        and context.organization_role in {"owner", "admin"}
+    )
+
+
+def can_use_resource_policy_snapshot(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    """Evaluate a server-owned policy snapshot for immutable history."""
+
+    context = _as_context(user_context)
+    if policy is not None and not isinstance(policy, Mapping):
+        return False
+    group_ids = policy.get("group_ids") if policy is not None else []
+    if not isinstance(group_ids, (list, tuple, set, frozenset)):
+        return False
+    return _policy_allows(context, policy, [str(group_id) for group_id in group_ids])
+
+
+def can_manage_resource_policy_snapshot(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    """Evaluate management access from a server-owned policy snapshot."""
+
+    if policy is not None and not isinstance(policy, Mapping):
+        return False
+    return _policy_allows_management(_as_context(user_context), policy)
+
+
 def can_use_resource(
     user_context: ResourceUserContext | Mapping[str, Any] | None,
     resource_kind: str,
@@ -623,16 +664,7 @@ def can_manage_resource_acl(
         return True
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
-    if policy is None:
-        return context.is_instance_owner
-    owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
-    if owner_user_id and context.subject and owner_user_id == context.subject:
-        return True
-    return bool(
-        context.is_active_organization_member
-        and context.organization_id == _clean_optional_string(policy.get("organization_id"))
-        and context.organization_role in {"owner", "admin"}
-    )
+    return _policy_allows_management(context, policy)
 
 
 def _row_resource_id(row: Any) -> str | None:

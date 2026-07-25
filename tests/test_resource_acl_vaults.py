@@ -24,15 +24,17 @@ def _context(
     subject: str,
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
+    role: str = "member",
+    instance_role: str = "viewer",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
         email=f"{subject}@example.com",
         organization_id="org-1",
         organization_member_id=f"member-{subject}",
-        organization_role="member",
+        organization_role=role,
         group_ids=group_ids,
-        instance_role="viewer",
+        instance_role=instance_role,
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -261,6 +263,51 @@ def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vaul
     assert [row["event"] for row in visible] == ["member-visible"]
     assert owner_request["id"] not in json.dumps(visible)
     assert owner_grant["id"] not in json.dumps(visible)
+
+
+def test_deleted_secret_audit_history_uses_acl_tombstone_without_exposing_it(vault) -> None:
+    owner = _context("member-1")
+    admin = _context("admin-1", role="admin")
+    outsider = _context("member-2")
+    with vault.begin() as conn:
+        _create_secret(conn, "DELETED_AUDIT", protection="protected")
+        _set_policy(conn, "DELETED_AUDIT", access_level="private", owner_user_id="member-1")
+        vault_service.audit(conn, "before-delete", secret_name="DELETED_AUDIT")
+        vault_service.delete_secret(conn, "DELETED_AUDIT", user_context=admin)
+
+        owner_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=owner)
+        admin_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=admin)
+        outsider_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=outsider)
+
+    expected_events = {"before-delete", "deleted"}
+    assert expected_events <= {row["event"] for row in owner_rows}
+    assert expected_events <= {row["event"] for row in admin_rows}
+    assert outsider_rows == []
+    assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(owner_rows)
+    assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(admin_rows)
+
+
+def test_remote_audit_uses_bounded_keyset_batches_until_limit_is_visible(vault, monkeypatch) -> None:
+    member = _context("member-1")
+    monkeypatch.setattr(vault_service, "_REMOTE_AUDIT_MIN_BATCH_SIZE", 2)
+    monkeypatch.setattr(vault_service, "_REMOTE_AUDIT_MAX_BATCH_SIZE", 2)
+    with vault.begin() as conn:
+        _create_secret(conn, "BATCH_VISIBLE")
+        _create_secret(conn, "BATCH_HIDDEN")
+        _set_policy(conn, "BATCH_VISIBLE", access_level="public")
+        _set_policy(conn, "BATCH_HIDDEN", access_level="private")
+        vault_service.audit(conn, "batch-visible", secret_name="BATCH_VISIBLE")
+        for index in range(5):
+            vault_service.audit(
+                conn,
+                f"batch-hidden-{index}",
+                secret_name="BATCH_HIDDEN",
+            )
+
+        visible = vault_service.list_audit(conn, limit=1, user_context=member)
+
+    assert [row["event"] for row in visible] == ["batch-visible"]
+    assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(visible)
 
 
 def test_vault_api_grant_and_audit_endpoints_use_current_resource_context(vault, monkeypatch) -> None:
