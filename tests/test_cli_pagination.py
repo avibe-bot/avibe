@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import shlex
 
 from config import paths
+from core.system_prompt_injection import build_system_prompt_injection
+from modules.im.base import MessageContext
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import cli
 
@@ -30,6 +34,27 @@ def _iter_command_parsers(parser, path=()):
             child_path = (*path, name)
             yield child_path, child
             yield from _iter_command_parsers(child, child_path)
+
+
+def _prompt_command_parser(command: str):
+    tokens = shlex.split(command)
+    assert tokens[0] == "vibe"
+    parser = cli.build_parser()
+    path: list[str] = []
+    for token in tokens[1:]:
+        subparsers = next(
+            (
+                action
+                for action in parser._actions
+                if isinstance(action, argparse._SubParsersAction)
+            ),
+            None,
+        )
+        if subparsers is None or token not in subparsers.choices:
+            break
+        parser = subparsers.choices[token]
+        path.append(token)
+    return parser, tuple(path)
 
 
 def test_all_collection_commands_share_bounded_pagination_contract() -> None:
@@ -60,6 +85,32 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         assert "--page" in flags, path
         assert "--limit" in flags, path
         assert "--all" not in flags, path
+
+
+def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
+    context = MessageContext(
+        user_id="user",
+        channel_id="channel",
+        platform="avibe",
+        platform_specific={"agent_session_id": "ses-test"},
+    )
+    prompt = build_system_prompt_injection(context=context)
+    commands = re.findall(r"`(vibe [^`\n]+)`", prompt)
+    checked_commands = 0
+
+    for command in commands:
+        mentioned_flags = set(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command))
+        if not mentioned_flags:
+            continue
+        parser, path = _prompt_command_parser(command)
+        unsupported_flags = mentioned_flags - _parser_flags(parser)
+        assert not unsupported_flags, (
+            f"Injected command {command!r} uses flags unsupported by "
+            f"{' '.join(('vibe', *path))}: {sorted(unsupported_flags)}"
+        )
+        checked_commands += 1
+
+    assert checked_commands >= 20
 
 
 def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> None:
