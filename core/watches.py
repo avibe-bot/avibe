@@ -1165,7 +1165,7 @@ class ManagedWatchService:
         worker_marker = new_process_identity_marker()
         spawn_env = process_identity_subprocess_env(worker_marker)
         process = await asyncio.create_subprocess_exec(
-            os.fspath(Path(sys.executable).resolve()),
+            os.path.abspath(sys.executable),
             os.fspath(Path(watch_worker.__file__).resolve()),
             cwd=spawn_cwd,
             env=spawn_env,

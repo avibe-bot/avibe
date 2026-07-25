@@ -248,7 +248,7 @@ def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) 
 
     assert result.exit_code == 0
     assert captured["args"] == (
-        str(Path(sys.executable).resolve()),
+        os.path.abspath(sys.executable),
         str(Path(watch_worker.__file__).resolve()),
     )
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE
@@ -304,7 +304,7 @@ def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch)
 
     assert result.exit_code == 0
     assert captured["args"] == (
-        str(Path(sys.executable).resolve()),
+        os.path.abspath(sys.executable),
         str(Path(watch_worker.__file__).resolve()),
     )
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE

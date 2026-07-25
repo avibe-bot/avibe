@@ -5,10 +5,14 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, BinaryIO
+
+import psutil
 
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
 WATCH_WORKER_PROTOCOL_VERSION = 1
@@ -136,7 +140,47 @@ def _forward_stream(source: BinaryIO, target: BinaryIO) -> None:
         target.flush()
 
 
+def _handle_posix_termination(_signal_number: int, _frame: Any) -> None:
+    # The signal is delivered to the entire process group. The command should
+    # decide whether to exit; the supervisor must remain for forced escalation.
+    return None
+
+
+def _install_posix_supervisor_signal_handlers() -> None:
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, _handle_posix_termination)
+
+
+def _posix_process_group_has_other_members() -> bool:
+    if os.name == "nt":
+        return False
+    own_pid = os.getpid()
+    try:
+        own_pgid = os.getpgrp()
+        processes = psutil.process_iter(["pid"])
+        for process in processes:
+            pid = process.info.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == own_pid:
+                continue
+            try:
+                if os.getpgid(pid) == own_pgid:
+                    return True
+            except (ProcessLookupError, PermissionError, psutil.Error):
+                continue
+    except (OSError, psutil.Error):
+        # Fail closed: retaining the supervisor is safer than orphaning an
+        # unverified descendant and clearing its persisted recovery identity.
+        return True
+    return False
+
+
+def _wait_for_posix_process_group_exit() -> None:
+    while _posix_process_group_has_other_members():
+        time.sleep(0.1)
+
+
 def _run_watch_worker() -> int:
+    _install_posix_supervisor_signal_handlers()
     # The handle must stay open for the supervisor lifetime so Windows keeps
     # every descendant in the kill-on-close job.
     _job_handle = _install_windows_kill_on_close_job()
@@ -171,6 +215,7 @@ def _run_watch_worker() -> int:
     return_code = process.wait()
     stdout_thread.join()
     stderr_thread.join()
+    _wait_for_posix_process_group_exit()
     return return_code
 
 
@@ -181,6 +226,8 @@ def main() -> int:
         print(f"watch worker supervisor failed: {exc}", file=sys.stderr, flush=True)
         return 1
 
+    if os.name == "nt":
+        return return_code
     if os.name != "nt" and return_code < 0:
         signal_number = -return_code
         os.kill(os.getpid(), signal_number)

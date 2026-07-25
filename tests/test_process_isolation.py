@@ -85,7 +85,7 @@ def test_process_identity_survives_exec_transition() -> None:
     async def _run() -> None:
         marker = new_process_identity_marker()
         process = await asyncio.create_subprocess_exec(
-            str(Path(sys.executable).resolve()),
+            os.path.abspath(sys.executable),
             str(Path(watch_worker.__file__).resolve()),
             env=process_identity_subprocess_env(marker),
             stdin=asyncio.subprocess.PIPE,
