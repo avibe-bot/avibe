@@ -6929,7 +6929,9 @@ async def _memory_internal_response(call: Callable[[], Any]) -> Response:
 def _memory_settings_payload() -> dict:
     from config.v2_config import memory_config_to_payload
 
-    return memory_config_to_payload(V2Config.load().memory)
+    # Tag the response, not `memory_config_to_payload` itself: the same helper
+    # feeds the persisted config, which must stay free of result envelopes.
+    return {**memory_config_to_payload(V2Config.load().memory), "status": "ok"}
 
 
 def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
@@ -7083,6 +7085,7 @@ async def memory_settings_patch(starlette_request: FastAPIRequest):
 
         payload = memory_config_to_payload(saved.memory)
         payload["runtime"] = runtime_payload
+        payload["status"] = "ok"
         return _memory_response(payload)
 
     return await _dispatch_native_ui_request(starlette_request, handler)

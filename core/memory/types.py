@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import json
 from typing import Literal, TypeAlias
 
+from core.memory.presentation import MemoryStatusBuckets
+
 
 MemoryKind = Literal["profile", "episode", "fact"]
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
@@ -200,6 +202,12 @@ class MemoryStatus:
     processing_fault_since: str | None = None
     processing_alert_active: bool = False
     error: MemoryErrorCode | None = None
+    # Derived once from the counters above so every surface renders the same
+    # six numbers; the raw counters stay published for callers that need them.
+    buckets: MemoryStatusBuckets = MemoryStatusBuckets()
+    # Discriminates a status body from the ``{"status": "failed"}`` envelope the
+    # same routes return, matching every other result type in this module.
+    status: Literal["ok"] = "ok"
 
 
 @dataclass(frozen=True)

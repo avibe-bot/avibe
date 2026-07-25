@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from config import paths
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
+from core.memory.presentation import memory_status_buckets
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryMeta,
@@ -578,16 +579,20 @@ class MemoryModule:
         stats: QueueStats,
         error: MemoryErrorCode | None = None,
     ) -> MemoryStatus:
+        counters = {
+            "pending": stats.pending,
+            "processing": stats.processing,
+            "awaiting_receipt": stats.awaiting_receipt,
+            "succeeded": stats.succeeded,
+            "receipt_unknown": stats.receipt_unknown,
+            "distill_failed": stats.distill_failed,
+            "dead": stats.dead,
+            "missed": meta.missed_count if meta is not None else 0,
+        }
         return MemoryStatus(
             state=state,
-            pending=stats.pending,
-            processing=stats.processing,
-            awaiting_receipt=stats.awaiting_receipt,
-            succeeded=stats.succeeded,
-            receipt_unknown=stats.receipt_unknown,
-            distill_failed=stats.distill_failed,
-            dead=stats.dead,
-            missed=meta.missed_count if meta is not None else 0,
+            **counters,
+            buckets=memory_status_buckets(counters),
             queue_plaintext_bytes=stats.queue_plaintext_bytes,
             provider_disk_bytes=await asyncio.to_thread(self._provider_disk_bytes),
             last_success_at=meta.last_success_at if meta is not None else None,

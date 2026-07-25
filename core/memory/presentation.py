@@ -8,12 +8,18 @@ from typing import Mapping
 
 @dataclass(frozen=True)
 class MemoryStatusBuckets:
-    syncing: int
-    succeeded: int
-    unknown: int
-    failed: int
-    dead: int
-    missed: int
+    """The six counts every Memory status surface renders.
+
+    Carried on ``MemoryStatus`` so the UI reads the same buckets the CLI does
+    instead of re-deriving the rule per language.
+    """
+
+    syncing: int = 0
+    succeeded: int = 0
+    unknown: int = 0
+    failed: int = 0
+    dead: int = 0
+    missed: int = 0
 
 
 def memory_status_buckets(payload: Mapping[str, object]) -> MemoryStatusBuckets:

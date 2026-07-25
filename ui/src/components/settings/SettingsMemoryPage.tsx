@@ -38,7 +38,6 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memoryStatusBuckets } from '../../lib/memoryStatus';
 import { buildEndpointPatch, draftFromConfig, memorySetupStage } from '../../lib/memorySettings';
 import type { EndpointDraft } from '../../lib/memorySettings';
 
@@ -73,16 +72,11 @@ const isForbiddenResult = (value: unknown): boolean =>
   (value as { status?: string; error?: string }).status === 'failed' &&
   (value as { status?: string; error?: string }).error === 'memory_disabled';
 
-const isSettingsSuccess = (value: unknown): value is MemorySettings =>
-  !!value && typeof value === 'object' && typeof (value as { enabled?: unknown }).enabled === 'boolean';
-
-const isStatusSuccess = (value: unknown): value is MemoryStatus =>
-  !!value && typeof value === 'object' && typeof (value as { state?: unknown }).state === 'string';
-
-const isItemsSuccess = (
-  value: unknown,
-): value is { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null } =>
-  !!value && typeof value === 'object' && (value as { status?: string }).status === 'ok';
+// Every Memory route body is discriminated: `status: 'ok'` on success, `status: 'failed'` with a
+// closed error code otherwise. A dependency-missing failure from the internal handler carries only
+// `error`, so require the tag rather than merely rejecting 'failed'.
+const isMemoryOk = <T,>(value: T): value is Extract<T, { status: 'ok' }> =>
+  !!value && typeof value === 'object' && (value as { status?: unknown }).status === 'ok';
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—';
@@ -232,7 +226,7 @@ const StatusPanel: React.FC<{
   }
   if (!status) return null;
 
-  const buckets = memoryStatusBuckets(status);
+  const buckets = status.buckets;
   const stats: Array<{ key: string; label: string; value: React.ReactNode; description?: string }> = [
     {
       key: 'syncing',
@@ -470,7 +464,7 @@ const ProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
     setError(null);
     try {
       const res = await api.getMemoryProfile();
-      if (isItemsSuccess(res)) {
+      if (isMemoryOk(res)) {
         // Only a SUCCESSFUL response is the benign Provider-A case: `profile_warning:'empty'`
         // (or simply zero items) renders as the graceful "not available"/empty copy.
         setItems(res.items);
@@ -559,7 +553,7 @@ const SearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
     setError(null);
     try {
       const res = await api.searchMemory(trimmed, 20);
-      if (isItemsSuccess(res)) {
+      if (isMemoryOk(res)) {
         setItems(res.items);
       } else {
         setItems([]);
@@ -698,7 +692,7 @@ const SettingsPanel: React.FC<{
         return;
       }
       const res = await api.saveMemorySettings(patch);
-      if (isSettingsSuccess(res)) {
+      if (isMemoryOk(res)) {
         onSaved(res);
         showToast(t('memory.settings.saved'), 'success');
       } else {
@@ -831,7 +825,7 @@ export const SettingsMemoryPage: React.FC = () => {
       const res = await api.getMemorySettings();
       if (isForbiddenResult(res)) {
         setRemoteUnavailable(true);
-      } else if (isSettingsSuccess(res)) {
+      } else if (isMemoryOk(res)) {
         setSettings(res);
         setSettingsError(null);
       } else {
@@ -849,7 +843,7 @@ export const SettingsMemoryPage: React.FC = () => {
       const res = await api.getMemoryStatus();
       if (isForbiddenResult(res)) {
         setRemoteUnavailable(true);
-      } else if (isStatusSuccess(res)) {
+      } else if (isMemoryOk(res)) {
         setStatus(res);
         setStatusError(null);
       } else {

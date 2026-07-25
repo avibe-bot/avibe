@@ -1491,6 +1491,7 @@ export type MemoryProcessingConfig = {
 };
 
 export type MemorySettings = {
+  status: 'ok';
   enabled: boolean;
   processing: MemoryProcessingConfig;
 };
@@ -1527,8 +1528,21 @@ export type MemoryStatusState =
   | 'clearing'
   | 'error';
 
+// The six display buckets the backend derives from the counters below, so this
+// rule lives in exactly one place (`core/memory/presentation.py`).
+export type MemoryStatusBuckets = {
+  syncing: number;
+  succeeded: number;
+  unknown: number;
+  failed: number;
+  dead: number;
+  missed: number;
+};
+
 export type MemoryStatus = {
+  status: 'ok';
   state: MemoryStatusState;
+  buckets: MemoryStatusBuckets;
   pending: number;
   processing: number;
   awaiting_receipt: number;
