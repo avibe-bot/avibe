@@ -8,6 +8,7 @@ capability:
     - tests/test_scheduled_tasks.py
     - tests/test_dispatcher_stream_chunk.py
     - tests/test_message_dispatcher_result_fallback.py
+    - tests/test_agent_stop_settlement.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -258,6 +259,41 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_sweep_skips_hold_class_when_live_session_turns_are_unknown
+  - id: HFR-036
+    name: a stop's synthetic result records no run terminal
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_stop_output_release_names_the_stop_and_records_no_run_terminal
+  - id: HFR-037
+    name: a stopped run settles canceled rather than succeeded
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_stopped_run_settles_canceled_not_succeeded
+  - id: HFR-038
+    name: stop output ends the turn while preserving the request's output policy
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_stop_output_ends_the_turn_without_owning_the_run
+  - id: HFR-039
+    name: a backend's live stop path emits stop semantics
+    status: covered
+    kind: failure
+    layer: contract
+    backend: codex
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_codex_stop_emits_stop_semantics
+  - id: HFR-040
+    name: no backend stop may use the terminal-turn default
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_no_backend_stop_uses_the_terminal_turn_default
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -263,11 +263,22 @@ class ConsolidatedMessageDispatcher:
     def _turn_release_settlement(output_semantics) -> str:
         """Which settlement a terminal-result release records on the turn sink.
 
-        ``settles_run`` means this output's own writer owns the run's terminal state
-        (``_record_agent_run_terminal_result`` runs right before the release), which
-        is the honest ``terminal_result``. Without it the run belongs to somebody
-        else — the requeued Activity behind a delivery failure — and this turn must
-        not settle it at all."""
+        An output may NAME its settlement, and that always wins: the emit knows why
+        it exists, and only it can. The live case is the synthetic terminal result a
+        user stop emits (``stop_output_for``) — an empty body that ends the turn while
+        the run was *called off*, so it must read ``stopped`` and let the stop's own
+        writer settle the row ``canceled``. Deriving the reason from ``settles_run``
+        alone would label it ``turn_only_result``, which is in no settlement map, and
+        the run would be left ``running`` for the sweep to relabel ``orphaned``.
+
+        Otherwise ``settles_run`` decides: it means this output's own writer owns the
+        run's terminal state (``_record_agent_run_terminal_result`` runs right before
+        the release), which is the honest ``terminal_result``. Without it the run
+        belongs to somebody else — the requeued Activity behind a delivery failure —
+        and this turn must not settle it at all."""
+        explicit = str(getattr(output_semantics, "settled_by", None) or "").strip()
+        if explicit:
+            return explicit
         return (
             SETTLED_BY_TERMINAL_RESULT
             if getattr(output_semantics, "settles_run", True)

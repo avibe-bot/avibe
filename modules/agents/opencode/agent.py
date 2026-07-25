@@ -16,7 +16,7 @@ from typing import Dict, Optional
 
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
-from core.message_output import terminal_output_for
+from core.message_output import stop_output_for, terminal_output_for
 from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
@@ -546,12 +546,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # user-facing message: a single SILENT result settles the dot to idle +
         # releases the SSE waiter through the outbound chokepoint without a bubble
         # (``level="silent"`` makes that explicit rather than faking it via empty text).
+        # ``stop_output_for`` (not the terminal-turn default) keeps this empty body out
+        # of the run's terminal state so the stop settles it ``canceled`` instead of
+        # ``succeeded`` — see its docstring.
         await self.controller.emit_agent_message(
             request.context,
             "result",
             "",
             level="silent",
-            output=terminal_output_for(request),
+            output=stop_output_for(request),
         )
         logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
         return True

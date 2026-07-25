@@ -239,4 +239,25 @@ observations:
       the gate, run ids for ownership and deliverability -- and a caller that
       cannot enumerate them must fail closed by disabling the class rather than
       guessing.
+  - id: HFR-OBS-021
+    result: confirmed
+    detail: >-
+      A synthetic terminal result is not evidence of a result. Every backend answers
+      an acknowledged stop with an empty silent ``result`` so the dot settles and the
+      SSE waiter closes through the one outbound chokepoint, and all three sent it
+      with the terminal-turn default (completes_run=True). The dispatcher therefore
+      recorded that empty body as the run's ``succeeded`` terminal BEFORE the stop's
+      own guarded write, so first-writer-wins reported every normally-stopped run as
+      a success and left the ``stopped`` -> ``canceled`` mapping reachable only when
+      the backend could not emit at all (stop_failed, stale release, IM /stop). The
+      earlier design accepted this race as benign because either outcome is "true of
+      a run the user stopped"; that was wrong, because the ordering is not a race at
+      all -- SessionTurnManager.cancel awaits the interrupt (which emits) and only
+      then cancels the task, so the losing branch was the ONLY branch. Correcting it
+      means the stop output declaring what it is: completes_turn=True so the turn
+      still ends, completes_run=False so an empty body never becomes a terminal
+      status, and an explicit settled_by so "I do not settle the run" is not confused
+      with the Activity case where somebody else genuinely owns the row. Where an
+      identical emit is copied across backends, the guard has to be cross-backend too
+      -- one behavior test pins one backend and lets the other two regress.
 

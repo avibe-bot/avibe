@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from config.v2_settings import make_thread_native_id
+from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_output import stop_output_for
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
@@ -2378,6 +2380,62 @@ def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(
     assert kept["completed_at"] is None
     assert not kept["error"]
     assert not (kept["metadata"] or {}).get("interrupt_reason")
+
+
+def test_a_stopped_run_settles_canceled_not_succeeded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-037: pressing End on a live run must report ``canceled``, not success.
+
+    The backend answers an acknowledged stop with an empty silent ``result``. Sent
+    with the terminal-turn default that output claimed the run and recorded the empty
+    body as ``succeeded``; since it writes before the stop's own guarded write,
+    first-writer-wins made every normally-stopped run read as a success and left
+    round 5's ``canceled`` mapping unreachable on the path that actually runs.
+
+    The stamp here is derived from the production helpers rather than written as a
+    literal, so changing either the stop output's lifecycle or the release-reason
+    rule fails this test instead of silently reverting the behavior.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="a long build the user gives up on",
+        agent_name="codex",
+    )
+
+    stop_semantics = stop_output_for(None)
+    # A stop must not own the run's terminal state...
+    assert stop_semantics.settles_run is False
+    # ...but must still end the turn, so the dot settles and the SSE waiter closes.
+    assert stop_semantics.completes_turn is True
+
+    async def _stop_the_turn(controller, context, _message) -> None:
+        sink = controller.get_turn_sink(controller._get_session_key(context))
+        assert sink is not None
+        sink["settled_by"] = ConsolidatedMessageDispatcher._turn_release_settlement(
+            stop_semantics
+        )
+
+    controller = _SettlementControllerDouble(on_turn=_stop_the_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    stopped = request_store.get_run(request.id)
+    assert stopped is not None
+    # Called off, not broken, and not a success: the closed vocabulary's ``canceled``.
+    assert stopped["status"] == "canceled"
+    assert stopped["completed_at"] is not None
+    assert stopped["error"]
+    assert stopped["metadata"]["interrupt_reason"] == SETTLED_BY_STOPPED
 
 
 def test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn(

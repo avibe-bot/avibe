@@ -9,10 +9,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
-from core.message_output import MessageOutput
+from core.message_output import MessageOutput, stop_output_for
 from core.run_settlement import (
+    SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENT_TERMINAL_STATUS,
     SETTLEMENTS_WITHOUT_RESULT,
 )
 from modules.im import MessageContext
@@ -346,7 +348,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.mark_turn_complete = mock.Mock()
         return controller
 
-    async def _emit_silent_terminal(self, controller, *, completes_run: bool):
+    async def _emit_silent_terminal(self, controller, *, completes_run: bool, output=None):
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()
         dispatcher._clear_consolidated_state = mock.AsyncMock()
@@ -366,7 +368,8 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             "result",
             "",
             level="silent",
-            output=MessageOutput(completes_turn=True, completes_run=completes_run),
+            output=output
+            or MessageOutput(completes_turn=True, completes_run=completes_run),
         )
         return dispatcher, context
 
@@ -404,6 +407,35 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             settled_by=SETTLED_BY_TERMINAL_RESULT,
         )
         dispatcher._record_agent_run_terminal_result.assert_called_once()
+
+    async def test_stop_output_release_names_the_stop_and_records_no_run_terminal(self):
+        """HFR-036: the synthetic result a user stop emits must NOT record the run.
+
+        Every backend answers an acknowledged stop with an empty silent ``result``.
+        Sent with the terminal-turn default it recorded that empty body as the run's
+        ``succeeded`` terminal — and because that write lands before the stop's own
+        guarded write, first-writer-wins reported a user-ended run as a success. The
+        stop output must therefore claim no run terminal AND still name ``stopped``,
+        so the settlement lanes reach the writer that maps it to ``canceled``.
+        Deriving the reason from ``settles_run`` alone would say ``turn_only_result``,
+        which no lane may settle, and the row would be left ``running``.
+        """
+        controller = self._terminal_lifecycle_controller()
+
+        dispatcher, context = await self._emit_silent_terminal(
+            controller,
+            completes_run=False,
+            output=stop_output_for(None),
+        )
+
+        controller.mark_turn_complete.assert_called_once_with(
+            context,
+            settled_by=SETTLED_BY_STOPPED,
+        )
+        # A settlement the lanes MAY act on — unlike ``turn_only_result``.
+        self.assertIn(SETTLED_BY_STOPPED, SETTLEMENTS_WITHOUT_RESULT)
+        self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_STOPPED], "canceled")
+        dispatcher._record_agent_run_terminal_result.assert_not_called()
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()

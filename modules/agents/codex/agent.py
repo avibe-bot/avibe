@@ -18,7 +18,7 @@ from config.v2_config import (
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
-from core.message_output import terminal_output_for
+from core.message_output import stop_output_for, terminal_output_for
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
@@ -335,12 +335,15 @@ class CodexAgent(BaseAgent):
             # bubble. The user already knows they stopped it (avibe shows the dot go
             # idle; IM shows the ack reaction removed above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
+            # ``stop_output_for`` (not the terminal-turn default) keeps this empty body
+            # out of the run's terminal state so the stop settles it ``canceled``
+            # instead of ``succeeded`` — see its docstring.
             await self.controller.emit_agent_message(
                 request.context,
                 "result",
                 "",
                 level="silent",
-                output=terminal_output_for(request),
+                output=stop_output_for(request),
             )
             logger.info("Codex turn %s interrupted via /stop", turn_id)
             return True

@@ -855,6 +855,57 @@ live fact must never be read as "nothing is live".
 | M27 drop the `busy_session_ids` exemption on the hold branch (finding P2b) | KILLED (HFR-034) |
 | M28 drop the caller's fail-closed `hold_ttl_seconds = 0` | KILLED (HFR-035) |
 
+### 5.10 Review round 8 (avibe-bot/avibe#1005) — a stop's empty result is not a success
+
+**P1 — every normally-stopped run was reported as `succeeded` (HFR-037).**
+§5.7 gave a user stop the `canceled` terminal it deserves, and recorded in
+`settle_bound_turn_sink` that if the backend's own terminal result landed first the row
+would keep `succeeded` — judged benign, because either reading is "true of a run the
+user stopped". That was wrong twice over.
+
+First, it is not a race. `SessionTurnManager.cancel` awaits `handle_stop`, every backend
+answers an acknowledged stop by emitting an empty silent `result`
+(`modules/agents/codex/agent.py:343`, `modules/agents/claude_agent.py:568`,
+`modules/agents/opencode/agent.py:554`), and only then does `cancel` call
+`turn.task.cancel()`. The emit therefore *always* precedes the stop settlement, so the
+branch dismissed as the unlucky one was the only branch that ever ran: `canceled` was
+reachable in production only when the backend could not emit at all (`stop_failed`, the
+stale-release path, an IM `/stop` with no live turn).
+
+Second, `succeeded` is not true. The row's terminal status is not "did the process
+stop cleanly" but "did this run produce its result", and the body here is empty
+precisely because nobody produced one. A user who ends a run and finds it filed as a
+success has been told the opposite of what happened, and a success counter agrees.
+
+The fix is the same principle as §5.8: the emit knows what it is, so it says so.
+`stop_output_for` (shared, one place) sends the stop with `completes_turn=True` — the
+turn really did end, the dot settles, the SSE waiter closes — and `completes_run=False`,
+so an empty body never becomes a terminal status. On its own that would read as
+`turn_only_result` (§5.8's Activity case, where another owner genuinely holds the row)
+and strand the run `running` until the sweep called it `orphaned`; so the output also
+carries an explicit `settled_by=stopped`, and `_turn_release_settlement` now lets a
+named settlement win over anything it would infer. Both lanes then reach the writer
+that already maps `stopped` to `canceled` with `interrupt_reason=stopped` — no new
+status logic, no duplicated i18n. `settle_bound_turn_sink` stays exactly as it was: a
+fallback for the stop that gets no emit at all.
+
+Built with `dataclasses.replace`, so a request carrying its own output policy (Activity
+lineage, an explicit `run_id`) keeps it and only the lifecycle is overridden.
+
+The defect was copied verbatim into three backends, which is what HFR-040 is for: it
+asserts on the terminal emit inside *every* `handle_stop`, so a fourth backend reaching
+for `terminal_output_for` in its stop path fails a test instead of silently reporting
+stopped runs as successes. (`notify` emits on the refusal paths are excluded — they
+settle nothing and return `False`.)
+
+| Mutation | Verdict |
+| --- | --- |
+| M29 stop output back to `completes_run=True` (the reported bug) | KILLED (HFR-036, HFR-037) |
+| M30 drop the explicit-settlement override in `_turn_release_settlement` | KILLED (HFR-036, HFR-037) |
+| M31 revert the stop emit to `terminal_output_for` — codex | KILLED (HFR-039, HFR-040) |
+| M31 revert the stop emit to `terminal_output_for` — claude | KILLED (HFR-040) |
+| M31 revert the stop emit to `terminal_output_for` — opencode | KILLED (HFR-040) |
+
 ## 6. Staging
 
 - **PR-A (Gap A)** — §3.1–3.4. Small, no new config, no sweep. Independently
