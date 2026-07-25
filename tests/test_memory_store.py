@@ -489,3 +489,74 @@ def test_store_rejects_a_symlinked_state_component_before_creating_external_file
         MemoryStore()
 
     assert not external.exists()
+
+
+@pytest.mark.parametrize("loses_race_at", ["chmod", "mode_verification"])
+def test_store_tolerates_a_sidecar_deleted_while_modes_are_enforced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    loses_race_at: str,
+) -> None:
+    """A peer connection checkpointing away the shm file is not a store failure."""
+
+    store = MemoryStore(_store_path(tmp_path / f"sidecar-race-{loses_race_at}"))
+    sidecar = store.path.with_name(f"{store.path.name}-shm")
+    sidecar.touch()
+    real_chmod = os.chmod
+    races: list[str] = []
+
+    def racing_chmod(path, mode, *args, **kwargs):
+        if Path(path) != sidecar:
+            return real_chmod(path, mode, *args, **kwargs)
+        races.append(loses_race_at)
+        if loses_race_at == "chmod":
+            sidecar.unlink()
+            return real_chmod(path, mode, *args, **kwargs)
+        result = real_chmod(path, mode, *args, **kwargs)
+        sidecar.unlink()
+        return result
+
+    monkeypatch.setattr(os, "chmod", racing_chmod)
+
+    assert store.ensure_meta() is not None
+    assert races, "the sidecar race never fired, so no benign ENOENT was exercised"
+
+
+def test_store_keeps_sidecar_checks_strict_for_files_that_do_exist(tmp_path: Path) -> None:
+    """Tolerating a vanished sidecar must not weaken the checks on a present one."""
+
+    store = MemoryStore(_store_path(tmp_path / "sidecar-strict"))
+    sidecar = store.path.with_name(f"{store.path.name}-wal")
+    sidecar.touch()
+    os.chmod(sidecar, 0o644)
+
+    store._enforce_private_database_modes()
+
+    assert stat.S_IMODE(sidecar.lstat().st_mode) == 0o600
+
+    sidecar.unlink()
+    sidecar.symlink_to(tmp_path / "external-wal")
+
+    with pytest.raises(OSError, match="must be a regular file"):
+        store._enforce_private_database_modes()
+
+
+def test_store_does_not_treat_a_vanished_main_database_as_a_benign_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only SQLite's own sidecars may disappear mid-check; the database may not."""
+
+    store = MemoryStore(_store_path(tmp_path / "database-vanishes"))
+    real_chmod = os.chmod
+
+    def vanishing_chmod(path, mode, *args, **kwargs):
+        result = real_chmod(path, mode, *args, **kwargs)
+        if Path(path) == store.path:
+            store.path.unlink()
+        return result
+
+    monkeypatch.setattr(os, "chmod", vanishing_chmod)
+
+    with pytest.raises(FileNotFoundError):
+        store._enforce_private_database_modes()

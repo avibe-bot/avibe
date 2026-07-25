@@ -1263,20 +1263,38 @@ class MemoryStore:
             raise OSError("Memory database path must be a regular file")
 
     def _enforce_private_database_modes(self) -> None:
-        for candidate in (
-            self.path,
-            self.path.with_name(f"{self.path.name}-wal"),
-            self.path.with_name(f"{self.path.name}-shm"),
-        ):
-            try:
-                info = os.lstat(candidate)
-            except FileNotFoundError:
-                continue
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise OSError("Memory database path must be a regular file")
+        self._enforce_private_file_mode(self.path, sidecar=False)
+        self._enforce_private_file_mode(self.path.with_name(f"{self.path.name}-wal"), sidecar=True)
+        self._enforce_private_file_mode(self.path.with_name(f"{self.path.name}-shm"), sidecar=True)
+
+    def _enforce_private_file_mode(self, candidate: Path, *, sidecar: bool) -> None:
+        """Hold one Memory database file at owner-only mode, or fail closed.
+
+        SQLite creates and removes the WAL/shm sidecars itself, so a concurrent
+        connection checkpointing mid-check can delete one between any two of
+        these syscalls. This method runs on both entry to and exit from
+        `_connection()`, so an unguarded ENOENT there surfaces a benign race as
+        `memory_store_unavailable` on an otherwise successful capture or read.
+        A sidecar therefore treats its own disappearance as the race it is;
+        every other verification stays strict, and for the main database only
+        the not-yet-created case is tolerated.
+        """
+
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("Memory database path must be a regular file")
+        try:
             os.chmod(candidate, 0o600)
-            if stat.S_IMODE(os.lstat(candidate).st_mode) != 0o600:
-                raise OSError("Memory database is not owner-only")
+            mode = stat.S_IMODE(os.lstat(candidate).st_mode)
+        except FileNotFoundError:
+            if sidecar:
+                return
+            raise
+        if mode != 0o600:
+            raise OSError("Memory database is not owner-only")
 
     def _validate_store_confinement(self) -> None:
         try:
