@@ -2459,9 +2459,24 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     finally:
         store.close()
 
+    authorization_refresh_at = None
+    remote_payload = _remote_access_websocket_session_claims(websocket, _load_remote_access_config())
+    if remote_payload is not None:
+        from vibe import remote_access
+
+        authorization_refresh_at = remote_access.session_authorization_refresh_deadline(remote_payload)
+
     await websocket.accept(subprotocol="vite-hmr")
     try:
-        await _proxy_show_runtime_websocket(websocket, session_id)
+        proxy = _proxy_show_runtime_websocket(websocket, session_id)
+        if authorization_refresh_at is None:
+            await proxy
+        else:
+            timeout = max(0.0, authorization_refresh_at - time.time())
+            await asyncio.wait_for(proxy, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.info("show_runtime.authorization_refresh session=%s", session_id)
+        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
     except Exception:
         logger.debug("Show runtime HMR websocket unavailable", exc_info=True)
         await websocket.close(code=1011)

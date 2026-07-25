@@ -4744,6 +4744,54 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
         set_show_runtime_manager_for_tests(None)
 
 
+def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+    class RecordingWebSocket:
+        def __init__(self):
+            self.calls = []
+
+        async def accept(self, *, subprotocol=None):
+            self.calls.append(("accept", subprotocol))
+
+        async def close(self, code=1000):
+            self.calls.append(("close", code))
+
+    proxy_calls = []
+
+    async def blocking_proxy(websocket, session_id):
+        proxy_calls.append(("started", session_id))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            proxy_calls.append(("cancelled", session_id))
+            raise
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {"sub": "remote-viewer", "claims_issued_at": 1},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "session_authorization_refresh_deadline",
+        lambda payload: ui_server.time.time() + 0.01,
+    )
+    monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
+    websocket = RecordingWebSocket()
+
+    asyncio.run(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
+
+    assert websocket.calls == [
+        ("accept", "vite-hmr"),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+    assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
+
+
 def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

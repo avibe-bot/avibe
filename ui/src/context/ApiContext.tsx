@@ -2169,6 +2169,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
       closeActiveWorkbenchEventSource();
+      // EventSource does not expose a failed response's status or JSON body.
+      // Probe the session through apiFetch so an authorization-refresh 401
+      // enters the same full-page/PWA login recovery path as ordinary APIs.
+      void apiFetch('/api/session', { cache: 'no-store' }).catch(() => undefined);
       setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));

@@ -19,11 +19,14 @@ describe('apiFetch remote auth recovery', () => {
     vi.clearAllMocks();
   });
 
-  it('hands an expired remote session to the PWA auth gate', async () => {
+  it.each([
+    'remote_access_login_required',
+    'remote_access_authorization_refresh_required',
+  ])('hands %s to the PWA auth gate', async (error) => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
-        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
+        Response.json({ error }, { status: 401 }),
       ),
     );
 
