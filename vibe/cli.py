@@ -1497,6 +1497,8 @@ def _task_display_name(task) -> str:
 def _task_state(task) -> str:
     if task.enabled:
         return "active"
+    if task.last_run_at and task.last_error:
+        return "failed"
     if _is_completed_one_shot(task):
         return "completed"
     return "paused"
@@ -1622,11 +1624,22 @@ def _supported_task_platforms() -> set[str]:
 
 
 def _is_completed_one_shot(task) -> bool:
-    return task.schedule_type == "at" and not task.enabled and bool(task.last_run_at)
+    return (
+        task.schedule_type == "at"
+        and not task.enabled
+        and bool(task.last_run_at)
+        and not task.last_error
+    )
 
 
 def _is_finished_one_shot_watch(watch) -> bool:
-    return watch.mode == "once" and not watch.enabled and bool(watch.last_finished_at)
+    return (
+        watch.mode == "once"
+        and not watch.enabled
+        and bool(watch.last_finished_at)
+        and not watch.last_error
+        and watch.last_exit_code in (None, 0)
+    )
 
 
 def _parse_validated_session_key(
@@ -12791,7 +12804,7 @@ def build_parser():
         "list",
         help="List scheduled tasks",
         description=(
-            f"List stored scheduled tasks, {DEFAULT_PAGE_LIMIT} per page. Finished one-shot tasks are hidden by default; "
+            f"List stored scheduled tasks, {DEFAULT_PAGE_LIMIT} per page. Successful one-shot tasks are hidden by default; "
             "use --include-finished to page through their history."
         ),
         epilog="Use the returned task IDs with 'vibe task show', 'vibe task update', 'vibe task run', 'vibe task pause', 'vibe task resume', or 'vibe task remove'.",
@@ -12802,7 +12815,7 @@ def build_parser():
     task_list_parser.add_argument(
         "--include-finished",
         action="store_true",
-        help="Include finished one-shot tasks while keeping pagination",
+        help="Include successful one-shot task history while keeping pagination",
     )
     task_list_parser.add_argument(
         "--brief",
@@ -13093,7 +13106,7 @@ def build_parser():
         "list",
         help="List background watches",
         description=(
-            f"List stored managed background watches, {DEFAULT_PAGE_LIMIT} per page. Finished one-shot watches are hidden "
+            f"List stored managed background watches, {DEFAULT_PAGE_LIMIT} per page. Successful one-shot watches are hidden "
             "by default; use --include-finished to page through their history."
         ),
         epilog="Use the returned watch IDs with 'vibe watch show', 'vibe watch update', 'vibe watch pause', 'vibe watch resume', or 'vibe watch remove'.",
@@ -13103,7 +13116,7 @@ def build_parser():
     watch_list_parser.add_argument(
         "--include-finished",
         action="store_true",
-        help="Include finished one-shot watches while keeping pagination",
+        help="Include successful one-shot watch history while keeping pagination",
     )
     watch_list_parser.add_argument(
         "--brief",
@@ -13312,7 +13325,7 @@ def main():
         if args.task_command in {"list", "ls"}:
             try:
                 page_request = _page_request_from_args(args, help_command="vibe task list --help")
-            except Exception as exc:
+            except TaskCliError as exc:
                 _print_task_error(exc, help_command="vibe task list --help")
                 sys.exit(1)
             sys.exit(
@@ -13345,7 +13358,7 @@ def main():
         if args.watch_command in {"list", "ls"}:
             try:
                 page_request = _page_request_from_args(args, help_command="vibe watch list --help")
-            except Exception as exc:
+            except TaskCliError as exc:
                 _print_task_error(exc, help_command="vibe watch list --help")
                 sys.exit(1)
             sys.exit(

@@ -255,7 +255,7 @@ def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Finished one-shot tasks are hidden by default" in captured.out
+    assert "Successful one-shot tasks are hidden by default" in captured.out
     assert "--include-finished" in captured.out
     assert "--page" in captured.out
     assert "--limit" in captured.out
@@ -991,6 +991,14 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         timezone_name="Asia/Shanghai",
     )
     store.mark_task_result(done.id, error=None)
+    failed = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="failed one-shot",
+        schedule_type="at",
+        run_at="2026-03-31T10:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    store.mark_task_result(failed.id, error="delivery failed")
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list()
@@ -999,6 +1007,8 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     ids = [item["id"] for item in payload["tasks"]]
     assert done.id not in ids
+    assert failed.id in ids
+    assert next(item for item in payload["tasks"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:

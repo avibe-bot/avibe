@@ -314,7 +314,7 @@ vibe watch remove <watch-id>
 ```
 
 `vibe task list` and `vibe watch list` return 20 definitions per page and
-include `pagination.next_command` when more rows exist. Finished one-shot
+include `pagination.next_command` when more rows exist. Successful one-shot
 definitions are hidden by default. Add `--include-finished` to page through
 history. List output is always bounded; there is no unpaginated `--all` mode.
 

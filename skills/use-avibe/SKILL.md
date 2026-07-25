@@ -810,7 +810,7 @@ Operational guidance:
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
 - use `--include-finished` for paginated task/watch one-shot history
-- both list commands hide finished one-shot definitions by default; use `--include-finished` and follow `pagination.next_command` for bounded history
+- both list commands hide successful one-shot definitions by default while failures stay visible; use `--include-finished` and follow `pagination.next_command` for bounded history
 - use `vibe task show <id>`, `vibe watch show <id>`, or `vibe runs show <run-id>` to inspect stored fields and runtime state
 - use `vibe task pause` / `vibe task resume` and `vibe watch pause` / `vibe watch resume` to disable a task or watch without deleting it
 - treat `warnings` from task, watch, agent-run, or runs commands as delivery-risk hints to fix proactively

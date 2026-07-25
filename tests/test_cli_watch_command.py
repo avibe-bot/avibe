@@ -121,7 +121,7 @@ def test_watch_list_help_describes_bounded_history(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Finished one-shot watches are hidden by default" in captured.out
+    assert "Successful one-shot watches are hidden by default" in captured.out
     assert "--include-finished" in captured.out
     assert "--page" in captured.out
     assert "--limit" in captured.out
@@ -876,9 +876,9 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in payload["watches"]}
-    assert ids == {active.id, paused.id, failed_forever.id}
+    assert ids == {active.id, failed.id, paused.id, failed_forever.id}
     assert completed.id not in ids
-    assert failed.id not in ids
+    assert next(item for item in payload["watches"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
