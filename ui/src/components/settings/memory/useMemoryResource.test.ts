@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  createRequestSequencer,
   INITIAL_MEMORY_RESOURCE_STATE,
   memoryRequestSettled,
   memoryRequestStarted,
@@ -78,5 +79,55 @@ describe('memoryRequestSettled', () => {
 
     expect(forbidden.forbidden).toBe(true);
     expect(succeeded(POLLED, forbidden).forbidden).toBe(true);
+  });
+});
+
+describe('createRequestSequencer', () => {
+  it('discards a slow response that a newer request already superseded', () => {
+    const sequencer = createRequestSequencer();
+
+    const slow = sequencer.begin();
+    const fresh = sequencer.begin();
+
+    expect(sequencer.settle(fresh)).toBe(true);
+    expect(sequencer.settle(slow)).toBe(false);
+  });
+
+  it('accepts the settlement of the only request in flight', () => {
+    const sequencer = createRequestSequencer();
+
+    expect(sequencer.settle(sequencer.begin())).toBe(true);
+  });
+
+  it('reports in-flight so a poll tick skips instead of stacking another probe', () => {
+    const sequencer = createRequestSequencer();
+
+    expect(sequencer.inFlight()).toBe(false);
+    const probe = sequencer.begin();
+    expect(sequencer.inFlight()).toBe(true);
+    sequencer.settle(probe);
+    expect(sequencer.inFlight()).toBe(false);
+  });
+
+  it('stays in flight until the newest request settles, not the slowest', () => {
+    const sequencer = createRequestSequencer();
+
+    const slow = sequencer.begin();
+    const fresh = sequencer.begin();
+
+    sequencer.settle(slow);
+    expect(sequencer.inFlight()).toBe(true);
+    sequencer.settle(fresh);
+    expect(sequencer.inFlight()).toBe(false);
+  });
+
+  it('does not reopen the gate when a superseded response arrives late', () => {
+    const sequencer = createRequestSequencer();
+
+    const slow = sequencer.begin();
+    sequencer.settle(sequencer.begin());
+    sequencer.settle(slow);
+
+    expect(sequencer.inFlight()).toBe(false);
   });
 });

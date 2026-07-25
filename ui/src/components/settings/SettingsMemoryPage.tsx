@@ -63,8 +63,8 @@ export const SettingsMemoryPage: React.FC = () => {
   });
 
   const { reload: loadSettings, setData: setSettings } = settingsRead;
-  const { reload: loadStatus } = statusRead;
-  const { reload: loadFailures } = failuresRead;
+  const { reload: loadStatus, reloadIfIdle: pollStatus } = statusRead;
+  const { reload: loadFailures, reloadIfIdle: pollFailures } = failuresRead;
   const settings = settingsRead.data;
   const status = statusRead.data;
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
@@ -106,11 +106,15 @@ export const SettingsMemoryPage: React.FC = () => {
   remoteUnavailableRef.current = remoteUnavailable;
   useEffect(() => {
     const id = window.setInterval(() => {
-      if (!remoteUnavailableRef.current) void loadStatus();
-      if (!remoteUnavailableRef.current) void loadFailures();
+      if (remoteUnavailableRef.current) return;
+      // Poll, but never stack probes: a status read can outlive the tick when the sidecar is
+      // slow (its provider health check has its own timeout), and one extra read every 4s
+      // would pile up on the controller and SQLite for as long as the sidecar stays quiet.
+      void pollStatus();
+      void pollFailures();
     }, POLL_MS);
     return () => window.clearInterval(id);
-  }, [loadStatus, loadFailures]);
+  }, [pollStatus, pollFailures]);
 
   const confirmClear = async () => {
     setClearing(true);
