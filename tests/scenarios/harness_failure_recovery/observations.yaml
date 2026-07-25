@@ -63,3 +63,48 @@ observations:
       A user queue row preserved by explicit Stop can precede a held Agent Run
       row. Startup recovery must not call the generic FIFO flush until the
       eligible held Agent Run segment itself is at the queue head.
+  - id: HFR-OBS-008
+    date: 2026-07-25
+    source: code-path trace of dispatch_turn and its callers
+    result: confirmed
+    detail: >-
+      A turn sink can be released without ever emitting a terminal result -
+      a blank harness message, or a refusal because the Session already has a
+      streaming turn. dispatch_turn returned success in both cases, so
+      _execute_agent_run reported nothing and the Run stayed running forever.
+      The refusal path returns before any sink exists, so the sink itself
+      cannot carry the reason; the outcome has to be reported by the caller.
+  - id: HFR-OBS-009
+    date: 2026-07-25
+    source: code-path trace of the two ownership lanes
+    result: confirmed
+    detail: >-
+      A running Run is owned by either the drain lane
+      (ScheduledTaskService._inflight_executions) or the turn lane
+      (SessionTurnManager in_flight plus active_turn_sinks), and neither can
+      observe the other. Nothing periodically reconciles rows whose owner
+      disappeared inside a live process, and queued rows never age at all, so
+      a Run stranded by a transport that never reconnected waits with no
+      user-visible explanation and keeps its Session slot.
+  - id: HFR-OBS-010
+    date: 2026-07-25
+    source: code-path trace of SqliteInvalidationProbe.has_external_write
+    result: confirmed
+    detail: >-
+      The store tick's reload gate bumps on any write to the database file,
+      including the service's own. Recording staleness evidence on every skip
+      iteration would therefore become a self-feeding write to reload to
+      re-drain loop for as long as a transport stayed down, plus one
+      runs.updated event per cycle. The evidence stamp must be written only
+      when the recorded reason changes, and must not bump updated_at.
+  - id: HFR-OBS-011
+    date: 2026-07-25
+    source: deterministic startup-recovery fault injection
+    result: confirmed
+    detail: >-
+      recover_processing_runs requeues every running row at service
+      construction, so a restart retries its in-flight Runs rather than
+      leaving them for the sweep. The swept orphan class is therefore about
+      owners lost within a live process, and any staged running fixture must
+      be written after the service is constructed or recovery flips it to
+      queued first.

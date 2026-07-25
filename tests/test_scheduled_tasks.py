@@ -2296,7 +2296,7 @@ def test_agent_run_settles_failed_when_sink_released_without_terminal_result(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Gap A: a released waiter with no terminal result must not strand the run.
+    """HFR-009: a released waiter with no terminal result must not strand the run.
 
     Nothing else will ever write this row — the out-of-band terminal writer only
     runs on a real backend result — so leaving it ``running`` is the zombie.
@@ -2330,7 +2330,7 @@ def test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The refusal returns before any sink exists, so the sink cannot carry it.
+    """HFR-010: the refusal returns before any sink exists, so the sink cannot carry it.
 
     ``dispatch_turn`` refuses a second streaming turn for a session that already has
     one in flight. That happens BEFORE ``register_turn_sink``, so an earlier design
@@ -2368,7 +2368,7 @@ def test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn(
 
 
 def test_agent_run_cancel_racing_settlement_keeps_canceled(tmp_path: Path, monkeypatch) -> None:
-    """§3.3.1 TOCTOU: a cancel landing mid-settlement must win.
+    """HFR-011: a cancel landing mid-settlement must win (§3.3.1 TOCTOU).
 
     The cancel is applied between the executor deciding to settle and the write
     itself — the exact window an unguarded ``UPDATE`` would clobber. A fixture that
@@ -2473,7 +2473,7 @@ class _StopSinkSettler:
 
 
 def test_agent_run_stopped_by_user_settles_canceled(tmp_path: Path, monkeypatch) -> None:
-    """Running-tab End on an agent run terminalizes it as ``canceled``.
+    """HFR-012: running-tab End on an agent run terminalizes it as ``canceled``.
 
     The backend was interrupted without emitting a terminal result, so nothing else
     will ever write this row. ``canceled`` (not ``failed``) is the honest status:
@@ -2700,7 +2700,7 @@ def _stage_orphan_run(
 
 
 def test_sweep_terminalizes_orphaned_running_run(tmp_path: Path, monkeypatch) -> None:
-    """A ``running`` row with no live owner is the zombie Gap A cannot reach.
+    """HFR-013: a ``running`` row with no live owner is the zombie Gap A cannot reach.
 
     Gap A only fires when a turn in this process reports back. A turn that was taken
     over out of band and then lost — no sink, no execution task, no settlement — never
@@ -2765,7 +2765,7 @@ def test_sweep_skips_running_run_owned_by_inflight_execution(tmp_path: Path, mon
 
 
 def test_sweep_skips_running_run_owned_by_workbench_turn(tmp_path: Path, monkeypatch) -> None:
-    """The second ownership lane, and the trap: it never enters ``_inflight_executions``.
+    """HFR-014: the second ownership lane, and the trap: it never enters ``_inflight_executions``.
 
     A workbench/web turn takes the run over out of band, so the drain lane knows
     nothing about it. A sweep that consulted only ``_inflight_executions`` would look
@@ -2820,7 +2820,7 @@ def test_sweep_skips_running_run_owned_by_workbench_turn(tmp_path: Path, monkeyp
 def test_sweep_fails_closed_when_ownership_is_unknown(
     tmp_path: Path, monkeypatch, session_turns: Any
 ) -> None:
-    """"Nobody owns this run" and "I cannot tell" are opposite answers.
+    """HFR-015: "Nobody owns this run" and "I cannot tell" are opposite answers.
 
     Both failures degrade to an empty owner set, which reads as "sweep everything".
     The sweep must refuse to run instead: leaving a zombie for one more interval is
@@ -2867,7 +2867,7 @@ def _stage_queued_run(
 def test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A queued run whose platform never reconnected is undeliverable, not pending.
+    """HFR-016: a queued run whose platform never reconnected is undeliverable, not pending.
 
     Left alone it waits forever with no user-visible explanation. The evidence is the
     reason the drain recorded — never re-derived here, because a transport that came
@@ -2894,7 +2894,7 @@ def test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport(
 def test_sweep_leaves_a_queued_run_whose_session_is_merely_busy(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """``session_busy`` is progress, and it must be able to clear a stale transport reason.
+    """HFR-017: ``session_busy`` is progress, and it must be able to clear a stale transport reason.
 
     A run blocked behind its own session's active turn will run the moment that turn
     ends. Without the drain overwriting the older ``transport_unavailable`` reason, an
@@ -3009,7 +3009,7 @@ def test_sweep_leaves_watch_runtime_and_deferred_rows_alone(tmp_path: Path, monk
 
 
 def test_sweep_releases_a_leaked_session_lock(tmp_path: Path, monkeypatch) -> None:
-    """An honest row is only half the repair; the wedge is in memory.
+    """HFR-018: an honest row is only half the repair; the wedge is in memory.
 
     ``_inflight_sessions`` gates dispatch for the whole conversation, so a lock that
     outlived its execution keeps the session undispatchable no matter how the run row
@@ -3033,7 +3033,7 @@ def test_sweep_releases_a_leaked_session_lock(tmp_path: Path, monkeypatch) -> No
 
 
 def test_execution_completion_does_not_steal_a_later_lock_owner(tmp_path: Path, monkeypatch) -> None:
-    """The owner map must not be clobbered by a finishing predecessor.
+    """HFR-019: the owner map must not be clobbered by a finishing predecessor.
 
     Two executions can reuse one lock key in sequence. If the first one's completion
     callback removed the owner entry the second one wrote, the sweep would read the
@@ -3057,7 +3057,7 @@ def test_execution_completion_does_not_steal_a_later_lock_owner(tmp_path: Path, 
 def test_stranded_queued_run_does_not_trigger_repeated_metadata_writes(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The skip stamp must be transition-only, or it becomes a self-feeding hot loop.
+    """HFR-020: the skip stamp must be transition-only, or it becomes a self-feeding hot loop.
 
     Every write bumps the store's invalidation probe, which is what wakes the drain —
     so a per-tick stamp would make a permanently-down transport spin the service
