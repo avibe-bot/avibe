@@ -79,8 +79,10 @@ form the delivery and fault-breaker state machine, whose rules live in
 `worker.py`: the store does not enforce that a claimed row is settled, or that a
 flush marked in flight reaches a verdict.
 
-Collapse those primitives into transition methods that take an outcome. Remove
-`compact_terminal_tombstones`, which has no caller outside the store.
+Collapse those primitives into transition methods that take an outcome.
+
+`compact_terminal_tombstones` has no caller outside the store, but its retention
+rule has no other direct test, so it stays public rather than losing coverage.
 
 ### 4. One status bucket contract
 
@@ -122,9 +124,9 @@ and lift the routes into a module of their own.
 
 ## Todo
 
-- [ ] 1. Ports for `EverOSProcess` and `MemoryArtifactManager`
-- [ ] 2. Collapse `UnavailableMemoryRuntime`
-- [ ] 3. Queue lifecycle behind `MemoryStore`
+- [x] 1. Ports for `EverOSProcess` and `MemoryArtifactManager` — `d13fef20`
+- [x] 2. Collapse `UnavailableMemoryRuntime` — `a2afdadb`
+- [x] 3. Queue lifecycle behind `MemoryStore` — `3989a8e8`
 - [ ] 4. One status bucket contract
 - [ ] 5. `core/memory/admission.py`
 - [ ] 6. Memory read module in the UI
@@ -138,3 +140,13 @@ Per commit:
 - `cd ui && npm run build` for commits touching `ui/`
 
 Full-suite gates stay on GitHub CI.
+
+## Known pre-existing flake
+
+`tests/test_memory_runtime.py -k activation` fails roughly 1 run in 30 with
+`FileNotFoundError` on `memory.sqlite-shm` reaching
+`_recover_interrupted_clear` as `memory_clear_failed`. Measured at the same rate
+on `09e43029` (before this work) and after commit 3989a8e8, so it is not caused
+by these refactors. It involves real SQLite in WAL mode, the drain task, and the
+cross-thread `future.result(timeout=90)` handoff in
+`_coordinate_artifact_activation`. Worth its own fix; out of scope here.
