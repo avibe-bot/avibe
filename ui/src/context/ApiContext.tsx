@@ -1105,6 +1105,7 @@ export type SessionRuntimeState = {
 
 export type WorkbenchSessionBootstrap = {
   session: WorkbenchSession;
+  capabilities: { can_chat: boolean };
   agents: VibeAgentBrief[];
   default_agent_name: string | null;
   config: any | null;

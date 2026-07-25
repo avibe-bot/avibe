@@ -6671,21 +6671,30 @@ async def sessions_bootstrap(session_id: str):
     """
     from core.services import sessions as workbench_sessions_service
     from core.services import settings as settings_service
-    from storage import messages_service
+    from storage import messages_service, project_access_service
     from vibe import api as vibe_api
     from vibe import internal_client
 
     authorization_context = getattr(g, "authorization_context", None)
-    can_chat = bool(authorization_context and authorization_context.can_chat)
     can_manage_instance = bool(
         authorization_context and authorization_context.can_manage_instance
     )
     engine = _projects_engine()
     with engine.connect() as conn:
         try:
-            session = workbench_sessions_service.get_session(conn, session_id)
+            session = workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
+        effective_role = project_access_service.get_effective_session_role(
+            conn,
+            authorization_context,
+            session_id,
+        )
+        can_chat = project_access_service.role_allows(effective_role, "editor")
         messages_result = messages_service.list_session_messages(
             conn,
             session_id=session_id,
@@ -6694,8 +6703,8 @@ async def sessions_bootstrap(session_id: str):
             include_metadata_sources=("show_page",),
             tail=True,
         )
-        queued = messages_service.list_queued(conn, session_id)
-        draft = messages_service.get_draft(conn, session_id)
+        queued = messages_service.list_queued(conn, session_id) if can_chat else []
+        draft = messages_service.get_draft(conn, session_id) if can_chat else None
 
     agents_payload = {"agents": [], "default_agent_name": None}
     if can_chat:
@@ -6745,6 +6754,7 @@ async def sessions_bootstrap(session_id: str):
     return jsonify(
         {
             "session": session,
+            "capabilities": {"can_chat": can_chat},
             "agents": agents_payload.get("agents") or [],
             "default_agent_name": agents_payload.get("default_agent_name"),
             "config": config_payload,

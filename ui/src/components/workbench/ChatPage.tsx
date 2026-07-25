@@ -154,7 +154,8 @@ export const ChatPage: React.FC = () => {
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
-  const canChat = capabilities.can_chat;
+  const [sessionCanChat, setSessionCanChat] = useState(false);
+  const canChat = capabilities.can_chat && sessionCanChat;
   const canManageShowPage = capabilities.can_manage_instance;
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
@@ -876,6 +877,7 @@ export const ChatPage: React.FC = () => {
       // Dropped if the user switched chats while this load was in flight.
       if (sessionId !== sessionIdRef.current) return;
       setSession(bootstrap.session);
+      setSessionCanChat(Boolean(bootstrap.capabilities?.can_chat));
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
@@ -928,6 +930,7 @@ export const ChatPage: React.FC = () => {
     // while the URL is already on the new chat (Codex P2). Nulling it shows the
     // loading state until refresh() resolves the new session.
     setSession(null);
+    setSessionCanChat(false);
     setMessages([]);
     setOlderCursor(null);
     setHistoricalWindow(false);
@@ -1100,8 +1103,12 @@ export const ChatPage: React.FC = () => {
       onAuthorizationChanged: () => {
         const currentSessionId = sessionIdRef.current;
         if (!currentSessionId) return;
+        setSessionCanChat(false);
         void api.getSession(currentSessionId, { cache: false })
-          .then((nextSession) => setSession(nextSession))
+          .then((nextSession) => {
+            setSession(nextSession);
+            void refresh();
+          })
           .catch(() => goBack());
       },
       onConnectionState: (state) => {
@@ -1115,7 +1122,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.

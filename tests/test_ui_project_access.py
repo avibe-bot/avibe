@@ -265,6 +265,73 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     assert hidden_action.status_code == 404
 
 
+def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                **_intent(ids["project_a"], "alice@example.com", role="viewer"),
+                "revision": 2,
+            },
+        )
+        scope_id = project_access_service.project_scope_id(ids["project_a"])
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id=ids["session_a"],
+            text="editor-only queued prompt",
+        )
+        messages_service.set_draft(
+            conn,
+            scope_id=scope_id,
+            session_id=ids["session_a"],
+            text="editor-only draft",
+        )
+
+    monkeypatch.setattr(
+        api,
+        "get_vibe_agents",
+        lambda **kwargs: {
+            "agents": [{"name": "editor-agent", "backend": "codex", "enabled": True}],
+            "default_agent_name": "editor-agent",
+        },
+    )
+    client = _remote_client(config, role="editor", email="alice@example.com")
+
+    viewer_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
+
+    assert viewer_bootstrap.status_code == 200
+    viewer_payload = viewer_bootstrap.get_json()
+    assert viewer_payload["capabilities"] == {"can_chat": False}
+    assert viewer_payload["agents"] == []
+    assert viewer_payload["default_agent_name"] is None
+    assert viewer_payload["queued"] == []
+    assert viewer_payload["draft"] == {"text": ""}
+    assert [message["text"] for message in viewer_payload["messages"]] == ["shared needle"]
+
+    with engine.begin() as conn:
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                **_intent(ids["project_a"], "alice@example.com"),
+                "revision": 3,
+            },
+        )
+
+    editor_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
+
+    assert editor_bootstrap.status_code == 200
+    editor_payload = editor_bootstrap.get_json()
+    assert editor_payload["capabilities"] == {"can_chat": True}
+    assert editor_payload["agents"][0]["name"] == "editor-agent"
+    assert editor_payload["default_agent_name"] == "editor-agent"
+    assert editor_payload["queued"][0]["text"] == "editor-only queued prompt"
+    assert editor_payload["draft"] == {"text": "editor-only draft"}
+
+
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
