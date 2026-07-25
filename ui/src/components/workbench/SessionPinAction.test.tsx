@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import { SessionPinAction, SessionPinIndicator } from './SessionPinAction';
+import { sessionPinRowPaddingClass } from './sessionPinLayout';
 
 const renderAction = (pinned: boolean, pending = false) =>
   renderToStaticMarkup(
@@ -67,5 +68,20 @@ describe('SessionPinIndicator', () => {
     expect(html).toContain('text-cyan');
     expect(html).not.toMatch(/(?:class="|\s)bg-[^\s"]+/);
     expect(html).not.toContain('<button');
+  });
+});
+
+describe('sessionPinRowPaddingClass', () => {
+  it('uses the full title width until an unpinned action is revealed', () => {
+    const className = sessionPinRowPaddingClass(false);
+
+    expect(className).toContain('pr-2.5');
+    expect(className).toContain('hover:pr-10');
+    expect(className).toContain('focus-within:pr-10');
+    expect(className).toContain('pointer-coarse:pr-10');
+  });
+
+  it('always reserves action space for a pinned session', () => {
+    expect(sessionPinRowPaddingClass(true)).toBe('pr-10');
   });
 });
