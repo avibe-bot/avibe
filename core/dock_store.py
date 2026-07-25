@@ -258,7 +258,7 @@ def pin_show_page(
     store = ShowPageStore(db_path)
     try:
         try:
-            store.require_access(session_id, user_context=context)
+            store.require_management(session_id, user_context=context)
         except ShowPageError as exc:
             if exc.code == "show_page_not_found":
                 raise DockError("This session has no Show Page to pin.", code="show_page_not_found") from exc

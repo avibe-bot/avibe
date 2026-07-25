@@ -224,6 +224,14 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
     store.close()
     owner = _organization_context("owner-1")
     member = _organization_context("member-1")
+    admin = _organization_context(
+        "admin-1",
+        group_ids=frozenset({"group-sales"}),
+        organization_role="admin",
+    )
+    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+        api.pin_dock_show_page("ses-public", user_context=member)
+    api.pin_dock_show_page("ses-scope", user_context=admin)
     for session_id in ("ses-private", "ses-public", "ses-scope"):
         api.pin_dock_show_page(session_id, user_context=owner)
 
