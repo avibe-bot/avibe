@@ -11,6 +11,7 @@ from storage.models import (
     metadata,
     resource_access_groups,
     resource_access_policies,
+    state_meta,
     vault_grants,
     vault_requests,
     vault_secrets,
@@ -337,3 +338,76 @@ def test_narrowed_vault_policy_revokes_active_grants(
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
     assert status == "revoked"
     assert releases == [{"scopes": [{"grant_id": grant["id"]}], "reason": "resource-access-policy-narrowed"}]
+
+
+def test_narrowed_vault_release_failure_stays_pending_until_retry_succeeds(vault, monkeypatch) -> None:
+    owner = _context("owner-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "RETRY_RELEASE_KEY", protection="protected")
+        resource_id = _set_policy(conn, "RETRY_RELEASE_KEY", access_level="public")
+        request = vault_service.create_access_request(conn, "RETRY_RELEASE_KEY", user_context=owner)
+        grant = _grant_from_request(conn, request, user_context=owner)
+
+    intent = {
+        "resource_kind": "vault_secret",
+        "resource_id": resource_id,
+        "revision": 2,
+        "access_level": "private",
+        "group_ids": [],
+    }
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: vault)
+    monkeypatch.setattr(
+        remote_access,
+        "publish_resource_index",
+        lambda *_args, **_kwargs: {"organization_id": "org-1", "resources": []},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "pull_resource_acl_intents",
+        lambda *_args, **_kwargs: {"organization_id": "org-1", "intents": [intent]},
+    )
+    acknowledgements: list[dict] = []
+    monkeypatch.setattr(
+        remote_access,
+        "acknowledge_resource_acl_intent",
+        lambda *_args, **kwargs: acknowledgements.append(kwargs),
+    )
+    releases: list[list[dict[str, str]]] = []
+
+    def release(scopes, *, reason):
+        releases.append([dict(scope) for scope in scopes])
+        if len(releases) == 1:
+            raise RuntimeError("resident release failed")
+
+    monkeypatch.setattr(remote_access.api, "release_vault_agent_scopes", release)
+
+    first = remote_access._sync_one_organization(None, organization_id="org-1", resources=[])
+    pending_key = remote_access._pending_vault_release_key("org-1", resource_id, 2)
+    with vault.connect() as conn:
+        pending_after_failure = conn.execute(
+            select(state_meta.c.value_json).where(state_meta.c.key == pending_key)
+        ).scalar_one_or_none()
+
+    second = remote_access._sync_one_organization(None, organization_id="org-1", resources=[])
+    with vault.connect() as conn:
+        pending_after_success = conn.execute(
+            select(state_meta.c.value_json).where(state_meta.c.key == pending_key)
+        ).scalar_one_or_none()
+
+    assert first["ok"] is False
+    assert first["applied"] == 1
+    assert first["acknowledged"] == 0
+    assert first["ack_errors"] == 1
+    assert pending_after_failure is not None
+    assert second["ok"] is True
+    assert second["acknowledged"] == 1
+    assert pending_after_success is None
+    assert releases == [[{"grant_id": grant["id"]}], [{"grant_id": grant["id"]}]]
+    assert acknowledgements == [
+        {
+            "resource_kind": "vault_secret",
+            "resource_id": resource_id,
+            "revision": 2,
+            "outcome": "applied",
+        }
+    ]

@@ -3,6 +3,10 @@ import { deferRemoteAuthRedirect } from './remoteAuth';
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const REMOTE_AUTH_RECOVERY_ERRORS = new Set([
+  'remote_access_login_required',
+  'remote_access_authorization_refresh_required',
+]);
 
 let csrfTokenPromise: Promise<string> | null = null;
 
@@ -73,7 +77,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   // once and then stops re-running on ordinary navigation (so it doesn't
   // re-mount the shell on every sidebar click). If the Avibe Cloud cookie
   // expires after that, no component re-checks auth — but the server starts
-  // answering /api/* with 401 `remote_access_login_required`. Detect it here
+  // answering /api/* with a remote login/authorization-refresh 401. Detect it here
   // and trigger the same full-page login redirect the guard uses, so the user
   // lands on the login flow instead of a wall of silently-failing fetches.
   if (response.status === 401) {
@@ -95,7 +99,7 @@ async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void
     // Non-JSON 401 — not the remote-access signal; let the caller handle it.
     return;
   }
-  if ((payload as { error?: string } | null)?.error !== 'remote_access_login_required') {
+  if (!REMOTE_AUTH_RECOVERY_ERRORS.has((payload as { error?: string } | null)?.error || '')) {
     return;
   }
   // A cross-origin OAuth redirect from an iOS Home-Screen app opens in a

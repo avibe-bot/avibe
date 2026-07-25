@@ -342,16 +342,21 @@ def create_session(
     )
 
     context = resolve_resource_access_context(user_context)
-    if context.is_remote and not agent_name and not agent_id and not agent_backend:
-        default_agent = ensure_default_agent_access(
-            conn,
-            user_context=context,
-            missing_is_error=True,
-        )
-        assert default_agent is not None
-        agent_id = default_agent.id
-        agent_name = default_agent.name
-        agent_backend = default_agent.backend
+    if context.is_remote and not agent_name and not agent_id:
+        if agent_backend:
+            from core.vibe_agents import VibeAgentAccessError
+
+            raise VibeAgentAccessError("Agent access is not permitted.")
+        else:
+            default_agent = ensure_default_agent_access(
+                conn,
+                user_context=context,
+                missing_is_error=True,
+            )
+            assert default_agent is not None
+            agent_id = default_agent.id
+            agent_name = default_agent.name
+            agent_backend = default_agent.backend
 
     if agent_name or agent_id:
         ensure_agent_selection_access(
@@ -446,14 +451,26 @@ def update_session(
         agent_backend = _backend_for_agent_name(conn, str(agent_name or "")) if agent_name else None
         derived_backend = True
 
-    if agent_name is not _UNSET or agent_id is not _UNSET:
-        from core.vibe_agents import ensure_agent_selection_access
+    from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access, resolve_resource_access_context
 
+    context = resolve_resource_access_context(user_context)
+    requested_agent_name = "" if agent_name is _UNSET else str(agent_name or "").strip()
+    requested_agent_id = "" if agent_id is _UNSET else str(agent_id or "").strip()
+    if (
+        context.is_remote
+        and agent_backend is not _UNSET
+        and bool(str(agent_backend or "").strip())
+        and not requested_agent_name
+        and not requested_agent_id
+    ):
+        raise VibeAgentAccessError("Agent access is not permitted.")
+
+    if agent_name is not _UNSET or agent_id is not _UNSET:
         ensure_agent_selection_access(
             conn,
             agent_name=None if agent_name is _UNSET else agent_name,
             agent_id=None if agent_id is _UNSET else agent_id,
-            user_context=user_context,
+            user_context=context,
         )
 
     # Backend is pinned once a NATIVE conversation exists: the native can only

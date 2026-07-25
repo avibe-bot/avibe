@@ -87,6 +87,7 @@ _RESOURCE_ACL_SYNC_ERROR_CODE_RE = re.compile(r"\A[a-z0-9][a-z0-9_:-]{0,119}\Z")
 _RESOURCE_ACL_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
 _RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 _RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
+_RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset({"owner", "public_instance", "email", "email_domain", "organization_group"})
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
@@ -873,6 +874,45 @@ def _validated_intent_fields(intent: Any) -> tuple[str, str, int, str, list[str]
     return str(resource_kind), resource_id, revision, str(access_level), group_ids
 
 
+def _pending_vault_release_key(organization_id: str, resource_id: str, revision: int) -> str:
+    digest = hashlib.sha256(f"{organization_id}\0{resource_id}\0{revision}".encode()).hexdigest()
+    return f"{_RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX}{digest}"
+
+
+def _load_pending_vault_release_scopes(connection, key: str) -> list[dict[str, str]]:
+    from sqlalchemy import select
+    from storage.models import state_meta
+
+    raw_value = connection.execute(select(state_meta.c.value_json).where(state_meta.c.key == key)).scalar_one_or_none()
+    try:
+        value = json.loads(raw_value) if raw_value else []
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    grant_ids = [str(item.get("grant_id") or "") for item in value if isinstance(item, Mapping)]
+    return [{"grant_id": grant_id} for grant_id in dict.fromkeys(grant_ids) if grant_id]
+
+
+def _store_pending_vault_release_scopes(connection, key: str, scopes: list[dict[str, str]]) -> None:
+    from storage.models import state_meta
+
+    connection.execute(state_meta.delete().where(state_meta.c.key == key))
+    connection.execute(
+        state_meta.insert().values(
+            key=key,
+            value_json=json.dumps(scopes, separators=(",", ":")),
+            updated_at=datetime.now().astimezone().isoformat(),
+        )
+    )
+
+
+def _clear_pending_vault_release_scopes(connection, key: str) -> None:
+    from storage.models import state_meta
+
+    connection.execute(state_meta.delete().where(state_meta.c.key == key))
+
+
 def _sync_one_organization(
     config: V2Config,
     *,
@@ -912,6 +952,11 @@ def _sync_one_organization(
             rejected += 1
             continue
         release_scopes: list[dict[str, str]] = []
+        release_key = (
+            _pending_vault_release_key(organization, resource_id, revision)
+            if resource_kind == "vault_secret"
+            else None
+        )
         try:
             with engine.begin() as connection:
                 previous_policy = resource_access_service.get_resource_policy(
@@ -937,6 +982,12 @@ def _sync_one_organization(
                             resource_id,
                         )
                         release_scopes = vault_service.agent_release_scopes_after_rows(connection, revoked_rows)
+                        if release_scopes and release_key is not None:
+                            _store_pending_vault_release_scopes(connection, release_key, release_scopes)
+                if release_key is not None:
+                    release_scopes = _load_pending_vault_release_scopes(connection, release_key)
+            if outcome["status"] == "applied":
+                applied += 1
             if release_scopes:
                 try:
                     api.release_vault_agent_scopes(
@@ -945,11 +996,19 @@ def _sync_one_organization(
                     )
                 except Exception:
                     logger.warning("failed to release narrowed Vault grant scopes", exc_info=True)
+                    ack_errors += 1
+                    continue
+                try:
+                    with engine.begin() as connection:
+                        assert release_key is not None
+                        _clear_pending_vault_release_scopes(connection, release_key)
+                except Exception:
+                    logger.warning("failed to clear pending narrowed Vault grant release", exc_info=True)
+                    ack_errors += 1
+                    continue
             if outcome["status"] == "stale":
                 skipped += 1
                 continue
-            if outcome["status"] == "applied":
-                applied += 1
             try:
                 acknowledge_resource_acl_intent(
                     config,

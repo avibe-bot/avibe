@@ -240,6 +240,27 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
                 agent_backend="",
                 user_context=context,
             )
+        with pytest.raises(VibeAgentAccessError):
+            workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="codex",
+                user_context=context,
+            )
+        backend_only_session = workbench_sessions_service.create_session(
+            connection,
+            scope_id=scope_id,
+            agent_backend="codex",
+            user_context=resource_access_service.ResourceUserContext(is_trusted_local=True),
+        )
+        with pytest.raises(VibeAgentAccessError):
+            workbench_sessions_service.update_session(
+                connection,
+                backend_only_session["id"],
+                agent_backend="claude",
+                agent_name=None,
+                user_context=context,
+            )
     blocked_default = client.post(
         "/api/sessions",
         json={"project_id": "proj_acl_agents"},
@@ -248,6 +269,14 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         environ_base=_remote_peer(),
     )
     assert blocked_default.status_code == 403
+    blocked_backend_only = client.post(
+        "/api/sessions",
+        json={"project_id": "proj_acl_agents", "agent_backend": "codex"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert blocked_backend_only.status_code == 403
 
     store = VibeAgentStore()
     try:
@@ -274,6 +303,17 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         return {"status_code": 202, "body": {}}
 
     monkeypatch.setattr("vibe.internal_client.dispatch_async", dispatch_async)
+    blocked_legacy_turn = client.post(
+        f"/api/sessions/{backend_only_session['id']}/messages",
+        json={"text": "must not dispatch"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert blocked_legacy_turn.status_code == 403
+    assert blocked_legacy_turn.get_json()["code"] == "agent_access_forbidden"
+    assert dispatch_calls == []
+
     with engine.begin() as connection:
         resource_access_service.apply_control_plane_intent(
             connection,

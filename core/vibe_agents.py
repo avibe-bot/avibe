@@ -233,15 +233,18 @@ def ensure_session_agent_access(
 ) -> VibeAgent | None:
     """Revalidate the Agent selected by a persisted session before dispatch."""
 
+    context = resolve_resource_access_context(user_context)
     if session.get("agent_id") or session.get("agent_name"):
         return ensure_agent_selection_access(
             connection,
             agent_name=session.get("agent_name"),
             agent_id=session.get("agent_id"),
-            user_context=user_context,
+            user_context=context,
         )
     if not session.get("agent_backend"):
-        return ensure_default_agent_access(connection, user_context=user_context)
+        return ensure_default_agent_access(connection, user_context=context)
+    if context.is_remote:
+        raise VibeAgentAccessError("Agent access is not permitted.")
     return None
 
 
