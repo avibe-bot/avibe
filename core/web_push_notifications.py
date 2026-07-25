@@ -119,6 +119,7 @@ def web_push_authorization_context_record(
         or context is None
         or not context.is_remote
         or not context.subject
+        or context.claims_issued_at is None
         or user_key != f"remote:{context.subject}"
     ):
         return None
@@ -128,6 +129,7 @@ def web_push_authorization_context_record(
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
         "vibe_group_ids": sorted(context.group_ids),
+        "claims_issued_at": context.claims_issued_at,
     }
     optional_claims = {
         "email": context.email,
@@ -142,6 +144,8 @@ def web_push_authorization_context_record(
 
 
 def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, AuthorizationContext]:
+    from vibe import remote_access
+
     raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
     if not isinstance(raw_contexts, list):
         return {}
@@ -151,6 +155,8 @@ def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, Auth
             continue
         user_key = raw_context.get("user_key")
         if not isinstance(user_key, str) or not user_key.startswith("remote:"):
+            continue
+        if remote_access.session_needs_authorization_refresh(raw_context):
             continue
         context = context_from_session_payload(raw_context)
         if context.subject and user_key == f"remote:{context.subject}" and context.can_read_instance:
@@ -245,6 +251,15 @@ def _filter_project_authorized_user_keys(
 ) -> list[str]:
     """Recheck delayed remote deliveries against the current Project policy."""
 
+    if not user_keys:
+        return user_keys
+
+    contexts = _metadata_authorization_contexts(metadata)
+    user_keys = [
+        user_key
+        for user_key in user_keys
+        if user_key == "local" or user_key in contexts
+    ]
     if not session_id or not user_keys:
         return user_keys
     from storage import project_access_service
@@ -261,7 +276,6 @@ def _filter_project_authorized_user_keys(
     ):
         return user_keys
 
-    contexts = _metadata_authorization_contexts(metadata)
     authorized: list[str] = []
     for user_key in user_keys:
         if user_key == "local":
