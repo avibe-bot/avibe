@@ -50,6 +50,7 @@ def _organization_context(
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
     role: str = "member",
+    instance_role: str = "viewer",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -58,7 +59,7 @@ def _organization_context(
         organization_member_id=f"member-{subject}",
         organization_role=role,
         group_ids=group_ids,
-        instance_role="viewer",
+        instance_role=instance_role,
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -491,14 +492,17 @@ def test_remote_skill_mutations_fail_closed_when_preflight_cannot_resolve_target
 def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     try:
-        rec = _Recorder(
-            {
-                "ok": True,
-                "action": "install",
-                "summary": {"skills": 1},
-                "selectedAgents": ["codex"],
-                "results": [{"skill": "new-skill", "success": True}],
-            }
+        rec = _SequenceRecorder(
+            [
+                {"ok": True, "skills": []},
+                {
+                    "ok": True,
+                    "action": "install",
+                    "summary": {"skills": 1},
+                    "selectedAgents": ["codex"],
+                    "results": [{"skill": "new-skill", "success": True}],
+                },
+            ]
         )
         monkeypatch.setattr(skills, "_run_askill", rec)
 
@@ -525,6 +529,87 @@ def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> Non
     assert policy is not None
     assert policy["owner_user_id"] == "member-1"
     assert policy["access_level"] == "private"
+
+
+def test_remote_skill_add_requires_instance_owner_for_installed_legacy_skill(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    listing = {"ok": True, "skills": [_skill_row("legacy-skill")]}
+    member_recorder = _SequenceRecorder([listing])
+    monkeypatch.setattr(skills, "_run_askill", member_recorder)
+    try:
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.add_skill(
+                    "askill",
+                    "gh:owner/repo",
+                    scope="global",
+                    skill="legacy-skill",
+                    backends=["codex"],
+                    user_context=_organization_context("member-1"),
+                )
+            )
+
+        owner_recorder = _SequenceRecorder(
+            [
+                listing,
+                {
+                    "ok": True,
+                    "action": "install",
+                    "summary": {"skills": 1},
+                    "selectedAgents": ["codex"],
+                    "results": [{"skill": "legacy-skill", "success": True}],
+                },
+            ]
+        )
+        monkeypatch.setattr(skills, "_run_askill", owner_recorder)
+        result = _run(
+            skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="legacy-skill",
+                backends=["codex"],
+                user_context=_organization_context("owner-1", instance_role="owner"),
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert [call["args"] for call in member_recorder.calls] == [["list", "-g", "-a", "codex"]]
+    assert [call["args"] for call in owner_recorder.calls] == [
+        ["list", "-g", "-a", "codex"],
+        ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"],
+    ]
+    assert result["ok"] is True
+
+
+def test_remote_skill_add_fails_closed_for_unresolved_installed_backend(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    recorder = _SequenceRecorder(
+        [
+            {
+                "ok": True,
+                "skills": [{**_skill_row("legacy-skill"), "agents": [{"id": "unknown"}]}],
+            }
+        ]
+    )
+    monkeypatch.setattr(skills, "_run_askill", recorder)
+    try:
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.add_skill(
+                    "askill",
+                    "gh:owner/repo",
+                    scope="global",
+                    skill="legacy-skill",
+                    backends=["codex"],
+                    user_context=_organization_context("member-1"),
+                )
+            )
+    finally:
+        engine.dispose()
+
+    assert [call["args"] for call in recorder.calls] == [["list", "-g", "-a", "codex"]]
 
 
 def test_invalid_backend_raises(monkeypatch):

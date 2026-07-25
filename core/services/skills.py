@@ -534,6 +534,46 @@ def _delete_skill_policies(resource_ids: list[str]) -> None:
             resource_access_service.delete_resource_policy(connection, "skill", resource_id)
 
 
+def _installed_skill_resource_ids_from_listing(
+    listing: dict[str, Any],
+    name: str,
+    *,
+    scope: str,
+    project_dir: Optional[str],
+    backends: Optional[list[str]],
+) -> list[str]:
+    if not listing.get("ok") or not isinstance(listing.get("skills"), list):
+        raise SkillAccessError()
+    target_name = _normalize_skill_name(name)
+    resource_ids: list[str] = []
+    for skill in listing["skills"]:
+        if not isinstance(skill, dict):
+            continue
+        try:
+            row_name = _normalize_skill_name(skill.get("name"))
+        except SkillsError:
+            continue
+        if row_name != target_name:
+            continue
+        row_scope = _skill_scope(skill, scope)
+        if row_scope is None:
+            continue
+        all_entries = _skill_backend_entries(skill, None)
+        if not all_entries:
+            raise SkillAccessError()
+        entries = _skill_backend_entries(skill, backends) if backends else all_entries
+        for backend, _agent_index in entries:
+            resource_ids.append(
+                skill_resource_id(
+                    backend,
+                    scope=row_scope,
+                    project_dir=project_dir,
+                    name=str(skill["name"]),
+                )
+            )
+    return list(dict.fromkeys(resource_ids))
+
+
 async def _installed_skill_resource_ids(
     askill_path: str,
     name: str,
@@ -547,38 +587,16 @@ async def _installed_skill_resource_ids(
         ["list", *_list_scope_flag(scope), *_agent_flags(backends)],
         cwd=_cwd_for(scope, project_dir),
     )
-    if not listing.get("ok") or not isinstance(listing.get("skills"), list):
-        raise SkillAccessError()
-    raw_skills = listing["skills"]
-    target_name = _normalize_skill_name(name)
-    resource_ids: list[str] = []
-    for skill in raw_skills:
-        if not isinstance(skill, dict):
-            continue
-        try:
-            row_name = _normalize_skill_name(skill.get("name"))
-        except SkillsError:
-            continue
-        if row_name != target_name:
-            continue
-        row_scope = _skill_scope(skill, scope)
-        if row_scope is None:
-            continue
-        entries = _skill_backend_entries(skill, backends)
-        if not entries:
-            raise SkillAccessError()
-        for backend, _agent_index in entries:
-            resource_ids.append(
-                skill_resource_id(
-                    backend,
-                    scope=row_scope,
-                    project_dir=project_dir,
-                    name=str(skill["name"]),
-                )
-            )
+    resource_ids = _installed_skill_resource_ids_from_listing(
+        listing,
+        name,
+        scope=scope,
+        project_dir=project_dir,
+        backends=backends,
+    )
     if not resource_ids:
         raise SkillAccessError()
-    return list(dict.fromkeys(resource_ids))
+    return resource_ids
 
 
 # --- public API -----------------------------------------------------------
@@ -656,6 +674,8 @@ async def add_skill(
             preview = await _run_askill(askill_path, ["add", source, "--list"], cwd=_cwd_for(scope, project_dir))
             if preview.get("ok"):
                 target_names = _skill_names_from_payload(preview)
+        if not target_names:
+            raise SkillAccessError()
         for target_name in target_names:
             _require_skill_management_access(
                 _resource_ids_for_skill_name(
@@ -667,6 +687,25 @@ async def add_skill(
                 user_context=context,
                 allow_missing_policy=True,
             )
+        listing = await _run_askill(
+            askill_path,
+            ["list", *_list_scope_flag(scope), *_agent_flags(backends)],
+            cwd=_cwd_for(scope, project_dir),
+        )
+        for target_name in target_names:
+            installed_resource_ids = _installed_skill_resource_ids_from_listing(
+                listing,
+                target_name,
+                scope=scope,
+                project_dir=project_dir,
+                backends=backends,
+            )
+            if installed_resource_ids:
+                _require_skill_management_access(
+                    installed_resource_ids,
+                    user_context=context,
+                    allow_missing_policy=False,
+                )
     args = ["add", source, *_target_scope_flag(scope), *_agent_flags(backends)]
     if skill:
         args += ["--skill", skill]

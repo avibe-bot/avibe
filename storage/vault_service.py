@@ -3612,19 +3612,20 @@ def list_requests(
     user_context: Any = None,
 ) -> list[dict[str, Any]]:
     _expire_pending_requests(conn)
+    context = resolve_resource_access_context(user_context)
     query = select(vault_requests).order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
     if status is not None:
         query = query.where(vault_requests.c.status == status)
     if request_type is not None:
         query = query.where(vault_requests.c.request_type == request_type)
-    # session_id lives in the request JSON (not a column), so a session-scoped query must filter
-    # in Python BEFORE limiting — else a global page could truncate this session's older rows.
-    if session is None:
+    # Session and remote ACL filters run in Python, so apply the limit only after
+    # those filters or newer inaccessible rows could hide older visible requests.
+    requires_post_filter = session is not None or not context.is_trusted_local
+    if not requires_post_filter:
         query = query.limit(limit)
     rows = [dict(row) for row in conn.execute(query).mappings()]
     if session is not None:
-        rows = [row for row in rows if _request_session_id(row) == session][:limit]
-    context = resolve_resource_access_context(user_context)
+        rows = [row for row in rows if _request_session_id(row) == session]
     if not context.is_trusted_local:
         accessible_rows: list[dict[str, Any]] = []
         for row in rows:
@@ -3634,6 +3635,8 @@ def list_requests(
                 continue
             accessible_rows.append(row)
         rows = accessible_rows
+    if requires_post_filter:
+        rows = rows[:limit]
     return [_request_row_payload(row, conn=conn, audience=REQUEST_AUDIENCE_UI) for row in rows]
 
 

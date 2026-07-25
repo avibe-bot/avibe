@@ -194,6 +194,22 @@ def test_vault_request_reads_and_denial_enforce_member_secret_acls(vault) -> Non
     assert denied["status"] == "denied"
 
 
+def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
+    owner = _context("owner-1")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "VISIBLE_REQUEST", protection="protected")
+        _create_secret(conn, "HIDDEN_REQUEST", protection="protected")
+        _set_policy(conn, "VISIBLE_REQUEST", access_level="public")
+        _set_policy(conn, "HIDDEN_REQUEST", access_level="private")
+        visible_request = vault_service.create_access_request(conn, "VISIBLE_REQUEST", user_context=owner)
+        vault_service.create_access_request(conn, "HIDDEN_REQUEST", user_context=owner)
+
+        visible = vault_service.list_requests(conn, limit=1, user_context=member)
+
+    assert [request["id"] for request in visible] == [visible_request["id"]]
+
+
 @pytest.mark.parametrize(
     "selector",
     [
