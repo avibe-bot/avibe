@@ -68,8 +68,14 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+def _row_to_payload(
+    row: dict[str, Any],
+    *,
+    include_local_details: bool = True,
+) -> dict[str, Any]:
     metadata = _load_metadata(row.get("metadata_json"))
+    if not include_local_details:
+        metadata = {}
     return {
         "id": row["id"],
         "scope_id": row.get("scope_id"),
@@ -91,7 +97,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         # Live agent-runtime status (idle/running/failed), separate from the
         # lifecycle ``status``. Older rows predating the column read as ``idle``.
         "agent_status": row.get("agent_status") or "idle",
-        "workdir": row.get("workdir"),
+        "workdir": row.get("workdir") if include_local_details else None,
         # The reserved native-session anchor (workbench sessions self-anchor to
         # their id). Dispatch carries it so resume binds by the stored anchor
         # after a restart instead of a computed one (Codex P2).
@@ -210,7 +216,10 @@ def list_sessions(
     )
     query = query.order_by(*order_columns).limit(effective_limit)
     rows = [dict(row) for row in conn.execute(query).mappings().all()]
-    sessions = [_row_to_payload(row) for row in rows]
+    sessions = [
+        _row_to_payload(row, include_local_details=context.is_instance_owner)
+        for row in rows
+    ]
     # Use the clamped page size for the cursor check — comparing against
     # the raw ``limit`` would emit ``next_before_id=null`` for callers who
     # requested > 200 and force them to stop paginating mid-history.
@@ -236,7 +245,10 @@ def get_session(
             conn, context, project_id
         ):
             raise LookupError(f"Session not found: {session_id}")
-    return _row_to_payload(dict(row))
+    return _row_to_payload(
+        dict(row),
+        include_local_details=context.is_instance_owner,
+    )
 
 
 def get_active_session(conn: Connection, session_id: str) -> dict[str, Any]:
@@ -397,7 +409,7 @@ def create_session(
         metadata=metadata_payload,
         now=now,
     )
-    return get_session(conn, session_id)
+    return get_session(conn, session_id, authorization_context=context)
 
 
 class SessionBackendLockedError(Exception):
@@ -608,7 +620,7 @@ def update_session(
             current_backend=current.agent_backend,
             requested_backend=agent_backend,
         )
-    return get_session(conn, session_id)
+    return get_session(conn, session_id, authorization_context=context)
 
 
 def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
@@ -1066,7 +1078,7 @@ def archive_session(
         .values(visibility="offline", offline_at=now, updated_at=now)
     )
 
-    payload = get_session(conn, session_id)
+    payload = get_session(conn, session_id, authorization_context=context)
     payload["reclaimed"] = reclaimed
     payload["revoked_vault_grant_scopes"] = revoked_vault_grant_scopes
     return payload

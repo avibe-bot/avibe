@@ -44,7 +44,14 @@ def _new_message_id() -> str:
     return f"msg_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
 
-def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+_PRIVATE_WEB_PUSH_METADATA_PREFIX = "_web_push_"
+
+
+def _row_to_payload(
+    row: dict[str, Any],
+    *,
+    include_private_metadata: bool = False,
+) -> dict[str, Any]:
     try:
         content = json.loads(row.get("content_json") or "{}")
     except json.JSONDecodeError:
@@ -53,6 +60,14 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         metadata = json.loads(row.get("metadata_json") or "{}")
     except json.JSONDecodeError:
         metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    elif not include_private_metadata:
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
+        }
     return {
         "id": row["id"],
         "scope_id": row.get("scope_id"),
@@ -732,7 +747,12 @@ def enqueue_queued(
     )
 
 
-def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
+def list_queued(
+    conn: Connection,
+    session_id: str,
+    *,
+    include_private_metadata: bool = False,
+) -> list[dict[str, Any]]:
     """Pending queued messages for a session, oldest first."""
     query = (
         select(messages)
@@ -740,7 +760,13 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
         .where(messages.c.type == QUEUED_TYPE)
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
     )
-    return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+    return [
+        _row_to_payload(
+            dict(row),
+            include_private_metadata=include_private_metadata,
+        )
+        for row in conn.execute(query).mappings().all()
+    ]
 
 
 def list_queued_session_ids(conn: Connection) -> list[str]:
@@ -779,7 +805,10 @@ def pop_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
         .where(messages.c.type == QUEUED_TYPE)
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
     )
-    rows = [_row_to_payload(dict(row)) for row in conn.execute(rows_q).mappings().all()]
+    rows = [
+        _row_to_payload(dict(row), include_private_metadata=True)
+        for row in conn.execute(rows_q).mappings().all()
+    ]
     if not rows:
         return []
     claimed_ids = [r["id"] for r in rows]

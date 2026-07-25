@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from sqlalchemy import select
+
 from config.v2_config import (
     AgentsConfig,
     PlatformsConfig,
@@ -15,7 +17,7 @@ from config.v2_config import (
 from storage import media_service, messages_service, project_access_service, projects_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import media_object_references, media_objects, scopes
+from storage.models import media_object_references, media_objects, messages, scopes
 from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
@@ -191,8 +193,13 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     assert project_rows[0]["capabilities"] == {"can_chat": True}
     sessions = _get(client, "/api/sessions?status=active").get_json()["sessions"]
     assert {row["id"] for row in sessions} == {ids["session_a"]}
+    assert sessions[0]["workdir"] is None
+    assert sessions[0]["metadata"] == {}
     assert _get(client, f"/api/projects/{ids['project_a']}").status_code == 200
     assert _get(client, f"/api/projects/{ids['project_b']}").status_code == 404
+    session = _get(client, f"/api/sessions/{ids['session_a']}").get_json()
+    assert session["workdir"] is None
+    assert session["metadata"] == {}
     assert _get(client, f"/api/sessions/{ids['session_a']}/messages").status_code == 200
     assert _get(client, f"/api/sessions/{ids['session_b']}/messages").status_code == 404
     assert _get(client, f"/api/sessions/{ids['unscoped']}").status_code == 404
@@ -323,6 +330,8 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert viewer_payload["queued"] == []
     assert viewer_payload["draft"] == {"text": ""}
     assert [message["text"] for message in viewer_payload["messages"]] == ["shared needle"]
+    assert viewer_payload["session"]["workdir"] is None
+    assert viewer_payload["session"]["metadata"] == {}
 
     with engine.begin() as conn:
         project_access_service.apply_project_access_intent(
@@ -432,12 +441,19 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
     client = _remote_client(config, role="editor", email="alice@example.com")
+    published = []
 
     async def dispatch_async(_payload):
         return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", dispatch_async)
+    monkeypatch.setattr(
+        broker,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
     response = client.post(
         f"/api/sessions/{ids['session_a']}/messages",
         base_url=REMOTE_ORIGIN,
@@ -455,19 +471,38 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
 
     assert response.status_code == 201
     payload = response.get_json()
-    assert payload["metadata"]["_web_push_user_key"].startswith("remote:")
-    records = payload["metadata"]["_web_push_authorization_contexts"]
+    assert not any(key.startswith("_web_push_") for key in payload["metadata"])
+    published_message = next(
+        data
+        for event_type, data in published
+        if event_type == "message.new"
+    )
+    assert not any(
+        key.startswith("_web_push_")
+        for key in published_message["metadata"]
+    )
+
+    with engine.connect() as conn:
+        metadata_json = conn.execute(
+            select(messages.c.metadata_json).where(messages.c.id == payload["id"])
+        ).scalar_one()
+    persisted_metadata = json.loads(metadata_json)
+    assert persisted_metadata["_web_push_user_key"].startswith("remote:")
+    records = persisted_metadata["_web_push_authorization_contexts"]
     assert records == [
         {
             "email": "alice@example.com",
-            "sub": payload["metadata"]["_web_push_user_key"].removeprefix("remote:"),
-            "user_key": payload["metadata"]["_web_push_user_key"],
+            "sub": persisted_metadata["_web_push_user_key"].removeprefix("remote:"),
+            "user_key": persisted_metadata["_web_push_user_key"],
             "vibe_group_ids": [],
             "vibe_instance_access_source": "owner",
             "vibe_instance_id": "inst_123",
             "vibe_instance_role": "editor",
         }
     ]
+    transcript = _get(client, f"/api/sessions/{ids['session_a']}/messages").get_json()
+    stored_payload = next(row for row in transcript["messages"] if row["id"] == payload["id"])
+    assert not any(key.startswith("_web_push_") for key in stored_payload["metadata"])
 
 
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:

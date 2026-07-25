@@ -16,6 +16,7 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import sys
 import tempfile
@@ -808,7 +809,7 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert [m["text"] for m in transcript["messages"]] == ["q1\nq2"], "the flush persisted one merged user row"
     assert transcript["messages"][0]["author_id"] == "remote:user-a"
-    assert transcript["messages"][0]["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert "_web_push_user_key" not in transcript["messages"][0]["metadata"]
 
 
 def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
@@ -3000,16 +3001,27 @@ def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch)
     assert [(t, s) for t, s, _ in runs] == [("u1\nu2", SOURCE_HUMAN)]
     with engine.connect() as conn:
         transcript = messages_service.list_session_messages(conn, session_id=session["id"], types=("user",))
+        from storage.models import messages
+
+        metadata_json = conn.execute(
+            select(messages.c.metadata_json).where(
+                messages.c.id == transcript["messages"][0]["id"]
+            )
+        ).scalar_one()
     assert transcript["messages"][0]["author_id"] is None
-    assert transcript["messages"][0]["metadata"]["_web_push_user_keys"] == [
+    assert not any(
+        key.startswith("_web_push_")
+        for key in transcript["messages"][0]["metadata"]
+    )
+    persisted_metadata = json.loads(metadata_json)
+    assert persisted_metadata["_web_push_user_keys"] == [
         "remote:user-a",
         "remote:user-b",
     ]
     assert [
         record["user_key"]
-        for record in transcript["messages"][0]["metadata"]["_web_push_authorization_contexts"]
+        for record in persisted_metadata["_web_push_authorization_contexts"]
     ] == ["remote:user-a", "remote:user-b"]
-    assert "_web_push_user_key" not in transcript["messages"][0]["metadata"]
 
 
 def test_capture_scheduled_provenance_keeps_delivery_drops_routing():

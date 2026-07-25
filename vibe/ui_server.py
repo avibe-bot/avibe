@@ -6559,7 +6559,11 @@ def _reserve_forked_session_for_ui(
     )
     engine = _projects_engine()
     with engine.connect() as conn:
-        return workbench_sessions_service.get_session(conn, result.session_id)
+        return workbench_sessions_service.get_session(
+            conn,
+            result.session_id,
+            authorization_context=authorization_context,
+        )
 
 
 @app.route("/api/sessions/<session_id>/fork", methods=["POST"])

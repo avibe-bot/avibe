@@ -897,7 +897,11 @@ class SessionTurnManager:
         engine = self._sqlite_engine()
         try:
             with run_update_event_transaction(engine) as conn:
-                rows = messages_service.list_queued(conn, session_id)
+                rows = messages_service.list_queued(
+                    conn,
+                    session_id,
+                    include_private_metadata=True,
+                )
                 if not rows:
                     return False
                 if _scheduled_provenance(rows[0]) is not None:
