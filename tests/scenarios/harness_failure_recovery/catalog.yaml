@@ -237,6 +237,27 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it
+  - id: HFR-033
+    name: a recovered transport gives the next outage its own full TTL
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_grants_a_second_outage_its_own_ttl_after_a_recovery
+  - id: HFR-034
+    name: a hold parked behind a live session turn is spared
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_a_hold_parked_behind_a_live_session_turn
+  - id: HFR-035
+    name: unknown live turns disable the hold class instead of failing holds
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_hold_class_when_live_session_turns_are_unknown
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

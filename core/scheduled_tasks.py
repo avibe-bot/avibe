@@ -1197,6 +1197,7 @@ class TaskExecutionStore:
         owned_run_ids: set[str],
         error_texts: dict[str, str],
         deliverable_run_ids: Optional[set[str]] = None,
+        busy_session_ids: Optional[set[str]] = None,
         orphan_grace_seconds: int,
         queued_ttl_seconds: int,
         hold_ttl_seconds: int,
@@ -1209,6 +1210,7 @@ class TaskExecutionStore:
             owned_run_ids=owned_run_ids,
             error_texts=error_texts,
             deliverable_run_ids=deliverable_run_ids,
+            busy_session_ids=busy_session_ids,
             orphan_grace_seconds=orphan_grace_seconds,
             queued_ttl_seconds=queued_ttl_seconds,
             hold_ttl_seconds=hold_ttl_seconds,
@@ -2072,6 +2074,26 @@ class ScheduledTaskService:
         owned |= {str(run_id) for run_id in provider() if run_id}
         return owned
 
+    def _busy_session_ids(self) -> set[str]:
+        """Sessions with a live turn, which is why their queue holds exist.
+
+        The gate answers ``enqueued`` for a run submitted into a session that already
+        has a turn in flight, and that run is then requeued with
+        ``workbench_queue_holds_run``. Nobody reports it as owned — the live turn owns
+        only the ids it is itself executing — so the hold class needs this second live
+        fact or it fails the follower of any turn longer than the hold TTL (Codex P2).
+
+        Raises when the turn lane cannot be reached, for the same reason
+        :meth:`_owned_agent_run_ids` does: "no session is busy" and "I cannot tell" are
+        opposite answers, and the caller must fail closed on the second.
+        """
+
+        session_turns = getattr(self.controller, "session_turns", None)
+        provider = getattr(session_turns, "busy_session_ids", None)
+        if not callable(provider):
+            raise RuntimeError("controller.session_turns.busy_session_ids is unavailable")
+        return {str(session_id) for session_id in provider() if session_id}
+
     def _deliverable_queued_run_ids(self) -> set[str]:
         """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.
 
@@ -2170,17 +2192,30 @@ class ScheduledTaskService:
             )
             deliverable_run_ids = set()
             queued_ttl_seconds = 0
+        hold_ttl_seconds = self._runtime_seconds(
+            "harness_run_hold_ttl_seconds", DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
+        )
+        try:
+            busy_session_ids = self._busy_session_ids()
+        except Exception:
+            # Fail closed by disabling the class, same posture as deliverability: a hold
+            # is only abandoned if no live turn explains it, and "I cannot tell which
+            # sessions are busy" would fail a run the gate is about to flush.
+            logger.warning(
+                "Skipping queue-hold sweep: live session turns are unknown", exc_info=True
+            )
+            busy_session_ids = set()
+            hold_ttl_seconds = 0
         swept = self.request_store.sweep_stale_runs(
             owned_run_ids=owned_run_ids,
             deliverable_run_ids=deliverable_run_ids,
+            busy_session_ids=busy_session_ids,
             error_texts={reason: self._t(key) for reason, key in SWEEP_I18N_KEYS.items()},
             orphan_grace_seconds=self._runtime_seconds(
                 "harness_run_orphan_grace_seconds", DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
             ),
             queued_ttl_seconds=queued_ttl_seconds,
-            hold_ttl_seconds=self._runtime_seconds(
-                "harness_run_hold_ttl_seconds", DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
-            ),
+            hold_ttl_seconds=hold_ttl_seconds,
         )
         # Unconditional: the in-memory wedge and the stale rows are independent
         # failures, and either can outlive the other.

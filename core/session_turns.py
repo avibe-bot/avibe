@@ -724,6 +724,25 @@ class SessionTurnManager:
             owned |= self._agent_run_ids_from_spec(sink)
         return owned
 
+    def busy_session_ids(self) -> set[str]:
+        """Sessions whose gate is occupied by a live turn RIGHT NOW.
+
+        This is the exemption the staleness sweep needs for the ``queue_hold_expired``
+        class, and it is deliberately NOT expressible through
+        :meth:`owned_agent_run_ids`: a run the gate parked behind a live turn is not one
+        the live turn is executing, so it has no owner to report it, yet it is not
+        abandoned either — ``flush_queue`` will pick it up when the turn ends. Without
+        this, a legitimate Workbench turn lasting longer than the hold TTL had its own
+        queued follower failed underneath it (Codex P2).
+
+        ``in_flight`` is the right predicate because it is the same map
+        ``submit``/``submit_scheduled`` consult before answering ``enqueued`` — the very
+        decision that created the hold. Sinks are not unioned in here: they are keyed by
+        session KEY, not session id, and a streaming turn always has an ``in_flight``
+        entry anyway.
+        """
+        return {session_id for session_id in list(self.in_flight) if session_id}
+
     def bind_context(self, build_context: Callable[[str], "MessageContext"]) -> None:
         """Inject the routing-context builder (it lives in ``internal_server``) once
         the gate is built, so ``flush_queue`` can rebuild a queued follow-up's

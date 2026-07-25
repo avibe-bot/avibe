@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2981,6 +2982,54 @@ def test_sweep_spares_a_stale_transport_stamp_once_the_platform_is_back(
     assert request_store.get_run(run_id)["status"] == "queued"
 
 
+def test_sweep_grants_a_second_outage_its_own_ttl_after_a_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-033: proven recovery retires the evidence, so the NEXT outage ages from itself.
+
+    Deliverability only exempts a row while the transport is up. Since the drain
+    ``break``s at its concurrency cap it never re-stamps a row below the cut, so a stale
+    ``last_skip_at`` survived the recovery — and the moment the platform dropped again
+    the sweep read one continuous outage and failed the run instantly, skipping the whole
+    configured reconnect window (Codex P2). Observing the recovery is the only chance to
+    retire it, so the sweep does that when it sees both halves of the evidence disagree.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(1900)},
+        created_age_seconds=1900,
+    )
+    # Slack is back, and the drain is at capacity so it can never say so itself.
+    controller = _SweepControllerDouble()
+    service = _sweep_service(tmp_path, request_store, controller)
+    for index in range(service._MAX_CONCURRENT_EXECUTIONS):
+        service._inflight_executions[f"busy{index:08d}"] = Mock(name="live-execution-task")
+
+    service._sweep_stale_runs()
+
+    recovered = request_store.get_run(run_id)
+    assert recovered["status"] == "queued", "deliverable => never swept (HFR-021)"
+    assert "last_skip_reason" not in (recovered["metadata"] or {}), "the ended outage is forgotten"
+    assert "last_skip_at" not in (recovered["metadata"] or {})
+
+    # A NEW outage, recorded by the drain now that a slot is free.
+    service._inflight_executions.clear()
+    controller._transport_ready = False
+    asyncio.run(service._drain_requests())
+    restamped = request_store.get_run(run_id)["metadata"]
+    assert restamped["last_skip_reason"] == "transport_unavailable"
+
+    service._last_sweep_at = None  # the rate limiter is not what is under test
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued", (
+        "the second outage gets its own full TTL, not the first one's leftover age"
+    )
+
+
 def test_sweep_ages_a_transport_failure_from_when_it_started(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -3409,6 +3458,122 @@ def test_turn_only_result_leaves_an_activity_owned_run_alone(
     assert kept["status"] == "running"
     assert not (kept["metadata"] or {}).get("interrupt_reason")
     assert not kept["error"]
+
+
+def test_sweep_skips_hold_class_when_live_session_turns_are_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-035: an unanswerable "is this session busy?" disables the hold class.
+
+    Same fail-closed posture as ownership and deliverability: "no session is busy" and
+    "I could not look" are opposite answers, and acting on the second fails a run the
+    gate is about to flush. Only the hold class is suppressed for this tick.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    manager = SessionTurnManager(controller=None)
+
+    def _broken() -> set[str]:
+        raise RuntimeError("turn manager unavailable")
+
+    manager.busy_session_ids = _broken
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(session_turns=manager)
+    )
+    held = _stage_queued_run(
+        request_store, metadata={"workbench_queue_holds_run": True}, updated_age_seconds=7200
+    )
+    orphan_id = _stage_orphan_run(request_store)
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(held)["status"] == "queued", "unprovable => untouched"
+    assert request_store.get_run(orphan_id)["status"] == "failed", "other classes still sweep"
+
+
+def test_sweep_spares_a_hold_parked_behind_a_live_session_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-034: a hold with a live turn to wait for is not abandoned (Codex P2).
+
+    The gate answers ``enqueued`` when a run arrives at a session that already has a
+    turn in flight, and the run is requeued with ``workbench_queue_holds_run``. Nobody
+    reports it as owned — the live turn owns only the ids it is executing itself — so a
+    legitimate Workbench turn outliving ``harness_run_hold_ttl_seconds`` had its own
+    queued follower failed underneath it, even though ``flush_queue`` would have picked
+    it up on completion. Ownership cannot express this; live session occupancy can. The
+    control row proves the class still works: same flag, same age, no live turn.
+    """
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    manager = SessionTurnManager(controller=None)
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(session_turns=manager)
+    )
+    manager.controller = SimpleNamespace(
+        scheduled_task_service=service,
+        session_turns=manager,
+        set_agent_status=lambda *_args, **_kwargs: None,
+        _get_session_key=lambda ctx: f"avibe::{ctx.channel_id}",
+    )
+    live = request_store.enqueue_agent_run(
+        session_id=session_id, message="the long legitimate turn", agent_name="codex"
+    ).id
+    _force_run_columns(request_store, live, status="running", started_at=_ago(30))
+    held = request_store.enqueue_agent_run(
+        session_id=session_id, message="parked behind that turn", agent_name="codex"
+    ).id
+    _force_run_columns(
+        request_store,
+        held,
+        updated_at=_ago(7200),
+        metadata_json=json.dumps({"workbench_queue_holds_run": True}),
+    )
+    abandoned = _stage_queued_run(
+        request_store, metadata={"workbench_queue_holds_run": True}, updated_age_seconds=7200
+    )
+
+    dispatch_started = asyncio.Event()
+
+    async def _never_returns(_controller, _context, _text, **_kwargs):
+        dispatch_started.set()
+        await asyncio.Event().wait()  # the long turn, still going
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _never_returns)
+
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"task_execution_id": live, "task_trigger_kind": "agent_run"},
+    )
+
+    async def _exercise() -> None:
+        assert (
+            await manager.submit(
+                session_id, context, "the long legitimate turn", source=SOURCE_SCHEDULED
+            )
+            == "ran"
+        )
+        await asyncio.wait_for(dispatch_started.wait(), timeout=5)
+        assert manager.busy_session_ids() == {session_id}
+
+        service._sweep_stale_runs()
+
+        assert request_store.get_run(held)["status"] == "queued", "the gate will flush it"
+        assert request_store.get_run(live)["status"] == "running", "owned, so never swept"
+        assert request_store.get_run(abandoned)["status"] == "failed", "no live turn => abandoned"
+
+        turn = manager.in_flight.get(session_id)
+        assert turn is not None
+        turn.task.cancel()
+        with suppress(asyncio.CancelledError):
+            await turn.task
+
+    asyncio.run(_exercise())
 
 
 def test_sweep_retires_the_queue_segment_of_the_run_it_expired(

@@ -809,6 +809,52 @@ user-visible text.
 | M24 turn lane back to `settled_by == terminal_result` deny-list | KILLED (HFR-031) |
 | M25 drain lane back to `settled_by == terminal_result` deny-list | KILLED (HFR-032) |
 
+### 5.9 Review round 7 (avibe-bot/avibe#1005) — a TTL must measure one outage, and the gate's parked rows have no owner
+
+Two P2 findings on `storage/background.py`, both real, both the same underlying mistake:
+the sweep was reasoning about *live* facts from *stale* evidence.
+
+**P2a — a recovered transport made the next outage's TTL retroactive (HFR-033).**
+`metadata.last_skip_reason = transport_unavailable` is stamped once, on transition
+(§4.3, deliberately, to avoid the write → invalidation-probe → reload → re-drain loop).
+Nothing retires it. So: stamped at `t0`; transport recovers; the drain that would
+re-evaluate the row never reaches it (already at `_MAX_CONCURRENT_EXECUTIONS`), so no
+rewrite happens; the sweep exempts the row because `deliverable_run_ids` now contains it.
+Transport drops again at `t2 > t0 + queued_ttl_seconds`, deliverability goes away, and the
+row is aged from `t0` — swept on the very first tick, with none of the reconnect window
+the TTL exists to grant.
+
+The fix retires the evidence at the only moment both halves are visible at once: the sweep
+already holds "the row remembers an outage" and "the row is deliverable right now".
+`_clear_transport_skip_evidence` pops `last_skip_reason`/`last_skip_at` for exactly those
+rows, re-reading each row under the write to skip anything that changed underneath, and
+writes **only** `metadata_json` — never `updated_at`, because the hold class's clock reads
+that column. It is transition-triggered in the same sense as the stamp: once the evidence
+is gone there is nothing left to clear, so a healthy queue costs zero repeat writes.
+
+**P2b — a hold parked behind a live turn was reported by nobody (HFR-034, HFR-035).**
+`submit_scheduled` returning `enqueued` requeues the row with
+`workbench_queue_holds_run = True`; the gate will flush it when the current turn ends.
+But `owned_agent_run_ids()` walks live turn *contexts* and yields only the ids those turns
+are executing themselves — a follower the gate parked is owned by no one. So a turn that
+legitimately runs longer than `harness_run_hold_ttl_seconds` (default 3600) had its own
+queued successor failed underneath it, and the user got an interruption notice for work
+that was still correctly waiting.
+
+The hold class therefore needs a third caller-supplied live fact, alongside
+`owned_run_ids` and `deliverable_run_ids`: `busy_session_ids`, at **session** granularity,
+because that is the granularity the gate occupies. `SessionTurnManager.busy_session_ids()`
+reads `in_flight`; `_busy_session_ids()` raises rather than returning a plausible empty
+set when the provider is missing, and `_sweep_stale_runs` catches that by failing closed —
+`hold_ttl_seconds = 0` disables the class entirely, per the §4.2 posture that an unknown
+live fact must never be read as "nothing is live".
+
+| Mutation | Verdict |
+| --- | --- |
+| M26 drop the recovered-evidence retirement (finding P2a) | KILLED (HFR-033) |
+| M27 drop the `busy_session_ids` exemption on the hold branch (finding P2b) | KILLED (HFR-034) |
+| M28 drop the caller's fail-closed `hold_ttl_seconds = 0` | KILLED (HFR-035) |
+
 ## 6. Staging
 
 - **PR-A (Gap A)** — §3.1–3.4. Small, no new config, no sweep. Independently

@@ -1773,12 +1773,54 @@ class SQLiteBackgroundTaskStore:
             )
         return True
 
+    def _clear_transport_skip_evidence(self, run_ids: set[str]) -> int:
+        """Forget a ``transport_unavailable`` stamp whose outage has demonstrably ended.
+
+        Counterpart to :meth:`record_run_skip_reason`, with the same two properties
+        that keep it from feeding the drain loop: it is TRANSITION-triggered (after the
+        clear there is no reason left to match, so a still-deliverable row costs zero
+        writes on every later sweep), and it leaves ``updated_at`` alone so a queue hold
+        keeps aging from its own clock.
+
+        Scoped to the transport reason on purpose: another writer's reason is not ours
+        to erase, and a row re-stamped between the select and here is left as it is —
+        it will be reconsidered, with a fresh ``last_skip_at``, next sweep.
+        """
+
+        cleared = 0
+        with self.engine.begin() as conn:
+            for run_id in sorted(run_ids):
+                row = conn.execute(
+                    select(agent_runs.c.status, agent_runs.c.metadata_json)
+                    .where(agent_runs.c.id == run_id)
+                    .limit(1)
+                ).mappings().first()
+                if not row or normalize_run_status(row["status"]) != "queued":
+                    continue
+                metadata = _json_loads(row["metadata_json"], {})
+                if not isinstance(metadata, dict):
+                    continue
+                if metadata.get("last_skip_reason") != SKIP_REASON_TRANSPORT_UNAVAILABLE:
+                    continue
+                metadata.pop("last_skip_reason", None)
+                metadata.pop("last_skip_at", None)
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(metadata_json=_json_dumps(metadata))
+                )
+                cleared += 1
+        if cleared:
+            logger.debug("Cleared recovered transport skip evidence on %s harness run(s)", cleared)
+        return cleared
+
     def sweep_stale_runs(
         self,
         *,
         owned_run_ids: set[str],
         error_texts: dict[str, str],
         deliverable_run_ids: Optional[set[str]] = None,
+        busy_session_ids: Optional[set[str]] = None,
         now: Optional[str] = None,
         orphan_grace_seconds: int = 0,
         queued_ttl_seconds: int = 0,
@@ -1799,7 +1841,7 @@ class SQLiteBackgroundTaskStore:
           re-derived, so a run deferred for capacity or a session lock — both of which
           are progress — is never swept.
         - ``queue_hold_expired``: a ``queued`` run holding a workbench queue slot that
-          has not been touched in ``hold_ttl_seconds``.
+          has not been touched in ``hold_ttl_seconds``, in a session with no live turn.
 
         ``owned_run_ids`` exempts a row from **every** class, not just ``orphaned``. A
         coalesced workbench turn claims its secondary runs and deliberately leaves them
@@ -1816,7 +1858,21 @@ class SQLiteBackgroundTaskStore:
         cap, so rows below the cut are never re-examined and keep an old
         ``transport_unavailable`` stamp long after their platform reconnected. Without a
         live second opinion the sweep would fail a run that is merely waiting for a free
-        slot. Every id listed here is exempt.
+        slot. Every id listed here is exempt. A listed row also has its stale
+        ``transport_unavailable`` evidence CLEARED, so a later outage is aged from its
+        own start: capacity keeps the drain from re-stamping a row below its cut, so
+        without the clear a recovered-then-failed-again transport would be read as one
+        continuous outage and skip the whole configured reconnect window (Codex P2).
+
+        ``busy_session_ids`` is the same contract again, for the hold class: a run the
+        gate parked behind a live turn is NOT reported by ``owned_agent_run_ids`` (the
+        live turn only owns the ids of the run it is itself executing), so a legitimate
+        Workbench turn outliving ``hold_ttl_seconds`` would have its own queued follower
+        failed even though the gate would flush it on completion (Codex P2). The set is
+        session ids, not run ids, because that is the granularity the gate occupies.
+        ``None`` means "no exemptions", so a caller that cannot enumerate live turns
+        must fail closed by disabling the class (``hold_ttl_seconds=0``), exactly as it
+        does for deliverability.
 
         Candidate selection is read-only; each row is then terminalized through
         :meth:`settle_run_terminal`, so every write inherits the same guards — scoped
@@ -1851,6 +1907,7 @@ class SQLiteBackgroundTaskStore:
             )
 
         candidates: list[tuple[dict[str, Any], str]] = []
+        recovered_ids: set[str] = set()
         for row in rows:
             result_payload = _json_loads(row["result_payload_json"], {})
             if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
@@ -1878,10 +1935,26 @@ class SQLiteBackgroundTaskStore:
                 ):
                     reason = SWEEP_REASON_ORPHANED
             elif status == "queued":
-                # Hold first: it is the more specific piece of evidence, and its TTL is
-                # deliberately the longest so an actively recovering queue survives.
-                if metadata.get("workbench_queue_holds_run") and _older_than(
-                    row["updated_at"], hold_ttl_seconds
+                if (
+                    metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE
+                    and run_id in (deliverable_run_ids or set())
+                ):
+                    # The outage this row remembers is OVER. Retire the evidence now,
+                    # while we can still see both halves of it: the drain breaks at its
+                    # concurrency cap, so a row below the cut is never re-stamped, and a
+                    # stale ``last_skip_at`` would make the NEXT outage look like a
+                    # continuation of this one and skip its whole TTL (Codex P2).
+                    recovered_ids.add(run_id)
+                # Hold before transport: it is the more specific piece of evidence, and
+                # its TTL is deliberately the longest so an actively recovering queue
+                # survives.
+                if (
+                    metadata.get("workbench_queue_holds_run")
+                    # A live turn in this row's session is why it is parked. The gate
+                    # will flush it when that turn ends, and the turn does NOT report
+                    # this run as owned — it owns only the ids it is executing itself.
+                    and str(row["session_id"] or "") not in (busy_session_ids or set())
+                    and _older_than(row["updated_at"], hold_ttl_seconds)
                 ):
                     reason = SWEEP_REASON_QUEUE_HOLD_EXPIRED
                 elif (
@@ -1904,6 +1977,9 @@ class SQLiteBackgroundTaskStore:
                     reason = SWEEP_REASON_TRANSPORT_UNAVAILABLE
             if reason is not None:
                 candidates.append((dict(row), reason))
+
+        if recovered_ids:
+            self._clear_transport_skip_evidence(recovered_ids)
 
         swept: list[SweptRun] = []
         for row, reason in candidates:

@@ -219,3 +219,24 @@ observations:
       result is coming (SETTLEMENTS_WITHOUT_RESULT) rather than treating everything
       except terminal_result as a zombie -- otherwise the next "turn ended, run
       lives on" reason repeats the same failure.
+  - id: HFR-OBS-020
+    result: confirmed
+    detail: >-
+      Staleness evidence is a point-in-time fact, and the sweep is the only party
+      that sees both halves of its lifetime. A queued row stamped
+      transport_unavailable at t0 stays stamped after transport recovers, because
+      re-stamping is transition-triggered and a drain that never reaches the row
+      (at concurrency capacity) rewrites nothing; deliverability then exempts it,
+      so nobody retires the stamp. When transport drops again at t2 > t0 + TTL, the
+      second outage is aged from the FIRST one and is swept with zero reconnect
+      window. Retiring the evidence at the moment deliverability proves the outage
+      is over restores the invariant that a TTL measures one continuous outage.
+      The same shape holds for the hold class: owned_agent_run_ids() reports only
+      the ids a live turn is executing, never the followers the gate parked behind
+      it, so a turn legitimately longer than harness_run_hold_ttl_seconds had its
+      own queued successor failed. Live facts the sweep cannot derive must be
+      supplied by the caller at the granularity the truth lives at -- sessions for
+      the gate, run ids for ownership and deliverability -- and a caller that
+      cannot enumerate them must fail closed by disabling the class rather than
+      guessing.
+
