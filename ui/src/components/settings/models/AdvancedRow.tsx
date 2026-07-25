@@ -15,7 +15,7 @@ export const AdvancedRow: React.FC = () => {
     <button
       type="button"
       onClick={() => showToast(t('settings.models.advanced.comingSoon') as string, 'warning')}
-      className="flex w-full items-center gap-3 rounded-xl border border-border bg-background px-5 py-4 text-left transition-colors hover:border-border-strong"
+      className="flex w-full items-center gap-3 rounded-xl border border-border bg-background px-4 py-4 text-left sm:px-5 transition-colors hover:border-border-strong"
     >
       <SlidersHorizontal className="size-4 shrink-0 text-muted" />
       <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">

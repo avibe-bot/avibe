@@ -33,7 +33,9 @@ export const MenuDrawer: React.FC<{
           'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:slide-in-from-right data-[state=closed]:slide-out-to-right data-[state=open]:duration-300 data-[state=closed]:duration-200',
         )}
       >
-        <header className="flex items-start gap-3 border-b border-border px-6 py-5">
+        {/* On phones the drawer is the whole screen, so it carries the safe-area
+            insets itself and tightens its gutters from 24px to 16px. */}
+        <header className="flex items-start gap-3 border-b border-border px-4 py-4 pt-[calc(1rem+env(safe-area-inset-top))] sm:px-6 sm:py-5 sm:pt-5">
           <span className={cn('flex size-11 shrink-0 items-center justify-center rounded-[12px]', ACCENT_TILE[accent])}>
             <Icon size={22} className={ACCENT_ICON[accent]} />
           </span>
@@ -45,15 +47,15 @@ export const MenuDrawer: React.FC<{
               {subtitle}
             </DialogPrimitive.Description>
           </div>
-          <DialogPrimitive.Close className="shrink-0 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
+          <DialogPrimitive.Close className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring sm:size-7">
             <X className="size-5" />
             <span className="sr-only">{t('common.close')}</span>
           </DialogPrimitive.Close>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
+        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">{children}</div>
 
-        <footer className="flex items-center justify-between gap-3 border-t border-border bg-surface/40 px-6 py-4">
+        <footer className="flex items-center justify-between gap-3 border-t border-border bg-surface/40 px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-6 sm:py-4 sm:pb-4">
           {footer}
         </footer>
       </DialogPrimitive.Content>

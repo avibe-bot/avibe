@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
+import { currencySymbol } from './format';
 import { ACCENT_DOT, type Accent } from './vendorMeta';
 import type { AgentMode, SourceState } from './types';
 
@@ -17,16 +18,33 @@ export const Dot: React.FC<{ accent: Accent; className?: string }> = ({ accent, 
   <span className={cn('inline-block size-1.5 shrink-0 rounded-full', ACCENT_DOT[accent], className)} aria-hidden />
 );
 
-/** 包月 / 按量 ¥ — fixed-width so the column aligns down the source list. */
-export const BillingChip: React.FC<{ billing: 'monthly' | 'metered' }> = ({ billing }) => {
+/**
+ * 包月 / 按量 $ — fixed-width so the column aligns down the source list.
+ *
+ * The metered symbol tracks the source's REPORTED currency (USD when absent).
+ * A static `$` contradicted the usage cell for a source that genuinely reports
+ * CNY/EUR — it would read `按量 $` beside `¥12.4`. The symbol still comes from
+ * format.ts's single map, never hand-written here; an unmappable code drops the
+ * symbol rather than printing a wrong one (the amount cell carries the truth).
+ */
+export const BillingChip: React.FC<{ billing: 'monthly' | 'metered'; currency?: string | null }> = ({
+  billing,
+  currency,
+}) => {
   const { t } = useTranslation();
-  return billing === 'monthly' ? (
-    <Badge variant="secondary" className="w-16 justify-center rounded-md py-1 font-medium">
-      {t('settings.models.billing.monthly')}
-    </Badge>
-  ) : (
+  if (billing === 'monthly') {
+    return (
+      <Badge variant="secondary" className="w-16 justify-center rounded-md py-1 font-medium">
+        {t('settings.models.billing.monthly')}
+      </Badge>
+    );
+  }
+  const symbol = currencySymbol(currency);
+  return (
     <Badge variant="warning" className="w-16 justify-center rounded-md py-1 font-medium">
-      {t('settings.models.billing.metered')}
+      {symbol
+        ? t('settings.models.billing.meteredWithSymbol', { symbol })
+        : t('settings.models.billing.metered')}
     </Badge>
   );
 };
@@ -98,12 +116,14 @@ export const ExperimentalChip: React.FC = () => {
  * `N 个模型 ｜ ● 多来源…`.
  */
 export const CompositePill: React.FC<{ left: string; dot: Accent; right: string }> = ({ left, dot, right }) => (
-  <div className="inline-flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-[13px]">
-    <span className="font-mono font-medium text-foreground">{left}</span>
-    <span className="h-3.5 w-px bg-border-strong" aria-hidden />
-    <span className="inline-flex items-center gap-1.5 text-muted">
+  // max-w-full + truncating halves: on a phone the model id would otherwise wrap
+  // to three lines and blow the Agent row's height open.
+  <div className="inline-flex max-w-full items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-[13px]">
+    <span className="truncate font-mono font-medium text-foreground">{left}</span>
+    <span className="h-3.5 w-px shrink-0 bg-border-strong" aria-hidden />
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-muted">
       <Dot accent={dot} />
-      {right}
+      <span className="truncate">{right}</span>
     </span>
   </div>
 );

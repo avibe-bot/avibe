@@ -68,7 +68,7 @@ export function buildMockSources(): Source[] {
       supply_channel: 'hub',
       billing: 'metered',
       state: { status: 'standby', retry_at: null, detail_key: null },
-      usage: { cycle_used_pct: null, month_spend_cents: 1240, currency: 'CNY' },
+      usage: { cycle_used_pct: null, month_spend_cents: 1240, currency: 'USD' },
       account_label: null,
       masked_credential: 'sk-ant-…8f2A',
       models: [
@@ -88,7 +88,7 @@ export function buildMockSources(): Source[] {
       supply_channel: 'hub',
       billing: 'metered',
       state: { status: 'standby', retry_at: null, detail_key: null },
-      usage: { cycle_used_pct: null, month_spend_cents: 210, currency: 'CNY' },
+      usage: { cycle_used_pct: null, month_spend_cents: 210, currency: 'USD' },
       account_label: null,
       masked_credential: 'glm-…c31b',
       models: [
@@ -109,7 +109,7 @@ export function buildMockSources(): Source[] {
       supply_channel: 'hub',
       billing: 'metered',
       state: { status: 'cooldown', retry_at: iso(47 * MIN), detail_key: 'settings.models.source.cooldown.timeout' },
-      usage: { cycle_used_pct: null, month_spend_cents: 320, currency: 'CNY' },
+      usage: { cycle_used_pct: null, month_spend_cents: 320, currency: 'USD' },
       account_label: null,
       masked_credential: 'key …9c1',
       models: [
