@@ -197,6 +197,43 @@ def test_vault_request_reads_and_denial_enforce_member_secret_acls(vault) -> Non
     assert denied["status"] == "denied"
 
 
+def test_pending_provision_lookups_require_instance_owner(vault, monkeypatch) -> None:
+    owner = _context("owner-1", instance_role="owner")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        provision = vault_service.create_provision_request(conn, "MISSING_SECRET")
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.resolve_pending_provision_request_by_name(
+                conn,
+                "MISSING_SECRET",
+                user_context=member,
+            )
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.get_pending_provision_request(
+                conn,
+                provision["id"],
+                user_context=member,
+            )
+        visible, ambiguous = vault_service.resolve_pending_provision_request_by_name(
+            conn,
+            "MISSING_SECRET",
+            user_context=owner,
+        )
+
+    assert visible is not None
+    assert visible["id"] == provision["id"]
+    assert ambiguous is False
+
+    monkeypatch.setattr(api, "_vault_engine", lambda: vault)
+    monkeypatch.setattr(api, "resolve_resource_access_context", lambda: member)
+    with pytest.raises(api.VaultApiError) as by_name:
+        api.get_vault_provision_request_by_name("MISSING_SECRET")
+    with pytest.raises(api.VaultApiError) as by_id:
+        api.get_vault_provision_request(provision["id"])
+    assert by_name.value.status == 403
+    assert by_id.value.status == 403
+
+
 def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
     owner = _context("owner-1")
     member = _context("member-1")

@@ -177,6 +177,54 @@ def test_remote_agent_creation_defaults_to_private_organization_policy(monkeypat
     assert policy["access_level"] == "private"
 
 
+def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    store.close()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        scope_id = upsert_scope(
+            connection,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_partial_agent",
+            now="2026-07-20T00:00:00Z",
+        )
+        session = workbench_sessions_service.create_session(
+            connection,
+            scope_id=scope_id,
+            agent_backend="",
+            agent_id=agents["public"].id,
+            user_context=_organization_context("member-1"),
+        )
+        by_name = workbench_sessions_service.update_session(
+            connection,
+            session["id"],
+            agent_name=agents["scope"].name,
+            user_context=_organization_context("member-1"),
+        )
+        by_id = workbench_sessions_service.update_session(
+            connection,
+            session["id"],
+            agent_id=agents["public"].id,
+            user_context=_organization_context("member-1"),
+        )
+
+    assert (session["agent_id"], session["agent_name"], session["agent_backend"]) == (
+        agents["public"].id,
+        agents["public"].name,
+        agents["public"].backend,
+    )
+    assert (by_name["agent_id"], by_name["agent_name"]) == (
+        agents["scope"].id,
+        agents["scope"].name,
+    )
+    assert (by_id["agent_id"], by_id["agent_name"]) == (
+        agents["public"].id,
+        agents["public"].name,
+    )
+
+
 def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

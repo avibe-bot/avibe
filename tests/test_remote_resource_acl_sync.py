@@ -236,6 +236,35 @@ def test_sync_publishes_empty_index_after_last_organization_policy_is_deleted(mo
     assert resource_access_service.list_resource_organization_ids() == []
 
 
+def test_malformed_intent_keeps_empty_organization_queued_for_retry(monkeypatch) -> None:
+    _seed_policy()
+    config = _config()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        assert resource_access_service.delete_resource_policy(connection, "agent", "agent-1")
+
+    responses = iter(
+        [
+            _Response({"organization_id": "org-1", "resources": []}),
+            _Response(
+                {
+                    "organization_id": "org-1",
+                    "poll_after_seconds": 30,
+                    "intents": [{"resource_kind": "invalid"}],
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(remote_access.requests, "request", lambda *_args, **_kwargs: next(responses))
+
+    result = remote_access.sync_resource_acl_once(config)
+
+    assert result["ok"] is False
+    assert result["organizations"][0]["rejected"] == 1
+    assert result["organizations"][0]["ack_errors"] == 1
+    assert resource_access_service.list_resource_organization_ids() == ["org-1"]
+
+
 def test_poll_delay_honors_successful_organization_backoff() -> None:
     result = {
         "ok": False,

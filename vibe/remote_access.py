@@ -950,6 +950,7 @@ def _sync_one_organization(
             # A malformed device response is not safe to acknowledge because it
             # does not identify an exact valid revision.
             rejected += 1
+            ack_errors += 1
             continue
         release_scopes: list[dict[str, str]] = []
         release_key = (

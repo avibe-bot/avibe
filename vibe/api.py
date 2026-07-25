@@ -2686,8 +2686,15 @@ def get_vault_provision_request_by_name(name: str) -> dict:
     if not vault_crypto.is_valid_secret_name(requested_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
+    try:
+        with engine.begin() as conn:
+            request, ambiguous = vault_service.resolve_pending_provision_request_by_name(
+                conn,
+                requested_name,
+                user_context=resolve_resource_access_context(),
+            )
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     return {"ok": True, "request": request, "ambiguous": ambiguous}
 
 
@@ -2698,8 +2705,15 @@ def get_vault_provision_request(request_id: str) -> dict:
     if not requested_id:
         raise VaultApiError("request_id is required", code="missing_request_id")
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request = vault_service.get_pending_provision_request(conn, requested_id)
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_pending_provision_request(
+                conn,
+                requested_id,
+                user_context=resolve_resource_access_context(),
+            )
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     return {"ok": True, "request": request}
 
 

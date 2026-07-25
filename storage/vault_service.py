@@ -3757,7 +3757,12 @@ def list_requests(
     return [_request_row_payload(row, conn=conn, audience=REQUEST_AUDIENCE_UI) for row in rows]
 
 
-def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tuple[dict[str, Any] | None, bool]:
+def resolve_pending_provision_request_by_name(
+    conn: Connection,
+    name: str,
+    *,
+    user_context: Any = None,
+) -> tuple[dict[str, Any] | None, bool]:
     _expire_pending_requests(conn)
     rows = list(
         conn.execute(
@@ -3771,8 +3776,11 @@ def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tu
             .limit(2)
         ).mappings()
     )
-    if len(rows) == 1:
-        return _request_row_payload(dict(rows[0]), conn=conn, audience=REQUEST_AUDIENCE_UI), False
+    row_dicts = [dict(row) for row in rows]
+    for row in row_dicts:
+        _require_request_secret_access(conn, row, user_context=user_context)
+    if len(row_dicts) == 1:
+        return _request_row_payload(row_dicts[0], conn=conn, audience=REQUEST_AUDIENCE_UI), False
     return None, len(rows) > 1
 
 
@@ -3781,7 +3789,12 @@ def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any
     return request
 
 
-def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str, Any] | None:
+def get_pending_provision_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    user_context: Any = None,
+) -> dict[str, Any] | None:
     _expire_pending_requests(conn)
     row = (
         conn.execute(
@@ -3798,7 +3811,9 @@ def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str
     )
     if row is None:
         return None
-    return _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
+    row_dict = dict(row)
+    _require_request_secret_access(conn, row_dict, user_context=user_context)
+    return _request_row_payload(row_dict, conn=conn, audience=REQUEST_AUDIENCE_UI)
 
 
 def _expire_grant_rows(

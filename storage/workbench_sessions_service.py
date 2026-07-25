@@ -359,12 +359,18 @@ def create_session(
             agent_backend = default_agent.backend
 
     if agent_name or agent_id:
-        ensure_agent_selection_access(
+        selected_agent = ensure_agent_selection_access(
             conn,
             agent_name=agent_name,
             agent_id=agent_id,
             user_context=context,
         )
+        if selected_agent is not None:
+            if agent_backend and agent_backend != selected_agent.backend:
+                raise ValueError("Agent backend does not match selected Agent")
+            agent_id = selected_agent.id
+            agent_name = selected_agent.name
+            agent_backend = selected_agent.backend
 
     now = _utc_now_iso()
     variant = agent_variant or agent_backend or "default"
@@ -447,31 +453,56 @@ def update_session(
         raise LookupError(f"Session not found: {session_id}")
 
     derived_backend = False
-    if agent_name is not _UNSET and agent_backend is _UNSET:
-        agent_backend = _backend_for_agent_name(conn, str(agent_name or "")) if agent_name else None
-        derived_backend = True
-
-    from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access, resolve_resource_access_context
+    from core.vibe_agents import (
+        VibeAgentAccessError,
+        ensure_agent_selection_access,
+        ensure_default_agent_access,
+        resolve_resource_access_context,
+    )
 
     context = resolve_resource_access_context(user_context)
-    requested_agent_name = "" if agent_name is _UNSET else str(agent_name or "").strip()
-    requested_agent_id = "" if agent_id is _UNSET else str(agent_id or "").strip()
-    if (
-        context.is_remote
-        and agent_backend is not _UNSET
-        and bool(str(agent_backend or "").strip())
-        and not requested_agent_name
-        and not requested_agent_id
-    ):
-        raise VibeAgentAccessError("Agent access is not permitted.")
-
-    if agent_name is not _UNSET or agent_id is not _UNSET:
-        ensure_agent_selection_access(
+    selector_changed = agent_name is not _UNSET or agent_id is not _UNSET
+    selected_agent = None
+    if selector_changed:
+        selected_agent = ensure_agent_selection_access(
             conn,
             agent_name=None if agent_name is _UNSET else agent_name,
             agent_id=None if agent_id is _UNSET else agent_id,
             user_context=context,
         )
+        if selected_agent is None and context.is_remote:
+            selected_agent = ensure_default_agent_access(
+                conn,
+                user_context=context,
+                missing_is_error=True,
+            )
+        if selected_agent is not None:
+            requested_backend = str(agent_backend or "").strip() if agent_backend is not _UNSET else ""
+            if requested_backend and requested_backend != selected_agent.backend:
+                raise ValueError("Agent backend does not match selected Agent")
+            agent_id = selected_agent.id
+            agent_name = selected_agent.name
+            if not requested_backend:
+                agent_backend = selected_agent.backend
+                derived_backend = True
+        else:
+            # Preserve legacy local names/ids that predate the Agent catalog,
+            # but clear the omitted half so it cannot remain stale.
+            requested_name = "" if agent_name is _UNSET else str(agent_name or "").strip()
+            requested_id = "" if agent_id is _UNSET else str(agent_id or "").strip()
+            agent_name = requested_name or None
+            agent_id = requested_id or None
+            if agent_backend is _UNSET and requested_name:
+                agent_backend = _backend_for_agent_name(conn, requested_name)
+                derived_backend = True
+
+    if (
+        context.is_remote
+        and agent_backend is not _UNSET
+        and bool(str(agent_backend or "").strip())
+        and selected_agent is None
+    ):
+        raise VibeAgentAccessError("Agent access is not permitted.")
 
     # Backend is pinned once a NATIVE conversation exists: the native can only
     # be resumed by the backend that created it, so switching (or clearing) the
