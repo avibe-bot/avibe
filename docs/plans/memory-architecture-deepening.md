@@ -1,6 +1,6 @@
 # Memory Architecture Deepening
 
-> Status: in progress
+> Status: complete
 >
 > Follow-up architecture work on the Memory system delivered by
 > [PR #1006](https://github.com/avibe-bot/avibe/pull/1006). Product behavior is
@@ -127,9 +127,9 @@ and lift the routes into a module of their own.
 - [x] 1. Ports for `EverOSProcess` and `MemoryArtifactManager` — `d13fef20`
 - [x] 2. Collapse `UnavailableMemoryRuntime` — `a2afdadb`
 - [x] 3. Queue lifecycle behind `MemoryStore` — `3989a8e8`
-- [ ] 4. One status bucket contract
-- [ ] 5. `core/memory/admission.py`
-- [ ] 6. Memory read module in the UI
+- [x] 4. One status bucket contract — `f170ddb3`
+- [x] 5. `core/memory/admission.py` — `3546c638`
+- [x] 6. Memory read module in the UI — `a515f053`
 
 ## Validation
 
@@ -150,3 +150,18 @@ on `09e43029` (before this work) and after commit 3989a8e8, so it is not caused
 by these refactors. It involves real SQLite in WAL mode, the drain task, and the
 cross-thread `future.result(timeout=90)` handoff in
 `_coordinate_artifact_activation`. Worth its own fix; out of scope here.
+
+## Follow-ups this work deliberately left open
+
+- **`modules/im/slack.py` hardcodes `is_ordinary_text=True`** on the native
+  slash-command context. Reads as drift from `2a504b9e` rather than intent, and
+  the Memory contract treats a slash command as a control event. Latent, not
+  live: slash commands never reach `MessageHandler.handle_message`. Changing it
+  is a product-behavior decision.
+- **Three failure conventions for an unavailable store** remain
+  (`MemoryStoreUnavailableError`, `{"status": "failed"}`, `{"ok": False}`).
+  Unifying them onto `OperationFailed` would turn the 503s in
+  `core/internal_server.py` into 200s, so it needs a product decision.
+- **The activation flake** described above.
+- **Profile and search still repeat the item-list markup.** Second occurrence,
+  not third; extract on the next repeat.
