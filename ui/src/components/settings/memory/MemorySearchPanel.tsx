@@ -25,6 +25,9 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   } = useMemoryResource<MemoryItemsOk, [string]>({
     read,
     failureMessageKey: 'memory.search.searchFailed',
+    // Each search reports its own outcome; a previous failure must not caption it.
+    clearErrorOnReload: true,
+    resetDataOnError: true,
   });
 
   const runSearch = () => {

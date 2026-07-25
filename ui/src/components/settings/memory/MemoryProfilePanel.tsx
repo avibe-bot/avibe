@@ -21,6 +21,9 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
     read: api.getMemoryProfile,
     failureMessageKey: 'memory.profile.loadFailed',
     enabled,
+    // Refresh is an explicit gesture: report the new attempt, not the old failure.
+    clearErrorOnReload: true,
+    resetDataOnError: true,
   });
 
   useEffect(() => {
