@@ -154,6 +154,10 @@ def test_session_cookie_requires_signed_instance_role() -> None:
 def test_authorization_claims_require_oidc_refresh() -> None:
     now = 1_700_000_000
 
+    assert remote_access.session_authorization_refresh_deadline({"claims_issued_at": now}) == (
+        now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+    )
+    assert remote_access.session_authorization_refresh_deadline({"claims_issued_at": "invalid"}) is None
     assert remote_access.session_needs_authorization_refresh(
         {"claims_issued_at": now}, now=now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS - 1
     ) is False

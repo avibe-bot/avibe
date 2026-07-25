@@ -1187,6 +1187,27 @@ def test_workbench_events_filter_privileged_events_for_viewers():
     assert "hidden-secret" not in body
 
 
+def test_workbench_events_end_at_authorization_refresh_deadline():
+    from vibe.authorization import AuthorizationContext
+    from vibe.ui_compat import g
+
+    async def collect_until_expired() -> list[str | bytes]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+            g.remote_authorization_refresh_at = ui_server.time.time()
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                chunks = [await iterator.__anext__() for _ in range(3)]
+                with pytest.raises(StopAsyncIteration):
+                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(collect_until_expired())) == 3
+
+
 def test_json_api_gzip_skips_attachments_and_existing_encoding():
     body = b'{"items":[' + (b'"payload",' * 300) + b'"end"]}'
     attachment = ui_server.Response(

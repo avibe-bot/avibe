@@ -1428,6 +1428,39 @@ def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch)
     assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
+def test_terminal_websocket_closes_at_authorization_refresh_deadline(monkeypatch):
+    from vibe import remote_access
+
+    class BlockingTerminalService:
+        def start_reaper(self) -> None:
+            pass
+
+        async def handle_websocket(self, websocket, session_id, *, initial_cwd=None):
+            await asyncio.Event().wait()
+
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    monkeypatch.setattr(ui_server, "_terminal_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {"sub": "remote-owner", "claims_issued_at": 1},
+    )
+    monkeypatch.setattr(remote_access, "session_authorization_refresh_deadline", lambda payload: 0)
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: BlockingTerminalService())
+    websocket = _RecordingWebSocket()
+    websocket.client = None
+    websocket.query_params = {}
+
+    asyncio.run(ui_server.terminal_websocket(websocket, "test"))
+
+    assert websocket.calls == [
+        ("accept", None),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+
+
 def test_terminal_websocket_rejects_forwarded_request(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

@@ -1893,6 +1893,51 @@ def test_private_show_me_is_always_available(monkeypatch, tmp_path):
     assert response.headers["cache-control"] == "no-store, private"
 
 
+def test_private_show_page_treats_remote_viewer_as_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
+    )
+    set_show_runtime_manager_for_tests(manager)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    try:
+        me_response = client.get(
+            "/show/ses123/__show/me",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        page_response = client.get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert me_response.status_code == 200
+    assert me_response.get_json() == {"authenticated": False, "canAnnotate": False}
+    assert page_response.status_code == 200
+    body = page_response.content.decode("utf-8")
+    assert '"authenticated":false' in body
+    assert '"writeToken"' not in body
+    cookies = "\n".join(page_response.headers.getlist("set-cookie"))
+    assert "vibe_show_event_token=" in cookies
+    assert "Max-Age=0" in cookies
+
+
 def test_public_show_me_is_anonymous_without_oauth_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
