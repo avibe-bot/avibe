@@ -11,6 +11,7 @@ from pathlib import Path
 
 from config import paths
 from config.v2_config import V2Config
+from core.memory.ui_access import generate_ui_read_secret
 from vibe import runtime
 
 
@@ -75,9 +76,17 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
 
     config = _config()
-    service_pid = runtime.start_service(wait_for_ready=False)
+    memory_ui_secret = generate_ui_read_secret()
+    service_pid = runtime.start_service(
+        wait_for_ready=False,
+        memory_ui_secret=memory_ui_secret,
+    )
     bind_host = runtime.effective_ui_bind_host(config)
-    ui_pid = runtime.start_ui(bind_host, config.ui.setup_port)
+    ui_pid = runtime.start_ui(
+        bind_host,
+        config.ui.setup_port,
+        memory_ui_secret=memory_ui_secret,
+    )
 
     if not runtime.service_pid_recorded(service_pid):
         ready_service_pid = runtime.wait_for_service_ready(
@@ -113,7 +122,11 @@ def main() -> int:
             _reap_child(current_ui_pid)
             if not _restart_in_progress():
                 config = _config()
-                ui_pid = runtime.start_ui(runtime.effective_ui_bind_host(config), config.ui.setup_port)
+                ui_pid = runtime.start_ui(
+                    runtime.effective_ui_bind_host(config),
+                    config.ui.setup_port,
+                    memory_ui_secret=memory_ui_secret,
+                )
                 runtime.write_status("running", "ui restarted in incus regression", service_pid, ui_pid)
         elif current_ui_pid != ui_pid:
             ui_pid = current_ui_pid

@@ -4,7 +4,45 @@ import json
 from pathlib import Path
 
 from core.memory import everos
+from core.memory import sidecar
 from core.memory.sidecar import _processing_healthy_from_child_environment, _request_rejection
+
+
+def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) -> None:
+    import uvicorn
+
+    captured: dict[str, object] = {}
+
+    class _App:
+        def middleware(self, _kind: str):
+            return lambda handler: handler
+
+    class _FactoryModule:
+        @staticmethod
+        def create_app() -> _App:
+            return _App()
+
+    class _Config:
+        def __init__(self, _app, **kwargs):
+            captured.update(kwargs)
+
+    class _Server:
+        def __init__(self, _config):
+            return None
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.1.3")
+    monkeypatch.setattr(sidecar.importlib, "import_module", lambda _module: _FactoryModule())
+    monkeypatch.setattr(sidecar.os, "umask", lambda _mode: 0o022)
+    monkeypatch.setattr(uvicorn, "Config", _Config)
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+
+    sidecar.serve(tmp_path / "everos.sock")
+
+    assert captured["timeout_graceful_shutdown"] == 1
 
 
 def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:

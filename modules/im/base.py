@@ -289,7 +289,7 @@ class BaseIMClient(ABC):
             settings_manager=settings_manager,
         )
         resolved_action = action or self.extract_command_action(text, allow_plain_bind=allow_plain_bind)
-        result = check_auth(
+        return check_auth(
             user_id=user_id,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -298,7 +298,6 @@ class BaseIMClient(ABC):
             action=resolved_action,
             settings_manager=settings_manager,
         )
-        return result
 
     def build_auth_denial_text(self, denial: str, channel_id: Optional[str] = None) -> Optional[str]:
         """Build a localized denial message from centralized auth result.
@@ -353,15 +352,6 @@ class BaseIMClient(ABC):
             Message ID of sent message, or None when not delivered
         """
         pass
-
-    async def send_inert_message(self, context: MessageContext, text: str) -> Optional[str]:
-        """Send a bounded plain command result without rich transport affordances.
-
-        Adapters with richer defaults override this with their native plain-text
-        primitive. The fallback keeps the contract usable for simple transports.
-        """
-
-        return await self.send_message(context, text, parse_mode=None)
 
     @abstractmethod
     async def send_message_with_buttons(

@@ -405,6 +405,8 @@ class EverOSProcess:
         except asyncio.CancelledError:
             return
         except Exception:
+            if not self._desired_running:
+                return
             logger.warning("EverOS sidecar safety monitor rejected the child tree")
             async with self._lifecycle_lock:
                 if process is not self._process:

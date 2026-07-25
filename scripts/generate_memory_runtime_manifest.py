@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 EVEROS_VERSION = "1.1.3"
 PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "37ab1606edf1a6299a9d52b5a99d288a81218a5a0b1eb89d60644f3ace4255eb"
+LOCK_SHA256 = "62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57"
 UV_VERSION = "0.9.18"
 ARCHIVE_PREFIX = f"memory-runtime-{EVEROS_VERSION}-"
 ARCHIVE_SUFFIX = ".tar.gz"

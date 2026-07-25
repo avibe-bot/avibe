@@ -738,7 +738,7 @@ class FakeMemoryProvider:
         Distinct from sidecar ``health``: the sidecar process can answer /health
         while its configured model endpoint is down. The disambiguation between a
         system outage and a poison row depends on this. The fake returns a flag; the
-        real EverOS adapter (Slice 2) performs bounded authenticated LLM+embedding
+        real EverOS adapter performs bounded authenticated LLM+embedding
         probes.
         """
         if self.processing_health_failure is not None:

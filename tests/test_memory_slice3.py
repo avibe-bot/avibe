@@ -114,17 +114,20 @@ def test_capture_skips_ineligible_human_turns(context, text, enabled) -> None:
 def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None:
     controller = _controller()
     context = _context("telegram")
+    other_user = _context("telegram", user_id="user-2")
 
     asyncio.run(controller.capture_user_memory(context, "/memory status", "stable-session"))
     asyncio.run(controller.capture_user_memory(context, "/memory status", "stable-session"))
+    asyncio.run(controller.capture_user_memory(other_user, "/memory status", "stable-session"))
 
-    assert len(controller.memory_module.accepted) == 1
+    assert len(controller.memory_module.accepted) == 2
     request = controller.memory_module.accepted[0]
-    assert request.source_message_id == "im:telegram:native-1"
+    assert request.source_message_id == f"im:telegram:u-{'1' * 32}:native-1"
     assert request.session_id == "stable-session"
     assert request.principal_id == "u-" + ("1" * 32)
     assert request.provenance == "user_input"
     assert request.text == "/memory status"
+    assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
 
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
@@ -134,7 +137,7 @@ def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     asyncio.run(controller.capture_user_memory(context, "ordinary text", "stable-session"))
 
     request = controller.memory_module.accepted[0]
-    assert request.source_message_id == "workbench:native-1"
+    assert request.source_message_id == f"workbench:u-{'2' * 32}:native-1"
     assert request.principal_id == "u-" + ("2" * 32)
 
 

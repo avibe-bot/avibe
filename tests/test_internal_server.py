@@ -174,6 +174,31 @@ def test_bind_socket_rejects_chmod_failure(monkeypatch) -> None:
         assert not target.exists()
 
 
+def test_controller_loop_server_does_not_take_process_signal_handlers(monkeypatch) -> None:
+    import uvicorn
+
+    calls: list[str] = []
+
+    class CapturingServer:
+        def __init__(self, config):
+            self.config = config
+
+        def capture_signals(self):
+            calls.append("capture")
+
+        def install_signal_handlers(self):
+            calls.append("install")
+
+    monkeypatch.setattr(uvicorn, "Server", CapturingServer)
+
+    server = internal_server._create_controller_loop_server(object())
+    with server.capture_signals():
+        pass
+    server.install_signal_handlers()
+
+    assert calls == []
+
+
 def test_create_app_exposes_minimal_endpoints():
     app = internal_server.create_app(_build_controller_double())
     routes = {(r.path, tuple(sorted(r.methods))) for r in app.routes if hasattr(r, "methods")}

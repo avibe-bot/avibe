@@ -1344,7 +1344,7 @@ class Controller:
         try:
             await self.memory_module.capture(
                 CaptureRequest(
-                    source_message_id=f"{source_prefix}:{native_message_id}",
+                    source_message_id=f"{source_prefix}:{principal_id}:{native_message_id}",
                     session_id=session_id,
                     principal_id=principal_id,
                     provenance="user_input",

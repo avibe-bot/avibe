@@ -579,24 +579,6 @@ class DiscordBot(BaseIMClient):
 
         return await self._run_on_client_loop(_impl())
 
-    async def send_inert_message(self, context: MessageContext, text: str) -> str:
-        """Send a non-mentioning, embed-suppressed command response."""
-
-        async def _impl() -> str:
-            if not text:
-                raise ValueError("Discord send_inert_message requires non-empty text")
-            target = await self._resolve_target(context)
-            if target is None:
-                raise RuntimeError("Discord channel not found")
-            message = await target.send(
-                content=discord.utils.escape_markdown(text, as_needed=False, ignore_links=False),
-                suppress_embeds=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return str(message.id)
-
-        return await self._run_on_client_loop(_impl())
-
     async def send_message_with_buttons(
         self,
         context: MessageContext,
@@ -1051,7 +1033,7 @@ class DiscordBot(BaseIMClient):
             text=content,
             settings_manager=self.settings_manager,
         )
-        if not auth_result.allowed and not auth_result.dispatch_to_safe_handler:
+        if not auth_result.allowed:
             await self._send_auth_denial(channel_id, str(message.author.id), auth_result)
             return
 

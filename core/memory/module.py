@@ -387,7 +387,7 @@ class MemoryModule:
         if not await self._provider_healthy():
             # An active provider outage is the cause; do not echo a stale persisted
             # last_error (e.g. a resolved memory_low_disk_space) that would misreport
-            # the current condition (tech §15 precedence).
+            # the current condition (active outages outrank stale errors).
             return await self._status(
                 "down",
                 meta=meta,
@@ -983,7 +983,7 @@ def _ensure_provider_root_chain_safe(provider_root: Path, effective_home: Path) 
 
     The final root and sentinel are validated separately; this guards every PARENT
     component so that clear/delete cannot traverse a symlinked directory and remove
-    data outside the intended root (tech §13 exact-root/no-follow requirement).
+    data outside the intended root (the exact-root/no-follow requirement).
     Each component from the root upward is lstat'd (no follow) until it reaches the
     effective home or the filesystem root; a symlink anywhere on that chain is
     rejected. Components below the effective home (e.g. an isolated test tmpdir) are

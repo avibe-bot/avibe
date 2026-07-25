@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 EVEROS_VERSION = "1.1.3"
 PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "37ab1606edf1a6299a9d52b5a99d288a81218a5a0b1eb89d60644f3ace4255eb"
+LOCK_SHA256 = "62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57"
 UV_VERSION = "0.9.18"
 BIN_PATH = "bin/python"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
@@ -233,12 +233,8 @@ def _sidecar_health_smoke(python: Path, *, effective_home: Path) -> None:
     repository = Path(__file__).resolve().parents[1]
     script = """
 import asyncio
-import os
-import signal
-import stat
 import sys
 from pathlib import Path
-import psutil
 from core.memory.everos import EverOSPort
 from core.memory.process import EverOSProcess, EverOSProcessSettings
 
@@ -246,7 +242,6 @@ async def verify() -> None:
     process = EverOSProcess(
         python=Path(sys.argv[1]),
         effective_home=Path(sys.argv[2]),
-        owner_id="runtime-build-verifier",
         settings=EverOSProcessSettings(
             llm_base_url="https://llm.invalid/v1",
             llm_model="unused",
@@ -258,59 +253,14 @@ async def verify() -> None:
         startup_timeout_seconds=30,
         stop_timeout_seconds=10,
     )
-    process._validate_launch_inputs()
-    process._prepare_owned_directories()
-    process._write_generated_config()
-    process._remove_owned_socket()
-    child = await asyncio.create_subprocess_exec(
-        str(process._python),
-        "-m",
-        "core.memory.sidecar",
-        "--uds",
-        str(process.socket_path),
-        "--owner-id",
-        "runtime-build-verifier",
-        cwd=str(process._memory_dir),
-        env=process._child_environment(),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
+    started = await process.start()
     try:
-        for _ in range(300):
-            if child.returncode is not None or process.socket_path.exists():
-                break
-            await asyncio.sleep(0.1)
-        if not process.socket_path.exists():
-            stdout, stderr = await child.communicate()
-            raise RuntimeError(
-                "sidecar did not create its UDS: "
-                + (stderr or stdout).decode("utf-8", errors="replace")[-4000:]
-            )
-        process._secure_socket()
-        info = process.socket_path.lstat()
-        if not stat.S_ISSOCK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
-            raise RuntimeError("sidecar UDS is not an owner-only socket")
-        if hasattr(os, "getuid") and info.st_uid != os.getuid():
-            raise RuntimeError("sidecar UDS owner mismatch")
+        if not started:
+            raise RuntimeError(f"sidecar failed to start: {process.last_error}")
         if not await EverOSPort(process.socket_path, sidecar_timeout_seconds=5).health():
             raise RuntimeError("sidecar UDS health endpoint failed")
-        inspected = [psutil.Process(child.pid), *psutil.Process(child.pid).children(recursive=True)]
-        if any(
-            connection.status == psutil.CONN_LISTEN
-            for owned in inspected
-            for connection in owned.net_connections(kind="inet")
-        ):
-            raise RuntimeError("sidecar opened a TCP listener")
     finally:
-        if child.returncode is None:
-            os.killpg(child.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(child.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                os.killpg(child.pid, signal.SIGKILL)
-                await child.wait()
+        await process.stop()
 
 asyncio.run(verify())
 """
@@ -434,7 +384,7 @@ def main() -> int:
     parser.add_argument(
         "--lock-project",
         type=Path,
-        default=repository / "scripts" / "memory_poc" / "harness",
+        default=repository / "scripts" / "memory_runtime",
     )
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--python-version", default=PYTHON_VERSION)

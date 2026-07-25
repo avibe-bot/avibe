@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS memory_meta (
             'memory_processing_failed', 'memory_clear_failed'
         )
     ),
+    last_error_at TEXT,
+    processing_fault_kind TEXT CHECK (
+        processing_fault_kind IS NULL OR processing_fault_kind IN ('credential', 'engine')
+    ),
+    processing_fault_since TEXT,
+    processing_alert_active INTEGER NOT NULL DEFAULT 0 CHECK (
+        processing_alert_active IN (0, 1)
+    ),
     updated_at TEXT NOT NULL
 );
 
@@ -31,6 +39,7 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     ),
     provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
     payload_text TEXT,
+    payload_attachments TEXT,
     occurred_at_ms INTEGER NOT NULL,
     provider_timestamp_ms INTEGER NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'processing', 'delivered', 'dead')),
@@ -48,6 +57,18 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
             'memory_processing_failed', 'memory_clear_failed'
         )
     ),
+    add_request_id TEXT,
+    flush_observation TEXT CHECK (
+        flush_observation IS NULL OR flush_observation IN (
+            'not_attempted', 'in_flight', 'succeeded', 'rejected', 'unknown'
+        )
+    ),
+    flush_status TEXT CHECK (
+        flush_status IS NULL OR flush_status IN ('extracted', 'no_extraction')
+    ),
+    flush_error_code TEXT,
+    flush_request_id TEXT,
+    flush_observed_at TEXT,
     created_at TEXT NOT NULL,
     completed_at TEXT,
     CHECK (

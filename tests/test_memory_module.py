@@ -614,7 +614,7 @@ async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path:
 
     This is the disambiguation's positive side: a genuine message failure (system
     healthy) must increment attempts so a poison row eventually deads and unblocks
-    the queue (tech §10.3).
+    the queue.
     """
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="one")) == CaptureAccepted()
@@ -1213,7 +1213,7 @@ async def test_pause_does_not_resume_until_processing_endpoint_recovers(tmp_path
 
     The resume gate must require BOTH health() and processing_healthy(); otherwise an
     endpoint that is still down gets re-probed on every tick after the pause interval,
-    prematurely reopening the claim fence (tech §10 resume-on-global-health).
+    prematurely reopening the claim fence.
     """
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()
@@ -1560,7 +1560,7 @@ async def test_provider_outage_after_disk_recovery_reports_sidecar_error(tmp_pat
 
     Sequence: low-disk skipped -> disk recovers (ready) -> provider goes down ->
     status must be 'down' with error 'memory_sidecar_unavailable', NOT the stale
-    'memory_low_disk_space' (tech §15 precedence: active outage over resolved disk).
+    'memory_low_disk_space' (active outage takes precedence over resolved disk).
     """
     disk = {"free": MIN_FREE_DISK_BYTES}
     module, store, provider = _module(tmp_path, disk_free_bytes=lambda: disk["free"])

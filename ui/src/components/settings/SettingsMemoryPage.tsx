@@ -44,7 +44,7 @@ import type { EndpointDraft } from '../../lib/memorySettings';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
 
-// Status precedence mirrors the backend contract exactly (tech §15) — this map
+// Status precedence mirrors the backend contract exactly; this map
 // is display-only; the actual precedence is computed server-side.
 const STATE_BADGE_VARIANT: Record<MemoryStatus['state'], 'success' | 'warning' | 'destructive' | 'info' | 'secondary'> = {
   disabled: 'secondary',
@@ -66,7 +66,7 @@ const errorMessage = (t: TFunction, code: string | null | undefined): string =>
 // every Memory route when the request isn't direct-loopback (e.g. opened via Avibe Cloud). It is
 // otherwise never produced by a settings/status/profile/search/clear success or config-disabled
 // path, so it's a safe signal to render the "available on this device only" static state instead
-// of a generic error (plan §7).
+// of a generic error.
 const isForbiddenResult = (value: unknown): boolean =>
   !!value &&
   typeof value === 'object' &&
@@ -98,7 +98,7 @@ function formatBytes(bytes: number): string {
 }
 
 // One LLM/embedding endpoint's fields. `locked` disables base_url/model edits — used for the
-// embedding endpoint once memory data exists (plan §7: changing it would mix vector spaces).
+// embedding endpoint once memory data exists, because changing it would mix vector spaces.
 const EndpointFields: React.FC<{
   title: string;
   draft: EndpointDraft;
@@ -527,7 +527,7 @@ const ProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
       ) : (
         <div className="flex flex-col gap-2">
           {items.map((item, idx) => (
-            // Inert text nodes only (tech §14.1) — never Markdown/HTML rendering of provider content.
+            // Inert text nodes only; never use Markdown/HTML rendering for provider content.
             <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
               <div className="mb-1 flex items-center gap-2">
                 <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
@@ -654,7 +654,7 @@ const SettingsPanel: React.FC<{
   // unlock it after a resolved status reports data_exists=false.
   const statusKnown = status != null;
   // Data already exists in the local Memory root: changing the embedding endpoint/model would mix
-  // vector spaces, so the backend rejects it (plan §7) — lock those fields here too, proactively.
+  // vector spaces, so the backend rejects it; lock those fields here too, proactively.
   const embeddingDataLock = !!status?.data_exists;
   const embeddingLocked = !statusKnown || embeddingDataLock;
   const canClearKeys = !enabledDraft;
@@ -679,7 +679,7 @@ const SettingsPanel: React.FC<{
     try {
       const patch: MemorySettingsPatch = {};
       if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-      // A key clear is accepted only while the resulting state stays disabled (Slice 2).
+      // A key clear is accepted only while the resulting state stays disabled.
       const allowClear = !enabledDraft;
       const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
       const embeddingPatch = buildEndpointPatch(

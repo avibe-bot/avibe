@@ -18,7 +18,7 @@ from pathlib import Path
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 EXPECTED_PYTHON_VERSION = "3.12.12"
-EXPECTED_LOCK_SHA256 = "37ab1606edf1a6299a9d52b5a99d288a81218a5a0b1eb89d60644f3ace4255eb"
+EXPECTED_LOCK_SHA256 = "62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57"
 EXPECTED_UV_VERSION = "0.9.18"
 EXPECTED_PLATFORMS = frozenset({"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"})
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024

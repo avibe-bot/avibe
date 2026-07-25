@@ -105,9 +105,19 @@ def test_main_recovers_when_restart_leaves_unready_service(monkeypatch, tmp_path
     monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
     monkeypatch.setattr(supervisor, "_reap_child", lambda pid: None)
     monkeypatch.setattr(supervisor, "_restart_in_progress", lambda: False)
-    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True: 100)
+    launch_secrets: dict[str, str | None] = {}
+
+    def start_service(*, wait_for_ready=True, memory_ui_secret=None):
+        launch_secrets["service"] = memory_ui_secret
+        return 100
+
+    def start_ui(host, port, *, memory_ui_secret=None):
+        launch_secrets["ui"] = memory_ui_secret
+        return 333
+
+    monkeypatch.setattr(runtime, "start_service", start_service)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
-    monkeypatch.setattr(runtime, "start_ui", lambda host, port: 333)
+    monkeypatch.setattr(runtime, "start_ui", start_ui)
     # 100 was ready at startup; the hung 200 never records (no lock).
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 100)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {200, 333})
@@ -119,6 +129,8 @@ def test_main_recovers_when_restart_leaves_unready_service(monkeypatch, tmp_path
 
     assert rc == 1
     assert runtime.read_status()["state"] == "error"
+    assert launch_secrets["service"]
+    assert launch_secrets["service"] == launch_secrets["ui"]
 
 
 def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
@@ -133,9 +145,9 @@ def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
     monkeypatch.setattr(supervisor, "_reap_child", lambda pid: None)
     monkeypatch.setattr(supervisor, "_restart_in_progress", lambda: True)
-    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True: 100)
+    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True, **kwargs: 100)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
-    monkeypatch.setattr(runtime, "start_ui", lambda host, port: 333)
+    monkeypatch.setattr(runtime, "start_ui", lambda host, port, **kwargs: 333)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 100)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 333)  # service 100 dead, ui alive
 
@@ -162,9 +174,9 @@ def test_main_adopts_scoped_service_lock_holder(monkeypatch, tmp_path):
     paths.ensure_data_dirs()
 
     monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
-    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True: 100)
+    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True, **kwargs: 100)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
-    monkeypatch.setattr(runtime, "start_ui", lambda host, port: 333)
+    monkeypatch.setattr(runtime, "start_ui", lambda host, port, **kwargs: 333)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 200)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {200, 333})
 

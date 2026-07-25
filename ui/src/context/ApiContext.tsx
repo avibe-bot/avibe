@@ -1474,7 +1474,7 @@ export type DependencyItem = {
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
 
-// Memory MVP (docs/plans/memory-mvp/memory-plugin-everos-phase1-tech.md §7, §14.1, §15).
+// Memory plugin contract: docs/plans/memory-plugin-system.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
 export type MemoryEndpointConfig = {
   base_url: string | null;

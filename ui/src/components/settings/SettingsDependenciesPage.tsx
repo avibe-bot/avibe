@@ -95,7 +95,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusText = (d: DependencyItem) => {
-    // Closed non-installed failure states (phase1 §2.2) render distinctly, ahead
+    // Closed non-installed failure states render distinctly, ahead
     // of the generic "not installed" fallback.
     if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
     if (d.status === 'error') return t('settings.dependencies.statusError');

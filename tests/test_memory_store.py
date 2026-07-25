@@ -78,7 +78,25 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
         assert {"memory_meta", "memory_capture_queue"}.issubset(tables)
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
-        assert {"principal_id", "provenance"}.issubset(queue_columns)
+        meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 1
+        assert {
+            "principal_id",
+            "provenance",
+            "payload_attachments",
+            "add_request_id",
+            "flush_observation",
+            "flush_status",
+            "flush_error_code",
+            "flush_request_id",
+            "flush_observed_at",
+        }.issubset(queue_columns)
+        assert {
+            "processing_fault_kind",
+            "processing_fault_since",
+            "processing_alert_active",
+            "last_error_at",
+        }.issubset(meta_columns)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -99,47 +117,6 @@ def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     assert first != derive_principal_id(bytes.fromhex("22" * 32), "slack:U123")
     assert first.startswith("u-") and len(first) == 34
     assert "U123" not in first
-
-
-def test_store_migrates_delivery_observation_schema_and_marks_add_ack(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-
-    with sqlite3.connect(store.path) as conn:
-        queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
-        meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 4
-    assert {
-        "add_request_id",
-        "flush_observation",
-        "flush_status",
-        "flush_error_code",
-        "flush_request_id",
-        "flush_observed_at",
-    }.issubset(queue_columns)
-    assert "payload_attachments" in queue_columns
-    assert {
-        "processing_fault_kind",
-        "processing_fault_since",
-        "processing_alert_active",
-        "last_error_at",
-    }.issubset(meta_columns)
-
-    _enqueue(store, "observed")
-    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.mark_delivered(
-        row,
-        lease_owner="boot",
-        now="2026-01-01T00:00:01.000Z",
-        add_request_id="add-request-1",
-    )
-
-    delivered = _row_for_source(store, "observed")
-    assert delivered is not None
-    assert delivered.add_request_id == "add-request-1"
-    assert delivered.flush_observation == "not_attempted"
-    assert store.ensure_meta().last_success_at is None
-
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
@@ -387,13 +364,14 @@ def test_store_enforces_owner_only_directory_and_database_modes_under_open_umask
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
 
 
-def test_opening_a_higher_version_database_never_downgrades_user_version(tmp_path: Path) -> None:
+def test_store_rejects_unknown_schema_without_downgrading_it(tmp_path: Path) -> None:
     database = _store_path(tmp_path / "future-version", "future-version.sqlite")
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
         conn.execute("PRAGMA user_version = 4")
 
-    MemoryStore(database)
+    with pytest.raises(sqlite3.DatabaseError, match="unsupported Memory schema version: 4"):
+        MemoryStore(database)
 
     with sqlite3.connect(database) as conn:
         assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 4

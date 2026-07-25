@@ -1033,17 +1033,8 @@ class MemoryStore:
                 conn.executescript((migrations / "0001_initial.sql").read_text(encoding="utf-8"))
                 conn.execute("PRAGMA user_version = 1")
                 user_version = 1
-            if user_version == 1:
-                conn.executescript((migrations / "0002_delivery_observation.sql").read_text(encoding="utf-8"))
-                conn.execute("PRAGMA user_version = 2")
-                user_version = 2
-            if user_version == 2:
-                conn.executescript((migrations / "0003_error_timestamp.sql").read_text(encoding="utf-8"))
-                conn.execute("PRAGMA user_version = 3")
-                user_version = 3
-            if user_version == 3:
-                conn.executescript((migrations / "0004_workbench_attachments.sql").read_text(encoding="utf-8"))
-                conn.execute("PRAGMA user_version = 4")
+            if user_version != 1:
+                raise sqlite3.DatabaseError(f"unsupported Memory schema version: {user_version}")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

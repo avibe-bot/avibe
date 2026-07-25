@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from config.v2_config import SlackConfig
-from core.auth import AuthResult
 
 
 def _install_slack_stubs() -> None:
@@ -157,35 +156,6 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         slack.sessions.mark_thread_active.assert_called_once_with("U123", "C123", "1710000000.000700")
-
-    async def test_legacy_memory_slash_uses_regular_auth_denial(self):
-        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
-        handler = AsyncMock()
-        slack.on_command_callbacks["memory"] = handler
-        slack.on_message_callback = AsyncMock()
-        slack.settings_manager = None
-        slack.check_authorization = lambda **kwargs: AuthResult(
-            allowed=False,
-            denial="unbound_dm",
-            is_dm=True,
-            dispatch_to_safe_handler=False,
-        )
-        slack._send_auth_denial = AsyncMock()
-
-        await slack._handle_slash_command(
-            {
-                "command": "/memory",
-                "channel_id": "D123",
-                "user_id": "U123",
-                "trigger_id": "trigger-1",
-                "text": "status",
-            }
-        )
-
-        handler.assert_not_awaited()
-        slack._send_auth_denial.assert_awaited_once()
-        slack.on_message_callback.assert_not_awaited()
-
 
 class SlackFileAttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_extract_file_attachments_preserves_file_id_when_url_missing(self):

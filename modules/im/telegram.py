@@ -445,7 +445,7 @@ class TelegramBot(BaseIMClient):
             text=text,
             settings_manager=self.settings_manager,
         )
-        if not denial.allowed and not denial.dispatch_to_safe_handler:
+        if not denial.allowed:
             denial_text = self.build_auth_denial_text(denial.denial, context.channel_id)
             if denial_text:
                 await self.send_message(context, denial_text)
@@ -1271,21 +1271,6 @@ class TelegramBot(BaseIMClient):
             reply_to=reply_to,
             parse_mode=parse_mode,
         )
-        result = await telegram_api.call_api(self.config.bot_token, "sendMessage", payload, proxy_url=self._proxy_url)
-        return str(result["result"]["message_id"])
-
-    async def send_inert_message(self, context: MessageContext, text: str) -> str:
-        """Send a plain Memory command response without markup or previews."""
-
-        if not text:
-            raise ValueError("Telegram send_inert_message requires non-empty text")
-        payload: dict[str, Any] = {
-            "chat_id": context.channel_id,
-            "text": text,
-            "link_preview_options": {"is_disabled": True},
-        }
-        if context.thread_id:
-            payload["message_thread_id"] = int(context.thread_id)
         result = await telegram_api.call_api(self.config.bot_token, "sendMessage", payload, proxy_url=self._proxy_url)
         return str(result["result"]["message_id"])
 

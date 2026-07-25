@@ -48,7 +48,14 @@ def serve(uds: Path) -> None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
         return await call_next(request)
 
-    config = uvicorn.Config(app, uds=str(uds), access_log=False, log_level="warning", log_config=None)
+    config = uvicorn.Config(
+        app,
+        uds=str(uds),
+        access_log=False,
+        log_level="warning",
+        log_config=None,
+        timeout_graceful_shutdown=1,
+    )
     uvicorn.Server(config).run()
 
 

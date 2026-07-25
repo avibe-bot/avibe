@@ -850,6 +850,23 @@ def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
     assert not _pid_exists(descendant_pid)
 
 
+def test_sidecar_safety_monitor_ignores_expected_shutdown(monkeypatch, tmp_path: Path, caplog) -> None:
+    class _Child:
+        pid = 999_999
+        returncode = None
+
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+    child = _Child()
+    process._process = child
+    process._desired_running = False
+    monkeypatch.setattr(memory_process, "_owned_process_identity_is_live", lambda *_args: False)
+
+    asyncio.run(process._monitor_child(child))
+
+    assert "safety monitor rejected" not in caplog.text
+    assert process._process is child
+
+
 def test_sidecar_stop_reaps_a_descendant_that_leaves_the_child_group(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "detached-child.pid"
     script = (
@@ -1268,7 +1285,7 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
     """A healthy running sidecar must not be force-stopped/replaced via Repair.
 
     Only a retained down supervisor (no live child) may be stopped for Repair; a
-    live sidecar requires a coordinated disable first (tech §12.2).
+    live sidecar requires a coordinated disable first.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     events: list[str] = []

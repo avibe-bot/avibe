@@ -28,6 +28,7 @@ The endpoint set is intentionally tiny for v1 (``dispatch`` + a stub
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -53,6 +54,24 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
+
+
+def _create_controller_loop_server(config: Any) -> Any:
+    """Create a uvicorn server without taking over process signal handlers."""
+
+    import uvicorn
+
+    class _ControllerLoopServer(uvicorn.Server):
+        # Uvicorn >= 0.29 wraps serve() in capture_signals(); older supported
+        # versions call install_signal_handlers() instead. The controller owns
+        # this process and its event loop, so both hooks must remain inert.
+        def capture_signals(self):
+            return contextlib.nullcontext()
+
+        def install_signal_handlers(self) -> None:
+            return None
+
+    return _ControllerLoopServer(config)
 
 
 def default_socket_path() -> Path:
@@ -788,7 +807,7 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
         loop="asyncio",
         lifespan="off",
     )
-    server = uvicorn.Server(config)
+    server = _create_controller_loop_server(config)
 
     listener, target = _bind_socket(socket_path)
     try:

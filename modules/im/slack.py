@@ -793,23 +793,6 @@ class SlackBot(BaseIMClient):
             logger.error(f"Error sending Slack message: {e}")
             raise
 
-    async def send_inert_message(self, context: MessageContext, text: str) -> Optional[str]:
-        """Send a plain Memory command response with no blocks or unfurls."""
-
-        self._ensure_clients()
-        if not text:
-            raise ValueError("Slack send_inert_message requires non-empty text")
-        kwargs: Dict[str, Any] = {
-            "channel": context.channel_id,
-            "text": text,
-            "mrkdwn": False,
-            "unfurl_links": False,
-            "unfurl_media": False,
-        }
-        if context.thread_id:
-            kwargs["thread_ts"] = context.thread_id
-        return await self._post_message_with_dm_recovery(context, kwargs, log_label="inert message send")
-
     async def _send_status_message(
         self,
         context: MessageContext,
@@ -1758,12 +1741,11 @@ class SlackBot(BaseIMClient):
                 await client.send_socket_mode_response(response)
                 self._create_event_task(req.payload)
             elif req.type == "slash_commands":
-                # Acknowledge before a direct Memory read can await a bounded
-                # provider operation. Slack requires the Socket Mode ack within
-                # three seconds; the handler replies independently afterward.
+                # Handle slash commands
+                await self._handle_slash_command(req.payload)
+                # Acknowledge after handling slash commands
                 response = SocketModeResponse(envelope_id=req.envelope_id)
                 await client.send_socket_mode_response(response)
-                self._create_slash_command_task(req.payload)
             elif req.type == "interactive":
                 # For interactive components, acknowledge FIRST to avoid Slack timeout
                 # This is important for long-running operations like updates
@@ -1790,11 +1772,6 @@ class SlackBot(BaseIMClient):
         self._event_tasks.add(task)
         task.add_done_callback(self._handle_event_task_done)
 
-    def _create_slash_command_task(self, payload: Dict[str, Any]) -> None:
-        task = asyncio.create_task(self._handle_slash_command(payload))
-        self._event_tasks.add(task)
-        task.add_done_callback(self._handle_event_task_done)
-
     def _handle_event_task_done(self, task: asyncio.Task) -> None:
         self._event_tasks.discard(task)
         try:
@@ -1802,7 +1779,7 @@ class SlackBot(BaseIMClient):
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.error("Error handling Slack background task asynchronously", exc_info=True)
+            logger.error("Error handling Slack event asynchronously", exc_info=True)
 
     async def _drain_event_tasks(self) -> None:
         if not self._event_tasks:
@@ -1966,7 +1943,7 @@ class SlackBot(BaseIMClient):
                 text=route_text,
                 settings_manager=self.settings_manager,
             )
-            if not auth.allowed and not auth.dispatch_to_safe_handler:
+            if not auth.allowed:
                 await self._send_auth_denial(channel_id, user_id, auth)
                 return
 
@@ -2063,7 +2040,7 @@ class SlackBot(BaseIMClient):
                 action=auth_action,
                 settings_manager=self.settings_manager,
             )
-            if not auth.allowed and not auth.dispatch_to_safe_handler:
+            if not auth.allowed:
                 await self._send_auth_denial(channel_id, user_id_mention or "", auth)
                 return
 
@@ -2147,7 +2124,7 @@ class SlackBot(BaseIMClient):
             action=command,
             settings_manager=self.settings_manager,
         )
-        if not auth.allowed and not auth.dispatch_to_safe_handler:
+        if not auth.allowed:
             await self._send_auth_denial(channel_id, user_id, auth, response_url=response_url)
             return
 
