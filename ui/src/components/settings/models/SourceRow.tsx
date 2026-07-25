@@ -129,7 +129,7 @@ export const SourceRow: React.FC<{
           desktop row single-line. */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 pl-[88px] sm:shrink-0 sm:flex-nowrap sm:gap-4 sm:pl-0">
         <UsageCell source={source} />
-        <BillingChip billing={source.billing} />
+        <BillingChip billing={source.billing} currency={source.usage?.currency} />
         <StateChip state={source.state} />
         <div className="ml-auto sm:ml-0">
           <SourceRowMenu source={source} onChanged={onChanged} />

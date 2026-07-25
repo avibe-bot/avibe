@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
+import { currencySymbol } from './format';
 import { ACCENT_DOT, type Accent } from './vendorMeta';
 import type { AgentMode, SourceState } from './types';
 
@@ -17,16 +18,33 @@ export const Dot: React.FC<{ accent: Accent; className?: string }> = ({ accent, 
   <span className={cn('inline-block size-1.5 shrink-0 rounded-full', ACCENT_DOT[accent], className)} aria-hidden />
 );
 
-/** 包月 / 按量 $ — fixed-width so the column aligns down the source list. */
-export const BillingChip: React.FC<{ billing: 'monthly' | 'metered' }> = ({ billing }) => {
+/**
+ * 包月 / 按量 $ — fixed-width so the column aligns down the source list.
+ *
+ * The metered symbol tracks the source's REPORTED currency (USD when absent).
+ * A static `$` contradicted the usage cell for a source that genuinely reports
+ * CNY/EUR — it would read `按量 $` beside `¥12.4`. The symbol still comes from
+ * format.ts's single map, never hand-written here; an unmappable code drops the
+ * symbol rather than printing a wrong one (the amount cell carries the truth).
+ */
+export const BillingChip: React.FC<{ billing: 'monthly' | 'metered'; currency?: string | null }> = ({
+  billing,
+  currency,
+}) => {
   const { t } = useTranslation();
-  return billing === 'monthly' ? (
-    <Badge variant="secondary" className="w-16 justify-center rounded-md py-1 font-medium">
-      {t('settings.models.billing.monthly')}
-    </Badge>
-  ) : (
+  if (billing === 'monthly') {
+    return (
+      <Badge variant="secondary" className="w-16 justify-center rounded-md py-1 font-medium">
+        {t('settings.models.billing.monthly')}
+      </Badge>
+    );
+  }
+  const symbol = currencySymbol(currency);
+  return (
     <Badge variant="warning" className="w-16 justify-center rounded-md py-1 font-medium">
-      {t('settings.models.billing.metered')}
+      {symbol
+        ? t('settings.models.billing.meteredWithSymbol', { symbol })
+        : t('settings.models.billing.metered')}
     </Badge>
   );
 };

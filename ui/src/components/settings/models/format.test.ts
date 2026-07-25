@@ -1,6 +1,37 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, formatSpend } from './format';
+import { cooldownEtaMinutes, currencySymbol, formatSpend } from './format';
+
+describe('currencySymbol', () => {
+  it('falls back to USD when the backend reports no currency', () => {
+    expect(currencySymbol(null)).toBe('$');
+    expect(currencySymbol(undefined)).toBe('$');
+    expect(currencySymbol()).toBe('$');
+  });
+
+  it('honors an explicitly reported currency', () => {
+    expect(currencySymbol('USD')).toBe('$');
+    expect(currencySymbol('CNY')).toBe('¥');
+    expect(currencySymbol('EUR')).toBe('€');
+  });
+
+  it('returns no symbol for a code it cannot map', () => {
+    // Callers use '' to pick a currency-free label instead of printing a wrong
+    // symbol — the amount cell carries the authoritative value.
+    expect(currencySymbol('JPY')).toBe('');
+  });
+
+  // The billing chip renders currencySymbol(...) while the usage cell renders
+  // formatSpend(...). They must never disagree: a static '$' on the chip read
+  // "按量 $" beside "¥12.4" for a CNY source (Codex P2, 2026-07-25).
+  it('agrees with the symbol formatSpend uses, for every currency', () => {
+    for (const c of [null, undefined, 'USD', 'CNY', 'EUR', 'JPY'] as const) {
+      expect(formatSpend(1240, c).startsWith(currencySymbol(c))).toBe(true);
+      const stripped = formatSpend(1240, c).slice(currencySymbol(c).length);
+      expect(stripped).toBe('12.4');
+    }
+  });
+});
 
 describe('formatSpend', () => {
   // Owner ruling 2026-07-25: upstream vendors bill in USD, so a missing currency

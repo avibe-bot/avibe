@@ -631,7 +631,8 @@
       },
       "billing": {
         "monthly": "包月",
-        "metered": "按量 $"
+        "metered": "按量",
+        "meteredWithSymbol": "按量 {{symbol}}"
       },
       "state": {
         "active": "使用中",
