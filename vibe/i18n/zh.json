@@ -23,7 +23,10 @@
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
-        "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。"
+        "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。",
+        "orphaned": "[Avibe Harness] 本次 run 一直标记为 running，但已经没有任何执行在推进它，通常是服务在它执行途中重启导致的。它此前已经发出的输出仍会保留在这次 run 上。如果这项工作仍需完成，请重新运行。",
+        "transportUnavailable": "[Avibe Harness] 本次 run 一直排队等待，因为它对应的聊天平台始终没有重新连接，消息也就无法送达。请在设置中检查该平台连接，然后重新触发。",
+        "queueHoldExpired": "[Avibe Harness] 本次 run 在所属 session 的 turn 队列后面排队过久，始终没有开始执行。请检查该 session 是否有卡住的 turn，然后重新触发这次 run。"
       }
     }
   },

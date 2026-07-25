@@ -16,7 +16,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.run_settlement import SETTLEMENT_I18N_KEYS
+from core.run_settlement import SETTLEMENT_I18N_KEYS, SWEEP_I18N_KEYS
+from storage.background import (
+    SWEEP_REASON_ORPHANED,
+    SWEEP_REASON_QUEUE_HOLD_EXPIRED,
+    SWEEP_REASON_TRANSPORT_UNAVAILABLE,
+)
 from vibe.i18n import get_supported_languages, t
 
 I18N_DIR = Path(__file__).resolve().parents[1] / "vibe" / "i18n"
@@ -51,11 +56,27 @@ def test_no_backend_translation_is_blank() -> None:
         assert blank == [], f"{lang} has blank translations: {blank}"
 
 
-@pytest.mark.parametrize("settled_by,key", sorted(SETTLEMENT_I18N_KEYS.items()))
-def test_every_run_settlement_reason_resolves(settled_by: str, key: str) -> None:
+@pytest.mark.parametrize(
+    "reason,key",
+    sorted(SETTLEMENT_I18N_KEYS.items()) + sorted(SWEEP_I18N_KEYS.items()),
+)
+def test_every_run_settlement_reason_resolves(reason: str, key: str) -> None:
     # These strings land in the run's user-visible ``error`` column, so an unresolved
     # key would show up verbatim in the Runs UI and the callback message.
     for lang in get_supported_languages():
         resolved = t(key, lang)
-        assert resolved != key, f"{key} is not translated in {lang} (settled_by={settled_by})"
+        assert resolved != key, f"{key} is not translated in {lang} (reason={reason})"
         assert resolved.strip()
+
+
+def test_sweep_reason_i18n_map_covers_every_store_sweep_reason() -> None:
+    # ``SWEEP_I18N_KEYS`` spells its keys as literals so ``core.run_settlement``
+    # stays dependency-free (see the comment there). This is the guard that makes
+    # that safe: add a sweep reason in the store without a translation and the
+    # sweep would stamp a run with an empty ``error``, which reads to the user as
+    # "it just failed" with no explanation.
+    assert set(SWEEP_I18N_KEYS) == {
+        SWEEP_REASON_ORPHANED,
+        SWEEP_REASON_TRANSPORT_UNAVAILABLE,
+        SWEEP_REASON_QUEUE_HOLD_EXPIRED,
+    }

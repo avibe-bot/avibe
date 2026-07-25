@@ -91,3 +91,23 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
 }
+
+
+# ----- staleness-sweep reason text ----------------------------------------
+#
+# The settlements above are all reported by the turn that owned the run. A run
+# whose owner vanished (process restart, lost turn, a queue gate that never
+# reopened) has nobody left to report it, so ``sweep_stale_runs`` terminalizes it
+# out of band and stamps one of these reasons instead. Same contract as
+# ``SETTLEMENT_I18N_KEYS``: the text lands in the user-visible ``error`` column.
+#
+# The keys are the ``SWEEP_REASON_*`` values from ``storage.background``, spelled
+# as literals here on purpose — this module stays dependency-free so the dispatch
+# layer can import it without pulling in SQLAlchemy, and importing core from
+# storage would invert the layering. ``tests/test_i18n_backend_keys.py`` asserts
+# this map's key set equals the store's constants, so the two cannot drift.
+SWEEP_I18N_KEYS: Final = {
+    "orphaned": "harness.run.interrupted.orphaned",
+    "transport_unavailable": "harness.run.interrupted.transportUnavailable",
+    "queue_hold_expired": "harness.run.interrupted.queueHoldExpired",
+}

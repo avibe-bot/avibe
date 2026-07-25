@@ -297,6 +297,17 @@ workbench path never enters `_inflight_executions`:
 Sweeping a live run would double-settle and, worse, could look like a false failure
 notification to the user.
 
+**As built (deviation 5):** `_owned_agent_run_ids()` unions `_inflight_executions` with
+`SessionTurnManager.owned_agent_run_ids()`, and the latter reads **both**
+`in_flight` turns *and* the live `active_turn_sinks` — a sink can be registered for a
+run before/after its `Turn` is in `in_flight`, and reading only `in_flight` leaves that
+window sweepable (mutation M2 confirms: dropping the `active_turn_sinks` union kills
+`test_sweep_skips_running_run_owned_by_workbench_turn`). Fail-closed is implemented as
+`raise RuntimeError` from the provider lookup plus a `try/except → return` in
+`_sweep_stale_runs`, warning once rather than once per interval; the store method
+cannot distinguish "nothing is owned" from "I could not look", so the decision has to
+live in the caller.
+
 ### 4.2 What the sweep does
 
 Runs from `ScheduledTaskService._watch_store` (the existing 2 s tick,
@@ -334,6 +345,26 @@ Notes:
 - The `agent_run`-only restriction on B3 keeps this plan disjoint from PR7 (which
   changes when `scheduled`/`watch` rows settle). Widen it only after PR7 lands.
 
+**Correction (as-built) — what B3's "orphan" actually is.** This section read as if B3
+were mainly about surviving a restart. It is not: `ScheduledTaskService.__init__` calls
+`request_store.recover_processing()` → `recover_processing_runs()`, which **requeues
+every `running` row** (bar `watch_runtime` and deferred ones) at service construction.
+So a restart's in-flight runs are *retried*, not swept, and B3 is about owners lost
+**within a live process** — a turn that returned without settling, a `create_task` that
+never attached its done-callback, a drain task that died between claim and settle. This
+also has a hard consequence for the tests: a staged `running` fixture must be written
+*after* the service is constructed, or recovery flips it to `queued` first (this cost
+nine failing tests before it was diagnosed).
+
+**Correction (as-built) — the exclusions are defended twice.** Mutation testing showed
+the `watch_runtime` / deferred exclusions cannot be killed one at a time:
+`watch_runtime` is filtered out by the SELECT *and* excluded by B3's
+`run_type == "agent_run"` restriction, and a deferred row is skipped by the candidate
+loop *and* refused by `settle_run_terminal`'s own deferred guard. Removing both
+`watch_runtime` guards kills the test; removing only the deferred candidate check does
+not. Kept as-is — this is defence-in-depth, not dead code — and recorded in the test
+docstring so nobody later "simplifies" a guard on the strength of a green suite.
+
 ### 4.3 Writers and side effects
 
 One new store method, guarded, alongside `recover_processing_runs`:
@@ -355,6 +386,17 @@ Also release the in-memory wedge when a swept run holds one: if a swept row's lo
 is still in `_inflight_sessions` while nothing owns the run, discard it. Without this,
 the DB is honest but the session stays undispatchable (the same wedge PR2 documents).
 
+**Correction (as-built, deviation 7):** rebuilding the lock key from a `SweptRun` is
+unsafe. A lock key is per-*conversation*, not per-run, so a swept run's identity can
+resolve to a key a *different*, live execution currently holds, and freeing it would
+let two turns run concurrently in one session. As built, `_spawn_execution` records
+`_session_lock_owners[lock_key] = request.id` next to the `_inflight_sessions` insert,
+and `_release_leaked_session_locks()` frees only keys whose recorded owner is no longer
+in `_inflight_executions`. That is provably one-directional: a lock held by a live task
+can never be freed. It also runs *unconditionally* after each sweep, not only when a
+row was swept, because the wedge and the stale row are independent failures and either
+can outlive the other.
+
 ### 4.4 Config
 
 New keys under runtime config in `config/v2_config.py`, each with the defaults above
@@ -365,6 +407,27 @@ No UI surface in this plan (defaults are the product decision); document in
 `docs/`. All user-visible error copy goes through `vibe/i18n/` — note
 `core/scheduled_tasks.py` imports no i18n today, which the approved plan already
 flags as a violation at this exact seam.
+
+As built, with `DEFAULT_HARNESS_RUN_*` constants exported from `config/v2_config.py`
+and read through `_runtime_seconds()`, which falls back to the default on a missing or
+non-integer value rather than letting a bad config crash the tick:
+
+| Key | Default | `0` means |
+| --- | --- | --- |
+| `harness_run_sweep_interval_seconds` | 60 | sweep disabled entirely |
+| `harness_run_orphan_grace_seconds` | 120 | never sweep orphaned `running` rows |
+| `harness_run_queued_ttl_seconds` | 1800 | never sweep transport-stranded `queued` rows |
+| `harness_run_hold_ttl_seconds` | 3600 | never expire a workbench queue hold |
+
+The i18n seam resolved as `SWEEP_I18N_KEYS` in `core/run_settlement.py`, next to
+`SETTLEMENT_I18N_KEYS`, mapping each `SWEEP_REASON_*` to
+`harness.run.interrupted.<reason>`. The reason strings are spelled as **literals**
+there rather than imported from `storage.background`: `core/run_settlement.py` is
+deliberately dependency-free so the dispatch layer can import it without pulling in
+SQLAlchemy, and importing `core` from `storage` would invert the layering. The drift
+risk that creates is closed by a test
+(`test_sweep_reason_i18n_map_covers_every_store_sweep_reason`) asserting the map's key
+set equals the store's constants.
 
 ## 5. Test plan (hermetic; `tests/conftest.py:53-72` autouse isolation, no `uses_real_paths`)
 
@@ -460,6 +523,73 @@ Also verified green (no behavior regressions): `test_message_dispatcher_schedule
 Pre-existing unrelated flake: `test_request_store_file_backend_reload_detects_queue_changes`
 (mtime granularity; fails on the untouched base too).
 
+### 5.2 What PR-B actually landed
+
+18 new cases in `tests/test_scheduled_tasks.py`, all hermetic, plus the store/i18n
+parity test. Every staged `running`/`queued` fixture is written **after** the service is
+constructed (see §4.2's recovery correction) and forced into the past with a raw
+`update(agent_runs)` helper rather than by moving a clock.
+
+| Test | What it pins |
+| --- | --- |
+| `test_sweep_terminalizes_orphaned_running_run` | B3 happy path: `failed` + `interrupt_reason="orphaned"` |
+| `test_sweep_respects_the_orphan_grace_period` | a young unowned row is left alone |
+| `test_sweep_skips_running_run_owned_by_inflight_execution` | ownership source 1 |
+| `test_sweep_skips_running_run_owned_by_workbench_turn` | ownership source 2, through the **real** `SessionTurnManager.register_turn_sink` with a `MessageContext` carrying `task_execution_id` + `coalesced_queue.execution_ids` |
+| `test_sweep_fails_closed_when_ownership_is_unknown[provider-missing\|provider-raises]` | §4.1's fail-closed rule, both ways it can break |
+| `test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport` | B1 happy path |
+| `test_sweep_leaves_a_queued_run_whose_session_is_merely_busy` | drives the **real** `_drain_requests` and asserts the stamped reason is `session_busy`, so a busy session is never swept |
+| `test_sweep_ignores_queued_run_skipped_only_for_capacity` | an unstamped row is unsweepable |
+| `test_sweep_expires_a_workbench_queue_hold_only_after_its_ttl` | B2 both sides of the TTL |
+| `test_sweep_leaves_watch_runtime_and_deferred_rows_alone` | the exclusions (defended twice — see §4.2) |
+| `test_sweep_releases_a_leaked_session_lock` | the wedge release |
+| `test_execution_completion_does_not_steal_a_later_lock_owner` | deviation 7's safety direction |
+| `test_stranded_queued_run_does_not_trigger_repeated_metadata_writes` | reviewer item 4: `wrote == [True, False, False, False]` across four ticks and `updated_at` unchanged |
+| `test_swept_run_notifies_the_session_that_launched_it` | the free callback path |
+| `test_sweep_publishes_a_run_update_event` | `runs.updated` fires (subscription unsubscribed in `finally` — `subscribe_callback` is persistent, not one-shot) |
+| `test_sweep_is_rate_limited_to_the_configured_interval` | rewinds `_last_sweep_at`, no clock patching |
+| `test_sweep_is_disabled_by_a_zero_interval` | the kill switch |
+
+Mutation evidence — 12 of 13 targeted mutations killed, each reverted afterwards:
+
+| Mutation | Verdict |
+| --- | --- |
+| M1 sweep ignores `owned_run_ids` | KILLED (both ownership tests) |
+| M2 ownership omits live `active_turn_sinks` | KILLED |
+| M3 unknown ownership read as empty instead of raising | KILLED |
+| M4 sweep `queued` rows without a recorded skip reason | KILLED (2 tests) |
+| M5 drain does not stamp `session_busy` | KILLED |
+| M6 skip reason written every pass | KILLED |
+| M7 skip stamp bumps `updated_at` | KILLED |
+| M8 wedge release ignores live owners | KILLED |
+| M9 completion steals a later lock owner | KILLED |
+| M10 no sweep rate limit | KILLED |
+| M11 drop one `watch_runtime`/deferred guard | **SURVIVED** — both classes are guarded twice; M11c (remove the SELECT filter *and* the `agent_run` restriction) KILLS. Documented rather than forced. |
+| M12 no orphan grace | KILLED |
+
+Deviations from §4 as written, all deliberate: (1) `record_run_skip_reason` writes only
+on reason *change*, with no `last_skip_at` bucketing — a transition-only stamp already
+produces zero steady-state writes, so the bucket was unnecessary machinery; (2)
+`session_busy` is stamped too, so it can overwrite a stale `transport_unavailable` and
+un-sweep a row whose transport came back; (3) capacity skips are deliberately left
+unstamped — the drain `break`s without examining the rest of the queue, and an unstamped
+row is never sweepable, so silence is the safe encoding; (4) each row is terminalized
+through `settle_run_terminal` rather than `defer_run_terminal` + `settle_deferred_run`,
+inheriting exactly the same guards with one write instead of two; (5) ownership unions
+live sinks (§4.1); (6) B3 stays `agent_run`-only per O5; (7) the owner-map wedge release
+(§4.3); (8) no pre-expiry queue-recovery attempt (§7 O4).
+
+Validation: `uvx ruff check core/ storage/ config/ tests/` clean; 211 passed across
+`test_scheduled_tasks.py`, `test_i18n_backend_keys.py`, `test_inbox_events.py`,
+`test_core_services_dispatch.py`, `test_controller_dispatch_loop.py`,
+`test_message_dispatcher_scheduled.py`. One unrelated pre-existing flake,
+`test_request_store_file_backend_reload_detects_queue_changes` — reproduced from a clean
+`git archive` of base master `5921ad39` (2/3 failures) as well as of this HEAD (3/3), so
+it is not caused here. Cause: the legacy file store's `_path_signature` relies on
+directory `st_mtime_ns`, which the kernel's coarse timestamp clock can report identically
+for two writes in the same jiffy. Fix candidate for a separate PR: fold the sorted
+directory entry names into the signature instead of trusting mtime alone.
+
 ## 6. Staging
 
 - **PR-A (Gap A)** — §3.1–3.4. Small, no new config, no sweep. Independently
@@ -483,6 +613,18 @@ Pre-existing unrelated flake: `test_request_store_file_backend_reload_detects_qu
   makes one `recover_persisted_agent_run_queue(session_id)` attempt (the same call the
   post-completion hook already makes, `core/scheduled_tasks.py:2464-2478`); only if the
   row is still held does it terminalize.
+
+  **Not implemented in PR-B (deviation 8, deliberate).** The recovery attempt would have
+  to happen between candidate selection and the terminal write, i.e. inside the store
+  method — and the store cannot call the controller without inverting the layering. The
+  hold class is safe without it: its TTL is 3600 s and its clock is `updated_at`, so any
+  successful recovery (which touches the row) resets it, and the post-completion hook
+  already retries recovery on the normal path. Doing it properly means splitting the
+  sweep into select → caller-side recovery → re-check → settle; worth it only if a real
+  `queue_hold_expired` is ever observed on a session that would have recovered.
+  `test_sweep_retries_queue_recovery_before_expiring_a_hold` is therefore not in the
+  delivered suite; `test_sweep_expires_a_workbench_queue_hold_only_after_its_ttl` covers
+  the TTL itself.
 - **O5 — `agent_run`-only scope.** Resolved: keep the scope for now; `_inflight_executions`
   already covers `scheduled`/`task_run` uniformly, so widening B3 is a small delta if
   PR2/PR7 timing slips.

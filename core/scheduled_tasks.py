@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
+from config.v2_config import (
+    DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS,
+    DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS,
+    DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS,
+    DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS,
+)
 from config.v2_settings import split_thread_native_id
 from core.message_context import (
     build_thread_session_anchor,
@@ -33,11 +40,20 @@ from core.run_settlement import (
     SETTLED_BY_TERMINAL_RESULT,
     SETTLEMENT_I18N_KEYS,
     SETTLEMENT_TERMINAL_STATUS,
+    SWEEP_I18N_KEYS,
 )
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    SKIP_REASON_SESSION_BUSY,
+    SKIP_REASON_TRANSPORT_UNAVAILABLE,
+    SQLiteBackgroundTaskStore,
+    SWEEP_REASON_ORPHANED,
+    SWEEP_REASON_QUEUE_HOLD_EXPIRED,
+    SWEEP_REASON_TRANSPORT_UNAVAILABLE,
+    SweptRun,
+)
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from vibe import runtime
@@ -1168,6 +1184,34 @@ class TaskExecutionStore:
             error=error,
         )
 
+    def record_skip_reason(self, run_id: str, *, reason: str) -> bool:
+        """Record why the drain deferred a queued run (SQLite only, no-op otherwise)."""
+
+        if self._sqlite is None:
+            return False
+        return self._sqlite.record_run_skip_reason(run_id, reason=reason)
+
+    def sweep_stale_runs(
+        self,
+        *,
+        owned_run_ids: set[str],
+        error_texts: dict[str, str],
+        orphan_grace_seconds: int,
+        queued_ttl_seconds: int,
+        hold_ttl_seconds: int,
+    ) -> list[SweptRun]:
+        """Terminalize provably stale runs. Empty for the legacy file store."""
+
+        if self._sqlite is None:
+            return []
+        return self._sqlite.sweep_stale_runs(
+            owned_run_ids=owned_run_ids,
+            error_texts=error_texts,
+            orphan_grace_seconds=orphan_grace_seconds,
+            queued_ttl_seconds=queued_ttl_seconds,
+            hold_ttl_seconds=hold_ttl_seconds,
+        )
+
     def supports_guarded_settlement(self) -> bool:
         """Whether this store can terminalize a run without clobbering a cancel.
 
@@ -1645,9 +1689,19 @@ class ScheduledTaskService:
         # serialize turns per session (never two at once for the same
         # conversation) while still running different sessions concurrently.
         self._inflight_sessions: set[str] = set()
+        # lock key -> the request id that took it. The set above answers "is this
+        # conversation busy"; this answers "busy on behalf of WHOM", which is what
+        # lets the sweep release a leaked lock without ever freeing one a live
+        # execution still holds (see ``_release_leaked_session_locks``).
+        self._session_lock_owners: Dict[str, str] = {}
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
         self._pending_recovered_activity_terminals: list[Any] = []
+        # Monotonic timestamp of the last staleness sweep, so the sweep can ride the
+        # 2 s store tick while running at most once per configured interval.
+        self._last_sweep_at: float = 0.0
+        # Warn once, not once per interval, while the sweep is failing closed.
+        self._sweep_ownership_unavailable_logged = False
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
@@ -1944,6 +1998,7 @@ class ScheduledTaskService:
                 pass
         self._inflight_executions.clear()
         self._inflight_sessions.clear()
+        self._session_lock_owners.clear()
 
     async def _watch_store(self) -> None:
         while self._running:
@@ -1968,6 +2023,10 @@ class ScheduledTaskService:
                 # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
                 # no-ops when nothing is pending.
                 await self._drain_vault_callbacks()
+                # Same reason, one layer down: a run whose owner vanished emits no
+                # store change either, so only a periodic pass can find it. Self
+                # rate-limited, so riding this tick is cheap.
+                self._sweep_stale_runs()
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
@@ -1977,6 +2036,125 @@ class ScheduledTaskService:
                     await asyncio.sleep(2)
                 except asyncio.CancelledError:
                     raise
+
+    def _runtime_seconds(self, name: str, default: int) -> int:
+        """Read one sweep timing knob off runtime config, tolerating junk values."""
+
+        runtime_config = getattr(getattr(self.controller, "config", None), "runtime", None)
+        try:
+            return int(getattr(runtime_config, name, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _owned_agent_run_ids(self) -> set[str]:
+        """Every run id something in THIS process is still legitimately executing.
+
+        Two lanes own a ``running`` row and neither can see the other:
+
+        - the drain lane: ``_inflight_executions``, one entry per claimed request
+          whose ``_execute_claimed_request`` task has not finished;
+        - the turn lane: a workbench/web turn that took over out of band. Those
+          never enter ``_inflight_executions``, so they are asked for directly via
+          :meth:`SessionTurnManager.owned_agent_run_ids`.
+
+        Raises when the turn lane cannot be reached. That is deliberate: the caller
+        must fail closed, because a missing provider silently reads as "no live
+        turns own anything", which would terminalize every streaming run.
+        """
+
+        owned = set(self._inflight_executions)
+        session_turns = getattr(self.controller, "session_turns", None)
+        provider = getattr(session_turns, "owned_agent_run_ids", None)
+        if not callable(provider):
+            raise RuntimeError("controller.session_turns.owned_agent_run_ids is unavailable")
+        owned |= {str(run_id) for run_id in provider() if run_id}
+        return owned
+
+    def _release_leaked_session_locks(self) -> set[str]:
+        """Drop per-session locks whose owning execution no longer exists.
+
+        A terminalized row is only half the repair. ``_inflight_sessions`` gates
+        dispatch for the whole conversation, so an entry that outlives its execution
+        wedges every later run for that session — the database reads honest and the
+        session still never drains.
+
+        ``_on_execution_done`` normally releases the lock, so the only way one
+        survives is if that callback was never attached (``asyncio.create_task``
+        raising after the lock was taken). Keying off the recorded owner rather than
+        off the swept rows is what makes this safe in the other direction: a lock
+        held by a live task is never freed, so this can never let two turns run
+        concurrently in one session.
+        """
+
+        leaked = {
+            lock_key: run_id
+            for lock_key, run_id in self._session_lock_owners.items()
+            if run_id not in self._inflight_executions
+        }
+        for lock_key, run_id in leaked.items():
+            self._session_lock_owners.pop(lock_key, None)
+            self._inflight_sessions.discard(lock_key)
+            logger.warning(
+                "Released leaked session lock %s owned by dead execution %s", lock_key, run_id
+            )
+        if leaked:
+            # The wedge is gone; re-check the queue now instead of waiting for the
+            # next store change, which a stuck session has no reason to produce.
+            self._drain_dirty = True
+        return set(leaked)
+
+    def _sweep_stale_runs(self) -> None:
+        """Terminalize runs that nothing is executing any more (plan §4).
+
+        Rides the existing store tick because the leak it repairs is the ABSENCE of
+        an event — a turn that never reported back, a transport that never came up, a
+        queue gate that never reopened — so nothing will ever wake it up. Rate
+        limited to ``harness_run_sweep_interval_seconds`` so the ordinary case
+        (nothing stale) costs one indexed SELECT per interval, not one per tick.
+        """
+
+        interval = self._runtime_seconds(
+            "harness_run_sweep_interval_seconds", DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS
+        )
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        # The first tick after startup sweeps immediately: a restart is exactly when
+        # the previous process's orphans are sitting there waiting to be found.
+        if self._last_sweep_at and now - self._last_sweep_at < interval:
+            return
+        self._last_sweep_at = now
+        try:
+            owned_run_ids = self._owned_agent_run_ids()
+        except Exception:
+            # Fail closed. "Nobody owns these runs" and "I cannot tell who owns them"
+            # are opposite answers, and acting on the second would fail runs that are
+            # still streaming. Skipping costs one interval of staleness.
+            if not self._sweep_ownership_unavailable_logged:
+                self._sweep_ownership_unavailable_logged = True
+                logger.warning("Skipping stale-run sweep: run ownership is unknown", exc_info=True)
+            else:
+                logger.debug("Skipping stale-run sweep: run ownership is unknown", exc_info=True)
+            return
+        self._sweep_ownership_unavailable_logged = False
+        swept = self.request_store.sweep_stale_runs(
+            owned_run_ids=owned_run_ids,
+            error_texts={reason: self._t(key) for reason, key in SWEEP_I18N_KEYS.items()},
+            orphan_grace_seconds=self._runtime_seconds(
+                "harness_run_orphan_grace_seconds", DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
+            ),
+            queued_ttl_seconds=self._runtime_seconds(
+                "harness_run_queued_ttl_seconds", DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
+            ),
+            hold_ttl_seconds=self._runtime_seconds(
+                "harness_run_hold_ttl_seconds", DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
+            ),
+        )
+        # Unconditional: the in-memory wedge and the stale rows are independent
+        # failures, and either can outlive the other.
+        self._release_leaked_session_locks()
+        if swept:
+            self._drain_dirty = True
 
     def reconcile_jobs(self) -> None:
         if not self._owns_service_instance():
@@ -2085,12 +2263,22 @@ class ScheduledTaskService:
             if pending.id in self._inflight_executions:
                 continue
             if not self._transport_ready_for_request(pending):
+                # Record it: this is the only skip reason that eventually makes the row
+                # sweepable, and the sweep reads the reason rather than re-deriving
+                # readiness. Transition-only inside the store, so a transport that
+                # stays down does not turn this into a per-tick write.
+                self.request_store.record_skip_reason(
+                    pending.id, reason=SKIP_REASON_TRANSPORT_UNAVAILABLE
+                )
                 continue
             lock_key = self._execution_lock_key(pending)
             if lock_key is not None and lock_key in self._inflight_sessions:
                 # A turn for this conversation is already running; keep this
                 # one queued so we never run two turns for one session at once.
                 # The next drain tick picks it up once the session frees.
+                # Recorded so it can clear a stale transport reason — this row is
+                # making progress and must not look sweepable.
+                self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
                 continue
             request = self.request_store.claim(pending.id)
             if request is None:
@@ -2400,6 +2588,10 @@ class ScheduledTaskService:
     def _spawn_execution(self, request: TaskExecutionRequest, lock_key: Optional[str]) -> None:
         if lock_key is not None:
             self._inflight_sessions.add(lock_key)
+            # Recorded BEFORE ``create_task`` so the one way this lock can leak — the
+            # task never being created, hence ``_on_execution_done`` never attached —
+            # still leaves an owner the sweep can trace back to a dead execution.
+            self._session_lock_owners[lock_key] = request.id
         task = asyncio.create_task(self._execute_claimed_request(request))
         self._inflight_executions[request.id] = task
         task.add_done_callback(
@@ -2412,6 +2604,11 @@ class ScheduledTaskService:
         self._inflight_executions.pop(request_id, None)
         if lock_key is not None:
             self._inflight_sessions.discard(lock_key)
+            # Only if it is still OURS: a later execution may already have taken the
+            # same key, and stealing its owner entry would make the sweep read that
+            # live lock as leaked.
+            if self._session_lock_owners.get(lock_key) == request_id:
+                self._session_lock_owners.pop(lock_key, None)
         self._drain_dirty = True
         # ``_execute_claimed_request`` already records failures and requeues on
         # cancellation; this only surfaces unexpected crashes in the wrapper.

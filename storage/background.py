@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -104,6 +105,67 @@ _TERMINAL_STATUS_PRIORITY = {
 # The closed set of terminal run statuses. Shared so guarded writers and reconcile
 # paths cannot drift apart (this file previously spelled the set inline).
 TERMINAL_RUN_STATUSES = frozenset(_TERMINAL_STATUS_PRIORITY)
+
+
+def _parse_iso_instant(value: Any) -> Optional[datetime]:
+    """Parse a stored ISO timestamp, or ``None`` if it is absent/unusable.
+
+    Callers deciding whether a row is stale must treat ``None`` as "not old enough".
+    A row we cannot date is a row we must not sweep.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        instant = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant
+
+
+@dataclass(frozen=True)
+class SweptRun:
+    """One run the staleness sweep terminalized, plus who it belonged to.
+
+    The identity fields are the sweep's report, not its repair: an honest DB row is
+    not enough if the session stays undispatchable, but the in-memory wedge is
+    released from the recorded lock owner (``ScheduledTaskService.
+    _release_leaked_session_locks``) rather than reconstructed from these fields —
+    a lock key is per-conversation, so freeing it from a swept run's identity could
+    free one a different live execution still holds. These fields exist so the
+    caller can log, notify, and test what was swept.
+    """
+
+    run_id: str
+    status: str
+    interrupt_reason: str
+    run_type: Optional[str] = None
+    task_id: Optional[str] = None
+    session_id: Optional[str] = None
+    session_key: Optional[str] = None
+
+
+#: ``metadata.last_skip_reason`` values written by the drain when it defers a queued
+#: run. The sweep requires this recorded evidence rather than re-deriving readiness, so
+#: a run deferred for a reason that still represents progress is never swept.
+#:
+#: Only ``transport_unavailable`` makes a row sweepable. ``session_busy`` is recorded
+#: precisely so it can OVERWRITE a stale ``transport_unavailable``: without it, a run
+#: that was once blocked on a dead transport and is now merely queued behind its own
+#: session's active turn would still look sweepable. Capacity skips are deliberately
+#: not recorded — the drain ``break``s at capacity without examining the remaining
+#: rows, and an unstamped row is never swept, which is the safe direction.
+SKIP_REASON_TRANSPORT_UNAVAILABLE = "transport_unavailable"
+SKIP_REASON_SESSION_BUSY = "session_busy"
+
+#: ``metadata.interrupt_reason`` values the sweep writes. Kept beside the sweep so
+#: the query and the reason cannot drift.
+SWEEP_REASON_ORPHANED = "orphaned"
+SWEEP_REASON_TRANSPORT_UNAVAILABLE = "transport_unavailable"
+SWEEP_REASON_QUEUE_HOLD_EXPIRED = "queue_hold_expired"
 
 
 def normalize_run_status(status: Any) -> str:
@@ -1664,6 +1726,175 @@ class SQLiteBackgroundTaskStore:
                 )
             _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
             _defer_run_ids_updated_from_connection(conn, recovered_ids)
+
+    def record_run_skip_reason(self, run_id: str, *, reason: str, at: Optional[str] = None) -> bool:
+        """Record WHY the drain deferred a queued run — only when it changes.
+
+        The sweep must not guess why a row sat in ``queued``, so the drain records it.
+        The subtlety is that this write cannot be tick-triggered.
+        ``ScheduledTaskService._watch_store`` decides whether to drain from
+        ``maybe_reload()`` → ``SqliteInvalidationProbe.has_external_write()``, which
+        bumps on *any* write to the DB file — including ours. Stamping on every drain
+        pass would therefore self-sustain a write → reload → re-drain → write loop for
+        as long as a transport stayed down.
+
+        So the write is transition-triggered: if the stored reason already matches,
+        nothing is written and the probe stays quiet. A permanently unavailable
+        transport costs exactly one write, ever. ``last_skip_at`` consequently means
+        "when this reason started", which is more useful than a refreshed timestamp.
+
+        Deliberately NOT wrapped in ``run_update_event_transaction``: this is
+        diagnostic metadata, not a state change worth an SSE frame. ``updated_at`` is
+        left alone too — bumping it would make a stranded row look freshly touched and
+        would defeat the hold TTL, which reads exactly that column.
+
+        Returns ``True`` when a write actually happened.
+        """
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs.c.status, agent_runs.c.metadata_json)
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
+            if not row or normalize_run_status(row["status"]) != "queued":
+                return False
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if metadata.get("last_skip_reason") == reason:
+                return False
+            metadata["last_skip_reason"] = reason
+            metadata["last_skip_at"] = at or _utc_now_iso()
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .values(metadata_json=_json_dumps(metadata))
+            )
+        return True
+
+    def sweep_stale_runs(
+        self,
+        *,
+        owned_run_ids: set[str],
+        error_texts: dict[str, str],
+        now: Optional[str] = None,
+        orphan_grace_seconds: int = 0,
+        queued_ttl_seconds: int = 0,
+        hold_ttl_seconds: int = 0,
+    ) -> list[SweptRun]:
+        """Terminalize runs that provably have nothing left to settle them.
+
+        Three evidence-based classes (``docs/plans/agent-run-zombie-settlement.md``
+        §4.2). Each is disabled by passing ``0`` for its window:
+
+        - ``orphaned``: a ``running`` agent run with no live owner, older than
+          ``orphan_grace_seconds``. The grace period is what keeps a run that is
+          legitimately starting up from being swept.
+        - ``transport_unavailable``: a ``queued`` run whose recorded skip reason says
+          its transport is down, older than ``queued_ttl_seconds``. The reason is read
+          off the row, never re-derived, so a run deferred for capacity or a session
+          lock — both of which are progress — is never swept.
+        - ``queue_hold_expired``: a ``queued`` run holding a workbench queue slot that
+          has not been touched in ``hold_ttl_seconds``.
+
+        ``owned_run_ids`` must be the union of every ownership source; the caller is
+        responsible for failing closed (passing "everything is owned", or not calling
+        at all) when it cannot enumerate owners. This method cannot tell an empty set
+        meaning "nothing is running" from one meaning "I could not look".
+
+        Candidate selection is read-only; each row is then terminalized through
+        :meth:`settle_run_terminal`, so every write inherits the same guards — scoped
+        to ``queued|running``, ``cancel_requested`` honored, deferred/Activity-owned
+        rows left alone, ``metadata_json`` merged rather than replaced. A row someone
+        else settles between the select and the write is simply skipped.
+        """
+
+        now_iso = now or _utc_now_iso()
+        now_dt = _parse_iso_instant(now_iso) or datetime.now(timezone.utc)
+
+        def _older_than(value: Any, seconds: int) -> bool:
+            if seconds <= 0:
+                return False
+            instant = _parse_iso_instant(value)
+            if instant is None:
+                # Undateable row: never sweep it.
+                return False
+            return instant <= now_dt - timedelta(seconds=seconds)
+
+        with self.engine.begin() as conn:
+            rows = list(
+                conn.execute(
+                    select(agent_runs)
+                    .where(
+                        agent_runs.c.status.in_(
+                            _status_query_values("queued") + _status_query_values("running")
+                        )
+                    )
+                    .where(agent_runs.c.run_type != "watch_runtime")
+                ).mappings()
+            )
+
+        candidates: list[tuple[dict[str, Any], str]] = []
+        for row in rows:
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                # The Activity lifecycle owns this row's terminal state.
+                continue
+            metadata = _json_loads(row["metadata_json"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            status = normalize_run_status(row["status"])
+            run_id = str(row["id"])
+            reason: Optional[str] = None
+            if status == "running":
+                # Restricted to ``agent_run`` on purpose: when ``scheduled``/``watch``
+                # rows settle is owned by a separate plan. Widen only alongside it.
+                if (
+                    str(row["run_type"] or "") == "agent_run"
+                    and run_id not in owned_run_ids
+                    and _older_than(row["started_at"] or row["created_at"], orphan_grace_seconds)
+                ):
+                    reason = SWEEP_REASON_ORPHANED
+            elif status == "queued":
+                # Hold first: it is the more specific piece of evidence, and its TTL is
+                # deliberately the longest so an actively recovering queue survives.
+                if metadata.get("workbench_queue_holds_run") and _older_than(
+                    row["updated_at"], hold_ttl_seconds
+                ):
+                    reason = SWEEP_REASON_QUEUE_HOLD_EXPIRED
+                elif metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE and _older_than(
+                    row["created_at"], queued_ttl_seconds
+                ):
+                    reason = SWEEP_REASON_TRANSPORT_UNAVAILABLE
+            if reason is not None:
+                candidates.append((dict(row), reason))
+
+        swept: list[SweptRun] = []
+        for row, reason in candidates:
+            run_id = str(row["id"])
+            written = self.settle_run_terminal(
+                run_id,
+                terminal_status="failed",
+                error=error_texts.get(reason),
+                metadata={"interrupt_reason": reason},
+                updated_at=now_iso,
+            )
+            if written is None:
+                # Settled by someone else in the meantime — nothing to report.
+                continue
+            logger.warning("Harness run %s swept as %s (%s)", run_id, written, reason)
+            swept.append(
+                SweptRun(
+                    run_id=run_id,
+                    status=written,
+                    interrupt_reason=reason,
+                    run_type=str(row["run_type"] or "") or None,
+                    task_id=str(row["definition_id"] or "") or None,
+                    session_id=str(row["session_id"] or "") or None,
+                    session_key=str(row["legacy_session_key"] or "") or None,
+                )
+            )
+        return swept
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}

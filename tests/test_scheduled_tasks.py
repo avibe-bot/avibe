@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,6 +34,7 @@ from core.scheduled_tasks import (
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
+from storage.models import agent_runs
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
 from storage.agent_session_rows import create_agent_session_row
@@ -2601,6 +2604,590 @@ def test_late_terminal_result_cannot_reopen_a_stopped_run(tmp_path: Path, monkey
     assert final is not None
     assert final["status"] == "canceled", "a stop already settled this run; the late result loses"
     assert final["metadata"]["interrupt_reason"] == "stopped"
+
+
+# ---------------------------------------------------------------------------
+# Gap B: the staleness sweep (docs/plans/agent-run-zombie-settlement.md §4)
+#
+# Gap A settles a run whose turn REPORTED that it produced nothing. These cases
+# cover the runs nobody will ever report on: the owner vanished without reporting,
+# the transport never came back, the queue gate never reopened. The sweep is the
+# only thing that can close them, which also makes it the only thing that can
+# WRONGLY close a healthy run — so the negative cases matter as much as the positive.
+#
+# Note on staging: ``ScheduledTaskService.__init__`` runs ``recover_processing()``,
+# which requeues every ``running`` row (that is how a restart's in-flight runs get
+# retried, and why the orphan class here is about owners lost WITHIN a live process).
+# So these tests build the service first and stage the stale row afterwards.
+# ---------------------------------------------------------------------------
+
+
+class _SweepControllerDouble:
+    """The controller surface the sweep reads: timing knobs plus the ownership lane.
+
+    ``session_turns`` is injectable so a test can supply the real
+    ``SessionTurnManager`` (the workbench ownership lane) or a broken provider (the
+    fail-closed case) rather than a hand-written answer.
+    """
+
+    def __init__(self, *, session_turns: Any = None, transport_ready: bool = True, **timings) -> None:
+        runtime = {
+            "harness_run_sweep_interval_seconds": 60,
+            "harness_run_orphan_grace_seconds": 120,
+            "harness_run_queued_ttl_seconds": 1800,
+            "harness_run_hold_ttl_seconds": 3600,
+        }
+        runtime.update(timings)
+        self.config = SimpleNamespace(language="en", runtime=SimpleNamespace(**runtime))
+        self.session_turns = SessionTurnManager(self) if session_turns is None else session_turns
+        self._transport_ready = transport_ready
+
+    def is_im_transport_ready(self, _platform: str) -> bool:
+        return self._transport_ready
+
+
+def _sweep_service(
+    tmp_path: Path,
+    request_store: TaskExecutionStore,
+    controller: Any = None,
+) -> ScheduledTaskService:
+    return ScheduledTaskService(
+        controller=controller if controller is not None else _SweepControllerDouble(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+
+def _ago(seconds: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+def _force_run_columns(request_store: TaskExecutionStore, run_id: str, **columns) -> None:
+    """Write raw ``agent_runs`` columns to stage a state that takes real time to reach.
+
+    Aging a row by hand is the only way to exercise a TTL without sleeping through
+    it, and the sweep classifies purely on stored columns, so a staged row is
+    indistinguishable from one that got there naturally.
+    """
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    with sqlite_store.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**columns))
+
+
+def _stage_orphan_run(
+    request_store: TaskExecutionStore,
+    *,
+    message: str = "summarize the build",
+    age_seconds: int = 900,
+) -> str:
+    """A ``running`` agent run whose executor is gone — the post-restart zombie."""
+
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message=message,
+        agent_name="codex",
+    )
+    _force_run_columns(
+        request_store,
+        request.id,
+        status="running",
+        started_at=_ago(age_seconds),
+        created_at=_ago(age_seconds),
+    )
+    return request.id
+
+
+def test_sweep_terminalizes_orphaned_running_run(tmp_path: Path, monkeypatch) -> None:
+    """A ``running`` row with no live owner is the zombie Gap A cannot reach.
+
+    Gap A only fires when a turn in this process reports back. A turn that was taken
+    over out of band and then lost — no sink, no execution task, no settlement — never
+    reports, so without the sweep the row stays ``running`` forever: it blocks its
+    session, shows as active in the UI, and never notifies anyone.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = _stage_orphan_run(request_store)
+
+    service._sweep_stale_runs()
+
+    swept = request_store.get_run(run_id)
+    assert swept is not None
+    assert swept["status"] == "failed"
+    assert swept["completed_at"] is not None
+    assert swept["metadata"]["interrupt_reason"] == "orphaned"
+    # The resolved translation, not a raw dotted key: this column is shown verbatim
+    # in the Runs UI and in the callback message.
+    assert "Avibe Harness" in swept["error"]
+    assert "harness.run.interrupted" not in swept["error"]
+
+
+def test_sweep_respects_the_orphan_grace_period(tmp_path: Path, monkeypatch) -> None:
+    """A run that just started has no owner YET; the grace period is what protects it.
+
+    Ownership registration and the run row are written by different steps, so a
+    freshly claimed run is briefly visible as unowned. Sweeping on that window would
+    fail healthy runs at the moment they start.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = _stage_orphan_run(request_store, age_seconds=5)
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "running"
+
+
+def test_sweep_skips_running_run_owned_by_inflight_execution(tmp_path: Path, monkeypatch) -> None:
+    """The drain lane: a claimed request whose execution task is still alive.
+
+    A hung backend looks exactly like an orphan in the database. The difference is
+    only visible in memory, and terminalizing it here would settle a run that is
+    still streaming — and then the real result would have nowhere to land.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = _stage_orphan_run(request_store)
+    # Only membership is read; a real ``asyncio.Task`` would need a running loop.
+    service._inflight_executions[run_id] = Mock(name="live-execution-task")
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "running"
+
+
+def test_sweep_skips_running_run_owned_by_workbench_turn(tmp_path: Path, monkeypatch) -> None:
+    """The second ownership lane, and the trap: it never enters ``_inflight_executions``.
+
+    A workbench/web turn takes the run over out of band, so the drain lane knows
+    nothing about it. A sweep that consulted only ``_inflight_executions`` would look
+    correct in every drain-lane test and still fail live workbench runs. Uses the real
+    ``register_turn_sink`` so the attribution path itself is under test.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    session_turns = SessionTurnManager(controller=None)
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(session_turns=session_turns)
+    )
+    run_id = _stage_orphan_run(request_store)
+    sibling_id = _stage_orphan_run(request_store, message="and the sibling callback")
+
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={
+            "task_execution_id": run_id,
+            # A coalesced turn settles several runs; it owns every one of them, not
+            # just the primary, or the sweep fails the siblings out from under it.
+            "coalesced_queue": {"execution_ids": [sibling_id]},
+        },
+    )
+    session_turns.register_turn_sink(
+        "slack::channel::C123",
+        on_chunk=AsyncMock(),
+        done_event=asyncio.Event(),
+        context=context,
+    )
+    assert service._inflight_executions == {}, "the workbench lane registers nothing here"
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "running"
+    assert request_store.get_run(sibling_id)["status"] == "running"
+
+
+@pytest.mark.parametrize(
+    "session_turns",
+    [
+        pytest.param(SimpleNamespace(), id="provider-missing"),
+        pytest.param(
+            SimpleNamespace(owned_agent_run_ids=Mock(side_effect=RuntimeError("turn state gone"))),
+            id="provider-raises",
+        ),
+    ],
+)
+def test_sweep_fails_closed_when_ownership_is_unknown(
+    tmp_path: Path, monkeypatch, session_turns: Any
+) -> None:
+    """"Nobody owns this run" and "I cannot tell" are opposite answers.
+
+    Both failures degrade to an empty owner set, which reads as "sweep everything".
+    The sweep must refuse to run instead: leaving a zombie for one more interval is
+    recoverable, failing every live run is not.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(session_turns=session_turns)
+    )
+    run_id = _stage_orphan_run(request_store)
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "running"
+
+
+def _stage_queued_run(
+    request_store: TaskExecutionStore,
+    *,
+    metadata: Optional[dict] = None,
+    created_age_seconds: int = 0,
+    updated_age_seconds: Optional[int] = None,
+) -> str:
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+    columns: dict[str, Any] = {}
+    if created_age_seconds:
+        columns["created_at"] = _ago(created_age_seconds)
+    if updated_age_seconds is not None:
+        columns["updated_at"] = _ago(updated_age_seconds)
+    if metadata is not None:
+        existing = request_store.get_run(request.id)["metadata"] or {}
+        columns["metadata_json"] = json.dumps({**existing, **metadata})
+    if columns:
+        _force_run_columns(request_store, request.id, **columns)
+    return request.id
+
+
+def test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A queued run whose platform never reconnected is undeliverable, not pending.
+
+    Left alone it waits forever with no user-visible explanation. The evidence is the
+    reason the drain recorded — never re-derived here, because a transport that came
+    back after the row went stale must not erase the fact that this run missed it.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(1900)},
+        created_age_seconds=1900,
+    )
+    service = _sweep_service(tmp_path, request_store)
+
+    service._sweep_stale_runs()
+
+    swept = request_store.get_run(run_id)
+    assert swept["status"] == "failed"
+    assert swept["metadata"]["interrupt_reason"] == "transport_unavailable"
+    assert "Avibe Harness" in swept["error"]
+
+
+def test_sweep_leaves_a_queued_run_whose_session_is_merely_busy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``session_busy`` is progress, and it must be able to clear a stale transport reason.
+
+    A run blocked behind its own session's active turn will run the moment that turn
+    ends. Without the drain overwriting the older ``transport_unavailable`` reason, an
+    aged row that is now making progress would still read as sweepable.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(1900)},
+        created_age_seconds=1900,
+    )
+    service = _sweep_service(tmp_path, request_store)
+    # The session is busy: a turn for this conversation holds the lock.
+    lock_key = service._execution_lock_key(request_store.list_pending()[0])
+    assert lock_key is not None
+    service._inflight_sessions.add(lock_key)
+    service._session_lock_owners[lock_key] = "otherrun0001"
+    service._inflight_executions["otherrun0001"] = Mock(name="live-execution-task")
+
+    asyncio.run(service._drain_requests())
+    assert request_store.get_run(run_id)["metadata"]["last_skip_reason"] == "session_busy"
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued"
+
+
+def test_sweep_ignores_queued_run_skipped_only_for_capacity(tmp_path: Path, monkeypatch) -> None:
+    """A row the drain never even looked at must never be swept.
+
+    At capacity the drain ``break``s without examining the rest of the queue, so those
+    rows carry no skip reason. Requiring recorded evidence is what makes that silence
+    safe — a busy service must not look like a broken one.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(request_store, created_age_seconds=7200)
+    service = _sweep_service(tmp_path, request_store)
+    for index in range(service._MAX_CONCURRENT_EXECUTIONS):
+        service._inflight_executions[f"busy{index:08d}"] = Mock(name="live-execution-task")
+
+    asyncio.run(service._drain_requests())
+    assert request_store.get_run(run_id)["metadata"].get("last_skip_reason") is None
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued"
+
+
+def test_sweep_expires_a_workbench_queue_hold_only_after_its_ttl(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The hold TTL is the longest one: a recovering queue must be allowed to recover.
+
+    A run holding a workbench queue slot is waiting on the session's turn queue, which
+    legitimately drains slowly. Only a hold nothing has touched for the full TTL is
+    treated as a gate that never reopened.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    recovering = _stage_queued_run(
+        request_store, metadata={"workbench_queue_holds_run": True}, updated_age_seconds=1800
+    )
+    abandoned = _stage_queued_run(
+        request_store, metadata={"workbench_queue_holds_run": True}, updated_age_seconds=7200
+    )
+    service = _sweep_service(tmp_path, request_store)
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(recovering)["status"] == "queued"
+    expired = request_store.get_run(abandoned)
+    assert expired["status"] == "failed"
+    assert expired["metadata"]["interrupt_reason"] == "queue_hold_expired"
+
+
+def test_sweep_leaves_watch_runtime_and_deferred_rows_alone(tmp_path: Path, monkeypatch) -> None:
+    """Two row classes look stale and are not: neither is ours to settle.
+
+    ``watch_runtime`` is a singleton bookkeeping row that is ``running`` by design, and
+    a deferred terminal belongs to the Activity lifecycle. Terminalizing either would
+    corrupt state the sweep does not own.
+
+    Both are defended twice on purpose. Mutation testing shows the deferred row
+    survives even with the sweep's own candidate check removed, because
+    ``settle_run_terminal`` refuses a deferred row as well — so read the candidate
+    check as belt-and-braces, not as the load-bearing guard. The watch_runtime row
+    needs both the query filter and the ``agent_run`` restriction gone before it is
+    touched.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    watch_runtime = _stage_orphan_run(request_store, message="watch runtime bookkeeping")
+    _force_run_columns(request_store, watch_runtime, run_type="watch_runtime")
+    deferred = _stage_orphan_run(request_store, message="activity-owned run")
+    _force_run_columns(
+        request_store,
+        deferred,
+        result_payload_json=json.dumps({"deferred_terminal_status": "succeeded"}),
+    )
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(watch_runtime)["status"] == "running"
+    assert request_store.get_run(deferred)["status"] == "running"
+
+
+def test_sweep_releases_a_leaked_session_lock(tmp_path: Path, monkeypatch) -> None:
+    """An honest row is only half the repair; the wedge is in memory.
+
+    ``_inflight_sessions`` gates dispatch for the whole conversation, so a lock that
+    outlived its execution keeps the session undispatchable no matter how the run row
+    reads. A lock a LIVE execution holds must survive the same pass — freeing that one
+    would let two turns run at once in one session.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    service._inflight_sessions.update({"key:leaked", "key:live"})
+    service._session_lock_owners.update({"key:leaked": "deadrun00001", "key:live": "liverun00001"})
+    service._inflight_executions["liverun00001"] = Mock(name="live-execution-task")
+    service._drain_dirty = False
+
+    service._sweep_stale_runs()
+
+    assert service._inflight_sessions == {"key:live"}
+    assert service._session_lock_owners == {"key:live": "liverun00001"}
+    assert service._drain_dirty is True, "the freed session must be re-checked immediately"
+
+
+def test_execution_completion_does_not_steal_a_later_lock_owner(tmp_path: Path, monkeypatch) -> None:
+    """The owner map must not be clobbered by a finishing predecessor.
+
+    Two executions can reuse one lock key in sequence. If the first one's completion
+    callback removed the owner entry the second one wrote, the sweep would read the
+    live lock as leaked and free it mid-turn.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    service._inflight_sessions.add("key:shared")
+    service._session_lock_owners["key:shared"] = "secondrun001"
+    service._inflight_executions["secondrun001"] = Mock(name="live-execution-task")
+
+    service._on_execution_done("firstrun0001", "key:shared", Mock(cancelled=lambda: True))
+
+    assert service._session_lock_owners == {"key:shared": "secondrun001"}
+    service._sweep_stale_runs()
+    assert service._session_lock_owners == {"key:shared": "secondrun001"}
+
+
+def test_stranded_queued_run_does_not_trigger_repeated_metadata_writes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The skip stamp must be transition-only, or it becomes a self-feeding hot loop.
+
+    Every write bumps the store's invalidation probe, which is what wakes the drain —
+    so a per-tick stamp would make a permanently-down transport spin the service
+    forever. It must also leave ``updated_at`` alone: the hold TTL reads that column,
+    and bumping it would keep any hold permanently fresh.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(request_store)
+    before = request_store.get_run(run_id)["updated_at"]
+    service = _sweep_service(tmp_path, request_store, _SweepControllerDouble(transport_ready=False))
+
+    wrote: list[bool] = []
+    original = request_store.record_skip_reason
+
+    def _record(target_id: str, *, reason: str) -> bool:
+        result = original(target_id, reason=reason)
+        wrote.append(result)
+        return result
+
+    monkeypatch.setattr(request_store, "record_skip_reason", _record)
+
+    for _ in range(4):
+        asyncio.run(service._drain_requests())
+
+    assert wrote == [True, False, False, False], "the reason is stamped once, not once per tick"
+    after = request_store.get_run(run_id)
+    assert after["metadata"]["last_skip_reason"] == "transport_unavailable"
+    assert after["updated_at"] == before, "stamping a skip must not refresh the hold TTL"
+
+
+def test_swept_run_notifies_the_session_that_launched_it(tmp_path: Path, monkeypatch) -> None:
+    """An honest row nobody is told about is still a silent failure.
+
+    A delegated run (``vibe agent run``) reports back to its caller's session when it
+    reaches a terminal state. The sweep goes through the same guarded writer, so the
+    callback becomes owed automatically — this pins that, because the whole point of
+    settling a zombie is that the waiting side stops waiting.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+        callback_session_id="ses_parent",
+    )
+    _force_run_columns(
+        request_store, request.id, status="running", started_at=_ago(900), created_at=_ago(900)
+    )
+    assert request_store.list_pending_callbacks() == [], "nothing is owed while it runs"
+
+    service._sweep_stale_runs()
+
+    owed = request_store.list_pending_callbacks()
+    assert [run["id"] for run in owed] == [request.id]
+    assert owed[0]["status"] == "failed"
+    assert owed[0]["callback_session_id"] == "ses_parent"
+
+
+def test_sweep_publishes_a_run_update_event(tmp_path: Path, monkeypatch) -> None:
+    """The Runs UI is SSE-driven, so a swept row must announce itself.
+
+    Without the event the run keeps rendering as active until something else happens
+    to refresh, which looks exactly like the bug the sweep exists to fix.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core import inbox_events
+
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = _stage_orphan_run(request_store)
+
+    published: list[tuple[str, dict]] = []
+    # The bus is process-global and this subscription is not one-shot, so it has to be
+    # removed again or it leaks into every later test in this process.
+    sub_id = inbox_events.bus.subscribe_callback(
+        lambda event_type, data: published.append((event_type, data))
+    )
+    try:
+        service._sweep_stale_runs()
+    finally:
+        inbox_events.bus.unsubscribe(sub_id)
+
+    assert published[-1][0] == "runs.updated"
+    assert published[-1][1]["run_id"] == run_id
+    assert published[-1][1]["status"] == "failed"
+
+
+def test_sweep_is_rate_limited_to_the_configured_interval(tmp_path: Path, monkeypatch) -> None:
+    """The sweep rides a 2 s tick, so its own interval is the only thing bounding cost.
+
+    Without the guard this becomes a full scan of every open run twice a second.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    first = _stage_orphan_run(request_store)
+
+    service._sweep_stale_runs()
+    assert request_store.get_run(first)["status"] == "failed"
+
+    second = _stage_orphan_run(request_store, message="a later orphan")
+    service._sweep_stale_runs()
+    assert request_store.get_run(second)["status"] == "running", "still inside the interval"
+
+    # Rewind the last-sweep stamp instead of the clock: same effect, no time travel.
+    service._last_sweep_at -= 61
+    service._sweep_stale_runs()
+    assert request_store.get_run(second)["status"] == "failed"
+
+
+def test_sweep_is_disabled_by_a_zero_interval(tmp_path: Path, monkeypatch) -> None:
+    """A zero interval is the documented off switch — an operator must be able to stop it."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(harness_run_sweep_interval_seconds=0)
+    )
+    run_id = _stage_orphan_run(request_store)
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "running"
 
 
 def test_agent_run_with_blank_message_fails_instead_of_hanging(tmp_path: Path, monkeypatch) -> None:

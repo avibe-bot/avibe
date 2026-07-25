@@ -39,6 +39,26 @@ V2 stores all user data under `~/.vibe_remote/` as JSON files. The model preserv
 - `default_cwd`: default working directory
 - `log_level`: `"DEBUG" | "INFO" | "WARNING" | "ERROR"`
 - `require_mention`: bool (channel messages require @mention; stored under `slack`)
+- `harness_run_sweep_interval_seconds`: int, default `60` — how often the Harness
+  staleness sweep looks for runs nothing is executing any more. `0` disables the sweep
+  entirely (and with it all three classes below).
+- `harness_run_orphan_grace_seconds`: int, default `120` — how long a `running` agent run
+  with no live owner is tolerated before it is settled `failed` with
+  `interrupt_reason="orphaned"`. `0` disables this class.
+- `harness_run_queued_ttl_seconds`: int, default `1800` — how long a run may sit `queued`
+  because its chat platform never reconnected before it is settled `failed` with
+  `interrupt_reason="transport_unavailable"`. Only rows the dispatcher actually recorded
+  as transport-blocked are eligible; a run merely waiting on a busy session or on
+  capacity is never affected. `0` disables this class.
+- `harness_run_hold_ttl_seconds`: int, default `3600` — how long an untouched workbench
+  queue hold is kept before its run is settled `failed` with
+  `interrupt_reason="queue_hold_expired"`. Any queue activity resets the clock. `0`
+  disables this class.
+
+All four are read per sweep, so a config save takes effect on the next tick without a
+restart. A missing or non-numeric value falls back to the default rather than failing
+the tick. Design rationale and the evidence each class requires:
+`docs/plans/agent-run-zombie-settlement.md` §4.
 
 ### agents
 

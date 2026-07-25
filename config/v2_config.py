@@ -29,6 +29,21 @@ CONFIG_LOCK = threading.RLock()
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 
+# Harness run staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.4).
+# How often the sweep may run at all — it rides the scheduler's existing 2 s tick, so
+# this only rate-limits the candidate query.
+DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS = 60
+# How long a ``running`` agent run may have no live owner before it is declared
+# orphaned. Must comfortably exceed the gap between claiming a row and registering the
+# executing turn, so a legitimately-starting run is never swept.
+DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS = 120
+# How long a ``queued`` run may sit while its transport is unavailable. Long enough
+# that a brief IM reconnect just delivers late instead of failing the run.
+DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS = 1800
+# How long a workbench queue hold may go unrefreshed. Deliberately the longest of the
+# three: a session actively recovering its queue keeps touching the row.
+DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS = 3600
+
 # Absolute-time backstop for evicting a Codex transport whose turn is stuck
 # "active" forever (e.g. the ``codex app-server`` wedged or silently
 # disconnected after ``turn/start`` but before ``turn/completed``, so
@@ -248,6 +263,16 @@ class RuntimeConfig:
     # workload. "auto" enables it only when Avibe can create and write the
     # delegated cgroup; unsupported systems silently fall back to legacy spawn.
     resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
+    # Harness run staleness sweep. A Run whose executor died, whose transport never
+    # came back, or whose workbench queue hold was never released has nothing left to
+    # write its terminal state, so it would sit ``running``/``queued`` forever. The
+    # sweep terminalizes those on evidence (see
+    # ``docs/plans/agent-run-zombie-settlement.md`` §4). Each key is seconds and ``0``
+    # disables that class; the defaults are the product decision, so there is no UI.
+    harness_run_sweep_interval_seconds: int = DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS
+    harness_run_orphan_grace_seconds: int = DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
+    harness_run_queued_ttl_seconds: int = DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
+    harness_run_hold_ttl_seconds: int = DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
 
 
 @dataclass
@@ -1182,6 +1207,10 @@ class V2Config:
                 "default_cwd": self.runtime.default_cwd,
                 "log_level": self.runtime.log_level,
                 "resource_governance": self.runtime.resource_governance,
+                "harness_run_sweep_interval_seconds": self.runtime.harness_run_sweep_interval_seconds,
+                "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
+                "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
+                "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,
