@@ -726,6 +726,27 @@ def test_remote_host_requires_authorization_refresh_before_mutation(monkeypatch,
     assert refreshed is None
 
 
+def test_remote_api_get_requires_top_level_authorization_refresh(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    cookie = _forged_session_cookie(config, near_exp)
+    client = app.test_client()
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
+
+    response = client.get(
+        "/api/config",
+        base_url="https://alex.avibe.bot",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_authorization_refresh_required"
+    assert response.headers.get("Location") is None
+
+
 def test_remote_host_fails_closed_when_config_load_fails(monkeypatch):
     def fail_load():
         raise ValueError("corrupt config")

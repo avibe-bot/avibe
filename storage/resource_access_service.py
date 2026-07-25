@@ -23,6 +23,7 @@ from storage.models import resource_access_groups, resource_access_policies
 RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
 ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 
 
 class ResourceAccessError(ValueError):
@@ -239,6 +240,44 @@ def resolve_resource_access_context(
     if has_request_context():
         return context
     return ResourceUserContext(is_trusted_local=True)
+
+
+def metadata_with_resource_user_context(
+    metadata: Mapping[str, Any] | None,
+    user_context: ResourceUserContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Store the minimum remote identity needed to recheck deferred work."""
+
+    result = dict(metadata or {})
+    result.pop(RESOURCE_USER_CONTEXT_METADATA_KEY, None)
+    context = resolve_resource_access_context(user_context)
+    if not context.is_remote:
+        return result
+
+    result[RESOURCE_USER_CONTEXT_METADATA_KEY] = {
+        "sub": context.subject,
+        "vibe_organization_id": context.organization_id,
+        "vibe_organization_member_id": context.organization_member_id,
+        "vibe_organization_role": context.organization_role,
+        "vibe_group_ids": sorted(context.group_ids) if context.group_ids is not None else None,
+        "vibe_membership_version": context.membership_version,
+        "vibe_instance_role": context.instance_role,
+        "vibe_instance_access_source": context.instance_access_source,
+    }
+    return result
+
+
+def resource_user_context_from_metadata(
+    metadata: Mapping[str, Any] | None,
+) -> ResourceUserContext | None:
+    """Restore a remote definition creator context, or None for local legacy work."""
+
+    if not isinstance(metadata, Mapping):
+        return None
+    snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return None
+    return current_resource_context(snapshot, is_remote=True, is_trusted_local=False)
 
 
 def _as_context(user_context: ResourceUserContext | Mapping[str, Any] | None) -> ResourceUserContext:

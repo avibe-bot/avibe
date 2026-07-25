@@ -2113,7 +2113,7 @@ def enforce_remote_access_cookie():
     payload = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
     if payload is not None:
         if remote_access.session_needs_authorization_refresh(payload):
-            if request.method == "GET":
+            if request.method == "GET" and not request.path.startswith("/api/"):
                 if _auth_rate_limited():
                     return _auth_rate_limit_response()
                 return _redirect_to_vibe_cloud_login(config)

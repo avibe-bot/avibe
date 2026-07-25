@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import select
 
-from core.scheduled_tasks import ScheduledTaskStore
+from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
 from core.vibe_agents import AgentImportCandidate, VibeAgent, VibeAgentAccessError, VibeAgentStore
 from core.watches import ManagedWatchStore
 from storage import resource_access_service, workbench_sessions_service
@@ -392,3 +395,87 @@ def test_remote_external_guest_cannot_create_agent(monkeypatch, tmp_path) -> Non
             )
     finally:
         store.close()
+
+
+def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_store, agents = _seed_agents_with_policies()
+    context = _organization_context("member-1")
+    task_store = ScheduledTaskStore(tmp_path / "tasks.json")
+    watch_store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    try:
+        task = task_store.add_task(
+            session_key="slack::channel::C123",
+            prompt="run task",
+            schedule_type="cron",
+            agent_name=agents["public"].name,
+            cron="0 * * * *",
+            timezone_name="UTC",
+            metadata={
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+                    "sub": "owner-1",
+                }
+            },
+            user_context=context,
+        )
+        watch = watch_store.add_watch(
+            name="acl watch",
+            session_key="slack::channel::C123",
+            command=["true"],
+            shell_command=None,
+            prefix=None,
+            cwd=str(tmp_path),
+            mode="once",
+            timeout_seconds=1,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=1,
+            post_to=None,
+            deliver_key=None,
+            agent_name=agents["public"].name,
+            user_context=context,
+        )
+        assert task.metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]["sub"] == "member-1"
+        assert watch.metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]["sub"] == "member-1"
+
+        with agent_store.engine.begin() as connection:
+            resource_access_service.apply_control_plane_intent(
+                connection,
+                organization_id="org-1",
+                resource_kind="agent",
+                resource_id=agents["public"].id,
+                revision=1,
+                access_level="private",
+                group_ids=[],
+            )
+
+        service = ScheduledTaskService(
+            controller=SimpleNamespace(),
+            store=task_store,
+            request_store=request_store,
+        )
+        task_result = asyncio.run(
+            service._execute_task(task, execution_id="task-run", disable_one_shot=False)
+        )
+        assert task_result.error == "Agent access is not permitted."
+
+        request = request_store.enqueue_hook_send(
+            session_key=watch.session_key,
+            prompt="run watch",
+            agent_name=watch.agent_name,
+            session_policy=watch.session_policy,
+            run_type="watch",
+            definition_id=watch.id,
+            source_kind="watch",
+            metadata=watch.metadata,
+        )
+        claimed = request_store.claim(request.id)
+        assert claimed is not None
+        asyncio.run(service._execute_claimed_request(claimed))
+        completed = request_store.get_run(request.id)
+        assert completed is not None
+        assert completed["status"] == "failed"
+        assert completed["error"] == "Agent access is not permitted."
+    finally:
+        agent_store.close()
