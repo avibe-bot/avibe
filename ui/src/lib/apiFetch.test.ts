@@ -4,7 +4,7 @@ const deferRemoteAuthRedirect = vi.hoisted(() => vi.fn());
 
 vi.mock('./remoteAuth', () => ({ deferRemoteAuthRedirect }));
 
-import { apiFetch } from './apiFetch';
+import { apiFetch, recoverRemoteAuthFromSessionProbe } from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
@@ -19,11 +19,14 @@ describe('apiFetch remote auth recovery', () => {
     vi.clearAllMocks();
   });
 
-  it('hands an expired remote session to the PWA auth gate', async () => {
+  it.each([
+    'remote_access_login_required',
+    'remote_access_authorization_refresh_required',
+  ])('hands %s to the PWA auth gate', async (error) => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
-        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
+        Response.json({ error }, { status: 401 }),
       ),
     );
 
@@ -44,5 +47,16 @@ describe('apiFetch remote auth recovery', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(deferRemoteAuthRedirect).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a successful session probe that requires authorization refresh', async () => {
+    await recoverRemoteAuthFromSessionProbe(Response.json({
+      remote: true,
+      authenticated: false,
+      authorization_refresh_required: true,
+    }));
+
+    expect(deferRemoteAuthRedirect).toHaveBeenCalledOnce();
+    expect(window.location.assign).not.toHaveBeenCalled();
   });
 });

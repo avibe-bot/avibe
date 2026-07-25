@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
@@ -2186,6 +2186,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
       closeActiveWorkbenchEventSource();
+      // EventSource does not expose a failed response's status or JSON body.
+      // Probe through apiFetch, then inspect the successful /api/session form;
+      // both 401s and the 200 refresh payload enter the shared login recovery.
+      void apiFetch('/api/session', { cache: 'no-store' })
+        .then(recoverRemoteAuthFromSessionProbe)
+        .catch(() => undefined);
       setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));

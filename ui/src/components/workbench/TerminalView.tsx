@@ -25,6 +25,7 @@ export type TerminalStatus = 'connecting' | 'ready' | 'closed' | 'disabled' | 'e
 
 const ENC = new TextEncoder();
 const MAX_BUSY_RETRIES = 3; // auto-retry a transient "busy" (1013) close this many times
+const AUTHORIZATION_REFRESH_CLOSE_CODE = 4401;
 
 // The terminal window is theme-locked to dark (registry lockTheme: a shell is conventionally
 // dark, like a code editor), so xterm carries a fixed dark palette regardless of the global theme.
@@ -334,6 +335,10 @@ export const TerminalView: React.FC<{
       term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
     ws.onclose = (ev: CloseEvent) => {
+      if (ev.code === AUTHORIZATION_REFRESH_CLOSE_CODE) {
+        window.location.reload();
+        return;
+      }
       // 1013 = transient "try again shortly" (the session id is mid-open/teardown, or the cap
       // is momentarily full). Auto-retry a few times with a short backoff before surfacing an
       // error, so a reconnect that races a CLOSING teardown recovers on its own.

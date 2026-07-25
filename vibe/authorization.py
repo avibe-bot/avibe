@@ -14,6 +14,22 @@ INSTANCE_ACCESS_SOURCES = frozenset(
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
 
+_VIEWER_WORKBENCH_EVENTS = frozenset(
+    {
+        "authorization.changed",
+        "connected",
+        "inbox.session.updated",
+        "inbox.unread.changed",
+        "message.new",
+        "session.activity",
+        "session.status",
+        "turn.end",
+        "turn.start",
+        "workbench.events.bridge.status",
+    }
+)
+_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
+
 
 @dataclass(frozen=True)
 class AuthorizationContext:
@@ -161,6 +177,33 @@ def require_instance_role(
     return resolved
 
 
+def required_workbench_event_role(event_type: str) -> str:
+    """Return the minimum role for a browser workbench event.
+
+    Unknown events default to owner so newly published management events are
+    not exposed to remote editors or viewers before their policy is defined.
+    """
+
+    if event_type in _VIEWER_WORKBENCH_EVENTS:
+        return "viewer"
+    if event_type in _EDITOR_WORKBENCH_EVENTS:
+        return "editor"
+    return "owner"
+
+
+def can_receive_workbench_event(
+    context: AuthorizationContext | Mapping[str, Any] | None,
+    event_type: str,
+) -> bool:
+    """Return whether an SSE subscriber may receive a workbench event."""
+
+    try:
+        require_instance_role(context, required_workbench_event_role(event_type))
+    except InstanceAuthorizationError:
+        return False
+    return True
+
+
 _VIEWER_HTTP_RULES = tuple(
     re.compile(pattern)
     for pattern in (
@@ -169,7 +212,8 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/config$",
         r"^/api/version$",
         r"^/api/platforms$",
-        r"^/api/projects(?:/[^/]+)?(?:/agents-md)?$",
+        r"^/api/projects(?:/[^/]+)?$",
+        r"^/api/workbench/prefs$",
         r"^/api/workbench/projects-bootstrap$",
         r"^/api/sessions$",
         r"^/api/sessions/[^/]+$",

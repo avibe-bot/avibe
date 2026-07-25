@@ -118,6 +118,7 @@ _SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES = 1024
 TERMINAL_ENABLED_ENV = "VIBE_UI_ENABLE_TERMINAL"
 TERMINAL_IDLE_TIMEOUT_ENV = "VIBE_UI_TERMINAL_IDLE_TIMEOUT_SECONDS"
 TERMINAL_MAX_SESSIONS_ENV = "VIBE_UI_TERMINAL_MAX_SESSIONS"
+_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE = 4401
 _TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
@@ -2125,6 +2126,7 @@ def enforce_remote_access_cookie():
                 return _redirect_to_vibe_cloud_login(config)
             return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
         g.authorization_context = context_from_session_payload(payload)
+        g.remote_authorization_refresh_at = remote_access.session_authorization_refresh_deadline(payload)
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = payload
         return None
@@ -2511,9 +2513,24 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     finally:
         store.close()
 
+    authorization_refresh_at = None
+    remote_payload = _remote_access_websocket_session_claims(websocket, _load_remote_access_config())
+    if remote_payload is not None:
+        from vibe import remote_access
+
+        authorization_refresh_at = remote_access.session_authorization_refresh_deadline(remote_payload)
+
     await websocket.accept(subprotocol="vite-hmr")
     try:
-        await _proxy_show_runtime_websocket(websocket, session_id)
+        proxy = _proxy_show_runtime_websocket(websocket, session_id)
+        if authorization_refresh_at is None:
+            await proxy
+        else:
+            timeout = max(0.0, authorization_refresh_at - time.time())
+            await asyncio.wait_for(proxy, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.info("show_runtime.authorization_refresh session=%s", session_id)
+        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
     except Exception:
         logger.debug("Show runtime HMR websocket unavailable", exc_info=True)
         await websocket.close(code=1011)
@@ -2567,8 +2584,18 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         return
 
     await websocket.accept()
+    config = _load_remote_access_config()
+    remote_payload = _remote_access_websocket_session_claims(websocket, config)
     remote_addr = _websocket_client_host(websocket) or "unknown"
-    remote_subject = _remote_access_websocket_subject(websocket)
+    remote_subject = None
+    authorization_refresh_at = None
+    if remote_payload is not None:
+        from vibe import remote_access
+
+        subject = str(remote_payload.get("sub") or "").strip()
+        email = str(remote_payload.get("email") or "").strip()
+        remote_subject = subject or email or None
+        authorization_refresh_at = remote_access.session_authorization_refresh_deadline(remote_payload)
     effective_session_id = _terminal_effective_session_id(session_id, remote_subject)
     session_ref = _terminal_session_log_ref(effective_session_id)
     logger.info("terminal.session_open session_ref=%s remote_addr=%s", session_ref, remote_addr)
@@ -2579,7 +2606,15 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     try:
         service = get_terminal_service()
         service.start_reaper()
-        await service.handle_websocket(websocket, effective_session_id, initial_cwd=initial_cwd)
+        handler = service.handle_websocket(websocket, effective_session_id, initial_cwd=initial_cwd)
+        if authorization_refresh_at is None:
+            await handler
+        else:
+            timeout = max(0.0, authorization_refresh_at - time.time())
+            await asyncio.wait_for(handler, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.info("terminal.authorization_refresh session_ref=%s", session_ref)
+        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
     except TerminalServiceError as exc:
         # Transient "try again shortly" conditions (not server faults): too_many_sessions (cap
         # full) and session_opening (the id is mid-open or mid-teardown). Close with 1013 so
@@ -2671,6 +2706,19 @@ def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
 
 
 def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | None) -> dict[str, Any] | None:
+    payload = _remote_access_websocket_session_claims(websocket, config)
+    if payload is None:
+        return None
+    from vibe import remote_access
+
+    if remote_access.session_needs_authorization_refresh(payload):
+        return None
+    return payload
+
+
+def _remote_access_websocket_session_claims(websocket: Any, config: V2Config | None) -> dict[str, Any] | None:
+    """Return valid signed remote claims without applying their refresh deadline."""
+
     if config is None or _websocket_is_local_request(websocket, config):
         return None
     if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
@@ -2683,8 +2731,6 @@ def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | 
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
     )
-    if payload is None or remote_access.session_needs_authorization_refresh(payload):
-        return None
     return payload
 
 
@@ -8265,10 +8311,12 @@ async def workbench_events():
     from fastapi.responses import StreamingResponse
 
     from core.inbox_events import WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT
+    from vibe.authorization import can_receive_workbench_event
     from vibe.inbox_bridge import is_bridge_connected
     from vibe.sse_broker import broker
 
     authorization_context = getattr(g, "authorization_context", None)
+    authorization_refresh_at = getattr(g, "remote_authorization_refresh_at", None)
 
     async def generate():
         sub_id, queue = broker.subscribe()
@@ -8287,8 +8335,16 @@ async def workbench_events():
             )
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             while True:
+                wait_timeout = 15.0
+                if authorization_refresh_at is not None:
+                    remaining = authorization_refresh_at - time.time()
+                    if remaining <= 0:
+                        return
+                    wait_timeout = min(wait_timeout, remaining)
                 try:
-                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
+                    if not can_receive_workbench_event(authorization_context, event_type):
+                        continue
                     visible = await asyncio.to_thread(
                         _workbench_event_visible_to_context,
                         authorization_context,
@@ -8311,6 +8367,8 @@ async def workbench_events():
                         )
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
+                    if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                        return
                     # 15s keep-alive — Cloudflare Tunnel default idle is well
                     # below 100s but this still keeps mid-tier proxies happy.
                     yield ": ping\n\n"
@@ -9308,6 +9366,15 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     from vibe import remote_access
     from vibe.authorization import context_from_session_payload
 
+    if not public:
+        context = getattr(g, "authorization_context", None)
+        if context is not None:
+            if not context.has_role("editor"):
+                return None
+            if context.is_remote:
+                return {"kind": "user", "email": context.email} if context.email else None
+            return {"kind": "local"}
+
     config = _load_remote_access_config()
     if config is not None:
         session = remote_access.parse_session_cookie(
@@ -9319,9 +9386,11 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
             if session is not None and not remote_access.session_needs_authorization_refresh(session)
             else None
         )
-        email = str(session.get("email", "")).strip() if context is not None else ""
-        if email and context.has_role("editor"):
-            return {"kind": "user", "email": email}
+        if context is not None:
+            email = str(session.get("email", "")).strip()
+            if email and context.has_role("editor"):
+                return {"kind": "user", "email": email}
+            return None
 
         cloud = config.remote_access.vibe_cloud
         if public and cloud.enabled:
@@ -9614,6 +9683,7 @@ async def _show_events_stream(
     after_id: str | None = None,
     public: bool = False,
     public_share_id: str | None = None,
+    authorization_refresh_at: float | None = None,
 ):
     import asyncio
 
@@ -9633,11 +9703,15 @@ async def _show_events_stream(
                 cursor = after_id
                 yield ": show events connected\n\n"
                 while True:
+                    if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                        return
                     batch = store.list(session_id, after_id=cursor, limit=500)
                     events = batch["events"]
                     if not events:
                         break
                     for event_payload in events:
+                        if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                            return
                         if isinstance(event_payload.get("id"), str):
                             replayed_ids.add(event_payload["id"])
                         yield _sse_frame(
@@ -9655,8 +9729,14 @@ async def _show_events_stream(
                 store.close()
 
             while True:
+                wait_timeout = 15.0
+                if authorization_refresh_at is not None:
+                    remaining = authorization_refresh_at - time.time()
+                    if remaining <= 0:
+                        return
+                    wait_timeout = min(wait_timeout, remaining)
                 try:
-                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
                     if event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):
@@ -9676,6 +9756,8 @@ async def _show_events_stream(
                     elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
+                    if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                        return
                     yield ": ping\n\n"
         except asyncio.CancelledError:
             raise
@@ -9707,6 +9789,9 @@ async def _show_events_response(
                 after_id=request.args.get("after_id") or _last_event_id_from_request(),
                 public=public,
                 public_share_id=public_share_id,
+                authorization_refresh_at=(
+                    None if public else getattr(g, "remote_authorization_refresh_at", None)
+                ),
             )
         store = _show_session_event_store()
         try:
@@ -10003,7 +10088,7 @@ async def _show_page_runtime_response(
             show_config_session_id or session_id,
             base_path=base_path,
             authenticated=show_authenticated,
-            include_write_token=external_prefix is None,
+            include_write_token=external_prefix is None and show_authenticated,
         )
         if external_prefix:
             response_headers["Referrer-Policy"] = "same-origin"
@@ -10468,12 +10553,14 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
             return _show_page_file_not_found_response()
+        show_author = _show_request_author()
+        can_annotate = show_author is not None
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
             return _show_me_response(
-                {"kind": "local"},
-                write_token=show_event_write_token(page.session_id),
+                show_author,
+                write_token=show_event_write_token(page.session_id) if can_annotate else None,
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
@@ -10487,7 +10574,7 @@ async def serve_private_show_page(session_id, asset_path):
                     asset_path,
                     starlette_request,
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
-                    show_authenticated=True,
+                    show_authenticated=can_annotate,
                 )
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
@@ -10507,7 +10594,7 @@ async def serve_private_show_page(session_id, asset_path):
         if request.method in {"GET", "HEAD"}:
             if _is_show_runtime_immutable_asset_path(asset_path):
                 return response
-            return _with_show_event_write_cookie(response, page.session_id, enabled=True)
+            return _with_show_event_write_cookie(response, page.session_id, enabled=can_annotate)
         return response
     finally:
         store.close()

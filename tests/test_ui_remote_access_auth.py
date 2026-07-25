@@ -724,6 +724,13 @@ def test_remote_instance_role_route_matrix(
     read_response = client.get("/api/projects", base_url="https://alex.avibe.bot")
     agents_response = client.get("/api/agents", base_url="https://alex.avibe.bot")
     config_response = client.get("/api/config", base_url="https://alex.avibe.bot")
+    prefs_read_response = client.get("/api/workbench/prefs", base_url="https://alex.avibe.bot")
+    prefs_write_response = client.put(
+        "/api/workbench/prefs",
+        base_url="https://alex.avibe.bot",
+        headers=headers,
+        json={"background_work_banner_enabled": False},
+    )
     conversation_response = client.post(
         "/api/sessions",
         base_url="https://alex.avibe.bot",
@@ -740,6 +747,9 @@ def test_remote_instance_role_route_matrix(
     assert read_response.status_code == 200
     assert agents_response.status_code == agents_status
     assert config_response.status_code == 200
+    assert prefs_read_response.status_code == 200
+    assert prefs_read_response.get_json()["background_work_banner_enabled"] is True
+    assert prefs_write_response.status_code == (200 if role == "owner" else 403)
     if role == "owner":
         assert "runtime" in config_response.get_json()
     else:

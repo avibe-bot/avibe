@@ -2087,15 +2087,24 @@ def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bo
     return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
 
 
+def session_authorization_refresh_deadline(payload: Mapping[str, Any]) -> int | None:
+    """Return the wall-clock deadline for refreshing signed authorization claims."""
+
+    try:
+        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
+    except (TypeError, ValueError):
+        return None
+    if claims_issued_at <= 0:
+        return None
+    return claims_issued_at + SESSION_AUTHORIZATION_REFRESH_SECONDS
+
+
 def session_needs_authorization_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
     """Return whether authorization claims must be refreshed through OIDC."""
 
     current = now if now is not None else int(time.time())
-    try:
-        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
-    except (TypeError, ValueError):
-        return True
-    return claims_issued_at <= 0 or current - claims_issued_at >= SESSION_AUTHORIZATION_REFRESH_SECONDS
+    deadline = session_authorization_refresh_deadline(payload)
+    return deadline is None or current >= deadline
 
 
 def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: str) -> str:

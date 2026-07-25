@@ -3,6 +3,7 @@ import pytest
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
+    can_receive_workbench_event,
     context_from_session_payload,
     require_instance_role,
     required_instance_role,
@@ -56,8 +57,12 @@ def test_malformed_role_context_fails_closed() -> None:
 
 def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/api/projects") == "viewer"
+    assert required_instance_role("GET", "/api/projects/proj-1") == "viewer"
+    assert required_instance_role("GET", "/api/projects/proj-1/agents-md") == "owner"
     assert required_instance_role("GET", "/api/agents") == "editor"
     assert required_instance_role("GET", "/api/config") == "viewer"
+    assert required_instance_role("GET", "/api/workbench/prefs") == "viewer"
+    assert required_instance_role("PUT", "/api/workbench/prefs") == "owner"
     assert required_instance_role("GET", "/api/sessions/ses-1/draft") == "editor"
     assert required_instance_role("POST", "/api/sessions/ses-1/messages") == "editor"
     assert required_instance_role("POST", "/api/projects") == "owner"
@@ -65,6 +70,22 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/show/ses-1/") == "viewer"
     assert required_instance_role("POST", "/show/ses-1/api/action") == "editor"
     assert required_instance_role("GET", "/assets/app.js") is None
+
+
+def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
+    viewer = _remote_context("viewer")
+    editor = _remote_context("editor")
+    owner = _remote_context("owner")
+
+    assert can_receive_workbench_event(viewer, "authorization.changed") is True
+    assert can_receive_workbench_event(viewer, "message.new") is True
+    assert can_receive_workbench_event(viewer, "workbench.events.bridge.status") is True
+    assert can_receive_workbench_event(viewer, "queue.updated") is False
+    assert can_receive_workbench_event(editor, "queue.updated") is True
+    assert can_receive_workbench_event(editor, "vaults.updated") is False
+    assert can_receive_workbench_event(owner, "vaults.updated") is True
+    assert can_receive_workbench_event(viewer, "future.management.event") is False
+    assert can_receive_workbench_event(owner, "future.management.event") is True
 
 
 def test_service_role_guard_defaults_local_and_denies_remote_viewer() -> None:
