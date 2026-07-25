@@ -80,8 +80,15 @@ def _skill_row(name: str) -> dict:
     }
 
 
-def _seed_skill_policy(conn, name: str, *, access_level: str, group_ids: list[str] | None = None) -> str:
-    resource_id = skills.skill_resource_id("codex", scope="global", project_dir=None, name=name)
+def _seed_skill_policy(
+    conn,
+    name: str,
+    *,
+    access_level: str,
+    group_ids: list[str] | None = None,
+    backend: str = "codex",
+) -> str:
+    resource_id = skills.skill_resource_id(backend, scope="global", project_dir=None, name=name)
     resource_access_service.ensure_resource_policy(
         conn,
         resource_kind="skill",
@@ -303,6 +310,15 @@ def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch,
             )
         ) == {"ok": True}
         assert [call["args"] for call in owner_recorder.calls] == [["list", "-g"], ["remove", "private-skill", "-g"]]
+        with engine.connect() as connection:
+            assert resource_access_service.get_resource_policy(
+                "skill",
+                skills.skill_resource_id("codex", scope="global", project_dir=None, name="private-skill"),
+                connection=connection,
+            ) is None
+
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "private-skill", access_level="private")
 
         admin_recorder = _SequenceRecorder([listing, {"ok": True}])
         monkeypatch.setattr(skills, "_run_askill", admin_recorder)
@@ -332,6 +348,61 @@ def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch,
         assert add_recorder.calls == []
     finally:
         engine.dispose()
+
+
+def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    listing = {
+        "ok": True,
+        "skills": [
+            {
+                **_skill_row("shared-skill"),
+                "agents": [
+                    {"id": "codex", "name": "Codex"},
+                    {"id": "claude", "name": "Claude"},
+                ],
+            }
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            codex_id = _seed_skill_policy(connection, "shared-skill", access_level="private")
+            claude_id = _seed_skill_policy(
+                connection,
+                "shared-skill",
+                access_level="private",
+                backend="claude",
+            )
+        recorder = _SequenceRecorder(
+            [
+                listing,
+                {
+                    "ok": True,
+                    "selectedAgents": ["codex", "claude"],
+                    "removedAgents": ["codex"],
+                },
+            ]
+        )
+        monkeypatch.setattr(skills, "_run_askill", recorder)
+
+        result = _run(
+            skills.remove_skill(
+                "askill",
+                "shared-skill",
+                scope="global",
+                backends=["codex", "claude"],
+                user_context=_organization_context("owner-1"),
+            )
+        )
+        with engine.connect() as connection:
+            codex_policy = resource_access_service.get_resource_policy("skill", codex_id, connection=connection)
+            claude_policy = resource_access_service.get_resource_policy("skill", claude_id, connection=connection)
+    finally:
+        engine.dispose()
+
+    assert result["ok"] is True
+    assert codex_policy is None
+    assert claude_policy is not None
 
 
 def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> None:

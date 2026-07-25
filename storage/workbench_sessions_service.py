@@ -335,14 +335,30 @@ def create_session(
         if reasoning_effort is None:
             reasoning_effort = scope_row.get("reasoning_effort")
 
-    if agent_name or agent_id:
-        from core.vibe_agents import ensure_agent_selection_access
+    from core.vibe_agents import (
+        ensure_agent_selection_access,
+        ensure_default_agent_access,
+        resolve_resource_access_context,
+    )
 
+    context = resolve_resource_access_context(user_context)
+    if context.is_remote and not agent_name and not agent_id and not agent_backend:
+        default_agent = ensure_default_agent_access(
+            conn,
+            user_context=context,
+            missing_is_error=True,
+        )
+        assert default_agent is not None
+        agent_id = default_agent.id
+        agent_name = default_agent.name
+        agent_backend = default_agent.backend
+
+    if agent_name or agent_id:
         ensure_agent_selection_access(
             conn,
             agent_name=agent_name,
             agent_id=agent_id,
-            user_context=user_context,
+            user_context=context,
         )
 
     now = _utc_now_iso()

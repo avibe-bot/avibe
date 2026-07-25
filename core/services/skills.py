@@ -469,6 +469,21 @@ def _result_backends(result: dict[str, Any], fallback: Optional[list[str]]) -> l
     return _normalized_backends(fallback) or list(BACKEND_TO_AGENT)
 
 
+def _removed_backends(result: dict[str, Any], fallback: Optional[list[str]]) -> list[str]:
+    if "removedAgents" in result:
+        raw_agents = result.get("removedAgents")
+        if not isinstance(raw_agents, list):
+            return []
+        return list(
+            dict.fromkeys(
+                backend
+                for agent in raw_agents
+                if (backend := _backend_from_agent_ref(agent)) is not None
+            )
+        )
+    return _normalized_backends(fallback) or list(BACKEND_TO_AGENT)
+
+
 def _register_created_skill_policies(
     names: list[str],
     *,
@@ -503,6 +518,20 @@ def _register_created_skill_policies(
                     created_by_user_id=context.subject,
                     updated_by_user_id=context.subject,
                 )
+
+
+def _delete_skill_policies(resource_ids: list[str]) -> None:
+    if not resource_ids:
+        return
+    from storage import resource_access_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        for resource_id in resource_ids:
+            resource_access_service.delete_resource_policy(connection, "skill", resource_id)
 
 
 async def _installed_skill_resource_ids(
@@ -710,7 +739,18 @@ async def remove_skill(
                 allow_missing_policy=False,
             )
     args = ["remove", name, *_target_scope_flag(scope), *_agent_flags(backends)]
-    return await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
+    result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
+    if result.get("ok"):
+        removed_backends = _removed_backends(result, backends)
+        _delete_skill_policies(
+            _resource_ids_for_skill_name(
+                name,
+                scope=scope,
+                project_dir=project_dir,
+                backends=removed_backends,
+            )
+        )
+    return result
 
 
 async def find_skills(askill_path: str, query: str = "") -> dict[str, Any]:

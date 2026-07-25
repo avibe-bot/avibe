@@ -139,8 +139,10 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store, agents = _seed_agents_with_policies()
-    store.close()
     private_agent = agents["private"]
+    public_agent = agents["public"]
+    store.set_default_agent_name(private_agent.name)
+    store.close()
     context = _organization_context("member-1")
 
     client = app.test_client()
@@ -192,6 +194,39 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
                 agent_id=private_agent.id,
                 user_context=context,
             )
+        with pytest.raises(VibeAgentAccessError):
+            workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=context,
+            )
+    blocked_default = client.post(
+        "/api/sessions",
+        json={"project_id": "proj_acl_agents"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert blocked_default.status_code == 403
+
+    store = VibeAgentStore()
+    try:
+        store.set_default_agent_name(public_agent.name)
+    finally:
+        store.close()
+    allowed_default = client.post(
+        "/api/sessions",
+        json={"project_id": "proj_acl_agents"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert allowed_default.status_code == 201
+    session = allowed_default.get_json()
+    assert session["agent_id"] == public_agent.id
+    assert session["agent_name"] == public_agent.name
+    assert session["agent_backend"] == public_agent.backend
 
     with pytest.raises(VibeAgentAccessError):
         ScheduledTaskStore(tmp_path / "tasks.json").add_task(

@@ -379,6 +379,24 @@ def ensure_resource_policy(
     return _serialize_policy(connection, policy)
 
 
+def delete_resource_policy(connection: Connection, resource_kind: str, resource_id: str) -> bool:
+    """Delete local policy state when its local resource is permanently removed."""
+
+    kind = _validate_resource_kind(resource_kind)
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    connection.execute(
+        resource_access_groups.delete()
+        .where(resource_access_groups.c.resource_kind == kind)
+        .where(resource_access_groups.c.resource_id == identifier)
+    )
+    result = connection.execute(
+        resource_access_policies.delete()
+        .where(resource_access_policies.c.resource_kind == kind)
+        .where(resource_access_policies.c.resource_id == identifier)
+    )
+    return bool(result.rowcount)
+
+
 def _replace_policy_groups(
     connection: Connection,
     resource_kind: str,

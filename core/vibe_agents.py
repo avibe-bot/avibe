@@ -167,6 +167,64 @@ class VibeAgent:
         return asdict(self)
 
 
+def resolve_effective_default_agent(connection, *, enabled_only: bool = True) -> VibeAgent | None:
+    """Resolve the same instance-wide default used by runtime dispatch."""
+
+    raw_name = connection.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == DEFAULT_AGENT_META_KEY).limit(1)
+    ).scalar_one_or_none()
+    configured_name = _json_loads(raw_name, None)
+    candidates = [configured_name, DEFAULT_AGENT_NAME]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        try:
+            normalized = normalize_agent_name(candidate)
+        except ValueError:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        statement = select(agents).where(agents.c.normalized_name == normalized)
+        if enabled_only:
+            statement = statement.where(agents.c.enabled == 1)
+        row = connection.execute(statement.limit(1)).mappings().first()
+        if row is not None:
+            return VibeAgentStore._from_row(row)
+
+    if not enabled_only:
+        return None
+    row = connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name).limit(1)).mappings().first()
+    return VibeAgentStore._from_row(row) if row is not None else None
+
+
+def ensure_default_agent_access(
+    connection,
+    *,
+    user_context: Any = None,
+    missing_is_error: bool = False,
+) -> VibeAgent | None:
+    """Resolve and authorize the effective default Agent for a remote caller."""
+
+    from storage import resource_access_service
+
+    context = resolve_resource_access_context(user_context)
+    agent = resolve_effective_default_agent(connection)
+    if agent is None:
+        if context.is_remote or missing_is_error:
+            raise LookupError("Default Agent not found")
+        return None
+    if not resource_access_service.can_use_resource(
+        context,
+        "agent",
+        agent.id,
+        connection=connection,
+    ):
+        raise VibeAgentAccessError("Agent access is not permitted.")
+    return agent
+
+
 @dataclass(frozen=True)
 class AgentImportCandidate:
     name: str
@@ -575,25 +633,8 @@ class VibeAgentStore:
             )
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:
-        name = self.get_default_agent_name()
-        if name:
-            agent = self.get(name)
-            if agent is not None and (agent.enabled or not enabled_only):
-                return agent
-        fallback = self.get(DEFAULT_AGENT_NAME)
-        if fallback is not None and (fallback.enabled or not enabled_only):
-            return fallback
-        if enabled_only:
-            # This resolver maintains the instance-wide default. It must not let
-            # one remote caller's ACL-filtered catalog rewrite that global state.
-            from storage.resource_access_service import ResourceUserContext
-
-            agents_list = self.list_agents(
-                include_disabled=False,
-                user_context=ResourceUserContext(is_trusted_local=True),
-            )
-            return agents_list[0] if agents_list else None
-        return None
+        with self.engine.connect() as conn:
+            return resolve_effective_default_agent(conn, enabled_only=enabled_only)
 
     @staticmethod
     def _from_row(row: Any) -> VibeAgent:
