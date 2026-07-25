@@ -358,9 +358,24 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
 def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        projects_service.archive_project(conn, ids["project_a"])
+    published = []
+    monkeypatch.setattr(
+        broker,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    archive = owner.delete(
+        f"/api/projects/{ids['project_a']}",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(owner, REMOTE_ORIGIN),
+    )
+    assert archive.status_code == 200
+    assert (
+        "authorization.changed",
+        {"project_ids": [ids["project_a"]]},
+    ) in published
 
     monkeypatch.setattr(
         api,

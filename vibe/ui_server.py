@@ -6068,6 +6068,7 @@ def projects_archive(project_id: str):
     """
 
     from storage import projects_service
+    from vibe.sse_broker import broker
 
     engine = _projects_engine()
     try:
@@ -6079,6 +6080,7 @@ def projects_archive(project_id: str):
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    broker.publish("authorization.changed", {"project_ids": [project_id]})
     return jsonify(project)
 
 

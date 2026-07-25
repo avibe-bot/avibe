@@ -33,6 +33,7 @@ export function useMessageSearch(
   const [results, setResults] = useState<MessageSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authorizationVersion, setAuthorizationVersion] = useState(0);
 
   // Bumped on every fired request; a resolved response only commits if it is
   // still the latest. Survives re-renders so stale in-flight calls are ignored.
@@ -44,6 +45,7 @@ export function useMessageSearch(
       setResults(null);
       setLoading(false);
       setError(null);
+      setAuthorizationVersion((version) => version + 1);
     },
   }), [connectWorkbenchEvents]);
 
@@ -91,7 +93,7 @@ export function useMessageSearch(
       window.clearTimeout(timer);
       seqRef.current += 1;
     };
-  }, [query, minLength, debounceMs, searchMessages]);
+  }, [query, minLength, debounceMs, searchMessages, authorizationVersion]);
 
   return { results, loading, error };
 }
