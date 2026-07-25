@@ -101,6 +101,9 @@ _TERMINAL_STATUS_PRIORITY = {
     "canceled": 1,
     "failed": 2,
 }
+# The closed set of terminal run statuses. Shared so guarded writers and reconcile
+# paths cannot drift apart (this file previously spelled the set inline).
+TERMINAL_RUN_STATUSES = frozenset(_TERMINAL_STATUS_PRIORITY)
 
 
 def normalize_run_status(status: Any) -> str:
@@ -1389,6 +1392,85 @@ class SQLiteBackgroundTaskStore:
             "run": run_payload,
         }
 
+    def settle_run_terminal(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        error: Optional[str] = None,
+        result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        updated_at: Optional[str] = None,
+    ) -> Optional[str]:
+        """Terminalize a non-terminal run in one guarded write.
+
+        This is the settlement writer for a turn that ended WITHOUT the backend
+        emitting a terminal result (see ``docs/plans/agent-run-zombie-settlement.md``).
+        Unlike ``update_run_status`` — whose UPDATE has no status predicate and would
+        clobber a row another actor already settled — the UPDATE here is scoped to
+        ``queued|running``, so a concurrent ``vibe runs cancel`` that lands first wins
+        and this call becomes a no-op.
+
+        ``cancel_requested`` is read inside the same transaction: a run the user asked
+        to cancel settles ``canceled``, never ``failed``, without needing a second
+        write. Rows carrying a deferred terminal intent are left alone — the Activity
+        lifecycle owns those.
+
+        Returns the terminal status actually written, or ``None`` when nothing was
+        written (already terminal, deferred, or missing).
+        """
+
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        written_status: Optional[str] = None
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row or normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+                return None
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                # The Activity lifecycle already owns this row's terminal state.
+                return None
+            status = normalize_run_status(terminal_status)
+            if row["cancel_requested"] and status == "failed":
+                status = "canceled"
+            values: dict[str, Any] = {
+                "status": status,
+                "completed_at": now,
+                "updated_at": now,
+            }
+            if error is not None:
+                values["error"] = str(error)
+            if result_text is not None:
+                values["result_text"] = str(result_text)
+            if metadata:
+                merged = _json_loads(row["metadata_json"], {})
+                if not isinstance(merged, dict):
+                    merged = {}
+                merged.update(metadata)
+                values["metadata_json"] = _json_dumps(merged)
+            transition = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued") + _status_query_values("running")
+                    )
+                )
+                .values(**values)
+            )
+            if transition.rowcount:
+                written_status = status
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                    ).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return written_status
+
     def defer_run_terminal(
         self,
         run_id: str,
@@ -1406,11 +1488,7 @@ class SQLiteBackgroundTaskStore:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
-            if not row or normalize_run_status(row["status"]) in {
-                "succeeded",
-                "failed",
-                "canceled",
-            }:
+            if not row or normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
                 return False
             result_payload = _json_loads(row["result_payload_json"], {})
             if not isinstance(result_payload, dict):

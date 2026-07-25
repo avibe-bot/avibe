@@ -1,7 +1,8 @@
 # Agent Run Zombie Settlement: honest terminal state + staleness sweep
 
 Status: reviewed by `codex-expert` (APPROVE WITH CHANGES, 2026-07-25); all six blocking
-items folded in below — ready to implement
+items folded in below. **PR-A (Gap A) implemented** — see §3.4 "As implemented" and §5.1.
+**PR-B (Gap B, §4) not started.**
 
 Branch: `fix/agent-run-zombie-runs` (from `master` @ `5921ad39`)
 
@@ -211,6 +212,26 @@ Independently of §3.3 (belt and braces, and it keeps the failure legible):
   before enqueue, so the CLI fails fast instead of creating a row that must then be
   swept.
 
+**As implemented (PR-A):**
+
+- The CLI door was already closed: `_resolve_message_input` (`vibe/cli.py:1215-1262`)
+  strips and rejects both an empty `--message` and an empty `--message-file`, so no
+  change was needed there. Verified, not assumed.
+- The guard moved one level deeper than planned as well: `TaskExecutionStore.enqueue_agent_run`
+  now raises on a blank message, which closes the door for *every* producer rather
+  than just the CLI. The only in-tree callers are the CLI and `enqueue_session_callback`,
+  which already returns `None` for a blank message, so nothing legitimate is refused.
+- `_execute_claimed_request`'s pre-dispatch check became `not message.strip()`, which
+  covers rows enqueued before the store-level guard existed.
+
+**Out of PR-A scope (deliberate):** the workbench gate path. When
+`_execute_agent_run` hands the turn to `gate.submit_scheduled` (`core/scheduled_tasks.py`
+workbench branch) the gate returns `enqueued` / `duplicate` / `ran`, and the `ran`
+result never passes through `dispatch_turn`, so there is no `settled_by` to branch on.
+Threading a settlement through `SessionTurnGate.submit` → `manager.submit` is a larger
+refactor of a second dispatch lane. Gap B's B3 orphan sweep is the backstop for a
+stranded row on that lane; §3.4's door checks remove the one reachable instance.
+
 ## 4. Design — Gap B: evidence-based staleness sweep
 
 ### 4.1 Ownership provider (who is legitimately executing a run right now)
@@ -351,6 +372,42 @@ stamped on the honest path.
 
 Plus the en/zh i18n key-parity test the approved plan already wants (there is none
 today), and `ruff check` on changed files before push. No UI change → no `npm run build`.
+
+### 5.1 What PR-A actually landed
+
+Delivered (all verified to FAIL with the fix reverted, so none is a tautology):
+
+- `tests/test_scheduled_tasks.py`
+  - `test_agent_run_settles_failed_when_sink_released_without_terminal_result`
+  - `test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn` (load-bearing)
+  - `test_agent_run_cancel_racing_settlement_keeps_canceled` (load-bearing TOCTOU;
+    the cancel is applied *inside* the patched settlement call, so the interleaving
+    is real — with an unguarded `update_run_status` the row comes back `failed`)
+  - `test_agent_run_cancel_requested_settles_canceled_not_failed` — the in-transaction
+    `cancel_requested` → `canceled` mapping
+  - `test_agent_run_with_blank_message_fails_instead_of_hanging` — covers both the
+    store-level door and a legacy pre-guard row
+  - `test_drain_requests_agent_run_passes_agent_name` — **updated**: it used to assert
+    the run stays in `processing`, which encoded the zombie for the legacy file store.
+    It now asserts the run is completed with the settlement reason.
+- `tests/test_core_services_dispatch.py` — four `TurnDispatchOutcome` cases, including
+  that `settled_by is None` means *only* "non-streaming caller".
+- `tests/test_dispatcher_stream_chunk.py` — the `terminal_result` stamp is written by a
+  result emit, not by a notify emit, and not by a stale turn's late result.
+- `tests/test_i18n_backend_keys.py` (new file) — en/zh key parity, no blank strings,
+  and every `SETTLEMENT_I18N_KEYS` entry resolves in every supported language.
+
+Deferred to PR-B (they test the sweep, which PR-B introduces): every `test_sweep_*`
+case and `test_stranded_queued_run_does_not_trigger_repeated_metadata_writes`.
+
+Also verified green (no behavior regressions): `test_message_dispatcher_scheduled.py`,
+`test_controller_dispatch_loop.py`, `test_internal_server.py`, `test_inbox_events.py`,
+`test_cli_agent_run_schema.py`, `test_vault_request_callbacks.py`,
+`test_cli_task_command.py`, `test_session_activities.py`,
+`test_background_work_banner.py`, `test_harness_payload_enrichment.py`,
+`test_sqlite_state_migration.py`, `test_cli_pagination.py`, `test_ui_server_fastapi.py`.
+Pre-existing unrelated flake: `test_request_store_file_backend_reload_detects_queue_changes`
+(mtime granularity; fails on the untouched base too).
 
 ## 6. Staging
 

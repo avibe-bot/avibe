@@ -2221,6 +2221,272 @@ def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch)
     assert completed["result_text"] == "terminal failed"
 
 
+class _SettlementControllerDouble:
+    """Controller double for the Gap-A settlement cases.
+
+    Same surface as the ``terminal_result`` doubles above, but the fake turn
+    releases the sink the way a turn that never produced a result does. The session
+    key is a constant so a test can pre-register a live sink for it and drive the
+    concurrent-turn refusal deterministically.
+    """
+
+    SESSION_KEY = "settlement-session"
+
+    def __init__(self, *, on_turn=None) -> None:
+        settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *a, **k: None))
+        self.platform_settings_managers = {"slack": settings_manager}
+        self.active_turn_sinks: dict[str, dict] = {}
+        self._on_turn = on_turn
+        self.turns: list[str] = []
+        self.message_handler = SimpleNamespace(handle_scheduled_message=self._handle_scheduled_message)
+
+    def _t(self, key: str, **_kwargs) -> str:
+        return key
+
+    def get_im_client_for_context(self, _context):
+        return SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        )
+
+    def _get_session_key(self, _context):
+        return self.SESSION_KEY
+
+    def get_turn_sink(self, session_key):
+        return self.active_turn_sinks.get(session_key)
+
+    def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
+        self.active_turn_sinks[session_key] = {
+            "on_chunk": on_chunk,
+            "done_event": done_event,
+            "turn_token": turn_token,
+        }
+
+    def pop_turn_sink(self, session_key, done_event=None):
+        self.active_turn_sinks.pop(session_key, None)
+
+    async def _handle_scheduled_message(self, context, message, parsed_session_key=None):
+        self.turns.append(message)
+        if self._on_turn is not None:
+            await self._on_turn(self, context, message)
+        # Release the waiter WITHOUT recording a terminal result — exactly what
+        # ``Controller.mark_turn_complete`` does for a turn that never dispatched.
+        sink = self.get_turn_sink(self._get_session_key(context))
+        assert sink is not None
+        sink["done_event"].set()
+        return None
+
+
+def _run_single_request(service: ScheduledTaskService, request_id: str) -> None:
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request_id)
+        if execution is not None:
+            await execution
+
+    asyncio.run(_exercise())
+
+
+def test_agent_run_settles_failed_when_sink_released_without_terminal_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Gap A: a released waiter with no terminal result must not strand the run.
+
+    Nothing else will ever write this row — the out-of-band terminal writer only
+    runs on a real backend result — so leaving it ``running`` is the zombie.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+    controller = _SettlementControllerDouble()
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["error"]
+    assert settled["metadata"]["interrupt_reason"] == "no_terminal_result"
+
+
+def test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The refusal returns before any sink exists, so the sink cannot carry it.
+
+    ``dispatch_turn`` refuses a second streaming turn for a session that already has
+    one in flight. That happens BEFORE ``register_turn_sink``, so an earlier design
+    that only inspected the sink saw ``settled_by=None`` and kept the run open.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+    controller = _SettlementControllerDouble()
+    # A turn is already streaming for this session.
+    controller.active_turn_sinks[_SettlementControllerDouble.SESSION_KEY] = {
+        "on_chunk": AsyncMock(),
+        "done_event": asyncio.Event(),
+        "turn_token": "live",
+    }
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    assert controller.turns == [], "the refused turn must never reach the handler"
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "refused_concurrent_turn"
+
+
+def test_agent_run_cancel_racing_settlement_keeps_canceled(tmp_path: Path, monkeypatch) -> None:
+    """§3.3.1 TOCTOU: a cancel landing mid-settlement must win.
+
+    The cancel is applied between the executor deciding to settle and the write
+    itself — the exact window an unguarded ``UPDATE`` would clobber. A fixture that
+    cancels up front would pass even with the unguarded writer, so this interleaves
+    for real.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+    controller = _SettlementControllerDouble()
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    original_settle = request_store.settle_without_result
+    raced: list[str] = []
+
+    def _settle_after_cancel(run_id: str, **kwargs):
+        # The user cancels the still-``running`` row right before our write lands,
+        # and the cancel path terminalizes it.
+        sqlite_store = request_store._sqlite
+        assert sqlite_store is not None
+        sqlite_store.cancel_run(run_id)
+        assert (
+            sqlite_store.settle_run_terminal(run_id, terminal_status="canceled") == "canceled"
+        )
+        raced.append(run_id)
+        return original_settle(run_id, **kwargs)
+
+    monkeypatch.setattr(request_store, "settle_without_result", _settle_after_cancel)
+
+    _run_single_request(service, request.id)
+
+    assert raced == [request.id]
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "canceled", "the guarded writer must not clobber a settled row"
+    assert settled["metadata"].get("interrupt_reason") is None
+
+
+def test_agent_run_cancel_requested_settles_canceled_not_failed(tmp_path: Path, monkeypatch) -> None:
+    """A run the user asked to cancel reports ``canceled``, not ``failed``.
+
+    ``cancel_run`` on a ``running`` row only records the request; the terminal write
+    is ours, and it must honor that request in the same transaction.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="summarize the build",
+        agent_name="codex",
+    )
+
+    async def _cancel_mid_turn(_controller, _context, _message) -> None:
+        sqlite_store = request_store._sqlite
+        assert sqlite_store is not None
+        assert sqlite_store.cancel_run(request.id) is True
+
+    controller = _SettlementControllerDouble(on_turn=_cancel_mid_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "canceled"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "no_terminal_result"
+
+
+def test_agent_run_with_blank_message_fails_instead_of_hanging(tmp_path: Path, monkeypatch) -> None:
+    """A whitespace-only prompt is rejected at the door instead of hanging.
+
+    ``MessageHandler`` returns early for a blank prompt without dispatching an agent,
+    so such a run could never receive a terminal result. A row enqueued before this
+    guard existed (bypassing ``enqueue_agent_run``) must still terminalize.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+
+    with pytest.raises(ValueError):
+        request_store.enqueue_agent_run(session_key="slack::channel::C123", message="   \n ")
+
+    legacy = request_store.enqueue(
+        TaskExecutionRequest(
+            id="blankrun0001",
+            request_type="agent_run",
+            session_key="slack::channel::C123",
+            message="   \n ",
+            prompt="   \n ",
+            source_kind="cli",
+        )
+    )
+    controller = _SettlementControllerDouble()
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, legacy.id)
+
+    assert controller.turns == []
+    settled = request_store.get_run(legacy.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+
+
 def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path: Path, monkeypatch) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
@@ -4214,8 +4480,15 @@ def test_drain_requests_agent_run_passes_agent_name(tmp_path: Path) -> None:
     assert context.channel_id == "C123"
     assert context.message_id == f"agent_run:{request.id}"
     assert context.platform_specific["vibe_agent_name"] == "release-reviewer"
-    payload = json.loads((request_store.processing_dir / f"{request.id}.json").read_text(encoding="utf-8"))
+    # The fake handler releases the turn sink without emitting a terminal result, so
+    # no out-of-band writer will ever settle this run. The legacy file store has no
+    # guarded writer, so the run is completed here rather than left in ``processing``
+    # forever. See docs/plans/agent-run-zombie-settlement.md.
+    assert not (request_store.processing_dir / f"{request.id}.json").exists()
+    payload = json.loads((request_store.completed_dir / f"{request.id}.json").read_text(encoding="utf-8"))
     assert payload["request_type"] == "agent_run"
+    assert payload["ok"] is False
+    assert "Agent producing a result" in payload["error"]
 
 
 def test_run_task_request_does_not_disable_one_shot(tmp_path: Path) -> None:

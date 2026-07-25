@@ -28,6 +28,7 @@ from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
+from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
@@ -1124,6 +1125,13 @@ class Controller:
 
         if not emit_matches_active_turn(sink, context):
             return
+        # Record that this turn produced NO terminal result, so ``dispatch_turn``
+        # can tell its caller. An ``agent_run`` whose waiter is released this way
+        # must be settled by the caller: nothing else will ever terminalize it
+        # (see docs/plans/agent-run-zombie-settlement.md). ``setdefault`` keeps a
+        # real terminal result — which always runs before this ``finally`` — as the
+        # winning settlement.
+        sink.setdefault("settled_by", SETTLED_BY_NO_TERMINAL_RESULT)
         done = sink.get("done_event")
         if done is not None:
             done.set()

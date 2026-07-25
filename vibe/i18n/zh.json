@@ -18,6 +18,13 @@
       "messagesLabel": "已合并的 callback 消息：",
       "latestLabel": "后续又触发 {additional} 次后的最新 callback 消息：",
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
+    },
+    "run": {
+      "interrupted": {
+        "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
+        "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止。已经完成的工作没有被记录为输出。",
+        "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。"
+      }
     }
   },
   "common": {

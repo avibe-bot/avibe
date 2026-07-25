@@ -28,6 +28,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
+from core.run_settlement import SETTLED_BY_STOPPED
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
@@ -1860,6 +1861,10 @@ class SessionTurnManager:
         is_set = getattr(done, "is_set", None)
         if callable(is_set) and is_set():
             return False
+        # A stop that interrupted the backend without a terminal result: record it so
+        # ``dispatch_turn``'s caller settles the run instead of leaving it ``running``
+        # forever. ``setdefault`` keeps an already-recorded real terminal result.
+        sink.setdefault("settled_by", SETTLED_BY_STOPPED)
         done.set()
         return True
 

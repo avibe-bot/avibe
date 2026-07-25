@@ -28,6 +28,11 @@ from core.message_context import (
     thread_id_from_session_anchor,
 )
 from core.reply_enhancer import strip_silent_blocks
+from core.run_settlement import (
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_TERMINAL_RESULT,
+    SETTLEMENT_I18N_KEYS,
+)
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
@@ -35,6 +40,7 @@ from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from vibe import runtime
+from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +222,10 @@ class AgentRunExecutionResult:
     complete_on_return: bool
     requeue_on_return: bool = False
     coalesced_completion_ids: tuple[str, ...] = ()
+    # The run's terminal row was already written by the executor itself (through a
+    # guarded writer), so the caller must skip ``complete()`` but still run the
+    # post-completion side effects: callback delivery and session-queue recovery.
+    settled_out_of_band: bool = False
 
 
 def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None) -> ResolvedSessionIdTarget:
@@ -1017,6 +1027,12 @@ class TaskExecutionStore:
         callback_active: bool = True,
         metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
+        if not (message or "").strip():
+            # Refuse at the door: a blank prompt never reaches an agent backend
+            # (``MessageHandler`` returns early), so the run could never be settled
+            # by a terminal result. Every caller (CLI, callback, delivery) has a
+            # real message; a blank one is a bug in the caller.
+            raise ValueError("agent run requires a non-empty message")
         return self.enqueue(
             TaskExecutionRequest(
                 id=uuid4().hex[:12],
@@ -1149,6 +1165,39 @@ class TaskExecutionStore:
             run_id,
             terminal_status=terminal_status,
             error=error,
+        )
+
+    def supports_guarded_settlement(self) -> bool:
+        """Whether this store can terminalize a run without clobbering a cancel.
+
+        Only the SQLite store has the status-scoped UPDATE behind
+        :meth:`settle_without_result`. The legacy file store has no equivalent, so
+        its callers must fall back to the ``complete()`` path instead.
+        """
+
+        return self._sqlite is not None
+
+    def settle_without_result(
+        self,
+        run_id: str,
+        *,
+        error: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Terminalize a still-open run whose turn produced no terminal result.
+
+        Returns the status actually written (``failed``, or ``canceled`` when the
+        run had a cancel pending), or ``None`` when nothing was written because the
+        row is missing, already terminal, or holds a deferred terminal status.
+        """
+
+        if self._sqlite is None:
+            return None
+        return self._sqlite.settle_run_terminal(
+            run_id,
+            terminal_status="failed",
+            error=error,
+            metadata=metadata,
         )
 
     def defer_run_terminal(
@@ -1600,6 +1649,18 @@ class ScheduledTaskService:
         self._drain_dirty = True
         self._recover_activity_lifecycle()
         self.request_store.recover_processing()
+
+    def _t(self, key: str, **kwargs: Any) -> str:
+        """Translate a user-visible string in the configured language.
+
+        Mirrors ``UpdateChecker._t``: read the language straight off the
+        controller's config so a headless service (tests, CLI-only runs) with no
+        controller still falls back to English instead of raising.
+        """
+
+        config = getattr(self.controller, "config", None)
+        lang = str(getattr(config, "language", "en") or "en")
+        return i18n_t(key, lang, **kwargs)
 
     @staticmethod
     def _activity_run_ids(activity: Any) -> list[str]:
@@ -2360,6 +2421,7 @@ class ScheduledTaskService:
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
         error: Optional[str] = None
         should_complete = True
+        settled_out_of_band = False
         coalesced_completion_ids: list[str] = _live_coalesced_agent_run_ids(request) or []
         task_id = request.task_id
         session_key = request.session_key
@@ -2407,7 +2469,11 @@ class ScheduledTaskService:
                 )
             elif request.request_type == "agent_run":
                 message = _agent_run_message_for_request(request)
-                if not message:
+                if not message.strip():
+                    # Whitespace-only counts as absent. ``MessageHandler`` returns
+                    # early for a blank prompt without dispatching an agent, so
+                    # accepting one here produced a run that could never receive a
+                    # terminal result. Fail it at the door instead.
                     raise ValueError("agent run requires message")
                 if not (request.session_id or request.session_key):
                     raise ValueError("agent run currently requires session_id or a resolvable session target")
@@ -2429,6 +2495,7 @@ class ScheduledTaskService:
                 )
                 error = result.error
                 should_complete = result.complete_on_return
+                settled_out_of_band = result.settled_out_of_band
                 if result.requeue_on_return:
                     self.request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
                 coalesced_completion_ids = list(result.coalesced_completion_ids)
@@ -2442,6 +2509,7 @@ class ScheduledTaskService:
             error = str(exc)
             logger.error("Task execution request %s failed: %s", request.id, exc, exc_info=True)
             should_complete = True
+            settled_out_of_band = False
         finally:
             if should_complete:
                 if coalesced_completion_ids:
@@ -2460,6 +2528,10 @@ class ScheduledTaskService:
                         session_key=session_key,
                         session_id=session_id,
                     )
+            if should_complete or settled_out_of_band:
+                # An out-of-band settlement still made this run terminal, so it owes
+                # the same follow-through as ``complete()``: deliver the callback and
+                # let the next queued turn for this session start.
                 await self._drain_callbacks()
                 if request.request_type == "agent_run" and session_id:
                     manager = getattr(self.controller, "session_turns", None)
@@ -2536,8 +2608,15 @@ class ScheduledTaskService:
         prompt is submitted, while their actual result arrives later through
         ``emit_agent_message``. Use the shared dispatch sink so the run stays
         ``running`` until that terminal result is emitted.
+
+        The run may only stay ``running`` when the sink was released BY that terminal
+        result. Any other release (no agent was dispatched, an external stop, a
+        refused concurrent turn) means no result will ever arrive, so this method
+        settles the run itself — otherwise the row is a permanent zombie, and its
+        callback and session status hang with it. See
+        ``docs/plans/agent-run-zombie-settlement.md``.
         """
-        from core.services.dispatch import SOURCE_SCHEDULED, dispatch_turn
+        from core.services.dispatch import SOURCE_SCHEDULED, dispatch_turn_with_outcome
 
         target_info = resolve_session_id_target(session_id) if session_id else None
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
@@ -2598,16 +2677,83 @@ class ScheduledTaskService:
         async def _noop_chunk(_envelope: dict) -> None:
             return None
 
-        result = await dispatch_turn(
+        outcome = await dispatch_turn_with_outcome(
             self.controller,
             context,
             message,
             source=SOURCE_SCHEDULED,
             on_chunk=_noop_chunk,
         )
-        if result:
-            return AgentRunExecutionResult(error=str(result), complete_on_return=True)
-        return AgentRunExecutionResult(error=None, complete_on_return=False)
+        if outcome.error:
+            return AgentRunExecutionResult(error=str(outcome.error), complete_on_return=True)
+        if outcome.settled_by == SETTLED_BY_TERMINAL_RESULT:
+            # The honest path: the backend emitted its terminal result, whose
+            # out-of-band writer owns this run's terminal state.
+            return AgentRunExecutionResult(error=None, complete_on_return=False)
+        settled_by = outcome.settled_by or SETTLED_BY_NO_TERMINAL_RESULT
+        if outcome.settled_by is None:
+            # Unreachable: this path always passes ``on_chunk``. Settle rather than
+            # trust an unexplained release — a wrong ``failed`` is recoverable, a
+            # zombie is not.
+            logger.warning(
+                "agent run %s dispatched without a turn sink; settling as %s",
+                execution_id,
+                settled_by,
+            )
+        error_text = self._t(
+            SETTLEMENT_I18N_KEYS.get(settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT])
+        )
+        if not self._settle_agent_run_without_result(execution_id, settled_by=settled_by, error=error_text):
+            # Legacy file store: no guarded writer exists, so fall back to the
+            # ``finally`` completion path rather than leave the run open.
+            return AgentRunExecutionResult(error=error_text, complete_on_return=True)
+        return AgentRunExecutionResult(
+            error=error_text,
+            complete_on_return=False,
+            settled_out_of_band=True,
+        )
+
+    def _settle_agent_run_without_result(
+        self,
+        execution_id: str,
+        *,
+        settled_by: str,
+        error: str,
+    ) -> bool:
+        """Terminalize a run whose turn ended without a terminal result.
+
+        Deliberately NOT routed through ``_execute_claimed_request``'s ``finally``:
+        that path writes via ``update_run_status``, whose UPDATE has no status
+        predicate and would clobber a row a concurrent ``vibe runs cancel`` already
+        settled. ``settle_without_result`` is scoped to ``queued|running`` and maps a
+        cancel-requested run to ``canceled`` inside its own transaction.
+
+        Returns ``True`` when this store owns the terminal write (whether or not this
+        call is the one that performed it — an already-terminal row is settled too),
+        and ``False`` only when the store has no guarded writer at all.
+        """
+
+        if not self.request_store.supports_guarded_settlement():
+            return False
+        settled = self.request_store.settle_without_result(
+            execution_id,
+            error=error,
+            metadata={"interrupt_reason": settled_by},
+        )
+        if settled is None:
+            logger.info(
+                "Agent run %s was already settled elsewhere (%s)",
+                execution_id,
+                settled_by,
+            )
+        else:
+            logger.warning(
+                "Agent run %s settled %s without a terminal result (%s)",
+                execution_id,
+                settled,
+                settled_by,
+            )
+        return True
 
     def _reserve_runtime_session(
         self,
