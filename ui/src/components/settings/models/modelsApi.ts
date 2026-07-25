@@ -169,7 +169,7 @@ class MockStore {
       supply_channel: 'hub',
       billing: 'metered',
       state: { status: 'standby', retry_at: null, detail_key: null },
-      usage: { cycle_used_pct: null, month_spend_cents: 0, currency: 'CNY' },
+      usage: { cycle_used_pct: null, month_spend_cents: 0, currency: 'USD' },
       account_label: null,
       // Simulates L2 computing the display mask once at provisioning.
       masked_credential: maskKey(draft.key),
@@ -293,7 +293,7 @@ class MockStore {
         experimental_consent_at: null,
         billing: isKey ? 'metered' : 'monthly',
         state: { status: 'standby', retry_at: null, detail_key: null },
-        usage: isKey ? { cycle_used_pct: null, month_spend_cents: 0, currency: 'CNY' } : { cycle_used_pct: 0, month_spend_cents: null, currency: null },
+        usage: isKey ? { cycle_used_pct: null, month_spend_cents: 0, currency: 'USD' } : { cycle_used_pct: 0, month_spend_cents: null, currency: null },
         account_label: channel === 'native_cli' ? 'me@gmail.com' : null,
         masked_credential: isKey ? 'sk-…dd3c' : null,
         models: [{ id: item.backend === 'opencode' ? 'glm-5.2' : item.backend === 'codex' ? 'gpt-5.6' : 'claude-opus-4-6', display_name: null, provenance: 'discovered', discovered_at: new Date().toISOString() }],

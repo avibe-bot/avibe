@@ -17,7 +17,7 @@ export const Dot: React.FC<{ accent: Accent; className?: string }> = ({ accent, 
   <span className={cn('inline-block size-1.5 shrink-0 rounded-full', ACCENT_DOT[accent], className)} aria-hidden />
 );
 
-/** 包月 / 按量 ¥ — fixed-width so the column aligns down the source list. */
+/** 包月 / 按量 $ — fixed-width so the column aligns down the source list. */
 export const BillingChip: React.FC<{ billing: 'monthly' | 'metered' }> = ({ billing }) => {
   const { t } = useTranslation();
   return billing === 'monthly' ? (

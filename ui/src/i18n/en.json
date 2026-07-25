@@ -631,7 +631,7 @@
       },
       "billing": {
         "monthly": "Monthly",
-        "metered": "Metered ¥"
+        "metered": "Metered $"
       },
       "state": {
         "active": "In use",
