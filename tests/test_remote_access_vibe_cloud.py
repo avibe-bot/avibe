@@ -2023,3 +2023,20 @@ def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch)
 
     assert remote_access.cloud_token_for_request(config, None) is None
     assert remote_access.cloud_token_for_request(config, "bogus.cookie") is None
+
+
+def test_cloud_token_for_request_rejects_stale_authorization(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    cookie = remote_session_cookie(config, "alex@example.com", "user-1")
+    mint_called = False
+
+    def fake_mint(*args, **kwargs):
+        nonlocal mint_called
+        mint_called = True
+        return {"access_token": "must-not-mint", "expires_in": 60}
+
+    monkeypatch.setattr(remote_access, "session_needs_authorization_refresh", lambda payload: True)
+    monkeypatch.setattr(remote_access, "mint_cloud_token", fake_mint)
+
+    assert remote_access.cloud_token_for_request(config, cookie) is None
+    assert mint_called is False

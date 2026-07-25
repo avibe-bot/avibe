@@ -4744,7 +4744,7 @@ def api_session():
         payload = remote_access.parse_session_cookie(
             config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
         )
-        if payload is None:
+        if payload is None or remote_access.session_needs_authorization_refresh(payload):
             response = jsonify({"remote": True, "authenticated": False})
         else:
             response = jsonify(
@@ -5015,8 +5015,12 @@ def api_cloud_token():
     config = _load_remote_access_config()
     if config is None:
         return jsonify({"error": "cloud_unavailable"}), 503
+    cookie_value = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
+    payload = remote_access.parse_session_cookie(config, cookie_value)
+    if payload is not None and remote_access.session_needs_authorization_refresh(payload):
+        return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
     result = remote_access.cloud_token_for_request(
-        config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
+        config, cookie_value
     )
     if result is None:
         return jsonify({"error": "cloud_unavailable"}), 503

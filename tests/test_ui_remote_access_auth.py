@@ -663,6 +663,53 @@ def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@exa
     return f"{payload_text}.{signature}"
 
 
+def test_remote_session_probe_reports_unauthenticated_when_authorization_refresh_required(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _forged_session_cookie(config, near_exp),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get("/api/session", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"remote": True, "authenticated": False}
+
+
+def test_cloud_token_requires_authorization_refresh_before_mint(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    mint_called = False
+
+    def fake_mint(*args, **kwargs):
+        nonlocal mint_called
+        mint_called = True
+        return {"access_token": "must-not-mint", "expires_in": 60}
+
+    monkeypatch.setattr(remote_access, "mint_cloud_token", fake_mint)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _forged_session_cookie(config, near_exp),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get("/api/cloud/token", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_authorization_refresh_required"
+    assert mint_called is False
+
+
 def test_remote_host_does_not_renew_fresh_cookie(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

@@ -617,7 +617,7 @@ def cloud_token_for_request(
     """
     config = config or V2Config.load()
     payload = parse_session_cookie(config, cookie_value)
-    if payload is None:
+    if payload is None or session_needs_authorization_refresh(payload):
         return None
     email = str(payload.get("email", "")).strip()
     sub = str(payload.get("sub", "")).strip()
