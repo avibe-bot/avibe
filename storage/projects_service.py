@@ -21,6 +21,7 @@ from typing import Any, Mapping, Optional
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
+from storage import project_access_service
 from storage.models import agents, scope_settings, scopes
 from vibe.authorization import AuthorizationContext, require_instance_role
 
@@ -186,7 +187,12 @@ def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any
         conn.execute(update(scope_settings).where(scope_settings.c.scope_id == scope_id).values(**values))
 
 
-def list_projects(conn: Connection, *, include_archived: bool = False) -> list[dict[str, Any]]:
+def list_projects(
+    conn: Connection,
+    *,
+    include_archived: bool = False,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Return all avibe projects sorted by recency, optionally including archived ones."""
 
     query = (
@@ -205,10 +211,19 @@ def list_projects(conn: Connection, *, include_archived: bool = False) -> list[d
         if not include_archived and not enabled:
             continue
         out.append(_project_dict(row))
-    return out
+    context = require_instance_role(authorization_context, "viewer")
+    return project_access_service.filter_accessible_projects(conn, context, out)
 
 
-def get_project(conn: Connection, project_id: str) -> dict[str, Any]:
+def get_project(
+    conn: Connection,
+    project_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = require_instance_role(authorization_context, "viewer")
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
     scope_id = _make_scope_id(project_id)
     return _project_payload(conn, scope_id)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DDL,
     Float,
@@ -90,6 +91,52 @@ scope_settings = Table(
     Index("ix_scope_settings_role", "role"),
     Index("ix_scope_settings_workdir", "workdir"),
     Index("ix_scope_settings_backend_model", "agent_backend", "model"),
+)
+
+project_access_policies = Table(
+    "project_access_policies",
+    metadata,
+    Column("project_id", String, primary_key=True),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("organization_id", String, nullable=True),
+    Column("mode", String, nullable=False, server_default="inherit"),
+    Column("policy_revision", Integer, nullable=False, server_default="0"),
+    Column("last_applied_control_plane_revision", Integer, nullable=False, server_default="0"),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    UniqueConstraint("scope_id", name="uq_project_access_policies_scope"),
+    CheckConstraint("mode in ('inherit', 'restricted')", name="ck_project_access_policies_mode"),
+    CheckConstraint("policy_revision >= 0", name="ck_project_access_policies_revision"),
+    CheckConstraint(
+        "last_applied_control_plane_revision >= 0",
+        name="ck_project_access_policies_control_revision",
+    ),
+    Index("ix_project_access_policies_organization", "organization_id"),
+)
+
+project_access_bindings = Table(
+    "project_access_bindings",
+    metadata,
+    Column(
+        "project_id",
+        String,
+        ForeignKey("project_access_policies.project_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("principal_kind", String, primary_key=True),
+    Column("principal_value", String, primary_key=True),
+    Column("access_role", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    CheckConstraint(
+        "principal_kind in ('email', 'email_domain', 'organization_group')",
+        name="ck_project_access_bindings_kind",
+    ),
+    CheckConstraint("access_role in ('editor', 'viewer')", name="ck_project_access_bindings_role"),
+    Index(
+        "ix_project_access_bindings_principal",
+        "principal_kind",
+        "principal_value",
+    ),
 )
 
 auth_codes = Table(

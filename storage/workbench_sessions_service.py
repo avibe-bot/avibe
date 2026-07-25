@@ -24,6 +24,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from config import paths
+from storage import project_access_service
 from vibe.authorization import AuthorizationContext, require_instance_role
 from storage.agent_session_rows import (
     SESSION_VISIBILITIES,
@@ -123,6 +124,7 @@ def list_sessions(
     limit: int = 50,
     before_id: Optional[str] = None,
     title_query: Optional[str] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return sessions for the workbench list. Cursor pagination via ``before_id``.
 
@@ -135,7 +137,18 @@ def list_sessions(
     case-insensitive title LIKE match (LIKE metacharacters escaped).
     """
 
+    context = require_instance_role(authorization_context, "viewer")
     query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
+    if not context.is_instance_owner:
+        accessible_scope_ids = {
+            project_access_service.project_scope_id(project_id)
+            for project_id in project_access_service.accessible_project_ids(conn, context)
+        }
+        if scope_id is not None and scope_id not in accessible_scope_ids:
+            return {"sessions": [], "next_before_id": None}
+        if not accessible_scope_ids:
+            return {"sessions": [], "next_before_id": None}
+        query = query.where(agent_sessions.c.scope_id.in_(accessible_scope_ids))
     if scope_id is not None:
         query = query.where(agent_sessions.c.scope_id == scope_id)
     if status is not None and status != "all":
@@ -205,12 +218,24 @@ def list_sessions(
     return {"sessions": sessions, "next_before_id": next_cursor}
 
 
-def get_session(conn: Connection, session_id: str) -> dict[str, Any]:
+def get_session(
+    conn: Connection,
+    session_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = require_instance_role(authorization_context, "viewer")
     row = conn.execute(
         select(agent_sessions).where(agent_sessions.c.id == session_id)
     ).mappings().first()
     if row is None:
         raise LookupError(f"Session not found: {session_id}")
+    if not context.is_instance_owner:
+        project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
+        if project_id is None or not project_access_service.can_read_project(
+            conn, context, project_id
+        ):
+            raise LookupError(f"Session not found: {session_id}")
     return _row_to_payload(dict(row))
 
 
@@ -291,7 +316,13 @@ def create_session(
     Codex fill it on their first turn.
     """
 
-    require_instance_role(authorization_context, "editor")
+    context = require_instance_role(authorization_context, "editor")
+    if not context.is_instance_owner:
+        project_id = project_access_service.project_id_from_scope_id(scope_id)
+        if project_id is None or not project_access_service.can_chat_project(
+            conn, context, project_id
+        ):
+            raise PermissionError("Project access denied")
     scope_row: dict[str, Any] = {}
     if scope_id is not None:
         found = conn.execute(
@@ -404,7 +435,7 @@ def update_session(
     scope_id: Any = _UNSET,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    require_instance_role(authorization_context, "editor")
+    context = require_instance_role(authorization_context, "editor")
     existing = conn.execute(
         select(
             agent_sessions.c.id,
@@ -417,6 +448,18 @@ def update_session(
     ).first()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+    if not context.is_instance_owner:
+        project_id = project_access_service.project_id_from_scope_id(existing.scope_id)
+        if project_id is None or not project_access_service.can_chat_project(
+            conn, context, project_id
+        ):
+            raise LookupError(f"Session not found: {session_id}")
+        if scope_id is not _UNSET:
+            target_project_id = project_access_service.project_id_from_scope_id(scope_id)
+            if target_project_id is None or not project_access_service.can_chat_project(
+                conn, context, target_project_id
+            ):
+                raise LookupError(f"Session not found: {session_id}")
 
     derived_backend = False
     if agent_name is not _UNSET and agent_backend is _UNSET:
@@ -928,12 +971,18 @@ def archive_session(
     Returns the archived session payload plus a ``reclaimed`` summary
     (``{tasks, watches, runs}``) for the confirm-dialog / post-archive notice.
     """
-    require_instance_role(authorization_context, "editor")
+    context = require_instance_role(authorization_context, "editor")
     existing = conn.execute(
         select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
     ).scalar_one_or_none()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+    if not context.is_instance_owner:
+        if not project_access_service.role_allows(
+            project_access_service.get_effective_session_role(conn, context, session_id),
+            "editor",
+        ):
+            raise LookupError(f"Session not found: {session_id}")
     now = _utc_now_iso()
 
     # 1) Mark archived + clear any stale "running" dot, and VACATE the thread

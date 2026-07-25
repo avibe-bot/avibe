@@ -166,6 +166,22 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const inFlightRef = useRef<Set<string>>(new Set());
   const pendingReconcileRef = useRef<Map<string, number>>(new Map());
 
+  const applyProjectsSnapshot = useCallback((nextProjects: WorkbenchProject[]) => {
+    const accessibleIds = new Set(nextProjects.map((project) => project.id));
+    projectsRef.current = nextProjects;
+    setProjects(nextProjects);
+    setSessions((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([projectId]) => accessibleIds.has(projectId)),
+      ),
+    );
+    setExpanded((prev) => new Set([...prev].filter((projectId) => accessibleIds.has(projectId))));
+    setCreating((prev) => new Set([...prev].filter((projectId) => accessibleIds.has(projectId))));
+    for (const projectId of [...pendingReconcileRef.current.keys()]) {
+      if (!accessibleIds.has(projectId)) pendingReconcileRef.current.delete(projectId);
+    }
+  }, []);
+
   const queueReconcile = useCallback((projectId: string, minCount = 0) => {
     const pending = pendingReconcileRef.current.get(projectId) ?? 0;
     pendingReconcileRef.current.set(projectId, Math.max(pending, minCount));
@@ -200,7 +216,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const fetchProjects = useCallback(async (options?: { cache?: boolean }) => {
     try {
       const result = await api.getWorkbenchProjectsBootstrap({ cache: options?.cache });
-      setProjects(result.projects);
+      applyProjectsSnapshot(result.projects);
       applyBootstrapSessions(result.sessions ?? {});
       setProjectsError(null);
     } catch (err: any) {
@@ -208,7 +224,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // any list we had and surface the error (mobile shows a retry).
       setProjectsError(err?.message ?? String(err));
     }
-  }, [api, applyBootstrapSessions]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot]);
 
   useEffect(() => {
     void fetchProjects();
@@ -243,6 +259,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
               beforeId: before,
               cache: false,
             });
+            if (!projectsRef.current?.some((project) => project.id === projectId)) return;
             for (const s of res.sessions) {
               if (!seen.has(s.id)) {
                 seen.add(s.id);
@@ -292,7 +309,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const groups = Array.from(bootstrapGroups.entries());
       if (groups.length === 0) {
         const result = await api.getWorkbenchProjectsBootstrap({ cache: false });
-        setProjects(result.projects);
+        applyProjectsSnapshot(result.projects);
       } else {
         let nextProjects: WorkbenchProject[] | null = null;
         const pages: Record<string, { sessions: WorkbenchSession[]; next_before_id: string | null }> = {};
@@ -313,7 +330,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
             }
           }
         }
-        if (nextProjects) setProjects(nextProjects);
+        if (nextProjects) applyProjectsSnapshot(nextProjects);
         applyBootstrapSessions(pages);
       }
       setProjectsError(null);
@@ -327,7 +344,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         void reconcileSessions(projectId);
       }
     }
-  }, [api, applyBootstrapSessions, queueReconcile, reconcileSessions]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot, queueReconcile, reconcileSessions]);
 
   const refreshCachedSessionRow = useCallback(async (sessionId: string) => {
     const needsRefresh = Object.values(sessionsRef.current).some((state) =>
@@ -360,6 +377,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       try {
         const beforeId = append ? sessionsRef.current[projectId]?.cursor ?? undefined : undefined;
         const res = await api.listSessions({ projectId, status: 'active', limit: SESSIONS_PAGE_SIZE, beforeId });
+        if (!projectsRef.current?.some((project) => project.id === projectId)) return;
         setSessions((prev) => {
           const cur = prev[projectId] ?? EMPTY_SESSIONS;
           const existing = append ? cur.sessions ?? [] : [];
@@ -401,6 +419,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
       onConnected: () => {
+        void reconcileProjectTree();
+      },
+      onAuthorizationChanged: () => {
         void reconcileProjectTree();
       },
       onSessionActivity: (data) => {

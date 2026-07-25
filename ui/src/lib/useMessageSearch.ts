@@ -26,7 +26,7 @@ export function useMessageSearch(
   query: string,
   opts?: UseMessageSearchOptions,
 ): UseMessageSearchState {
-  const { searchMessages } = useApi();
+  const { connectWorkbenchEvents, searchMessages } = useApi();
   const minLength = opts?.minLength ?? 1;
   const debounceMs = opts?.debounceMs ?? 200;
 
@@ -37,6 +37,15 @@ export function useMessageSearch(
   // Bumped on every fired request; a resolved response only commits if it is
   // still the latest. Survives re-renders so stale in-flight calls are ignored.
   const seqRef = useRef(0);
+
+  useEffect(() => connectWorkbenchEvents({
+    onAuthorizationChanged: () => {
+      seqRef.current += 1;
+      setResults(null);
+      setLoading(false);
+      setError(null);
+    },
+  }), [connectWorkbenchEvents]);
 
   useEffect(() => {
     const trimmed = query.trim();

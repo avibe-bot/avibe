@@ -129,7 +129,7 @@ def reserve_forked_session(
     session.
     """
 
-    require_instance_role(authorization_context, "editor")
+    context = require_instance_role(authorization_context, "editor")
 
     from sqlalchemy import select
 
@@ -146,6 +146,18 @@ def reserve_forked_session(
     agent_store = VibeAgentStore(path)
     try:
         with engine.begin() as conn:
+            if not context.is_instance_owner:
+                from storage import project_access_service
+
+                if not project_access_service.role_allows(
+                    project_access_service.get_effective_session_role(
+                        conn,
+                        context,
+                        source_session_id,
+                    ),
+                    "editor",
+                ):
+                    raise SessionForkError("source_not_found")
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()

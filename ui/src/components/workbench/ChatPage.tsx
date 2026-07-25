@@ -1096,6 +1096,13 @@ export const ChatPage: React.FC = () => {
         void syncTurnState({ quiet: true });
         void refreshSessionRowUntilNativeBound();
       },
+      onAuthorizationChanged: () => {
+        const currentSessionId = sessionIdRef.current;
+        if (!currentSessionId) return;
+        void api.getSession(currentSessionId, { cache: false })
+          .then((nextSession) => setSession(nextSession))
+          .catch(() => goBack());
+      },
       onConnectionState: (state) => {
         const connected = state === 'connected';
         setEventStreamConnected(connected);

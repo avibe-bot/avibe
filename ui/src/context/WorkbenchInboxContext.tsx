@@ -227,6 +227,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       void reconcile();
     }
     const disconnect = api.connectWorkbenchEvents({
+      onAuthorizationChanged: () => {
+        void refresh();
+      },
       onInboxSessionUpdated: (row) => {
         setInboxSessions((prev) => upsertSession(prev, row));
         setUnreadBySession((prev) => {

@@ -2158,6 +2158,56 @@ def enforce_instance_role_capabilities():
     return None
 
 
+_PROJECT_RESOURCE_PATHS = (
+    ("project", re.compile(r"^/api/projects/([^/]+)(?:/agents-md)?$")),
+    ("session", re.compile(r"^/api/sessions/([^/]+)(?:/.*)?$")),
+    ("session", re.compile(r"^/api/show-pages/([^/]+)(?:/.*)?$")),
+    ("session", re.compile(r"^/api/show/sessions/([^/]+)(?:/.*)?$")),
+    ("session", re.compile(r"^/show/([^/]+)(?:/.*)?$")),
+)
+
+
+def _project_access_resource(path: str) -> tuple[str, str] | None:
+    for kind, pattern in _PROJECT_RESOURCE_PATHS:
+        match = pattern.fullmatch(path)
+        if match is not None:
+            return kind, unquote(match.group(1))
+    return None
+
+
+@app.before_request
+def enforce_project_role_capabilities():
+    """Narrow remote non-owner Project/session routes through applied Project ACLs."""
+    if _remote_auth_exempt_path():
+        return None
+    context = getattr(g, "authorization_context", None)
+    if context is None or context.is_instance_owner:
+        return None
+
+    from storage import project_access_service
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import required_instance_role
+
+    minimum_instance_role = required_instance_role(request.method, request.path)
+    if minimum_instance_role not in {"viewer", "editor"}:
+        return None
+    resource = _project_access_resource(request.path)
+    if resource is None:
+        return None
+
+    kind, resource_id = resource
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        role = (
+            project_access_service.get_effective_project_role(conn, context, resource_id)
+            if kind == "project"
+            else project_access_service.get_effective_session_role(conn, context, resource_id)
+        )
+    if not project_access_service.role_allows(role, minimum_instance_role):
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    return None
+
+
 @app.before_request
 def protect_mutating_ui_requests():
     if request.method not in MUTATING_METHODS:
@@ -2441,7 +2491,11 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     if not _show_runtime_hmr_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
-    if not _show_runtime_websocket_authorized(websocket, minimum_role="viewer"):
+    if not _show_runtime_websocket_authorized(
+        websocket,
+        minimum_role="viewer",
+        project_session_id=session_id,
+    ):
         await websocket.close(code=1008)
         return
 
@@ -2575,7 +2629,12 @@ def _terminal_http_request_adapter() -> SimpleNamespace:
     )
 
 
-def _show_runtime_websocket_authorized(websocket: Any, *, minimum_role: str = "viewer") -> bool:
+def _show_runtime_websocket_authorized(
+    websocket: Any,
+    *,
+    minimum_role: str = "viewer",
+    project_session_id: str | None = None,
+) -> bool:
     config = _load_remote_access_config()
     if config is None:
         return _websocket_is_local_request(websocket)
@@ -2586,9 +2645,22 @@ def _show_runtime_websocket_authorized(websocket: Any, *, minimum_role: str = "v
     payload = _remote_access_websocket_session_payload(websocket, config)
     if payload is None:
         return False
+    from storage import project_access_service
     from vibe.authorization import context_from_session_payload
 
-    return context_from_session_payload(payload).has_role(minimum_role)
+    context = context_from_session_payload(payload)
+    if not context.has_role(minimum_role):
+        return False
+    if project_session_id is None or context.is_instance_owner:
+        return True
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        role = project_access_service.get_effective_session_role(
+            conn,
+            context,
+            project_session_id,
+        )
+    return project_access_service.role_allows(role, minimum_role)
 
 
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
@@ -3940,9 +4012,28 @@ def _show_page_error_response(exc):
 
 @app.route("/api/show-pages", methods=["GET"])
 def show_pages_list_get():
+    from storage import project_access_service
     from vibe import api
 
-    return jsonify(api.list_show_pages())
+    payload = api.list_show_pages()
+    context = getattr(g, "authorization_context", None)
+    if context is not None and not context.is_instance_owner:
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            payload["pages"] = [
+                page
+                for page in payload.get("pages", [])
+                if project_access_service.role_allows(
+                    project_access_service.get_effective_session_role(
+                        conn,
+                        context,
+                        str(page.get("session_id") or ""),
+                    ),
+                    "viewer",
+                )
+            ]
+        payload["count"] = len(payload["pages"])
+    return jsonify(payload)
 
 
 @app.route("/api/show-pages/<session_id>/visibility", methods=["POST"])
@@ -5733,6 +5824,19 @@ def _projects_engine():
     return create_sqlite_engine()
 
 
+def _request_accessible_project_scope_ids(conn) -> list[str] | None:
+    """Return the current remote user's Project scopes; owners need no SQL filter."""
+    from storage import project_access_service
+
+    context = getattr(g, "authorization_context", None)
+    if context is None or context.is_instance_owner:
+        return None
+    return sorted(
+        project_access_service.project_scope_id(project_id)
+        for project_id in project_access_service.accessible_project_ids(conn, context)
+    )
+
+
 @app.route("/api/projects", methods=["GET"])
 def projects_list():
     from storage import projects_service
@@ -5740,7 +5844,15 @@ def projects_list():
     include_archived = request.args.get("include_archived") in {"1", "true", "yes"}
     engine = _projects_engine()
     with engine.connect() as conn:
-        return jsonify({"projects": projects_service.list_projects(conn, include_archived=include_archived)})
+        return jsonify(
+            {
+                "projects": projects_service.list_projects(
+                    conn,
+                    include_archived=include_archived,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
+            }
+        )
 
 
 @app.route("/api/projects", methods=["POST"])
@@ -5773,7 +5885,13 @@ def projects_get(project_id: str):
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
-            return jsonify(projects_service.get_project(conn, project_id))
+            return jsonify(
+                projects_service.get_project(
+                    conn,
+                    project_id,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
@@ -6161,6 +6279,7 @@ def sessions_list():
             limit=limit,
             before_id=before_id,
             title_query=title_query,
+            authorization_context=getattr(g, "authorization_context", None),
         )
     return jsonify(result)
 
@@ -6187,7 +6306,12 @@ def workbench_projects_bootstrap():
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        projects = projects_service.list_projects(conn, include_archived=include_archived)
+        authorization_context = getattr(g, "authorization_context", None)
+        projects = projects_service.list_projects(
+            conn,
+            include_archived=include_archived,
+            authorization_context=authorization_context,
+        )
         project_id_set = {project["id"] for project in projects}
         sessions: dict[str, Any] = {}
         for project_id in project_ids:
@@ -6198,6 +6322,7 @@ def workbench_projects_bootstrap():
                 scope_id=_project_to_scope_id(project_id),
                 status=status,
                 limit=limit,
+                authorization_context=authorization_context,
             )
     return jsonify({"projects": projects, "sessions": sessions})
 
@@ -6341,7 +6466,13 @@ def sessions_get(session_id: str):
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
-            return jsonify(workbench_sessions_service.get_session(conn, session_id))
+            return jsonify(
+                workbench_sessions_service.get_session(
+                    conn,
+                    session_id,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
@@ -6905,7 +7036,12 @@ def search_messages_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        result = messages_service.search_messages(conn, query=query, limit=limit)
+        result = messages_service.search_messages(
+            conn,
+            query=query,
+            limit=limit,
+            scope_ids=_request_accessible_project_scope_ids(conn),
+        )
     return jsonify(result)
 
 
@@ -7449,6 +7585,24 @@ def media_get(token: str):
     return _registered_media_response(token)
 
 
+def _request_can_read_media_row(conn, row: dict[str, Any]) -> bool:
+    from storage import project_access_service
+
+    context = getattr(g, "authorization_context", None)
+    if context is None or context.is_instance_owner:
+        return True
+    session_id = row.get("session_id")
+    project_id = project_access_service.project_id_from_scope_id(row.get("scope_id"))
+    role = (
+        project_access_service.get_effective_session_role(conn, context, session_id)
+        if session_id
+        else project_access_service.get_effective_project_role(conn, context, project_id)
+        if project_id
+        else None
+    )
+    return project_access_service.role_allows(role, "viewer")
+
+
 def _registered_media_response(
     token: str,
     *,
@@ -7462,6 +7616,8 @@ def _registered_media_response(
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
+        if row and not _request_can_read_media_row(conn, row):
+            row = None
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
     if expected_session_id is not None and row.get("session_id") != expected_session_id:
@@ -7515,6 +7671,8 @@ def media_meta(token: str):
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
+        if row and not _request_can_read_media_row(conn, row):
+            row = None
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
     return jsonify(
@@ -8055,6 +8213,39 @@ def sessions_draft_set(session_id: str):
     return jsonify({"ok": True})
 
 
+def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
+    if context is None or context.is_instance_owner:
+        return True
+    if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
+        return True
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(data, dict):
+        return False
+
+    from storage import project_access_service
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        session_id = data.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return project_access_service.role_allows(
+                project_access_service.get_effective_session_role(
+                    conn,
+                    context,
+                    session_id,
+                ),
+                "viewer",
+            )
+        project_id = project_access_service.project_id_from_scope_id(data.get("scope_id"))
+        if project_id is not None:
+            return project_access_service.can_read_project(conn, context, project_id)
+    return False
+
+
 @app.route("/api/events", methods=["GET"])
 async def workbench_events():
     """Server-Sent Events stream for the workbench.
@@ -8077,6 +8268,8 @@ async def workbench_events():
     from vibe.inbox_bridge import is_bridge_connected
     from vibe.sse_broker import broker
 
+    authorization_context = getattr(g, "authorization_context", None)
+
     async def generate():
         sub_id, queue = broker.subscribe()
         try:
@@ -8096,6 +8289,26 @@ async def workbench_events():
             while True:
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    visible = await asyncio.to_thread(
+                        _workbench_event_visible_to_context,
+                        authorization_context,
+                        event_type,
+                        payload,
+                    )
+                    if not visible:
+                        continue
+                    if (
+                        event_type == "authorization.changed"
+                        and authorization_context is not None
+                        and not authorization_context.is_instance_owner
+                    ):
+                        payload = json.dumps(
+                            {
+                                "type": "authorization.changed",
+                                "data": {"project_ids": []},
+                            },
+                            separators=(",", ":"),
+                        )
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
                     # 15s keep-alive — Cloudflare Tunnel default idle is well
@@ -8140,6 +8353,7 @@ def inbox_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
+        accessible_scope_ids = _request_accessible_project_scope_ids(conn)
         result = messages_service.list_inbox_sessions(
             conn,
             platform=scope_filter,
@@ -8147,10 +8361,15 @@ def inbox_list():
             limit=limit,
             before=before,
             only_session=only_session,
+            scope_ids=accessible_scope_ids,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
-        per_session = messages_service.unread_counts_by_session(conn, platform=scope_filter)
+        per_session = messages_service.unread_counts_by_session(
+            conn,
+            platform=scope_filter,
+            scope_ids=accessible_scope_ids,
+        )
         result["unread_by_session"] = per_session
         result["unread_total"] = sum(per_session.values())
         result["unread_sessions"] = len(per_session)

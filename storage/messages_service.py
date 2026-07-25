@@ -224,6 +224,7 @@ def search_messages(
     platform: str = "avibe",
     types: Optional[Iterable[str]] = None,
     limit: int = 50,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -250,6 +251,9 @@ def search_messages(
     """
     cleaned = (query or "").strip()
     if not cleaned:
+        return {"sessions": [], "total": 0, "session_count": 0}
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
@@ -288,6 +292,8 @@ def search_messages(
         .order_by(messages.c.created_at.desc(), messages.c.id.desc())
         .limit(effective_limit)
     )
+    if allowed_scope_ids is not None:
+        stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
 
     rows = conn.execute(stmt).mappings().all()
 
@@ -941,6 +947,7 @@ def unread_counts_by_session(
     conn: Connection,
     *,
     platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{session_id: count}`` for unread agent ``result`` messages.
 
@@ -951,6 +958,10 @@ def unread_counts_by_session(
     ``type='result'`` so the sidebar badge matches the inbox card's unread
     count (the realtime ``inbox.session.updated`` row is result-only too).
     """
+
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
+        return {}
 
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
@@ -974,6 +985,14 @@ def unread_counts_by_session(
     )
     if platform is not None:
         query = query.where(messages.c.platform == platform)
+    if allowed_scope_ids is not None:
+        query = query.where(
+            messages.c.session_id.in_(
+                select(agent_sessions.c.id).where(
+                    agent_sessions.c.scope_id.in_(allowed_scope_ids)
+                )
+            )
+        )
     return {session_id: int(count) for session_id, count in conn.execute(query).all()}
 
 
@@ -998,6 +1017,7 @@ def list_inbox_sessions(
     limit: int = 30,
     before: Optional[str] = None,
     only_session: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Per-session ("Slack-like") inbox feed.
 
@@ -1012,6 +1032,10 @@ def list_inbox_sessions(
     Keyset pagination via ``before`` (an opaque ``"<last_activity_at>|<session_id>"``
     cursor returned as ``next_cursor``).
     """
+
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
+        return {"sessions": [], "next_cursor": None}
 
     def _latest_message_value(
         column_name: str,
@@ -1112,6 +1136,8 @@ def list_inbox_sessions(
     )
     if only_session:
         session_rows = session_rows.where(agent_sessions.c.id == only_session)
+    if allowed_scope_ids is not None:
+        session_rows = session_rows.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
 
     session_rows_sub = session_rows.subquery()
     query = select(session_rows_sub).where(session_rows_sub.c.preview_id.is_not(None))

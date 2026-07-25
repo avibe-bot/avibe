@@ -1338,10 +1338,13 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
 
 
 def start_runtime_monitoring(config: V2Config | None = None) -> None:
-    """Ensure the UI-owned heartbeat and quality workers are running."""
+    """Ensure the UI-owned heartbeat, quality, and Project sync workers are running."""
 
     start_tunnel_quality_monitor()
     start_status_heartbeat(config)
+    from vibe.project_access_sync import start_project_access_sync
+
+    start_project_access_sync(config)
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:
