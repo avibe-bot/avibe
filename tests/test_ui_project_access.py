@@ -19,6 +19,7 @@ from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, remote_access, ui_server
 from vibe.authorization import AuthorizationContext
+from vibe.sse_broker import broker
 from vibe.ui_server import app
 
 
@@ -198,6 +199,8 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     assert show_pages["pages"] == [{"session_id": ids["session_a"]}]
     assert show_pages["count"] == 1
 
+    published = []
+    monkeypatch.setattr(broker, "publish", lambda event_type, data: published.append((event_type, data)))
     headers = csrf_headers(client, REMOTE_ORIGIN)
     mark_read = client.post(
         f"/api/sessions/{ids['session_a']}/mark-read",
@@ -209,6 +212,40 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     assert mark_read.status_code == 200
     assert mark_read.get_json()["unread_counts"] == {}
     assert mark_read.get_json()["unread_by_session"] == {}
+    event_type, event_data = published[-1]
+    assert event_type == "inbox.unread.changed"
+    raw_payload = json.dumps({"type": event_type, "data": event_data})
+    alice_context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        is_remote=True,
+    )
+    alice_payload = json.loads(
+        ui_server._workbench_event_payload_for_context(
+            alice_context,
+            event_type,
+            raw_payload,
+        )
+    )
+    assert alice_payload["data"]["unread_counts"] == {}
+    assert alice_payload["data"]["unread_by_session"] == {}
+
+    owner_payload = json.loads(
+        ui_server._workbench_event_payload_for_context(None, event_type, raw_payload)
+    )
+    assert owner_payload["data"]["unread_counts"] == {
+        project_access_service.project_scope_id(ids["project_b"]): 1,
+    }
+    assert owner_payload["data"]["unread_by_session"] == {ids["session_b"]: 1}
+    filtered_owner_payload = json.loads(
+        ui_server._workbench_event_payload_for_context(
+            alice_context,
+            event_type,
+            json.dumps(owner_payload),
+        )
+    )
+    assert filtered_owner_payload["data"]["unread_counts"] == {}
+    assert filtered_owner_payload["data"]["unread_by_session"] == {}
 
     allowed_action = client.post(
         f"/api/sessions/{ids['session_a']}/attachments",

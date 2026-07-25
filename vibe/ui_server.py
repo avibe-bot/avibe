@@ -5945,16 +5945,22 @@ def _projects_engine():
     return create_sqlite_engine()
 
 
-def _request_accessible_project_scope_ids(conn) -> list[str] | None:
-    """Return the current remote user's Project scopes; owners need no SQL filter."""
+def _accessible_project_scope_ids_for_context(conn, context) -> list[str] | None:
+    """Return a principal's readable Project scopes; owners need no SQL filter."""
     from storage import project_access_service
 
-    context = getattr(g, "authorization_context", None)
     if context is None or context.is_instance_owner:
         return None
     return sorted(
         project_access_service.project_scope_id(project_id)
         for project_id in project_access_service.accessible_project_ids(conn, context)
+    )
+
+
+def _request_accessible_project_scope_ids(conn) -> list[str] | None:
+    return _accessible_project_scope_ids_for_context(
+        conn,
+        getattr(g, "authorization_context", None),
     )
 
 
@@ -8381,6 +8387,47 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     return False
 
 
+def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
+    """Project-filter aggregate payloads whose values depend on the recipient."""
+    if event_type != "inbox.unread.changed":
+        return payload
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return payload
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(data, dict):
+        return payload
+
+    from storage import messages_service
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        scope_ids = _accessible_project_scope_ids_for_context(conn, context)
+        unread_counts = messages_service.unread_counts(
+            conn,
+            platform="avibe",
+            scope_ids=scope_ids,
+        )
+        unread_by_session = messages_service.unread_counts_by_session(
+            conn,
+            platform="avibe",
+            scope_ids=scope_ids,
+        )
+    return json.dumps(
+        {
+            **envelope,
+            "data": {
+                **data,
+                "unread_counts": unread_counts,
+                "unread_by_session": unread_by_session,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 @app.route("/api/events", methods=["GET"])
 async def workbench_events():
     """Server-Sent Events stream for the workbench.
@@ -8442,6 +8489,12 @@ async def workbench_events():
                     )
                     if not visible:
                         continue
+                    payload = await asyncio.to_thread(
+                        _workbench_event_payload_for_context,
+                        authorization_context,
+                        event_type,
+                        payload,
+                    )
                     if (
                         event_type == "authorization.changed"
                         and authorization_context is not None
