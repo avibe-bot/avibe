@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import agent_tool_policy as policy
+from core import system_prompt_injection as spi
 from core.handlers import session_handler as sh
 
 
@@ -121,6 +122,38 @@ def test_always_session_only_names_are_a_subset_of_the_policy():
     assert "Agent" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
     assert "CronCreate" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
     assert "Bash" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+
+
+# --------------------------------------------------------------------------
+# injected prompt
+# --------------------------------------------------------------------------
+
+
+def test_prompt_describes_enforcement_when_the_policy_is_active(monkeypatch):
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    section = spi._build_tool_policy_section()
+    assert "is blocked at the tool layer" in section
+    assert "are all denied" in section
+
+
+def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
+    # Enforcement is off here, so telling the agent these tools are denied
+    # would stop it from using what the operator deliberately re-enabled.
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    section = spi._build_tool_policy_section()
+    assert "is not blocked in this runtime" in section
+    assert "blocked at the tool layer" not in section
+    assert "denied" not in section
+    # The Harness is still the default; only the enforcement claim changes.
+    assert "vibe agent run" in section
+    assert policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV in section
+
+
+def test_prompt_section_is_read_per_turn_not_at_import(monkeypatch):
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    before = spi._build_tool_policy_section()
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    assert spi._build_tool_policy_section() != before
 
 
 # --------------------------------------------------------------------------

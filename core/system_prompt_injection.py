@@ -11,6 +11,7 @@ from string import Template
 from typing import Any, Iterable, Optional
 
 from config import paths
+from core.agent_tool_policy import native_background_tools_allowed
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
 from core.show_git import format_agent_contract
@@ -205,6 +206,19 @@ _VAULT_WEB_CHAT_PLACEHOLDER_PROMPT = """\
 A lighter manual prompt can mention the missing secret as a clickable placeholder in your reply, for example `$<OPENAI_API_KEY>`. The user can click it and fill the secret from Web chat. This has no reason or structured prefill metadata; use `vibe vault request` when those are needed.
 """
 
+# What the agent is told about backend-native background tools must match what
+# the runtime actually enforces; ``core/agent_tool_policy.py`` owns that
+# decision and this prompt only announces it.
+_TOOL_POLICY_ENFORCED_SECTION = """\
+Backend-native background work is blocked at the tool layer, because its result is delivered only while this agent process is alive and is lost without warning otherwise. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, and a native multi-agent workflow are all denied, and the denial names the `vibe` command to run instead. A synchronous subagent that returns inside the current turn is still available, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
+
+A background shell is session-only for the same reason but is not blocked, because most of them finish inside the turn. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
+
+# Enforcement is off, so the prompt must not claim these calls are blocked; an
+# agent told a tool is denied will not attempt what the operator re-enabled.
+_TOOL_POLICY_RELAXED_SECTION = """\
+Backend-native background work is not blocked in this runtime, because the operator set `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS`. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, a native multi-agent workflow, and a background shell will all run if you call them. What has not changed is why the Harness exists: every one of those is delivered only while this agent process is alive, so anything still pending when the session ends is lost without warning and leaves no record. Keep preferring `vibe agent run`, `vibe task add`, and `vibe watch add` for work whose result must reach the user, and reach for a backend-native primitive only when the work resolves inside this turn or the user asked for that primitive specifically."""
+
 _HARNESS_PROMPT = """\
 
 ## Harness
@@ -212,9 +226,7 @@ Avibe Harness turns user intent into durable Agent work. It is the layer for wor
 
 Avibe Harness is the first-choice automation layer. For Agent workflows, recurring automation, background loops, scheduled tasks, watches, skills-style automation, workflow tools, or any automation request, route through `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, native workflow tools, backend-native skills, hooks, schedulers, or backend configuration. Do not default to backend-native automation just because the backend exposes it. Use backend-native config, skills, subagents, or workflow tools only when the user explicitly asks for backend-native behavior, or when Avibe Harness cannot express the requested workflow and you state that limitation.
 
-Backend-native background work is blocked at the tool layer, because its result is delivered only while this agent process is alive and is lost without warning otherwise. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, and a native multi-agent workflow are all denied, and the denial names the `vibe` command to run instead. A synchronous subagent that returns inside the current turn is still available, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
-
-A background shell is session-only for the same reason but is not blocked, because most of them finish inside the turn. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it.
+{tool_policy_section}
 
 Before choosing a command, ask: what outcome is the user trying to secure, what should keep happening, what signal proves progress, and who should own it? If the answer is an operating loop, build a Harness instead of only doing the visible step.
 
@@ -454,6 +466,17 @@ def _build_session_start_prompt(context: MessageContext) -> str:
     return prompt
 
 
+def _build_tool_policy_section() -> str:
+    """Describe backend-native background tools as the runtime actually treats them.
+
+    Read at prompt-build time rather than import time so a change to the escape
+    hatch takes effect on the next turn instead of requiring a restart.
+    """
+    if native_background_tools_allowed():
+        return _TOOL_POLICY_RELAXED_SECTION
+    return _TOOL_POLICY_ENFORCED_SECTION
+
+
 def _build_harness_prompt(
     context: MessageContext,
     *,
@@ -463,6 +486,7 @@ def _build_harness_prompt(
     default_session_id = _extract_default_session_id(context)
     return _HARNESS_PROMPT.format(
         default_session_id=default_session_id,
+        tool_policy_section=_build_tool_policy_section(),
         current_agent_backend=str(current_agent_backend or "unknown").strip() or "unknown",
         enabled_agents_table=_format_enabled_agents_table(enabled_agents),
     )
