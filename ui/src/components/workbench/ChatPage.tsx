@@ -155,6 +155,7 @@ export const ChatPage: React.FC = () => {
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
   const canChat = capabilities.can_chat;
+  const canManageShowPage = capabilities.can_manage_instance;
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -1318,6 +1319,7 @@ export const ChatPage: React.FC = () => {
       setShowPageMode(false);
       return;
     }
+    if (!canManageShowPage) return;
     setShowPageBusy(true);
     try {
       const res = await api.ensureShowPage(sid);
@@ -1353,7 +1355,7 @@ export const ChatPage: React.FC = () => {
       // strand the shared busy flag on a session the user switched to).
       setShowPageBusy(false);
     }
-  }, [sessionId, showPageMode, api, sendMessage, t]);
+  }, [sessionId, showPageMode, canManageShowPage, api, sendMessage, t]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe
@@ -1842,6 +1844,7 @@ export const ChatPage: React.FC = () => {
           annotation={annotation}
           onAnnotateOpenChange={setAnnotateOpen}
           readOnly={!canChat}
+          canManageShowPage={canManageShowPage}
         />
 
       {showPageMode && showPageUrl && (
@@ -2321,9 +2324,10 @@ interface ChatHeaderBarProps {
   annotation: AnnotationBridge;
   onAnnotateOpenChange?: (open: boolean) => void;
   readOnly: boolean;
+  canManageShowPage: boolean;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly, canManageShowPage }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2412,8 +2416,8 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             Share. The annotation control sits immediately left of back-to-chat;
             the Share control stays rightmost. In chat mode only the Visualize
             toggle shows. */}
-        {!readOnly && <div className="ml-auto flex items-center gap-1.5">
-          {showPageMode && (
+        {(showPageMode || canManageShowPage) && <div className="ml-auto flex items-center gap-1.5">
+          {showPageMode && !readOnly && (
             <ShowPageAnnotateControl
               state={annotation.state}
               onEnable={annotation.enable}
@@ -2442,7 +2446,7 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
               {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
             </span>
           </Button>
-          {showPageMode && (
+          {showPageMode && canManageShowPage && (
             <ShowPageShareControl
               sessionId={session.id}
               onPayloadChange={onShowPageVisibilityChange}
