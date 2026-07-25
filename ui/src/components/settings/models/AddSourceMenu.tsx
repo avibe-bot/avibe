@@ -68,17 +68,21 @@ export const AddSourceMenu: React.FC<{
   // Mobile only: which step of the chooser is showing.
   const [step, setStep] = React.useState<'type' | 'vendor'>('type');
 
-  const close = () => setOpen(false);
-  const pick = (fn: () => void) => () => {
-    close();
-    fn();
-  };
-
-  // Always reopen on the first step — landing back on the vendor list after a
-  // completed connect would be a confusing place to start.
+  // The chooser always opens on the first step. Resetting on the OPEN edge, not
+  // the close edge, is deliberate: closing happens through several paths (picking
+  // an entry, Escape, tapping the overlay, a future programmatic close) and any
+  // one of them that skips the reset leaves the next open on the vendor list.
+  // Opening only ever happens through the trigger, so this single place cannot be
+  // bypassed. (Codex P2, 2026-07-25: `pick` closed via a helper that set `open`
+  // directly and skipped the close-edge reset.)
   const onOpenChange = (next: boolean) => {
     setOpen(next);
-    if (!next) setStep('type');
+    if (next) setStep('type');
+  };
+
+  const pick = (fn: () => void) => () => {
+    setOpen(false);
+    fn();
   };
 
   const claude = {
