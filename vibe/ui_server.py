@@ -8074,8 +8074,11 @@ async def workbench_events():
     from fastapi.responses import StreamingResponse
 
     from core.inbox_events import WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT
+    from vibe.authorization import can_receive_workbench_event
     from vibe.inbox_bridge import is_bridge_connected
     from vibe.sse_broker import broker
+
+    authorization_context = getattr(g, "authorization_context", None)
 
     async def generate():
         sub_id, queue = broker.subscribe()
@@ -8096,6 +8099,8 @@ async def workbench_events():
             while True:
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    if not can_receive_workbench_event(authorization_context, event_type):
+                        continue
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
                     # 15s keep-alive — Cloudflare Tunnel default idle is well
