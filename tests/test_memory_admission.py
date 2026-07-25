@@ -162,6 +162,41 @@ def test_ineligible_turns_skip_with_their_reason(facts: InboundTurnFacts, reason
     assert _admission().decide(facts) == CaptureSkipped(reason=reason)
 
 
+@pytest.mark.parametrize("malformed", ["false", "true", "0", "1", 0, 1, None, "", []])
+def test_a_non_bool_is_dm_never_admits_a_public_channel_turn(malformed: object) -> None:
+    """`is_dm` arrives untyped, and `"false"` is truthy: only `True` may admit."""
+
+    admission = _admission()
+    facts = _facts(is_dm=malformed)
+
+    assert admission.admits(facts) is False
+    assert admission.decide(facts) == CaptureSkipped(reason="memory_access_denied")
+
+
+@pytest.mark.parametrize("malformed", ["false", "true", "0", "1", 0, 1, None, "", []])
+def test_a_non_bool_memory_enabled_never_enables_capture(malformed: object) -> None:
+    """A mis-typed enablement flag must read as disabled, not as consent."""
+
+    assert _admission().decide(_facts(memory_enabled=malformed)) == CaptureSkipped(
+        reason="memory_disabled"
+    )
+
+
+@pytest.mark.parametrize("malformed", ["true", "1", 1, "ordinary"])
+def test_a_non_bool_is_ordinary_text_is_not_a_classification(malformed: object) -> None:
+    """Only the surface's literal `True` counts as "this is ordinary human text"."""
+
+    assert _admission().decide(_facts(is_ordinary_text=malformed)) == CaptureSkipped(
+        reason="memory_invalid_input"
+    )
+
+
+def test_a_literal_true_still_admits_after_strict_normalization() -> None:
+    """The strict reading must not reject the well-behaved surfaces."""
+
+    assert isinstance(_admission().decide(_facts(is_dm=True, memory_enabled=True)), CaptureRequest)
+
+
 def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:
     principals = _Principals(raises=True)
     bindings = _Bindings(raises=True)

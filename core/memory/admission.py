@@ -106,7 +106,7 @@ class CaptureAdmission:
             return False
         if platform == WORKBENCH_PLATFORM:
             return True
-        if not facts.is_dm:
+        if not _asserted_true(facts.is_dm):
             return False
         try:
             return bool(self._bindings.is_enabled_user(platform, user_id))
@@ -118,7 +118,7 @@ class CaptureAdmission:
     def decide(self, facts: InboundTurnFacts) -> CaptureRequest | CaptureSkipped:
         """Turn one classified turn into the capture it earns, or a skip."""
 
-        if not facts.memory_enabled:
+        if not _asserted_true(facts.memory_enabled):
             return CaptureSkipped(reason="memory_disabled")
         platform = self.platform_of(facts)
         if platform is None:
@@ -154,6 +154,19 @@ def _nonempty_str(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def _asserted_true(value: object) -> bool:
+    """Treat anything but a literal ``True`` as an unstated fact.
+
+    These flags are annotated as bools but originate in untyped platform
+    payloads, where a JSON ``"false"`` is a truthy string. Truth-testing them
+    would let a new surface widen capture by mis-typing a flag: a ``"false"``
+    ``is_dm`` would carry a bound user's public-channel turns into Memory. The
+    boundary normalizes here so no caller has to be trusted to do it.
+    """
+
+    return value is True
+
+
 def _attributed_user_id(facts: InboundTurnFacts) -> str | None:
     """Return the user this turn is attributed to, or None for a fallback id.
 
@@ -174,4 +187,6 @@ def _is_ordinary_human_text(facts: InboundTurnFacts, platform: str) -> bool:
         return False
     # A Workbench attachment-only turn carries no text but is still captured.
     has_workbench_attachment = platform == WORKBENCH_PLATFORM and bool(facts.files)
-    return facts.is_ordinary_text is True and (bool(facts.text.strip()) or has_workbench_attachment)
+    return _asserted_true(facts.is_ordinary_text) and (
+        bool(facts.text.strip()) or has_workbench_attachment
+    )
