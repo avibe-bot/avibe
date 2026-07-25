@@ -42,6 +42,7 @@ class ResourceUserContext:
     organization_role: str | None = None
     group_ids: frozenset[str] | None = None
     membership_version: str | None = None
+    instance_role: str | None = None
     instance_access_source: str | None = None
     is_remote: bool = False
     is_trusted_local: bool = False
@@ -56,7 +57,7 @@ class ResourceUserContext:
 
     @property
     def is_instance_owner(self) -> bool:
-        return self.instance_access_source == "owner" and bool(self.subject)
+        return self.instance_role == "owner" and bool(self.subject)
 
 
 def _utc_now_iso() -> str:
@@ -165,6 +166,7 @@ def _context_from_mapping(
         membership_version=_clean_optional_string(
             data.get("vibe_membership_version", data.get("membership_version"))
         ),
+        instance_role=_clean_optional_string(data.get("vibe_instance_role", data.get("instance_role"))),
         instance_access_source=_clean_optional_string(
             data.get("vibe_instance_access_source", data.get("instance_access_source"))
         ),

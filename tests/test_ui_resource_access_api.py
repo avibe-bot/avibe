@@ -5,18 +5,19 @@ from storage import resource_access_service
 from storage.db import get_cached_sqlite_engine
 from storage.migrations import run_migrations
 from tests.test_ui_remote_access_auth import _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access
 from vibe.ui_server import app
 
 
 def _organization_cookie(config) -> str:
-    return remote_access.make_session_cookie(
+    return remote_session_cookie(
         config,
         "member@example.com",
         "member-1",
         session_claims={
             "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
             "vibe_instance_access_source": "organization_group",
             "vibe_organization_id": "org-1",
             "vibe_organization_member_id": "organization-member-1",
@@ -28,12 +29,13 @@ def _organization_cookie(config) -> str:
 
 
 def _external_guest_cookie(config) -> str:
-    return remote_access.make_session_cookie(
+    return remote_session_cookie(
         config,
         "guest@example.com",
         "guest-1",
         session_claims={
             "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
             "vibe_instance_access_source": "email",
         },
     )
@@ -73,6 +75,7 @@ def test_organization_context_and_policy_routes_use_signed_cookie_claims(monkeyp
     policies = client.get("/api/resource-policies?kind=agent", base_url="https://alex.avibe.bot")
 
     assert context.status_code == 200
+    assert context.get_json()["instance_role"] == "viewer"
     assert context.get_json()["organization"] == {
         "id": "org-1",
         "member_id": "organization-member-1",

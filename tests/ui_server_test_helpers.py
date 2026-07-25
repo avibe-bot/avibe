@@ -3,6 +3,30 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 
+def remote_session_cookie(
+    config,
+    email: str,
+    subject: str,
+    *,
+    session_claims: dict | None = None,
+) -> str:
+    from vibe import remote_access
+
+    claims = session_claims
+    if claims is None:
+        claims = {
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+        }
+    return remote_access.make_session_cookie(
+        config,
+        email,
+        subject,
+        session_claims=claims,
+    )
+
+
 def csrf_headers(client, base_url: str = "http://localhost") -> dict[str, str]:
     response = client.get("/api/csrf-token", base_url=base_url)
     assert response.status_code == 200

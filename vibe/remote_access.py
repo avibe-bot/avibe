@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
 SESSION_TTL_SECONDS = 24 * 60 * 60
-SESSION_ORGANIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
+SESSION_AUTHORIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
@@ -84,6 +84,7 @@ _RESOURCE_ACL_SYNC_ERROR_CODE_RE = re.compile(r"\A[a-z0-9][a-z0-9_:-]{0,119}\Z")
 _RESOURCE_ACL_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
 _RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 _RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset({"owner", "public_instance", "email", "email_domain", "organization_group"})
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _BLOCKED_PAIRING_BACKEND_HOSTS = {
@@ -2387,6 +2388,9 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     instance_id = _oidc_claim_string(claims.get("vibe_instance_id"), reason="invalid_instance_id")
     if instance_id != config.remote_access.vibe_cloud.instance_id:
         raise OAuthCodeExchangeError("invalid_instance_id")
+    instance_role = _oidc_claim_string(claims.get("vibe_instance_role"), reason="invalid_instance_role")
+    if instance_role not in _INSTANCE_ACCESS_ROLES:
+        raise OAuthCodeExchangeError("invalid_instance_role")
     access_source_raw = claims.get("vibe_instance_access_source")
     # An explicit null is not equivalent to an omitted organization claim. It
     # is a malformed frozen-claim shape and must not silently downgrade into a
@@ -2400,13 +2404,11 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
 
     session_claims: dict[str, Any] = {
         "vibe_instance_id": instance_id,
+        "vibe_instance_role": instance_role,
         "vibe_instance_access_source": access_source,
     }
     if not organization_claim_present:
         return session_claims
-    if access_source in {"email", "email_domain"}:
-        # External guests must never receive local organization/group context.
-        raise OAuthCodeExchangeError("invalid_organization_claims")
     organization_id = _oidc_claim_string(claims.get("vibe_organization_id"), reason="invalid_organization_claims")
     member_id = _oidc_claim_string(claims.get("vibe_organization_member_id"), reason="invalid_organization_claims")
     role = _oidc_claim_string(claims.get("vibe_organization_role"), reason="invalid_organization_claims")
@@ -2441,7 +2443,8 @@ def make_session_cookie(
     config: V2Config,
     email: str,
     subject: str,
-    session_claims: Mapping[str, Any] | None = None,
+    *,
+    session_claims: Mapping[str, Any],
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -2454,21 +2457,11 @@ def make_session_cookie(
         "iat": issued_at,
         "exp": issued_at + SESSION_TTL_SECONDS,
     }
-    has_oidc_session_claims = bool(
-        session_claims
-        and any(
-            key in session_claims
-            for key in ("vibe_instance_id", "vibe_instance_access_source", *_ORGANIZATION_SESSION_CLAIM_KEYS)
-        )
-    )
-    if has_oidc_session_claims:
-        assert session_claims is not None
-        selected_claims = session_claims_from_oidc(config, session_claims)
-        payload.update(selected_claims)
-        if selected_claims.get("vibe_organization_id"):
-            # Membership/group claims must be refreshed through OIDC instead of
-            # being slid indefinitely from a stale signed local cookie.
-            payload["claims_issued_at"] = issued_at
+    selected_claims = session_claims_from_oidc(config, session_claims)
+    payload.update(selected_claims)
+    # Instance roles and optional organization membership must be refreshed
+    # through OIDC instead of being slid indefinitely from a local cookie.
+    payload["claims_issued_at"] = issued_at
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _session_signature(cloud.session_secret, payload_text)
     return f"{payload_text}.{signature}"
@@ -2494,24 +2487,16 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
         return None
     if int(payload.get("exp", 0)) <= int(time.time()):
         return None
-    has_session_claims = any(
-        key in payload
-        for key in ("vibe_instance_id", "vibe_instance_access_source", *_ORGANIZATION_SESSION_CLAIM_KEYS)
-    )
-    if has_session_claims:
-        try:
-            selected_claims = session_claims_from_oidc(config, payload)
-        except OAuthCodeExchangeError:
-            return None
-        if not selected_claims:
-            return None
-        if selected_claims.get("vibe_organization_id"):
-            try:
-                claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
-            except (TypeError, ValueError):
-                return None
-            if claims_issued_at <= 0:
-                return None
+    try:
+        session_claims_from_oidc(config, payload)
+    except OAuthCodeExchangeError:
+        return None
+    try:
+        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
+    except (TypeError, ValueError):
+        return None
+    if claims_issued_at <= 0:
+        return None
     return payload
 
 
@@ -2530,17 +2515,15 @@ def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bo
     return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
 
 
-def session_needs_membership_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
-    """Return whether an organization-bearing session must refresh via OIDC."""
+def session_needs_authorization_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
+    """Return whether signed authorization claims must refresh via OIDC."""
 
-    if not payload.get("vibe_organization_id"):
-        return False
     current = now if now is not None else int(time.time())
     try:
         claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
     except (TypeError, ValueError):
         return True
-    return claims_issued_at <= 0 or current - claims_issued_at >= SESSION_ORGANIZATION_REFRESH_SECONDS
+    return claims_issued_at <= 0 or current - claims_issued_at >= SESSION_AUTHORIZATION_REFRESH_SECONDS
 
 
 def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: str) -> str:

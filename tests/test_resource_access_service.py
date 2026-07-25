@@ -13,6 +13,7 @@ def _context(
     organization_id: str | None = "org-1",
     group_ids: frozenset[str] | None = frozenset(),
     role: str | None = "member",
+    instance_role: str = "viewer",
     access_source: str = "organization_group",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
@@ -21,6 +22,7 @@ def _context(
         organization_member_id="member-1" if organization_id else None,
         organization_role=role,
         group_ids=group_ids,
+        instance_role=instance_role,
         instance_access_source=access_source,
         is_remote=True,
     )
@@ -98,11 +100,18 @@ def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_p
     try:
         with engine.connect() as connection:
             member = _context("member-1", group_ids=frozenset({"group-engineering"}))
-            owner = _context("owner-1", access_source="owner")
+            owner = _context("owner-1", instance_role="owner", access_source="owner")
+            diagnostic_owner = _context("member-2", instance_role="viewer", access_source="owner")
             local = resource_access_service.ResourceUserContext(is_trusted_local=True)
 
             assert not resource_access_service.can_use_resource(member, "agent", "legacy-agent", connection=connection)
             assert resource_access_service.can_use_resource(owner, "agent", "legacy-agent", connection=connection)
+            assert not resource_access_service.can_use_resource(
+                diagnostic_owner,
+                "agent",
+                "legacy-agent",
+                connection=connection,
+            )
             assert resource_access_service.can_use_resource(local, "agent", "legacy-agent", connection=connection)
     finally:
         engine.dispose()

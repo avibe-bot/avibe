@@ -34,7 +34,7 @@ from core.terminal_service import (
     _tmux_socket_name,
     sanitize_session_id,
 )
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access
 from vibe import ui_server
 from vibe.ui_server import app
@@ -1629,7 +1629,7 @@ def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeyp
     user_two_client = app.test_client()
     user_two_client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "user-2@example.com", "user-2"),
+        remote_session_cookie(config, "user-2@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
     headers = csrf_headers(user_two_client, "https://alex.avibe.bot")

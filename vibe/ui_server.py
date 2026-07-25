@@ -2112,12 +2112,12 @@ def enforce_remote_access_cookie():
         return jsonify({"ok": False, "error": "remote_access_session_secret_missing"}), 503
     payload = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
     if payload is not None:
-        if remote_access.session_needs_membership_refresh(payload):
+        if remote_access.session_needs_authorization_refresh(payload):
             if request.method == "GET":
                 if _auth_rate_limited():
                     return _auth_rate_limit_response()
                 return _redirect_to_vibe_cloud_login(config)
-            return jsonify({"ok": False, "error": "remote_access_membership_refresh_required"}), 401
+            return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = payload
         return None
@@ -2578,7 +2578,7 @@ def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | 
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
     )
-    if payload is not None and remote_access.session_needs_membership_refresh(payload):
+    if payload is not None and remote_access.session_needs_authorization_refresh(payload):
         return None
     return payload
 
@@ -4651,14 +4651,7 @@ def remote_access_auth_callback():
         claims = result["claims"]
         session_claims = result.get("session_claims")
         if not isinstance(session_claims, dict):
-            # Compatibility for a previously paired backend and test doubles
-            # that return the historical minimal claim set. Production
-            # `exchange_oauth_code` always returns validated session_claims.
-            session_claims = (
-                remote_access.session_claims_from_oidc(config, claims)
-                if claims.get("vibe_instance_id")
-                else {}
-            )
+            raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
@@ -4675,7 +4668,7 @@ def remote_access_auth_callback():
             config,
             str(claims.get("email", "")),
             str(claims.get("sub", "")),
-            session_claims=session_claims or None,
+            session_claims=session_claims,
         ),
         httponly=True,
         secure=True,
@@ -4787,6 +4780,7 @@ def organization_context_get():
             "user": {"sub": user_context.subject, "email": user_context.email},
             "instance_id": _payload.get("vibe_instance_id", _payload.get("instance_id")),
             "organization": organization,
+            "instance_role": user_context.instance_role,
             "instance_access_source": user_context.instance_access_source,
         }
     )
