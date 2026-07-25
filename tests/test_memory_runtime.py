@@ -575,6 +575,57 @@ def test_memory_artifact_routes_incompatible_empty_root_through_activation_coord
     assert manager.provider_root_format() == "everos-2.0"
 
 
+def test_memory_artifact_treats_generated_control_files_as_an_empty_root(tmp_path: Path) -> None:
+    provider_root = tmp_path / "memory" / "everos-root"
+    provider_root.mkdir(parents=True, mode=0o700)
+    sentinel = provider_root / ".avibe-memory-root.json"
+    sentinel.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider_root_id": "root-id",
+                "provider_id": "everos",
+                "provider_root_format": "everos-1.0",
+                "created_by_artifact_fingerprint": "old-artifact",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(sentinel, 0o600)
+    # Written into the root by every sidecar start, so they must not make an
+    # otherwise empty root look like provider data.
+    (provider_root / "everos.toml").write_text("[memory]\n", encoding="utf-8")
+    (provider_root / "ome.toml").write_text("[strategies]\n", encoding="utf-8")
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=provider_root,
+    )
+    observed: list[MemoryProviderRootState] = []
+
+    def coordinate(_candidate, root_state, commit, _rollback) -> None:
+        observed.append(root_state)
+        commit()
+
+    manager.set_activation_coordinator(coordinate)
+    manager._write_current_pointer(
+        tmp_path / "runtime" / "versions" / "candidate",
+        _artifact_manifest("everos-2.0", compatible_formats=[]),
+        _artifact_archive(),
+    )
+
+    assert observed == [MemoryProviderRootState(exists=True, provider_root_format="everos-1.0", empty=True)]
+    assert manager.provider_root_format() == "everos-2.0"
+
+
+def test_memory_provider_root_control_files_match_the_runtime_data_check() -> None:
+    """The two emptiness checks must not diverge again."""
+
+    from core.memory import runtime as memory_runtime
+
+    assert memory_runtime._PROVIDER_ROOT_CONTROL_FILES == memory_artifact.PROVIDER_ROOT_CONTROL_FILES
+
+
 def test_memory_artifact_accepts_declared_compatible_nonempty_root(tmp_path: Path) -> None:
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True, mode=0o700)

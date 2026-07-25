@@ -42,6 +42,15 @@ _DEV_PROVIDER_ROOT_FORMAT = f"everos-{EVEROS_VERSION}"
 _DEV_ARTIFACT_FINGERPRINT = f"dev-everos-{EVEROS_VERSION}"
 _MANIFEST_RESOURCE = "memory_runtime_manifest.json"
 _MAX_CURRENT_POINTER_BYTES = 16 * 1024
+ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
+#: Files Avibe itself generates inside the provider root, so none of them proves
+#: that the root holds provider data. The sentinel is written when the root is
+#: created, and ``everos.toml`` / ``ome.toml`` are regenerated on every sidecar
+#: start because EverOS 1.1.3 discovers those fixed names under ``EVEROS_ROOT``.
+#: Counting them as data made an owned-but-empty root look occupied once Memory
+#: had started once, which then rejected an incompatible-format runtime before
+#: activation could rewrite the verified-empty sentinel.
+PROVIDER_ROOT_CONTROL_FILES = frozenset({ROOT_SENTINEL_FILENAME, "everos.toml", "ome.toml"})
 _SPEC = ManagedRuntimeSpec(
     runtime_id="memory-runtime",
     manifest_resource=_MANIFEST_RESOURCE,
@@ -393,7 +402,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if stat.S_IMODE(root_info.st_mode) != 0o700:
             raise MemoryRuntimeActivationError("memory provider root mode mismatch")
 
-        sentinel_path = self._provider_root / ".avibe-memory-root.json"
+        sentinel_path = self._provider_root / ROOT_SENTINEL_FILENAME
         try:
             sentinel_info = sentinel_path.lstat()
         except FileNotFoundError as exc:
@@ -410,7 +419,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
         try:
             with os.scandir(self._provider_root) as entries:
-                empty = all(entry.name == sentinel_path.name for entry in entries)
+                empty = all(entry.name in PROVIDER_ROOT_CONTROL_FILES for entry in entries)
         except OSError as exc:
             raise MemoryRuntimeActivationError("memory provider root cannot be inspected") from exc
         if not empty and provider_root_format not in candidate.compatible_provider_root_formats:
