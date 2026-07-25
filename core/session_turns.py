@@ -27,7 +27,11 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
+from core.web_push_notifications import (
+    WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
+    WEB_PUSH_USER_KEY_METADATA,
+    WEB_PUSH_USER_KEYS_METADATA,
+)
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
@@ -1004,6 +1008,25 @@ class SessionTurnManager:
                         user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
                     elif user_owners:
                         user_metadata = {WEB_PUSH_USER_KEYS_METADATA: user_owners}
+                    authorization_contexts: dict[str, dict[str, Any]] = {}
+                    for row in segment:
+                        raw_contexts = (row.get("metadata") or {}).get(
+                            WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA
+                        )
+                        if not isinstance(raw_contexts, list):
+                            continue
+                        for raw_context in raw_contexts:
+                            if not isinstance(raw_context, dict):
+                                continue
+                            context_user_key = raw_context.get("user_key")
+                            if context_user_key in user_owners:
+                                authorization_contexts[str(context_user_key)] = raw_context
+                    if authorization_contexts:
+                        if user_metadata is None:
+                            user_metadata = {}
+                        user_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = list(
+                            authorization_contexts.values()
+                        )
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )

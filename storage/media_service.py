@@ -74,14 +74,13 @@ def register(
     """Register *local_path* under a token and return it, reusing an existing
     token for the same file so its proxy URL is stable + cacheable.
 
-    Dedup is machine-global on the ``(local_path, size_bytes, mtime_ns)``
-    fingerprint — scope/session are intentionally NOT part of the key, so the
-    same file referenced from any message or session resolves to one URL the
-    browser can cache. ``mtime_ns`` + ``size_bytes`` is a stat-only change
-    detector: a rewritten file (new size/mtime) mints a fresh token, busting the
-    cache. ``content_type`` / ``file_ext`` / ``size_bytes`` are derived from the
-    path when not supplied so the proxy response and UI card don't re-compute
-    them.
+    Dedup is scoped to the referencing session. A shared path referenced from
+    different sessions receives separate tokens so each token retains the
+    correct authorization target. ``mtime_ns`` + ``size_bytes`` is a stat-only
+    change detector: a rewritten file (new size/mtime) mints a fresh token,
+    busting the cache. ``content_type`` / ``file_ext`` / ``size_bytes`` are
+    derived from the path when not supplied so the proxy response and UI card
+    don't re-compute them.
     """
     path = Path(local_path)
     name = file_name or path.name
@@ -107,6 +106,8 @@ def register(
                 media_objects.c.local_path == str(local_path),
                 media_objects.c.size_bytes == size,
                 media_objects.c.mtime_ns == mtime_ns,
+                media_objects.c.scope_id == scope_id,
+                media_objects.c.session_id == session_id,
                 media_objects.c.revoked_at.is_(None),
             )
         ).scalar()

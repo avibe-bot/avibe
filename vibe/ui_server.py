@@ -7711,13 +7711,12 @@ _INLINE_SAFE_MEDIA_TYPES = {
 def media_get(token: str):
     """Serve a registered chat-media file (agent reply / upload) by opaque token.
 
-    The token — not a path, not a session — is the capability: only files we
-    minted into ``media_objects`` are reachable, and the same token resolves to
-    one stable URL the browser can cache across messages/sessions. Lives under
-    ``/api/*`` so the remote-access auth middleware already gates it, and a
-    same-origin ``<img>`` / anchor GET carries the session cookie. Defaults to
-    ``inline`` (so images render in ``<img>`` and PDFs preview); ``?download=1``
-    forces an attachment download.
+    Only files minted into ``media_objects`` are reachable. Tokens stay stable
+    within their referencing session, and the row's Project/session scope is
+    authorized on every request. Lives under ``/api/*`` so the remote-access
+    auth middleware already gates it, and a same-origin ``<img>`` / anchor GET
+    carries the session cookie. Defaults to ``inline`` (so images render in
+    ``<img>`` and PDFs preview); ``?download=1`` forces an attachment download.
     """
     return _registered_media_response(token)
 
@@ -7988,6 +7987,10 @@ async def sessions_messages_create(session_id: str):
     """
 
     from core.services import sessions as workbench_sessions_service
+    from core.web_push_notifications import (
+        WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
+        web_push_authorization_context_record,
+    )
     from storage import messages_service
     from vibe import internal_client
     from vibe.sse_broker import broker
@@ -8000,6 +8003,10 @@ async def sessions_messages_create(session_id: str):
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
     web_push_user_key = _web_push_user_key()
+    web_push_authorization_context = web_push_authorization_context_record(
+        web_push_user_key,
+        getattr(g, "authorization_context", None),
+    )
 
     engine = _projects_engine()
     try:
@@ -8054,6 +8061,15 @@ async def sessions_messages_create(session_id: str):
             # must stay terminal — no new row, no turn.
             if workbench_sessions_service.is_session_archived(conn, session_id):
                 return None
+            message_metadata = {
+                **(payload.get("metadata") or {}),
+                "_web_push_user_key": web_push_user_key,
+            }
+            message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
+            if web_push_authorization_context is not None:
+                message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [
+                    web_push_authorization_context
+                ]
             row = messages_service.append(
                 conn,
                 scope_id=session["scope_id"],
@@ -8064,10 +8080,7 @@ async def sessions_messages_create(session_id: str):
                 message_type=messages_service.PENDING_TYPE,
                 text=text if isinstance(text, str) else None,
                 content=content if isinstance(content, dict) else None,
-                metadata={
-                    **(payload.get("metadata") or {}),
-                    "_web_push_user_key": web_push_user_key,
-                },
+                metadata=message_metadata,
                 author_id=web_push_user_key,
                 author_name=payload.get("author_name"),
             )

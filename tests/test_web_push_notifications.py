@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from core import web_push_notifications
-from storage import messages_service, web_push_service
+from storage import messages_service, project_access_service, web_push_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions
 from storage.settings_service import upsert_scope
+from vibe.authorization import AuthorizationContext
 
 
 def test_maybe_notify_inbox_message_schedules_agent_result(monkeypatch):
@@ -262,6 +263,152 @@ def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeyp
     assert [send[0]["endpoint"] for send in sends] == [
         "https://push.example.test/a",
     ]
+
+
+def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-06-04T00:00:00Z"
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="user-a",
+        email="member@example.com",
+        instance_access_source="email",
+        is_remote=True,
+    )
+    authorization_record = web_push_notifications.web_push_authorization_context_record(
+        "remote:user-a",
+        context,
+    )
+    assert authorization_record is not None
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_acl",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_acl",
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="ses_push_acl",
+                native_session_id="",
+                title="Push ACL",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        assert project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_push_acl",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "email",
+                        "principal_value": "member@example.com",
+                        "access_role": "editor",
+                    }
+                ],
+            },
+        ).outcome == "applied"
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_acl",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        allowed_message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_acl",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Allowed",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload={
+                "endpoint": "https://push.example.test/a",
+                "keys": {"p256dh": "a-key", "auth": "a-auth"},
+            },
+        )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Push ACL",
+            "body": "Allowed",
+            "session_id": "ses_push_acl",
+            "message_id": allowed_message["id"],
+        }
+    )
+    assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/a"]
+
+    with engine.begin() as conn:
+        assert project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_push_acl",
+                "revision": 2,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "email",
+                        "principal_value": "someone-else@example.com",
+                        "access_role": "editor",
+                    }
+                ],
+            },
+        ).outcome == "applied"
+        revoked_message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_acl",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Revoked",
+        )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Push ACL",
+            "body": "Revoked",
+            "session_id": "ses_push_acl",
+            "message_id": revoked_message["id"],
+        }
+    )
+    assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/a"]
 
 
 def test_send_to_enabled_subscriptions_sets_global_badge_count(monkeypatch, tmp_path):

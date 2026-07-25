@@ -17,7 +17,7 @@ from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
-from vibe import api, remote_access, ui_server
+from vibe import api, internal_client, remote_access, ui_server
 from vibe.authorization import AuthorizationContext
 from vibe.sse_broker import broker
 from vibe.ui_server import app
@@ -89,10 +89,8 @@ def _setup_state(tmp_path) -> tuple[V2Config, dict[str, str]]:
     project_b_dir = tmp_path / "project-b"
     project_a_dir.mkdir()
     project_b_dir.mkdir()
-    media_a = tmp_path / "a.txt"
-    media_b = tmp_path / "b.txt"
-    media_a.write_text("project a", encoding="utf-8")
-    media_b.write_text("project b", encoding="utf-8")
+    shared_media = tmp_path / "shared.txt"
+    shared_media.write_text("shared media", encoding="utf-8")
     with engine.begin() as conn:
         project_a = projects_service.create_project(conn, str(project_a_dir), display_name="A")
         project_b = projects_service.create_project(conn, str(project_b_dir), display_name="B")
@@ -115,7 +113,7 @@ def _setup_state(tmp_path) -> tuple[V2Config, dict[str, str]]:
             session_id=session_a["id"],
             kind="file",
             source="agent_reply",
-            local_path=str(media_a.resolve()),
+            local_path=str(shared_media.resolve()),
         )
         media_b_token = media_service.register(
             conn,
@@ -123,8 +121,9 @@ def _setup_state(tmp_path) -> tuple[V2Config, dict[str, str]]:
             session_id=session_b["id"],
             kind="file",
             source="agent_reply",
-            local_path=str(media_b.resolve()),
+            local_path=str(shared_media.resolve()),
         )
+        assert media_a_token != media_b_token
         project_access_service.apply_project_access_intent(
             conn,
             _intent(project_a["id"], "alice@example.com"),
@@ -332,6 +331,50 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert editor_payload["draft"] == {"text": "editor-only draft"}
 
 
+def test_remote_message_persists_trusted_web_push_authorization_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    client = _remote_client(config, role="editor", email="alice@example.com")
+
+    async def dispatch_async(_payload):
+        return {"status_code": 202, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "dispatch_async", dispatch_async)
+    response = client.post(
+        f"/api/sessions/{ids['session_a']}/messages",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(client, REMOTE_ORIGIN),
+        json={
+            "text": "Run it",
+            "metadata": {
+                "_web_push_authorization_contexts": [
+                    {"user_key": "remote:spoofed", "email": "spoofed@example.com"}
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["metadata"]["_web_push_user_key"].startswith("remote:")
+    records = payload["metadata"]["_web_push_authorization_contexts"]
+    assert records == [
+        {
+            "email": "alice@example.com",
+            "sub": payload["metadata"]["_web_push_user_key"].removeprefix("remote:"),
+            "user_key": payload["metadata"]["_web_push_user_key"],
+            "vibe_group_ids": [],
+            "vibe_instance_access_source": "owner",
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+        }
+    ]
+
+
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
@@ -374,6 +417,8 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     ] == [ids["project_b"]]
     assert _get(organization_member, f"/api/sessions/{ids['session_b']}").status_code == 200
     assert _get(organization_member, f"/api/sessions/{ids['session_a']}").status_code == 404
+    assert _get(organization_member, f"/api/media/{ids['media_b']}").status_code == 200
+    assert _get(organization_member, f"/api/media/{ids['media_a']}").status_code == 404
 
     owner = _remote_client(config, role="owner", email="owner@example.com")
     assert {row["id"] for row in _get(owner, "/api/projects").get_json()["projects"]} == {

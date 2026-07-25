@@ -461,14 +461,14 @@ messages = Table(
 # file referenced by an agent reply (or uploaded by the user) is registered
 # here and served back over ``/api/media/<token>``. The URL carries only the
 # opaque ``token`` — never a filesystem path, never a session — so it is stable
-# across messages/sessions and the browser can cache it. ``content_type`` /
+# within the referencing session and the browser can cache it. ``content_type`` /
 # ``file_ext`` are stored so the response and the UI file card don't have to
 # re-derive them; ``kind`` (image|file) selects inline-image vs download-card
 # rendering; ``source`` distinguishes agent output from user uploads so one
 # table serves both. ``size_bytes`` + ``mtime_ns`` are the content fingerprint:
 # :func:`storage.media_service.register` reuses an existing token for the same
-# (local_path, size_bytes, mtime_ns) so a re-referenced file keeps one cacheable
-# URL, while a changed file mints a fresh token (busting the browser cache).
+# session and (local_path, size_bytes, mtime_ns), while a different session or
+# changed file mints a fresh token.
 media_objects = Table(
     "media_objects",
     metadata,
@@ -494,7 +494,7 @@ media_objects = Table(
     Column("revoked_at", String, nullable=True),
     Index("ix_media_objects_session", "session_id"),
     Index("ix_media_objects_scope_created", "scope_id", "created_at"),
-    # Backs register()'s dedup lookup (machine-global content fingerprint).
+    # Backs the fingerprint prefix of register()'s session-scoped dedup lookup.
     Index("ix_media_objects_dedup", "local_path", "size_bytes", "mtime_ns"),
 )
 

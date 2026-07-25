@@ -2979,7 +2979,19 @@ def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch)
                 message_type=messages_service.QUEUED_TYPE,
                 text=text,
                 author_id=owner,
-                metadata={"_web_push_user_key": owner},
+                metadata={
+                    "_web_push_user_key": owner,
+                    "_web_push_authorization_contexts": [
+                        {
+                            "user_key": owner,
+                            "sub": owner.removeprefix("remote:"),
+                            "email": f"{owner.removeprefix('remote:')}@example.com",
+                            "vibe_instance_role": "editor",
+                            "vibe_instance_access_source": "email",
+                            "vibe_group_ids": [],
+                        }
+                    ],
+                },
             )
 
     mgr, runs = _manager_capturing_runs()
@@ -2993,6 +3005,10 @@ def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch)
         "remote:user-a",
         "remote:user-b",
     ]
+    assert [
+        record["user_key"]
+        for record in transcript["messages"][0]["metadata"]["_web_push_authorization_contexts"]
+    ] == ["remote:user-a", "remote:user-b"]
     assert "_web_push_user_key" not in transcript["messages"][0]["metadata"]
 
 

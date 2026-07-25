@@ -252,17 +252,36 @@ def test_register_dedups_same_fingerprint(tmp_path):
 
     with engine.begin() as conn:
         scope_id = _seed_scope_and_session(conn)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="other",
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="other-anchor",
+                native_session_id="other-native",
+                status="active",
+                metadata_json="{}",
+                created_at=_now(),
+                updated_at=_now(),
+            )
+        )
         t1 = media_service.register(
             conn, scope_id=scope_id, session_id="sess_x", kind="image",
             source="agent_reply", local_path=str(shot),
         )
-        # Same file (path + size + mtime), DIFFERENT session → same token: dedup is
-        # machine-global, so the proxy URL stays stable + cacheable.
+        # Same file in the same authorization scope stays stable + cacheable.
+        assert media_service.register(
+            conn, scope_id=scope_id, session_id="sess_x", kind="image",
+            source="agent_reply", local_path=str(shot),
+        ) == t1
+        # A different session receives a distinct token so authorization checks
+        # use that referencing session instead of the first dedup registration.
         t2 = media_service.register(
             conn, scope_id=scope_id, session_id="other", kind="image",
             source="agent_reply", local_path=str(shot),
         )
-        assert t2 == t1
+        assert t2 != t1
         # Content change (new size + mtime) → fresh token, busting the cache.
         shot.write_bytes(b"abcdef-changed")
         t3 = media_service.register(
@@ -273,7 +292,7 @@ def test_register_dedups_same_fingerprint(tmp_path):
 
     with engine.connect() as conn:
         rows = conn.execute(select(media_objects)).mappings().all()
-    assert len(rows) == 2  # original (reused once) + the changed file
+    assert len(rows) == 3  # two authorization scopes + changed content
 
 
 def test_register_reads_image_dimensions(tmp_path):
