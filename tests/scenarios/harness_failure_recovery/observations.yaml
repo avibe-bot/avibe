@@ -108,3 +108,28 @@ observations:
       owners lost within a live process, and any staged running fixture must
       be written after the service is constructed or recovery flips it to
       queued first.
+  - id: HFR-OBS-012
+    date: 2026-07-25
+    source: review of _drain_requests capacity break against the sweep's evidence read
+    result: confirmed
+    detail: >-
+      The drain breaks at _MAX_CONCURRENT_EXECUTIONS without examining the
+      remaining queue, so rows below the cut keep whatever skip reason they
+      last carried. A transport_unavailable stamp therefore survives long
+      after the platform reconnected, and sweeping on the stamp alone would
+      fail a Run that is merely waiting for a free slot. The transport class
+      needs a live second opinion (deliverable_run_ids) in addition to the
+      recorded reason, and must disable itself when that opinion is
+      unavailable.
+  - id: HFR-OBS-013
+    date: 2026-07-25
+    source: review of the stop-versus-terminal-result ordering in _stream_chunk
+    result: confirmed
+    detail: >-
+      An acknowledged stop stamps settled_by in memory and releases the waiter
+      immediately, while the Run row is only written later when
+      _execute_agent_run reads the stamp back. A terminal result arriving in
+      that window overwrote the reason, so the guarded canceled settlement was
+      skipped and the outcome depended on which coroutine resumed first. The
+      reason the user was already shown must win; the row's terminal status
+      stays first-writer-wins.

@@ -26,7 +26,7 @@ from core.message_mirror import (
 )
 from core.message_output import MessageOutput, output_for_message
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.session_turns import emit_matches_active_turn
 from storage.background import SQLiteBackgroundTaskStore
 from vibe.i18n import t as i18n_t
@@ -121,8 +121,19 @@ async def _stream_chunk(
         # Record WHY the waiter is being released, before releasing it. This is the
         # honest settlement: a real terminal result arrived, so ``dispatch_turn``
         # must leave the run's terminal state to the out-of-band writer. The
-        # fallback releasers use ``setdefault``, so this value always wins.
-        sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
+        # fallback releasers use ``setdefault``, so this value always wins over them.
+        #
+        # An acknowledged Stop is NOT one of those fallbacks and must not be
+        # overwritten (Codex P2). ``settle_bound_turn_sink`` bails out when ``done`` is
+        # already set, so reaching here with ``stopped`` recorded means the user's stop
+        # won the race and was already reported to them; replacing the reason would
+        # make ``_execute_agent_run`` skip the guarded ``canceled`` settlement and let
+        # the outcome depend on which coroutine happened to resume first. The run's
+        # terminal STATUS is still first-writer-wins in the store, so a result whose row
+        # write already landed keeps its ``succeeded`` — this only stops the reason from
+        # silently disagreeing with what the user was told.
+        if sink.get("settled_by") != SETTLED_BY_STOPPED:
+            sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:
             done.set()

@@ -1778,6 +1778,7 @@ class SQLiteBackgroundTaskStore:
         *,
         owned_run_ids: set[str],
         error_texts: dict[str, str],
+        deliverable_run_ids: Optional[set[str]] = None,
         now: Optional[str] = None,
         orphan_grace_seconds: int = 0,
         queued_ttl_seconds: int = 0,
@@ -1792,9 +1793,10 @@ class SQLiteBackgroundTaskStore:
           ``orphan_grace_seconds``. The grace period is what keeps a run that is
           legitimately starting up from being swept.
         - ``transport_unavailable``: a ``queued`` run whose recorded skip reason says
-          its transport is down, older than ``queued_ttl_seconds``. The reason is read
-          off the row, never re-derived, so a run deferred for capacity or a session
-          lock — both of which are progress — is never swept.
+          its transport is down, older than ``queued_ttl_seconds``, AND which the
+          caller still cannot deliver. The reason is read off the row, never
+          re-derived, so a run deferred for capacity or a session lock — both of which
+          are progress — is never swept.
         - ``queue_hold_expired``: a ``queued`` run holding a workbench queue slot that
           has not been touched in ``hold_ttl_seconds``.
 
@@ -1802,6 +1804,13 @@ class SQLiteBackgroundTaskStore:
         responsible for failing closed (passing "everything is owned", or not calling
         at all) when it cannot enumerate owners. This method cannot tell an empty set
         meaning "nothing is running" from one meaning "I could not look".
+
+        ``deliverable_run_ids`` is the same contract for the transport class, and it is
+        why the recorded reason alone is not enough. The drain stops at its concurrency
+        cap, so rows below the cut are never re-examined and keep an old
+        ``transport_unavailable`` stamp long after their platform reconnected. Without a
+        live second opinion the sweep would fail a run that is merely waiting for a free
+        slot. Every id listed here is exempt.
 
         Candidate selection is read-only; each row is then terminalized through
         :meth:`settle_run_terminal`, so every write inherits the same guards — scoped
@@ -1862,8 +1871,13 @@ class SQLiteBackgroundTaskStore:
                     row["updated_at"], hold_ttl_seconds
                 ):
                     reason = SWEEP_REASON_QUEUE_HOLD_EXPIRED
-                elif metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE and _older_than(
-                    row["created_at"], queued_ttl_seconds
+                elif (
+                    metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE
+                    # Two independent facts, both required: the drain recorded that this
+                    # row's platform was down, AND the caller still cannot deliver it.
+                    # The stamp alone goes stale below the drain's concurrency cap.
+                    and run_id not in (deliverable_run_ids or set())
+                    and _older_than(row["created_at"], queued_ttl_seconds)
                 ):
                     reason = SWEEP_REASON_TRANSPORT_UNAVAILABLE
             if reason is not None:

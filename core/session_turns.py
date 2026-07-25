@@ -1898,11 +1898,15 @@ class SessionTurnManager:
         timing luck. A terminal that lands *before* this call finds ``done`` already
         set and we bail out, leaving ``settled_by="terminal_result"`` so the run
         settles from its true result. A terminal that lands *after* the stop was
-        acknowledged loses to the ``canceled`` settlement
-        (``SETTLEMENT_TERMINAL_STATUS``), because both writers are scoped to
-        ``queued|running``. That is deliberate: for a run the user explicitly
-        stopped, ``canceled`` is true either way, and the late result's text is
-        still recorded in the run's outputs.
+        acknowledged cannot take the reason back — the dispatcher refuses to overwrite
+        a recorded ``stopped`` — so this run is always settled through the ``canceled``
+        mapping (``SETTLEMENT_TERMINAL_STATUS``). Whether ``canceled`` reaches the row
+        is then ordinary first-writer-wins: both writers are scoped to
+        ``queued|running``, so if the result's own row write got there first the run
+        keeps ``succeeded``. That is deliberate rather than lossy — the backend really
+        did finish, its text is recorded in the run's outputs either way, and forcing
+        ``canceled`` over an existing terminal status would mean breaking the single
+        guarantee every other settlement path relies on.
         """
         if not isinstance(binding, dict):
             return False

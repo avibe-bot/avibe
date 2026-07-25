@@ -257,7 +257,12 @@ timeout is explicitly out of this design):
   run settles from its true result. This is the common case and it is now pinned by
   `test_stop_defers_to_a_terminal_result_that_already_landed`.
 - **Terminal lands after the stop was acknowledged** — the `canceled` settlement wins
-  and `record_run_output`'s terminal write becomes a no-op. That is deliberate:
+  and `record_run_output`'s terminal write becomes a no-op, *provided the stop's row
+  write got there first*. (**Corrected by §5.3 P2**: this bullet originally read as a
+  guarantee, but the stop's row write happens later than its in-memory stamp, and a
+  result arriving in between used to overwrite the reason and skip the `canceled`
+  settlement entirely. The reason is now protected; whether `canceled` reaches the row
+  remains first-writer-wins.) The precedence on the reason is deliberate:
   `canceled` is true of a run the user stopped regardless of what the backend was
   about to say, and the late text is still appended to the run's outputs
   (`record_run_output` returns `recorded=True, terminal_transition=False`). Pinned by
@@ -328,7 +333,10 @@ Notes:
   `_drain_requests` stamp `metadata.last_skip_reason` (+ a coarse `last_skip_at`) on the
   skip branches (`:2023`, `:2026`, capacity `:2017`), so the sweep never guesses and
   the row itself explains why it sat. A row skipped only for capacity or a session lock
-  is **never** swept — it is making progress.
+  is **never** swept — it is making progress. (**Superseded in part by §5.3 P1**: the
+  recorded reason is necessary but not sufficient, because the drain stops at its
+  concurrency cap and stops refreshing the stamp. A live deliverability check is now
+  required alongside it.)
 
   **Reviewer's blocking item 4 — this stamp must not self-trigger the drain.**
   `_watch_store`'s gate is `maybe_reload()` → `SqliteInvalidationProbe.has_external_write()`
@@ -566,6 +574,9 @@ Mutation evidence — 12 of 13 targeted mutations killed, each reverted afterwar
 | M10 no sweep rate limit | KILLED |
 | M11 drop one `watch_runtime`/deferred guard | **SURVIVED** — both classes are guarded twice; M11c (remove the SELECT filter *and* the `agent_run` restriction) KILLS. Documented rather than forced. |
 | M12 no orphan grace | KILLED |
+| M14 transport class ignores `deliverable_run_ids` (review round 1) | KILLED |
+| M15 result overwrites a recorded `stopped` (review round 1) | KILLED |
+| M16 unknown deliverability does not disable the class (review round 1) | KILLED |
 
 Deviations from §4 as written, all deliberate: (1) `record_run_skip_reason` writes only
 on reason *change*, with no `last_skip_at` bucketing — a transition-only stamp already
@@ -589,6 +600,40 @@ it is not caused here. Cause: the legacy file store's `_path_signature` relies o
 directory `st_mtime_ns`, which the kernel's coarse timestamp clock can report identically
 for two writes in the same jiffy. Fix candidate for a separate PR: fold the sorted
 directory entry names into the signature instead of trusting mtime alone.
+
+### 5.3 Review round 1 (avibe-bot/avibe#1005) — two real defects
+
+Both findings were reproduced against the code before being fixed, and each fix is
+pinned by a test that fails when the fix is reverted.
+
+**P1 — stale transport evidence could fail a deliverable run (HFR-021, HFR-022).**
+§4.2 said the recorded skip reason is read off the row and never re-derived, so a
+transport that came back cannot erase the fact that a run missed it. That reasoning only
+holds for rows the drain still visits. The drain `break`s at
+`_MAX_CONCURRENT_EXECUTIONS` without examining the remaining queue (deviation 3's own
+premise), so a row below the cut keeps a `transport_unavailable` stamp indefinitely —
+including long after its platform reconnected — and would be failed for a transport
+outage that is over. The evidence now has two independent halves, both required: the
+recorded reason **and** a live `deliverable_run_ids` set, computed per sweep from
+`request_store.list_pending()` × `_transport_ready_for_request`. Any queued run whose
+transport answers ready is exempt, so a run waiting only for a free slot is never swept.
+If that live half cannot be computed the class disables itself for the tick
+(`queued_ttl_seconds = 0`) — the same fail-closed posture as unknown ownership, since an
+unprovable claim must not terminalize a run. The other two classes keep working.
+
+**P2 — a terminal result could overwrite an acknowledged stop's reason (HFR-023).**
+§3.5 claimed the stop/result precedence was settled by both writers being scoped to
+`queued|running`. It was not, one layer up: the stop stamps `settled_by="stopped"` in
+memory and releases the waiter immediately, while the row is written later when
+`_execute_agent_run` reads the stamp back. A terminal result arriving inside that window
+overwrote the reason unconditionally, so the guarded `canceled` settlement was skipped
+and the recorded outcome depended on which coroutine resumed first — while the user had
+already been told the run was stopped. `_stream_chunk` now refuses to overwrite a
+recorded `stopped`. Deliberately *not* fixed by widening the guarded writer to override
+an existing terminal status: that would break the one guarantee every settlement path
+relies on. Whether `canceled` reaches the row therefore stays ordinary
+first-writer-wins, and `settle_bound_turn_sink`'s docstring now says so instead of
+claiming a precedence the code does not provide.
 
 ## 6. Staging
 

@@ -1196,6 +1196,7 @@ class TaskExecutionStore:
         *,
         owned_run_ids: set[str],
         error_texts: dict[str, str],
+        deliverable_run_ids: Optional[set[str]] = None,
         orphan_grace_seconds: int,
         queued_ttl_seconds: int,
         hold_ttl_seconds: int,
@@ -1207,6 +1208,7 @@ class TaskExecutionStore:
         return self._sqlite.sweep_stale_runs(
             owned_run_ids=owned_run_ids,
             error_texts=error_texts,
+            deliverable_run_ids=deliverable_run_ids,
             orphan_grace_seconds=orphan_grace_seconds,
             queued_ttl_seconds=queued_ttl_seconds,
             hold_ttl_seconds=hold_ttl_seconds,
@@ -2070,6 +2072,23 @@ class ScheduledTaskService:
         owned |= {str(run_id) for run_id in provider() if run_id}
         return owned
 
+    def _deliverable_queued_run_ids(self) -> set[str]:
+        """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.
+
+        The drain records ``transport_unavailable`` when it defers a run, but it
+        ``break``s at ``_MAX_CONCURRENT_EXECUTIONS`` without examining the rows below
+        the cut — so their stamp is never refreshed and stays true-at-the-time long
+        after the platform reconnected. This is the live half of that evidence: a run
+        listed here is deliverable and is only queued for capacity, so the sweep must
+        leave it alone (Codex P1).
+        """
+
+        return {
+            pending.id
+            for pending in self.request_store.list_pending()
+            if self._transport_ready_for_request(pending)
+        }
+
     def _release_leaked_session_locks(self) -> set[str]:
         """Drop per-session locks whose owning execution no longer exists.
 
@@ -2137,15 +2156,28 @@ class ScheduledTaskService:
                 logger.debug("Skipping stale-run sweep: run ownership is unknown", exc_info=True)
             return
         self._sweep_ownership_unavailable_logged = False
+        queued_ttl_seconds = self._runtime_seconds(
+            "harness_run_queued_ttl_seconds", DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
+        )
+        try:
+            deliverable_run_ids = self._deliverable_queued_run_ids()
+        except Exception:
+            # Same fail-closed posture as ownership, expressed as "disable the class":
+            # a recorded transport reason is only half the evidence, and without the
+            # live half a deliverable run could be failed for a transport that is back.
+            logger.warning(
+                "Skipping transport-stale sweep: queue deliverability is unknown", exc_info=True
+            )
+            deliverable_run_ids = set()
+            queued_ttl_seconds = 0
         swept = self.request_store.sweep_stale_runs(
             owned_run_ids=owned_run_ids,
+            deliverable_run_ids=deliverable_run_ids,
             error_texts={reason: self._t(key) for reason, key in SWEEP_I18N_KEYS.items()},
             orphan_grace_seconds=self._runtime_seconds(
                 "harness_run_orphan_grace_seconds", DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
             ),
-            queued_ttl_seconds=self._runtime_seconds(
-                "harness_run_queued_ttl_seconds", DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
-            ),
+            queued_ttl_seconds=queued_ttl_seconds,
             hold_ttl_seconds=self._runtime_seconds(
                 "harness_run_hold_ttl_seconds", DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
             ),

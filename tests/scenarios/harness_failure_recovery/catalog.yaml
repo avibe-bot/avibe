@@ -6,6 +6,7 @@ capability:
     - tests/test_agent_backend_alive.py
     - tests/test_agent_service.py
     - tests/test_scheduled_tasks.py
+    - tests/test_dispatcher_stream_chunk.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -151,6 +152,27 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_stranded_queued_run_does_not_trigger_repeated_metadata_writes
+  - id: HFR-021
+    name: stale transport evidence never fails a run that is deliverable now
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_a_stale_transport_stamp_once_the_platform_is_back
+  - id: HFR-022
+    name: unknown queue deliverability disables the transport class
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_transport_class_when_deliverability_is_unknown
+  - id: HFR-023
+    name: terminal result cannot overwrite an acknowledged stop's settlement reason
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_dispatcher_stream_chunk.py::test_result_does_not_overwrite_an_acknowledged_stop_stamp
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

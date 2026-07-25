@@ -2869,9 +2869,9 @@ def test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport(
 ) -> None:
     """HFR-016: a queued run whose platform never reconnected is undeliverable, not pending.
 
-    Left alone it waits forever with no user-visible explanation. The evidence is the
-    reason the drain recorded — never re-derived here, because a transport that came
-    back after the row went stale must not erase the fact that this run missed it.
+    Left alone it waits forever with no user-visible explanation. Two independent facts
+    have to agree before it is failed: the reason the drain recorded, and a live check
+    saying the platform is *still* undeliverable. Here both hold.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2881,7 +2881,9 @@ def test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport(
         metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(1900)},
         created_age_seconds=1900,
     )
-    service = _sweep_service(tmp_path, request_store)
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(transport_ready=False)
+    )
 
     service._sweep_stale_runs()
 
@@ -2889,6 +2891,73 @@ def test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport(
     assert swept["status"] == "failed"
     assert swept["metadata"]["interrupt_reason"] == "transport_unavailable"
     assert "Avibe Harness" in swept["error"]
+
+
+def test_sweep_spares_a_stale_transport_stamp_once_the_platform_is_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-021: the recorded reason alone must not fail a run that is deliverable now.
+
+    The drain ``break``s at its concurrency cap without examining the rest of the
+    queue, so a row below the cut keeps its old ``transport_unavailable`` stamp long
+    after its platform reconnected — nothing re-derives it. Sweeping on the stamp
+    alone would fail a run that is merely waiting for a free slot (Codex P1). The live
+    second opinion is what distinguishes the two.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(1900)},
+        created_age_seconds=1900,
+    )
+    # transport_ready=True: Slack is back. The drain cannot say so, because it is at
+    # capacity and never reaches this row to refresh the stamp.
+    service = _sweep_service(tmp_path, request_store)
+    for index in range(service._MAX_CONCURRENT_EXECUTIONS):
+        service._inflight_executions[f"busy{index:08d}"] = Mock(name="live-execution-task")
+
+    asyncio.run(service._drain_requests())
+    assert (
+        request_store.get_run(run_id)["metadata"]["last_skip_reason"] == "transport_unavailable"
+    ), "the stale stamp survives, which is exactly why the sweep needs a second opinion"
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued"
+
+
+def test_sweep_skips_transport_class_when_deliverability_is_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-022: if the live deliverability check breaks, the whole class is disabled.
+
+    Same fail-closed posture as unknown ownership: a sweep that cannot prove a run is
+    undeliverable must not fail it. The other classes keep working — only the transport
+    class is suppressed for this tick.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(1900)},
+        created_age_seconds=1900,
+    )
+    controller = _SweepControllerDouble(transport_ready=False)
+    service = _sweep_service(tmp_path, request_store, controller)
+    orphan_id = _stage_orphan_run(request_store)
+
+    def _broken(_platform: str) -> bool:
+        raise RuntimeError("transport registry unavailable")
+
+    controller.is_im_transport_ready = _broken
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued", "unprovable => untouched"
+    assert request_store.get_run(orphan_id)["status"] == "failed", "other classes still sweep"
 
 
 def test_sweep_leaves_a_queued_run_whose_session_is_merely_busy(
