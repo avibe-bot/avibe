@@ -236,6 +236,178 @@ def test_im_adapters_normalize_native_ordinary_text_facts() -> None:
     assert is_ordinary_wechat_text({"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]}, None) is False
 
 
+def _slack_dm_event(**overrides) -> dict:
+    """Return a real-shaped Slack ``message`` event for a DM typed in a client.
+
+    Modern Slack clients always attach the composer's ``rich_text`` block, so a
+    payload without ``blocks`` does not represent what production delivers.
+    """
+
+    event = {
+        "client_msg_id": "3d0a24a2-1c1a-4b6f-9f43-8f9d0d9a1111",
+        "type": "message",
+        "text": "ship the memory fix today",
+        "user": "U04ABCDEF",
+        "ts": "1753420800.123456",
+        "team": "T04ABCDEF",
+        "channel": "D04ABCDEF",
+        "channel_type": "im",
+        "event_ts": "1753420800.123456",
+        "blocks": [
+            {
+                "type": "rich_text",
+                "block_id": "Xq2",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "ship the memory fix today"}],
+                    }
+                ],
+            }
+        ],
+    }
+    event.update(overrides)
+    return event
+
+
+def test_slack_composer_rich_text_dm_is_ordinary_human_text() -> None:
+    assert is_ordinary_slack_text(_slack_dm_event(), None) is True
+
+    # Mentions, links, emoji, styled runs, lists, quotes, and code blocks are all
+    # plain composer output for a human-typed DM.
+    decorated = _slack_dm_event(
+        text="<@U04TEAMMATE> see <https://example.com|docs> :tada:",
+        blocks=[
+            {
+                "type": "rich_text",
+                "block_id": "d1F",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {"type": "user", "user_id": "U04TEAMMATE"},
+                            {"type": "text", "text": " see "},
+                            {"type": "link", "url": "https://example.com", "text": "docs"},
+                            {"type": "text", "text": " now", "style": {"bold": True}},
+                            {"type": "emoji", "name": "tada", "unicode": "1f389"},
+                        ],
+                    },
+                    {
+                        "type": "rich_text_list",
+                        "style": "bullet",
+                        "indent": 0,
+                        "elements": [
+                            {
+                                "type": "rich_text_section",
+                                "elements": [{"type": "text", "text": "first"}],
+                            }
+                        ],
+                    },
+                    {
+                        "type": "rich_text_quote",
+                        "elements": [{"type": "text", "text": "quoted line"}],
+                    },
+                    {
+                        "type": "rich_text_preformatted",
+                        "elements": [{"type": "text", "text": "uv run pytest"}],
+                    },
+                ],
+            }
+        ],
+    )
+    assert is_ordinary_slack_text(decorated, None) is True
+
+
+def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
+    # Image upload in a DM: Slack sends ``file_share`` with a files array.
+    upload = _slack_dm_event(
+        subtype="file_share",
+        text="look at this",
+        upload=False,
+        display_as_bot=False,
+        files=[
+            {
+                "id": "F04FILEID",
+                "name": "screenshot.png",
+                "mimetype": "image/png",
+                "filetype": "png",
+                "url_private_download": "https://files.slack.com/files-pri/T04-F04/screenshot.png",
+            }
+        ],
+    )
+    assert is_ordinary_slack_text(upload, None) is False
+
+    # Forwarded / shared message: composer rich text PLUS a share attachment.
+    forwarded = _slack_dm_event(
+        text="fyi",
+        attachments=[
+            {
+                "id": 1,
+                "is_share": True,
+                "author_name": "Teammate",
+                "channel_id": "C04SOURCE",
+                "ts": "1753410000.000100",
+                "text": "the original message",
+            }
+        ],
+    )
+    assert is_ordinary_slack_text(forwarded, None) is False
+
+    # App-authored layout blocks are not composer output, even without ``bot_id``.
+    app_blocks = _slack_dm_event(
+        text="Deployment finished",
+        blocks=[
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Deployment finished"}},
+            {"type": "image", "image_url": "https://example.com/chart.png", "alt_text": "chart"},
+        ],
+    )
+    assert is_ordinary_slack_text(app_blocks, None) is False
+
+    # An unrecognized node inside rich text fails closed.
+    unknown_element = _slack_dm_event(
+        blocks=[
+            {
+                "type": "rich_text",
+                "block_id": "u1",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {"type": "text", "text": "see "},
+                            {"type": "image", "image_url": "https://example.com/inline.png"},
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+    assert is_ordinary_slack_text(unknown_element, None) is False
+
+    # Edits and bot/self events stay excluded regardless of block content.
+    assert is_ordinary_slack_text(_slack_dm_event(subtype="message_changed"), None) is False
+    assert (
+        is_ordinary_slack_text(
+            _slack_dm_event(edited={"user": "U04ABCDEF", "ts": "1753420900.000000"}),
+            None,
+        )
+        is False
+    )
+    assert is_ordinary_slack_text(_slack_dm_event(bot_id="B04BOTID"), None) is False
+    assert (
+        is_ordinary_slack_text(
+            _slack_dm_event(),
+            [
+                FileAttachment(
+                    name="notes.txt",
+                    mimetype="text/plain",
+                    url="https://files.slack.com/notes.txt",
+                )
+            ],
+        )
+        is False
+    )
+
+
 def test_slack_manifest_has_no_native_memory_command() -> None:
     manifest_path = Path(__file__).resolve().parents[1] / "vibe" / "templates" / "slack_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

@@ -7,6 +7,75 @@ from typing import Any, Optional
 from .base import FileAttachment
 
 
+# Slack's WYSIWYG composer emits a ``rich_text`` block for every message a human
+# sends from a modern client, so the mere presence of ``blocks`` carries no
+# signal about whether the event is ordinary text. Classification therefore
+# inspects block CONTENT: only composer-shaped rich text is ordinary, and any
+# other or unrecognized shape (app-authored layout blocks, media, interactive
+# elements, future element types) fails closed.
+_SLACK_RICH_TEXT_CONTAINERS = frozenset(
+    {
+        "rich_text_section",
+        "rich_text_list",
+        "rich_text_quote",
+        "rich_text_preformatted",
+    }
+)
+_SLACK_RICH_TEXT_LEAVES = frozenset(
+    {
+        "text",
+        "link",
+        "emoji",
+        "user",
+        "usergroup",
+        "channel",
+        "team",
+        "date",
+        "broadcast",
+        "color",
+    }
+)
+
+
+def _is_composer_rich_text_element(element: Any) -> bool:
+    """Return True when one rich-text node is plain composer output."""
+
+    if not isinstance(element, dict):
+        return False
+    element_type = element.get("type")
+    if element_type in _SLACK_RICH_TEXT_LEAVES:
+        return True
+    if element_type not in _SLACK_RICH_TEXT_CONTAINERS:
+        return False
+    children = element.get("elements")
+    if not isinstance(children, list):
+        return False
+    return all(_is_composer_rich_text_element(child) for child in children)
+
+
+def is_plain_slack_composer_blocks(blocks: Any) -> bool:
+    """Return True when ``blocks`` only contains text a human could have typed.
+
+    An absent or empty array is the pre-Block-Kit client shape and stays
+    ordinary. Anything else must be exclusively ``rich_text`` blocks whose
+    nested elements are all recognized text nodes.
+    """
+
+    if not blocks:
+        return True
+    if not isinstance(blocks, list):
+        return False
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != "rich_text":
+            return False
+        elements = block.get("elements")
+        if not isinstance(elements, list):
+            return False
+        if not all(_is_composer_rich_text_element(element) for element in elements):
+            return False
+    return True
+
+
 def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
     subtype = event.get("subtype")
     return not any(
@@ -16,7 +85,9 @@ def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttac
             event.get("attachments"),
             event.get("edited"),
             event.get("bot_id"),
-            event.get("blocks"),
+            not is_plain_slack_composer_blocks(event.get("blocks")),
+            # Not a documented Slack message field. Retained as a fail-closed
+            # catch-all for any payload carrying rich text outside ``blocks``.
             event.get("rich_text"),
             event.get("forwarded"),
             event.get("is_system"),
