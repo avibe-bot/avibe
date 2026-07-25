@@ -124,6 +124,21 @@ def test_always_session_only_names_are_a_subset_of_the_policy():
     assert "Bash" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
 
 
+def test_name_only_fallback_never_strands_a_running_loop():
+    # `ScheduleWakeup {"stop": true}` is the only way to end a dynamic loop.
+    # A name-level block cannot see the argument, so listing the tool there
+    # would make an already-running loop unstoppable on older SDKs.
+    assert "ScheduleWakeup" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+    assert policy.check_tool_call("ScheduleWakeup", {"stop": True}, env={}).allowed
+
+
+@pytest.mark.parametrize("name", policy.ALWAYS_SESSION_ONLY_TOOL_NAMES)
+def test_name_only_fallback_entries_are_denied_under_every_input(name):
+    # A name-level block is faithful only if no input to that tool is allowed.
+    for tool_input in ({}, {"stop": True}, {"durable": True}, {"run_in_background": False}):
+        assert policy.check_tool_call(name, tool_input, env={}).denied
+
+
 # --------------------------------------------------------------------------
 # injected prompt
 # --------------------------------------------------------------------------
@@ -131,15 +146,37 @@ def test_always_session_only_names_are_a_subset_of_the_policy():
 
 def test_prompt_describes_enforcement_when_the_policy_is_active(monkeypatch):
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
     section = spi._build_tool_policy_section()
     assert "is blocked at the tool layer" in section
     assert "are all denied" in section
+
+
+def test_prompt_admits_partial_enforcement_without_argument_aware_hooks(monkeypatch):
+    # The name-only fallback cannot inspect arguments, so it blocks Workflow and
+    # nothing else. Claiming full denial would stop the agent from self-policing
+    # exactly the calls no gate is covering.
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    section = spi._build_tool_policy_section()
+    assert "only partly blocked" in section
+    assert "A native multi-agent workflow is denied outright" in section
+    assert "are **not** stopped here" in section
+    assert "is blocked at the tool layer" not in section
+    assert "are all denied" not in section
+
+
+def test_escape_hatch_outranks_hook_availability(monkeypatch):
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    assert "is not blocked in this runtime" in spi._build_tool_policy_section()
 
 
 def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
     # Enforcement is off here, so telling the agent these tools are denied
     # would stop it from using what the operator deliberately re-enabled.
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
     section = spi._build_tool_policy_section()
     assert "is not blocked in this runtime" in section
     assert "blocked at the tool layer" not in section
@@ -151,6 +188,7 @@ def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
 
 def test_prompt_section_is_read_per_turn_not_at_import(monkeypatch):
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
     before = spi._build_tool_policy_section()
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
     assert spi._build_tool_policy_section() != before

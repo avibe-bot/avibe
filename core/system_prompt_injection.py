@@ -15,6 +15,7 @@ from core.agent_tool_policy import native_background_tools_allowed
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
 from core.show_git import format_agent_contract
+from modules.claude_sdk_compat import CLAUDE_SDK_HOOKS_AVAILABLE
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,15 @@ _TOOL_POLICY_ENFORCED_SECTION = """\
 Backend-native background work is blocked at the tool layer, because its result is delivered only while this agent process is alive and is lost without warning otherwise. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, and a native multi-agent workflow are all denied, and the denial names the `vibe` command to run instead. A synchronous subagent that returns inside the current turn is still available, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
 
 A background shell is session-only for the same reason but is not blocked, because most of them finish inside the turn. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
+
+# No argument-aware hook here, so only whole tool names can be refused. Saying
+# "all denied" would be wrong in both directions: it overstates what stops
+# `Agent` and `CronCreate`, and it hides that those two now need the agent's own
+# judgement rather than a gate.
+_TOOL_POLICY_NAME_ONLY_SECTION = """\
+Backend-native background work is only partly blocked in this runtime: the installed agent SDK predates argument-aware tool hooks, so enforcement can refuse whole tool names but cannot inspect a call's arguments. A native multi-agent workflow is denied outright. A background subagent and a non-durable in-session cron job are **not** stopped here — they will run if you call them, and their results are delivered only while this agent process is alive, so anything still pending when the session ends is lost without warning and leaves no record. Treat those two as your responsibility rather than the runtime's: use `vibe agent run`, `vibe task add`, and `vibe watch add` for work whose result must reach the user, and call a backend-native primitive only when the work resolves inside this turn. A synchronous subagent is the right tool for that, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
+
+A background shell is session-only for the same reason and is likewise not blocked. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
 
 # Enforcement is off, so the prompt must not claim these calls are blocked; an
 # agent told a tool is denied will not attempt what the operator re-enabled.
@@ -469,11 +479,19 @@ def _build_session_start_prompt(context: MessageContext) -> str:
 def _build_tool_policy_section() -> str:
     """Describe backend-native background tools as the runtime actually treats them.
 
+    Three runtimes, three contracts: the escape hatch disables enforcement
+    entirely, an SDK without argument-aware hooks can only refuse whole tool
+    names, and a current SDK enforces the full policy. Announcing more
+    enforcement than exists is the dangerous direction — the agent stops
+    self-policing the calls it believes a gate already covers.
+
     Read at prompt-build time rather than import time so a change to the escape
     hatch takes effect on the next turn instead of requiring a restart.
     """
     if native_background_tools_allowed():
         return _TOOL_POLICY_RELAXED_SECTION
+    if not CLAUDE_SDK_HOOKS_AVAILABLE:
+        return _TOOL_POLICY_NAME_ONLY_SECTION
     return _TOOL_POLICY_ENFORCED_SECTION
 
 

@@ -360,6 +360,9 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
             patch("core.show_git.show_git_checkpointing_active", return_value=True),
+            # The tool-policy paragraphs vary with SDK hook support, so pin it
+            # rather than let the installed SDK decide what this test asserts.
+            patch("core.system_prompt_injection.CLAUDE_SDK_HOOKS_AVAILABLE", True),
         ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,

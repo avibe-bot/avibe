@@ -171,10 +171,15 @@ _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyD
 }
 
 # Tools that are session-only under every input, so a name-level deny list is a
-# faithful backstop for them. `Agent` and `CronCreate` are excluded because they
-# have legitimate non-background forms that only argument inspection can tell
-# apart, and `Bash` because this policy never denies it.
-ALWAYS_SESSION_ONLY_TOOL_NAMES: Tuple[str, ...] = ("ScheduleWakeup", "Workflow")
+# faithful backstop for them. Everything else is excluded because it has a
+# legitimate non-background form that only argument inspection can tell apart:
+# `Agent` with an explicit false, `CronCreate` with durable, and
+# `ScheduleWakeup` with stop — blocking that last one by name would strand an
+# already-running loop with no way to end it. `Bash` is excluded because this
+# policy never denies it. On a backend without argument-aware enforcement those
+# calls go unchecked; that is the honest cost of a name-only backstop, and the
+# injected prompt says so rather than claiming a gate that is not there.
+ALWAYS_SESSION_ONLY_TOOL_NAMES: Tuple[str, ...] = ("Workflow",)
 
 
 def session_only_background_tool_names() -> Tuple[str, ...]:
