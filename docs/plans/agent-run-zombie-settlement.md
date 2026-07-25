@@ -635,6 +635,29 @@ relies on. Whether `canceled` reaches the row therefore stays ordinary
 first-writer-wins, and `settle_bound_turn_sink`'s docstring now says so instead of
 claiming a precedence the code does not provide.
 
+### 5.4 Review round 2 (avibe-bot/avibe#1005) — the TTL was measured from the wrong clock
+
+**P1 — `queued_ttl` aged from `created_at` instead of from the outage (HFR-024, HFR-025).**
+Round 1 fixed *which* rows the transport class may consider; this is *when* it may act.
+A run can sit in `queued` far longer than the TTL for reasons that are progress —
+capacity, a busy session. Aging from `created_at` meant that as soon as such a run's
+transport blinked, the row satisfied the TTL immediately and was failed on the next
+tick, consuming none of the configured 30-minute reconnect window. The TTL is a
+reconnect window, so it now ages from `metadata.last_skip_at`. That timestamp is already
+exactly right for the job: `record_run_skip_reason` is transition-triggered (deviation 1),
+so `last_skip_at` means "when this reason started", not "when we last looked".
+
+A reason with no parseable timestamp is treated as unrecognized evidence and never
+swept — `_older_than` already fails closed on an undateable value, and the reason and
+timestamp are written in one statement, so one without the other did not come from that
+writer. A `created_at` fallback was considered and rejected: it would silently
+reintroduce this exact bug for those rows, which is what HFR-025 now pins.
+
+| Mutation | Verdict |
+| --- | --- |
+| M17 fall back to `created_at` when `last_skip_at` is absent | KILLED (HFR-025) |
+| M18 age from `created_at` outright (the reported bug) | KILLED (HFR-024 + HFR-025) |
+
 ## 6. Staging
 
 - **PR-A (Gap A)** — §3.1–3.4. Small, no new config, no sweep. Independently

@@ -2928,6 +2928,63 @@ def test_sweep_spares_a_stale_transport_stamp_once_the_platform_is_back(
     assert request_store.get_run(run_id)["status"] == "queued"
 
 
+def test_sweep_ages_a_transport_failure_from_when_it_started(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-024: the TTL is a reconnect window, so it runs from the outage, not the enqueue.
+
+    A run can legitimately sit in ``queued`` far longer than the TTL for reasons that
+    are progress — capacity, a busy session. If its transport then blinks, aging from
+    ``created_at`` would make it sweepable on the very next tick and skip the entire
+    configured reconnect window. ``last_skip_at`` is when the reason started (the stamp
+    is transition-triggered), which is the only clock that means "how long has this been
+    undeliverable".
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        # Two hours in the queue, but the transport only just went down.
+        metadata={"last_skip_reason": "transport_unavailable", "last_skip_at": _ago(30)},
+        created_age_seconds=7200,
+    )
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(transport_ready=False)
+    )
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued"
+
+
+def test_sweep_never_terminalizes_a_transport_reason_with_no_timestamp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-025: a reason without its timestamp is unrecognized evidence, not old evidence.
+
+    ``record_run_skip_reason`` writes the reason and ``last_skip_at`` in one statement,
+    so a row carrying one without the other did not come from that writer. Falling back
+    to ``created_at`` there would quietly reintroduce the bug HFR-024 pins, so the row is
+    left alone instead.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    run_id = _stage_queued_run(
+        request_store,
+        metadata={"last_skip_reason": "transport_unavailable"},
+        created_age_seconds=7200,
+    )
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(transport_ready=False)
+    )
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(run_id)["status"] == "queued"
+
+
 def test_sweep_skips_transport_class_when_deliverability_is_unknown(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -133,3 +133,15 @@ observations:
       skipped and the outcome depended on which coroutine resumed first. The
       reason the user was already shown must win; the row's terminal status
       stays first-writer-wins.
+  - id: HFR-OBS-014
+    date: 2026-07-25
+    source: review of the transport TTL clock against a long-queued Run
+    result: confirmed
+    detail: >-
+      A Run can sit in queued far longer than the transport TTL for reasons that
+      are progress, such as capacity or a busy Session. Aging the transport class
+      from created_at therefore made such a Run sweepable on the first tick after
+      its transport blinked, consuming none of the configured reconnect window.
+      The TTL is a reconnect window, so it must be measured from last_skip_at,
+      the instant the transport reason started, which the transition-triggered
+      skip stamp already records.

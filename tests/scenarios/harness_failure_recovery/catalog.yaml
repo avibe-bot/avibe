@@ -173,6 +173,20 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_dispatcher_stream_chunk.py::test_result_does_not_overwrite_an_acknowledged_stop_stamp
+  - id: HFR-024
+    name: transport TTL is measured from the outage, not the enqueue
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_ages_a_transport_failure_from_when_it_started
+  - id: HFR-025
+    name: a transport reason with no timestamp is never acted on
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_never_terminalizes_a_transport_reason_with_no_timestamp
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

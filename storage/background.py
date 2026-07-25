@@ -1793,7 +1793,8 @@ class SQLiteBackgroundTaskStore:
           ``orphan_grace_seconds``. The grace period is what keeps a run that is
           legitimately starting up from being swept.
         - ``transport_unavailable``: a ``queued`` run whose recorded skip reason says
-          its transport is down, older than ``queued_ttl_seconds``, AND which the
+          its transport is down, whose ``last_skip_at`` (when that reason started, not
+          when the run was enqueued) is older than ``queued_ttl_seconds``, AND which the
           caller still cannot deliver. The reason is read off the row, never
           re-derived, so a run deferred for capacity or a session lock — both of which
           are progress — is never swept.
@@ -1877,7 +1878,16 @@ class SQLiteBackgroundTaskStore:
                     # row's platform was down, AND the caller still cannot deliver it.
                     # The stamp alone goes stale below the drain's concurrency cap.
                     and run_id not in (deliverable_run_ids or set())
-                    and _older_than(row["created_at"], queued_ttl_seconds)
+                    # Age from when the transport problem STARTED, not from when the
+                    # run was enqueued. ``record_run_skip_reason`` is
+                    # transition-triggered, so ``last_skip_at`` is exactly that instant.
+                    # Using ``created_at`` would make a run that had already been
+                    # queued past the TTL for a healthy reason (capacity, a busy
+                    # session) sweepable the moment its transport blinked, skipping the
+                    # whole configured reconnect window. Absent or unparseable => never
+                    # swept: the reason and its timestamp are written together, so a
+                    # reason without one is evidence this writer did not produce.
+                    and _older_than(metadata.get("last_skip_at"), queued_ttl_seconds)
                 ):
                     reason = SWEEP_REASON_TRANSPORT_UNAVAILABLE
             if reason is not None:
