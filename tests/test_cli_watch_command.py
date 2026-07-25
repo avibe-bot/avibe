@@ -901,6 +901,45 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
     assert payload["watches"][0]["state"] == "paused"
 
 
+def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_test_watch(store, name="Change mode", mode="forever")
+    store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
+    store.set_enabled(watch.id, False)
+    args = _parse_watch_update([watch.id, "--once"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        assert cli.cmd_watch_update(args) == 0
+
+    updated = store.get_watch(watch.id)
+    assert updated is not None
+    assert updated.mode == "once"
+    assert updated.last_started_at is None
+    assert updated.last_finished_at is None
+    assert updated.last_event_at is None
+    assert updated.last_exit_code is None
+    assert updated.last_error is None
+
+    capsys.readouterr()
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        assert cli.cmd_watch_list() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in payload["watches"]] == [watch.id]
+    assert payload["watches"][0]["state"] == "paused"
+
+
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")

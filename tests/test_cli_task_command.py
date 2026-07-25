@@ -1036,6 +1036,30 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
     assert entry["state"] == "active"
 
 
+def test_paused_recurring_task_keeps_failed_run_in_last_status(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        name="Paused after failure",
+        session_key="slack::channel::C123",
+        prompt="recurring",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    store.mark_task_result(task.id, error="delivery failed")
+    store.set_enabled(task.id, False)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        assert cli.cmd_task_list(brief=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tasks"][0]["state"] == "paused"
+    assert payload["tasks"][0]["last_status"] == "failed"
+
+
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
     store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     for index in range(25):

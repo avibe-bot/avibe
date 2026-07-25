@@ -1497,7 +1497,7 @@ def _task_display_name(task) -> str:
 def _task_state(task) -> str:
     if task.enabled:
         return "active"
-    if task.last_run_at and task.last_error:
+    if _is_failed_one_shot(task):
         return "failed"
     if _is_completed_one_shot(task):
         return "completed"
@@ -1631,6 +1631,15 @@ def _is_completed_one_shot(task) -> bool:
         and not task.enabled
         and bool(task.last_run_at)
         and not task.last_error
+    )
+
+
+def _is_failed_one_shot(task) -> bool:
+    return (
+        task.schedule_type == "at"
+        and not task.enabled
+        and bool(task.last_run_at)
+        and bool(task.last_error)
     )
 
 
