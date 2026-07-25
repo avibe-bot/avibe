@@ -292,7 +292,7 @@ export const InboxPage: React.FC = () => {
                     {t('workbench.inbox.openSession')}
                     <ArrowRight className="size-3" />
                   </button>
-                  {unread > 0 && (
+                  {capabilities.can_chat && unread > 0 && (
                     <button
                       type="button"
                       onClick={() => markRead(s.session_id)}

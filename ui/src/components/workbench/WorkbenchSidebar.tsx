@@ -74,6 +74,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession: Record<string, number>;
   unreadSessions: number;
   totalUnread: number;
+  canMarkRead: boolean;
   onItemClick: (session: InboxSession) => void;
   onMarkAllRead: () => void;
   onMouseEnter: () => void;
@@ -83,6 +84,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession,
   unreadSessions,
   totalUnread,
+  canMarkRead,
   onItemClick,
   onMarkAllRead,
   onMouseEnter,
@@ -116,19 +118,21 @@ const InboxHoverPopover: React.FC<{
             {t('workbench.inbox.headerCount', { unread: unreadSessions, total: sessions.length })}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onMarkAllRead}
-          disabled={totalUnread === 0}
-          className={clsx(
-            'rounded-md border px-2 py-1 text-[10px] font-medium transition',
-            totalUnread === 0
-              ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-              : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-          )}
-        >
-          {t('workbench.inbox.markAllRead')}
-        </button>
+        {canMarkRead && (
+          <button
+            type="button"
+            onClick={onMarkAllRead}
+            disabled={totalUnread === 0}
+            className={clsx(
+              'rounded-md border px-2 py-1 text-[10px] font-medium transition',
+              totalUnread === 0
+                ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
+                : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
+            )}
+          >
+            {t('workbench.inbox.markAllRead')}
+          </button>
+        )}
       </div>
 
       {shown.length === 0 ? (
@@ -895,6 +899,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           unreadBySession={unreadBySession}
           unreadSessions={unreadSessions}
           totalUnread={totalUnread}
+          canMarkRead={capabilities.can_chat}
           onItemClick={onItemClick}
           onMarkAllRead={onMarkAllRead}
           onMouseEnter={openPopover}
@@ -952,7 +957,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               row above to reclaim that space for the Projects list; ⌘K still
               works. Both are roomy 28px tap targets. */}
           <div className="flex items-center gap-0.5">
-            {capabilities.can_manage_projects && <Button
+            <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -961,17 +966,19 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               onClick={onOpenSearch}
             >
               <Search className="size-4" />
-            </Button>}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 text-muted hover:text-foreground"
-              aria-label={t('workbench.addProject')}
-              onClick={() => setShowNewProject(true)}
-            >
-              <FolderPlus className="size-4" />
             </Button>
+            {capabilities.can_manage_projects && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 text-muted hover:text-foreground"
+                aria-label={t('workbench.addProject')}
+                onClick={() => setShowNewProject(true)}
+              >
+                <FolderPlus className="size-4" />
+              </Button>
+            )}
           </div>
         </div>
 
