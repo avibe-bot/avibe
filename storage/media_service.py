@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
-from storage.models import media_objects
+from storage.models import media_object_references, media_objects
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,31 @@ def _utc_now_iso() -> str:
 def _new_token() -> str:
     # URL-safe, unguessable; the token IS the capability to fetch the file.
     return secrets.token_urlsafe(16)
+
+
+def _record_session_reference(
+    conn: Connection,
+    *,
+    token: str,
+    session_id: Optional[str],
+    created_at: Optional[str] = None,
+) -> None:
+    if not session_id:
+        return
+    conn.execute(
+        sqlite_insert(media_object_references)
+        .values(
+            token=token,
+            session_id=session_id,
+            created_at=created_at or _utc_now_iso(),
+        )
+        .on_conflict_do_nothing(
+            index_elements=[
+                media_object_references.c.token,
+                media_object_references.c.session_id,
+            ]
+        )
+    )
 
 
 def _probe_image_dimensions(
@@ -112,6 +138,11 @@ def register(
             )
         ).scalar()
         if existing:
+            _record_session_reference(
+                conn,
+                token=str(existing),
+                session_id=session_id,
+            )
             return existing
 
     # Read image dimensions only for a freshly-minted row (a dedup hit above
@@ -119,6 +150,7 @@ def register(
     width_px, height_px = _probe_image_dimensions(kind, ctype, str(local_path))
 
     token = _new_token()
+    created_at = _utc_now_iso()
     conn.execute(
         media_objects.insert().values(
             token=token,
@@ -135,10 +167,16 @@ def register(
             mtime_ns=mtime_ns,
             width_px=width_px,
             height_px=height_px,
-            created_at=_utc_now_iso(),
+            created_at=created_at,
             expires_at=None,
             revoked_at=None,
         )
+    )
+    _record_session_reference(
+        conn,
+        token=token,
+        session_id=session_id,
+        created_at=created_at,
     )
     return token
 
@@ -149,3 +187,34 @@ def get_by_token(conn: Connection, token: str) -> Optional[dict[str, Any]]:
         return None
     row = conn.execute(select(media_objects).where(media_objects.c.token == token)).mappings().first()
     return dict(row) if row else None
+
+
+def referenced_session_ids(conn: Connection, token: str) -> list[str]:
+    """Return sessions that contain a trusted reference to *token*."""
+
+    if not token:
+        return []
+    return [
+        str(session_id)
+        for session_id in conn.execute(
+            select(media_object_references.c.session_id)
+            .where(media_object_references.c.token == token)
+            .order_by(media_object_references.c.session_id)
+        ).scalars()
+    ]
+
+
+def is_referenced_by_session(conn: Connection, token: str, session_id: str) -> bool:
+    if not token or not session_id:
+        return False
+    return (
+        conn.execute(
+            select(media_object_references.c.token)
+            .where(
+                media_object_references.c.token == token,
+                media_object_references.c.session_id == session_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )

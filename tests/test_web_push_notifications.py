@@ -40,9 +40,8 @@ def test_maybe_notify_inbox_message_schedules_agent_result(monkeypatch):
         },
     )
 
-    # badge_count is intentionally NOT set at schedule time: the app-icon badge
-    # is one global number, computed fresh at send time (post-debounce), not this
-    # one session's unread count.
+    # badge_count is intentionally NOT set at schedule time. It is computed for
+    # each subscription owner after the debounce delay.
     assert calls == [
         {
             "title": "Build fix",
@@ -347,6 +346,54 @@ def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkey
             message_type="result",
             text="Allowed",
         )
+        hidden_scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_hidden",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_hidden",
+                scope_id=hidden_scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="ses_push_hidden",
+                native_session_id="",
+                title="Hidden Push",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        assert project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_push_hidden",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "email",
+                        "principal_value": "someone-else@example.com",
+                        "access_role": "editor",
+                    }
+                ],
+            },
+        ).outcome == "applied"
+        messages_service.append(
+            conn,
+            scope_id=hidden_scope_id,
+            session_id="ses_push_hidden",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Hidden unread",
+        )
         web_push_service.upsert_subscription(
             conn,
             user_key="remote:user-a",
@@ -372,6 +419,7 @@ def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkey
         }
     )
     assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/a"]
+    assert [send[1]["badge_count"] for send in sends] == [1]
 
     with engine.begin() as conn:
         assert project_access_service.apply_project_access_intent(
@@ -411,13 +459,24 @@ def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkey
     assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/a"]
 
 
-def test_send_to_enabled_subscriptions_sets_global_badge_count(monkeypatch, tmp_path):
-    """badge_count in the sent payload is the GLOBAL unread total, not the
-    triggering session's per-session count — the app-icon badge is one number."""
+def test_send_to_enabled_subscriptions_sets_visible_badge_count(monkeypatch, tmp_path):
+    """One Project's badge includes every visible unread session in it."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="user-a",
+        email="member@example.com",
+        instance_access_source="email",
+        is_remote=True,
+    )
+    authorization_record = web_push_notifications.web_push_authorization_context_record(
+        "remote:user-a",
+        context,
+    )
+    assert authorization_record is not None
     with engine.begin() as conn:
         scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_badge", now=now)
         for sid in ("ses_badge_a", "ses_badge_b"):
@@ -445,7 +504,10 @@ def test_send_to_enabled_subscriptions_sets_global_badge_count(monkeypatch, tmp_
             author="user",
             source="user",
             author_id="remote:user-a",
-            metadata={"_web_push_user_key": "remote:user-a"},
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
             message_type="user",
             text="Please finish",
         )

@@ -1003,8 +1003,13 @@ def unread_counts_by_session(
     return {session_id: int(count) for session_id, count in conn.execute(query).all()}
 
 
-def total_unread(conn: Connection, *, platform: Optional[str] = None) -> int:
-    """Global unread agent-``result`` count across all non-archived sessions.
+def total_unread(
+    conn: Connection,
+    *,
+    platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
+) -> int:
+    """Unread agent-``result`` count across the caller's visible sessions.
 
     This is the sum of :func:`unread_counts_by_session`, i.e. the exact number
     the Inbox nav badge shows (``ui_server`` returns it as ``unread_total``). It
@@ -1013,7 +1018,13 @@ def total_unread(conn: Connection, *, platform: Optional[str] = None) -> int:
     screen icon never disagrees with the in-app count.
     """
 
-    return sum(unread_counts_by_session(conn, platform=platform).values())
+    return sum(
+        unread_counts_by_session(
+            conn,
+            platform=platform,
+            scope_ids=scope_ids,
+        ).values()
+    )
 
 
 def list_inbox_sessions(

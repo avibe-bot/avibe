@@ -161,6 +161,29 @@ def _project_dict(row: Any) -> dict[str, Any]:
     }
 
 
+def _project_for_context(
+    conn: Connection,
+    context: AuthorizationContext,
+    project: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the Project fields and capabilities safe for this caller."""
+
+    payload = dict(project)
+    payload["capabilities"] = {
+        "can_chat": project_access_service.can_chat_project(
+            conn,
+            context,
+            str(project.get("id") or ""),
+        )
+    }
+    if not context.is_instance_owner:
+        # Remote collaborators need Project identity and routing defaults, but
+        # never the host's absolute workdir or arbitrary local metadata.
+        payload["folder_path"] = ""
+        payload["metadata"] = {}
+    return payload
+
+
 def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any], now: str) -> None:
     """Apply a partial ``scope_settings`` update, inserting the row if missing.
 
@@ -212,7 +235,10 @@ def list_projects(
             continue
         out.append(_project_dict(row))
     context = require_instance_role(authorization_context, "viewer")
-    return project_access_service.filter_accessible_projects(conn, context, out)
+    return [
+        _project_for_context(conn, context, project)
+        for project in project_access_service.filter_accessible_projects(conn, context, out)
+    ]
 
 
 def get_project(
@@ -225,7 +251,7 @@ def get_project(
     if not project_access_service.can_read_project(conn, context, project_id):
         raise LookupError(f"Project not found: {project_id}")
     scope_id = _make_scope_id(project_id)
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
 def create_project(
@@ -246,7 +272,7 @@ def create_project(
     never clobbers a name the user set earlier; renaming stays explicit.
     """
 
-    require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "owner")
     folder = _resolve_folder(folder_path)
     now = _utc_now_iso()
 
@@ -265,7 +291,7 @@ def create_project(
             .where(scopes.c.id == scope_id)
             .values(last_seen_at=now, updated_at=now)
         )
-        return _project_payload(conn, scope_id)
+        return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
     project_id = _new_project_id()
     scope_id = _make_scope_id(project_id)
@@ -305,7 +331,7 @@ def create_project(
             updated_at=now,
         )
     )
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
 def update_project(
@@ -328,7 +354,7 @@ def update_project(
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
     """
-    require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "owner")
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
@@ -360,7 +386,7 @@ def update_project(
     if settings_values:
         _write_scope_settings(conn, scope_id, settings_values, now)
 
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
 def archive_project(
@@ -369,7 +395,7 @@ def archive_project(
     *,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "owner")
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
@@ -405,7 +431,7 @@ def archive_project(
         .where(scopes.c.id == scope_id)
         .values(updated_at=now)
     )
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
 def _project_payload(conn: Connection, scope_id: str) -> dict[str, Any]:

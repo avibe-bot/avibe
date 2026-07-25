@@ -498,6 +498,24 @@ media_objects = Table(
     Index("ix_media_objects_dedup", "local_path", "size_bytes", "mtime_ns"),
 )
 
+# A legacy media token could be reused across multiple sessions before token
+# dedup became session-scoped. Keep every trusted referencing session so those
+# historical attachments remain readable without treating the opaque token as
+# authorization for an arbitrary session.
+media_object_references = Table(
+    "media_object_references",
+    metadata,
+    Column("token", String, ForeignKey("media_objects.token", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("created_at", String, nullable=False),
+    Index("ix_media_object_references_session", "session_id"),
+)
+
 # Per-install browser Push API subscriptions for PWA Web Push. These are
 # runtime/device endpoints, not user-authored config: one user may install the
 # app on multiple devices, and endpoints can rotate or expire independently.

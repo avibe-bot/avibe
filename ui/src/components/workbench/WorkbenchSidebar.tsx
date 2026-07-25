@@ -1025,7 +1025,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     }
                   }}
                   creatingSession={creatingSession(project.id)}
-                  canChat={capabilities.can_chat}
+                  canChat={capabilities.can_chat && project.capabilities.can_chat}
                   canManageProjects={capabilities.can_manage_projects}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}

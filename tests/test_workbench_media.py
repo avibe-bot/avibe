@@ -18,7 +18,7 @@ from core.workbench_media import rewrite_agent_media
 from storage import media_service, settings_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
-from storage.models import agent_sessions, media_objects
+from storage.models import agent_sessions, media_object_references, media_objects
 
 
 def _now() -> str:
@@ -292,7 +292,13 @@ def test_register_dedups_same_fingerprint(tmp_path):
 
     with engine.connect() as conn:
         rows = conn.execute(select(media_objects)).mappings().all()
+        references = conn.execute(select(media_object_references)).mappings().all()
     assert len(rows) == 3  # two authorization scopes + changed content
+    assert {(row["token"], row["session_id"]) for row in references} == {
+        (t1, "sess_x"),
+        (t2, "other"),
+        (t3, "sess_x"),
+    }
 
 
 def test_register_reads_image_dimensions(tmp_path):

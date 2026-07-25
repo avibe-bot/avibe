@@ -277,6 +277,33 @@ def test_archived_or_missing_project_intent_is_rejected(tmp_path) -> None:
     assert result.error_code == "project_not_found"
 
 
+def test_archived_project_denies_non_owner_effective_roles(tmp_path) -> None:
+    engine, project = _engine_with_project(tmp_path)
+    editor = _context("editor")
+    with engine.begin() as conn:
+        assert project_access_service.get_effective_project_role(
+            conn,
+            editor,
+            project["id"],
+        ) == "editor"
+        projects_service.archive_project(conn, project["id"])
+        assert project_access_service.get_effective_project_role(
+            conn,
+            editor,
+            project["id"],
+        ) is None
+        assert project_access_service.can_read_project(
+            conn,
+            editor,
+            project["id"],
+        ) is False
+        assert project_access_service.get_effective_project_role(
+            conn,
+            trusted_local_context(),
+            project["id"],
+        ) == "owner"
+
+
 def test_policy_delete_cascades_bindings(tmp_path) -> None:
     engine, project = _engine_with_project(tmp_path)
     with engine.begin() as conn:

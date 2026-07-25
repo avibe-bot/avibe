@@ -62,10 +62,9 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     if not message.get("session_id"):
         return
 
-    # ``badge_count`` is the app-icon badge number, which is a single global
-    # value — not this one session's unread count. It is computed at send time
-    # (see ``_send_to_enabled_subscriptions``) so it reflects the real total
-    # after the debounce delay and matches the in-app Inbox badge.
+    # ``badge_count`` is computed per subscription owner at send time, not from
+    # this one session's unread count. That keeps it current after the debounce
+    # delay and aligned with the recipient's Project-filtered Inbox.
     payload = {
         "title": inbox_row.get("title") or inbox_row.get("project_name") or "avibe",
         "body": (message.get("text") or inbox_row.get("preview_text") or "").strip()[:240],
@@ -257,7 +256,9 @@ def _filter_project_authorized_user_keys(
     if project_id is None:
         return user_keys
     policy = project_access_service.get_project_policy(conn, project_id)
-    if policy is None or policy.get("mode") != "restricted":
+    if project_access_service.is_active_project(conn, project_id) and (
+        policy is None or policy.get("mode") != "restricted"
+    ):
         return user_keys
 
     contexts = _metadata_authorization_contexts(metadata)
@@ -273,6 +274,37 @@ def _filter_project_authorized_user_keys(
         ):
             authorized.append(user_key)
     return authorized
+
+
+def _badge_count_for_user_key(
+    conn: Any,
+    *,
+    user_key: str,
+    contexts: dict[str, AuthorizationContext],
+) -> int:
+    """Return the unread count visible to one Push subscription owner."""
+
+    if user_key == "local":
+        return messages_service.total_unread(conn, platform="avibe")
+    context = contexts.get(user_key)
+    if context is None:
+        # Legacy remote messages predate persisted authorization claims. Keep
+        # delivering eligible content, but never attach a machine-global count.
+        return 0
+    if context.is_instance_owner:
+        return messages_service.total_unread(conn, platform="avibe")
+
+    from storage import project_access_service
+
+    scope_ids = [
+        project_access_service.project_scope_id(project_id)
+        for project_id in project_access_service.accessible_project_ids(conn, context)
+    ]
+    return messages_service.total_unread(
+        conn,
+        platform="avibe",
+        scope_ids=scope_ids,
+    )
 
 
 def _remote_access_enabled() -> bool:
@@ -301,9 +333,6 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
             if not _message_still_unread(conn, payload.get("message_id")):
                 logger.debug("web push: skip notification for message already read or missing")
                 return
-            # The app-icon badge is one global number; compute the live total now
-            # (post-debounce) so it matches the in-app Inbox badge on open.
-            payload["badge_count"] = messages_service.total_unread(conn, platform="avibe")
             session_id, owner_metadata = _web_push_owner_metadata_for_message(
                 conn,
                 payload.get("message_id"),
@@ -319,7 +348,16 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
             if not user_keys:
                 logger.debug("web push: skip notification without a unique subscription owner")
                 return
-            subscriptions = []
+            contexts = _metadata_authorization_contexts(owner_metadata)
+            badge_counts = {
+                user_key: _badge_count_for_user_key(
+                    conn,
+                    user_key=user_key,
+                    contexts=contexts,
+                )
+                for user_key in user_keys
+            }
+            deliveries = []
             seen_endpoints: set[str] = set()
             for user_key in user_keys:
                 for subscription in web_push_service.list_enabled(conn, user_key=user_key):
@@ -327,10 +365,13 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     if not isinstance(endpoint, str) or endpoint in seen_endpoints:
                         continue
                     seen_endpoints.add(endpoint)
-                    subscriptions.append(subscription)
-        for subscription in subscriptions:
+                    deliveries.append((subscription, badge_counts[user_key]))
+        for subscription, badge_count in deliveries:
             try:
-                send_web_push(subscription=subscription, payload=payload)
+                send_web_push(
+                    subscription=subscription,
+                    payload={**payload, "badge_count": badge_count},
+                )
                 with engine.begin() as conn:
                     web_push_service.mark_send_success(conn, endpoint=subscription["endpoint"])
             except Exception as exc:

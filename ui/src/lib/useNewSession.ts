@@ -73,7 +73,10 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   // the project default can be derived live instead of copied into state.
   const [userPick, setUserPick] = useState<AgentRouteSelection>({});
 
-  const projects = useMemo(() => (rawProjects ? sortByRecent(rawProjects) : []), [rawProjects]);
+  const projects = useMemo(
+    () => (rawProjects ? sortByRecent(rawProjects.filter((project) => project.capabilities.can_chat)) : []),
+    [rawProjects],
+  );
   const loaded = rawProjects !== null;
 
   // Agents rarely change → fetch once per mount (not per sheet-open). Feeds the

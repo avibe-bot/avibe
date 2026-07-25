@@ -168,6 +168,10 @@ def _active_project_scope(conn: Connection, project_id: str) -> str | None:
     return str(row.id)
 
 
+def is_active_project(conn: Connection, project_id: str) -> bool:
+    return _active_project_scope(conn, project_id) is not None
+
+
 def apply_project_access_intent(
     conn: Connection,
     intent: Any,
@@ -310,6 +314,8 @@ def get_effective_project_role(
 ) -> str | None:
     if context.is_instance_owner:
         return "owner"
+    if not is_active_project(conn, project_id):
+        return None
     instance_role = context.instance_role
     if instance_role not in _ROLE_RANK:
         return None

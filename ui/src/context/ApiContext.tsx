@@ -728,6 +728,9 @@ export type WorkbenchProject = {
   archived: boolean;
   default_agent?: ProjectDefaultAgent | null;
   metadata?: Record<string, unknown>;
+  capabilities: {
+    can_chat: boolean;
+  };
 };
 
 export type ProjectSessionsPage = {

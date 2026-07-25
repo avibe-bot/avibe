@@ -15,6 +15,7 @@ from config.v2_config import (
 from storage import media_service, messages_service, project_access_service, projects_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
+from storage.models import media_object_references, media_objects, scopes
 from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
@@ -161,6 +162,13 @@ def _get(client, path: str):
 def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            scopes.update()
+            .where(scopes.c.native_id == ids["project_a"])
+            .values(metadata_json=json.dumps({"host_path_hint": "/private/host"}))
+        )
     client = _remote_client(config, role="editor", email="alice@example.com")
     monkeypatch.setattr(
         api,
@@ -176,9 +184,11 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
         },
     )
 
-    assert [row["id"] for row in _get(client, "/api/projects").get_json()["projects"]] == [
-        ids["project_a"]
-    ]
+    project_rows = _get(client, "/api/projects").get_json()["projects"]
+    assert [row["id"] for row in project_rows] == [ids["project_a"]]
+    assert project_rows[0]["folder_path"] == ""
+    assert project_rows[0]["metadata"] == {}
+    assert project_rows[0]["capabilities"] == {"can_chat": True}
     sessions = _get(client, "/api/sessions?status=active").get_json()["sessions"]
     assert {row["id"] for row in sessions} == {ids["session_a"]}
     assert _get(client, f"/api/projects/{ids['project_a']}").status_code == 200
@@ -300,6 +310,9 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     )
     client = _remote_client(config, role="editor", email="alice@example.com")
 
+    viewer_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
+    assert viewer_project["capabilities"] == {"can_chat": False}
+
     viewer_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
 
     assert viewer_bootstrap.status_code == 200
@@ -329,6 +342,88 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert editor_payload["default_agent_name"] == "editor-agent"
     assert editor_payload["queued"][0]["text"] == "editor-only queued prompt"
     assert editor_payload["draft"] == {"text": "editor-only draft"}
+    editor_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
+    assert editor_project["capabilities"] == {"can_chat": True}
+
+
+def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, ids["project_a"])
+
+    monkeypatch.setattr(
+        api,
+        "list_show_pages",
+        lambda: {
+            "ok": True,
+            "count": 1,
+            "pages": [{"session_id": ids["session_a"]}],
+        },
+    )
+    client = _remote_client(config, role="editor", email="alice@example.com")
+
+    assert _get(client, "/api/projects").get_json()["projects"] == []
+    assert _get(client, f"/api/projects/{ids['project_a']}").status_code == 404
+    assert _get(client, f"/api/sessions/{ids['session_a']}/messages").status_code == 404
+    assert _get(client, f"/api/media/{ids['media_a']}").status_code == 404
+    assert _get(client, "/api/show-pages").get_json()["pages"] == []
+
+    response = client.post(
+        f"/api/sessions/{ids['session_a']}/attachments",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(client, REMOTE_ORIGIN),
+        json={},
+    )
+    assert response.status_code == 404
+
+
+def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    token = "legacy-shared-token"
+    with engine.begin() as conn:
+        original = media_service.get_by_token(conn, ids["media_a"])
+        assert original is not None
+        conn.execute(media_objects.insert().values(**{**original, "token": token}))
+        conn.execute(
+            media_object_references.insert(),
+            [
+                {
+                    "token": token,
+                    "session_id": ids["session_a"],
+                    "created_at": original["created_at"],
+                },
+                {
+                    "token": token,
+                    "session_id": ids["session_b"],
+                    "created_at": original["created_at"],
+                },
+            ],
+        )
+
+    alice = _remote_client(config, role="editor", email="alice@example.com")
+    beta = _remote_client(config, role="editor", email="beta@example.com")
+    beta.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "beta@example.com",
+            "user-beta",
+            role="editor",
+            organization_id="org_beta",
+            organization_member_id="member_beta",
+            organization_role="member",
+            group_ids=["grp_beta"],
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    assert _get(alice, f"/api/media/{token}").status_code == 200
+    assert _get(beta, f"/api/media/{token}").status_code == 200
 
 
 def test_remote_message_persists_trusted_web_push_authorization_context(

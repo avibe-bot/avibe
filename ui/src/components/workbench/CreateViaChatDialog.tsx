@@ -35,11 +35,12 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
       .listProjects()
       .then((result) => {
         if (cancelled) return;
-        setProjects(result.projects);
-        if (result.projects.length > 0) {
+        const chatProjects = result.projects.filter((project) => project.capabilities.can_chat);
+        setProjects(chatProjects);
+        if (chatProjects.length > 0) {
           // Default to the most recently active project so the user can
           // usually just hit "Open chat" without touching the picker.
-          const sorted = [...result.projects].sort((a, b) => {
+          const sorted = [...chatProjects].sort((a, b) => {
             const aTs = a.last_active_at || a.created_at;
             const bTs = b.last_active_at || b.created_at;
             return bTs.localeCompare(aTs);
@@ -149,7 +150,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
             >
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.display_name} · {p.folder_path}
+                  {p.display_name}
                 </option>
               ))}
             </Select>

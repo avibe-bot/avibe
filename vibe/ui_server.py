@@ -7721,12 +7721,21 @@ def media_get(token: str):
     return _registered_media_response(token)
 
 
-def _request_can_read_media_row(conn, row: dict[str, Any]) -> bool:
-    from storage import project_access_service
+def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
+    from storage import media_service, project_access_service
 
     context = getattr(g, "authorization_context", None)
     if context is None or context.is_instance_owner:
         return True
+    session_ids = media_service.referenced_session_ids(conn, token)
+    if session_ids:
+        return any(
+            project_access_service.role_allows(
+                project_access_service.get_effective_session_role(conn, context, session_id),
+                "viewer",
+            )
+            for session_id in session_ids
+        )
     session_id = row.get("session_id")
     project_id = project_access_service.project_id_from_scope_id(row.get("scope_id"))
     role = (
@@ -7752,11 +7761,19 @@ def _registered_media_response(
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
-        if row and not _request_can_read_media_row(conn, row):
+        if row and not _request_can_read_media_row(conn, token, row):
             row = None
+        matches_expected_session = (
+            expected_session_id is None
+            or bool(row)
+            and (
+                row.get("session_id") == expected_session_id
+                or media_service.is_referenced_by_session(conn, token, expected_session_id)
+            )
+        )
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
-    if expected_session_id is not None and row.get("session_id") != expected_session_id:
+    if not matches_expected_session:
         return jsonify({"error": "not_found"}), 404
     if expected_source is not None and row.get("source") != expected_source:
         return jsonify({"error": "not_found"}), 404
@@ -7807,7 +7824,7 @@ def media_meta(token: str):
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
-        if row and not _request_can_read_media_row(conn, row):
+        if row and not _request_can_read_media_row(conn, token, row):
             row = None
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
