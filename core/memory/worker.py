@@ -184,7 +184,7 @@ class MemoryWorker:
         recovery = await self._store_call(
             self._store.recover_after_boot,
             lease_owner=self._boot_id,
-            now=self._current_time(),
+            clock=self._current_time,
         )
         self._recovery_sessions = list(recovery.not_attempted_sessions)
         self._activation_pending = False

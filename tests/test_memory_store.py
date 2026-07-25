@@ -276,13 +276,45 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
     assert store.mark_flush_in_flight(in_flight_session) == 1
 
-    recovery = store.recover_after_boot(lease_owner="boot", now=_dt("2026-01-01T00:00:05.000Z"))
+    recovery = store.recover_after_boot(
+        lease_owner="boot",
+        clock=lambda: _dt("2026-01-01T00:00:05.000Z"),
+    )
 
     assert recovery.interrupted_flushes == 1
     assert _row_for_source(store, "in-flight").flush_observation == "unknown"
     # Sessions are listed only after interrupted flushes have been resolved;
     # recover_after_boot owns that ordering.
     assert recovery.not_attempted_sessions == (not_attempted_session,)
+
+
+def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path) -> None:
+    """Reclamation can block on SQLite contention; the flush stamp must postdate it.
+
+    A backdated `flush_observed_at` reorders the `ORDER BY
+    COALESCE(flush_observed_at, ...)` history, so the sampling point is part of
+    this method's contract rather than a caller's detail.
+    """
+
+    store = MemoryStore(_store_path(tmp_path / "recovery-clock-order"))
+    in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
+    assert store.mark_flush_in_flight(in_flight_session) == 1
+    _enqueue(store, "stale-lease")
+    assert store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z") is not None
+    observed_states: list[str] = []
+
+    def clock_observing_the_queue() -> datetime:
+        observed_states.append(_row_for_source(store, "stale-lease").state)
+        return _dt("2026-01-01T00:00:09.000Z")
+
+    recovery = store.recover_after_boot(
+        lease_owner="new-boot",
+        clock=clock_observing_the_queue,
+    )
+
+    assert recovery.reclaimed == 1
+    assert observed_states == ["pending"], "the clock was sampled before leases were reclaimed"
+    assert _row_for_source(store, "in-flight").flush_observed_at == "2026-01-01T00:00:09.000Z"
 
 
 def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) -> None:
@@ -379,7 +411,10 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
     assert claimed is not None
 
-    recovery = store.recover_after_boot(lease_owner="new-boot", now=_dt("2026-01-01T00:00:02.000Z"))
+    recovery = store.recover_after_boot(
+        lease_owner="new-boot",
+        clock=lambda: _dt("2026-01-01T00:00:02.000Z"),
+    )
     assert recovery.reclaimed == 1
     reclaimed = _row_for_source(store, "queued")
     assert reclaimed is not None

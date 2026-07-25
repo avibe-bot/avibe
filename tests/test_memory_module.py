@@ -276,6 +276,54 @@ async def test_provider_timestamp_is_allocated_once_and_reused_after_restart(tmp
     assert retry_provider.captures[-1].provider_timestamp_ms == original
 
 
+async def test_boot_recovery_stamps_interrupted_flushes_after_lease_reclamation(
+    tmp_path: Path,
+) -> None:
+    """A contended reclaim must not backdate the interrupted flush it precedes.
+
+    The worker hands the store a clock rather than a pre-sampled instant, so a
+    reclaim that blocks on SQLite contention cannot make the flush it resolves
+    look older than it is and reorder the flush history.
+    """
+
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="interrupted")) == CaptureAccepted()
+    claimed = store.claim_due(lease_owner="crashed-boot", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+    assert store.settle(
+        claimed,
+        Delivered(),
+        lease_owner="crashed-boot",
+        now=_dt("2026-01-01T00:00:00.000Z"),
+    ).settled
+    assert store.mark_flush_in_flight(claimed.session_id) == 1
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _ContendedStore(MemoryStore):
+        """Stand in for a reclaim that spends 30 seconds waiting on the database."""
+
+        def _reclaim_processing(self, *, lease_owner: str) -> int:
+            nonlocal current
+            reclaimed = super()._reclaim_processing(lease_owner=lease_owner)
+            current += timedelta(seconds=30)
+            return reclaimed
+
+    contended = _ContendedStore(store.path)
+    restarted = MemoryWorker(
+        store=contended,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="restarted-boot",
+        now=lambda: current,
+    )
+
+    await restarted.drain(max_rows=1)
+
+    recovered = contended.list_queue_rows()[0]
+    assert recovered.flush_observation == "unknown"
+    assert recovered.flush_observed_at == "2026-01-01T00:00:30.000Z"
+
+
 async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(text="secret queue payload")) == CaptureAccepted()

@@ -9,7 +9,7 @@ import secrets
 import sqlite3
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -434,17 +434,24 @@ class MemoryStore:
             attempts=failure.attempts,
         )
 
-    def recover_after_boot(self, *, lease_owner: str, now: datetime) -> BootRecovery:
+    def recover_after_boot(self, *, lease_owner: str, clock: Callable[[], datetime]) -> BootRecovery:
         """Return the queue to a claimable state after an unclean shutdown.
 
         The three steps are ordered: stale leases must be reclaimed before
         interrupted flushes are resolved, and sessions still awaiting a first
         flush can only be listed once both have settled. That ordering is an
         invariant of this method, not something a caller has to reproduce.
+
+        `clock` rather than an instant for the same reason. Reclamation can
+        block for seconds on SQLite contention, and the timestamp it precedes is
+        what dates the interrupted flushes. Sampling before reclamation would
+        backdate them by however long the contention lasted, which can reorder
+        "most recent flush"; sampling here keeps that impossible to get wrong
+        from a call site.
         """
 
-        now_iso = _iso_from_datetime(now)
         reclaimed = self._reclaim_processing(lease_owner=lease_owner)
+        now_iso = _iso_from_datetime(clock())
         interrupted = self._recover_in_flight_flushes(now=now_iso)
         return BootRecovery(
             reclaimed=reclaimed,
