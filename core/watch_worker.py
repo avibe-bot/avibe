@@ -16,6 +16,7 @@ import psutil
 
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
 WATCH_WORKER_PROTOCOL_VERSION = 1
+WATCH_WORKER_ERROR_PREFIX = "AVIBE_WATCH_WORKER_ERROR:"
 _MAX_SPEC_BYTES = 16 * 1024 * 1024
 
 
@@ -30,6 +31,12 @@ def encode_watch_worker_spec(
         "shell_command": shell_command,
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def decode_watch_worker_error(stderr: str) -> str | None:
+    if not stderr.startswith(WATCH_WORKER_ERROR_PREFIX):
+        return None
+    return stderr[len(WATCH_WORKER_ERROR_PREFIX) :].strip()
 
 
 def _read_watch_worker_spec() -> tuple[list[str], str | None]:
@@ -223,13 +230,15 @@ def main() -> int:
     try:
         return_code = _run_watch_worker()
     except Exception as exc:
-        print(f"watch worker supervisor failed: {exc}", file=sys.stderr, flush=True)
+        print(f"{WATCH_WORKER_ERROR_PREFIX}{exc}", file=sys.stderr, flush=True)
         return 1
 
     if os.name == "nt":
         return return_code
     if os.name != "nt" and return_code < 0:
         signal_number = -return_code
+        if signal_number == signal.SIGTERM:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
         os.kill(os.getpid(), signal_number)
         return 128 + signal_number
     if 0 <= return_code <= 255:

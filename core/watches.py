@@ -35,6 +35,7 @@ from core.process_isolation import (
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import runtime
+from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
@@ -566,6 +567,19 @@ class ManagedWatchService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._reconcile_dirty = True
         self._runtime_state_dirty = True
+
+    def _t(self, key: str, **kwargs: Any) -> str:
+        controller_translator = getattr(self.controller, "_t", None)
+        if callable(controller_translator):
+            return controller_translator(key, **kwargs)
+        language = getattr(getattr(self.controller, "config", None), "language", "en")
+        return i18n_t(key, language, **kwargs)
+
+    def _localize_watch_worker_error(self, stderr: str) -> str:
+        detail = watch_worker.decode_watch_worker_error(stderr)
+        if detail is None:
+            return stderr
+        return self._t("harness.watch.supervisorFailed", detail=detail)
 
     def active_process_pids(self) -> set[int]:
         """Return active waiter process roots owned by managed watches."""
@@ -1202,7 +1216,10 @@ class ManagedWatchService:
             except (BrokenPipeError, ConnectionResetError):
                 stdout, stderr = await process.communicate()
                 detail = stderr.decode("utf-8", errors="replace").strip()
-                raise RuntimeError(detail or "watch worker supervisor exited during startup") from None
+                detail = self._localize_watch_worker_error(detail)
+                raise RuntimeError(
+                    detail or self._t("harness.watch.supervisorExitedDuringStartup")
+                ) from None
             finally:
                 process.stdin.close()
             if timeout_seconds > 0:
@@ -1225,7 +1242,9 @@ class ManagedWatchService:
         return _CycleResult(
             exit_code=process.returncode or 0,
             stdout=stdout.decode("utf-8", errors="replace").strip(),
-            stderr=stderr.decode("utf-8", errors="replace").strip(),
+            stderr=self._localize_watch_worker_error(
+                stderr.decode("utf-8", errors="replace").strip()
+            ),
             timed_out=timed_out,
         )
 

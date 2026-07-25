@@ -49,13 +49,19 @@ class _BrokenStdin(_FakeStdin):
 
 
 class _FakeProcess:
-    def __init__(self, *, stdin: _FakeStdin | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        stdin: _FakeStdin | None = None,
+        stderr: bytes = b"",
+    ) -> None:
         self.pid = 1234
         self.returncode = 0
         self.stdin = stdin or _FakeStdin()
+        self.stderr = stderr
 
     async def communicate(self) -> tuple[bytes, bytes]:
-        return b"ok\n", b""
+        return b"ok\n", self.stderr
 
 
 async def _start_watch_service(service: ManagedWatchService) -> None:
@@ -352,12 +358,52 @@ def test_managed_watch_clears_supervisor_state_when_startup_pipe_breaks(tmp_path
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    with pytest.raises(RuntimeError, match="watch worker supervisor exited during startup"):
+    with pytest.raises(RuntimeError, match="Watch worker supervisor exited during startup"):
         asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
     assert process.stdin.closed is True
     assert service._active_pids == {}
     assert service._active_process_identities == {}
+
+
+def test_managed_watch_localizes_supervisor_startup_failure(tmp_path: Path, monkeypatch) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    service = ManagedWatchService(
+        controller=SimpleNamespace(config=SimpleNamespace(language="zh")),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    watch = store.add_watch(
+        name="Broken supervisor",
+        session_key="slack::channel::C123",
+        command=["python3", "-c", "print('ok')"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    process = _FakeProcess(
+        stdin=_BrokenStdin(),
+        stderr=(
+            f"{watch_worker.WATCH_WORKER_ERROR_PREFIX}"
+            "invalid watch worker command"
+        ).encode(),
+    )
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Watch 监控进程失败：invalid watch worker command"):
+        asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
 
 def test_managed_watch_legacy_none_cwd_survives_deleted_process_cwd(tmp_path: Path) -> None:

@@ -74,7 +74,29 @@ def test_watch_worker_rejects_invalid_specification() -> None:
     )
 
     assert result.returncode == 1
+    assert result.stderr.decode().startswith(watch_worker.WATCH_WORKER_ERROR_PREFIX)
     assert "invalid watch worker command" in result.stderr.decode()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal exit contract")
+def test_posix_watch_worker_preserves_waiter_signal_exit() -> None:
+    result = subprocess.run(
+        _supervisor_command(),
+        input=watch_worker.encode_watch_worker_spec(
+            command=[
+                sys.executable,
+                "-c",
+                "import os,signal; os.kill(os.getpid(), signal.SIGTERM)",
+            ],
+            shell_command=None,
+        ),
+        capture_output=True,
+        timeout=10,
+        check=False,
+        **_supervisor_isolation_kwargs(),
+    )
+
+    assert result.returncode == -signal.SIGTERM
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group contract")
