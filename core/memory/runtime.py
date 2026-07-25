@@ -17,14 +17,19 @@ from config import paths
 from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config
 from core.memory.artifact import (
     MemoryArtifactCandidate,
-    MemoryArtifactManager,
+    MemoryArtifactPort,
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
     get_memory_artifact_manager,
 )
 from core.memory.everos import EverOSPort
 from core.memory.module import MemoryModule
-from core.memory.process import EverOSProcess, EverOSProcessSettings
+from core.memory.process import (
+    EverOSProcess,
+    EverOSProcessFactory,
+    EverOSProcessPort,
+    EverOSProcessSettings,
+)
 from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
 from core.memory.worker import ProcessingEvent
@@ -52,13 +57,15 @@ class UnavailableMemoryRuntime:
         self,
         config: MemoryConfig,
         *,
-        artifact_manager: MemoryArtifactManager | None = None,
+        artifact_manager: MemoryArtifactPort | None = None,
+        process_factory: EverOSProcessFactory | None = None,
         effective_home: Path | None = None,
         processing_event: ProcessingEvent | None = None,
         initial_error: Exception | None = None,
     ) -> None:
         self._config = config
         self._artifact_manager = artifact_manager
+        self._process_factory = process_factory
         self._effective_home = effective_home
         self._processing_event = processing_event
         self._initial_error = initial_error
@@ -79,6 +86,7 @@ class UnavailableMemoryRuntime:
             runtime = MemoryRuntime(
                 config,
                 artifact_manager=self._artifact_manager,
+                process_factory=self._process_factory,
                 effective_home=self._effective_home,
                 processing_event=self._processing_event,
             )
@@ -141,7 +149,8 @@ class UnavailableMemoryRuntime:
 def create_memory_runtime(
     config: MemoryConfig,
     *,
-    artifact_manager: MemoryArtifactManager | None = None,
+    artifact_manager: MemoryArtifactPort | None = None,
+    process_factory: EverOSProcessFactory | None = None,
     effective_home: Path | None = None,
     processing_event: ProcessingEvent | None = None,
 ) -> MemoryRuntime | UnavailableMemoryRuntime:
@@ -151,6 +160,7 @@ def create_memory_runtime(
         return MemoryRuntime(
             config,
             artifact_manager=artifact_manager,
+            process_factory=process_factory,
             effective_home=effective_home,
             processing_event=processing_event,
         )
@@ -159,6 +169,7 @@ def create_memory_runtime(
         return UnavailableMemoryRuntime(
             config,
             artifact_manager=artifact_manager,
+            process_factory=process_factory,
             effective_home=effective_home,
             processing_event=processing_event,
             initial_error=exc,
@@ -173,15 +184,17 @@ class MemoryRuntime:
         config: MemoryConfig,
         *,
         store: MemoryStore | None = None,
-        artifact_manager: MemoryArtifactManager | None = None,
+        artifact_manager: MemoryArtifactPort | None = None,
+        process_factory: EverOSProcessFactory | None = None,
         effective_home: Path | None = None,
         processing_event: ProcessingEvent | None = None,
     ) -> None:
         self._config = config
         self._effective_home = effective_home or paths.get_vibe_remote_dir()
-        self._artifact_manager = artifact_manager or get_memory_artifact_manager()
+        self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
+        self._process_factory: EverOSProcessFactory = process_factory or EverOSProcess
         self._store = store or MemoryStore()
-        self._process: EverOSProcess | None = None
+        self._process: EverOSProcessPort | None = None
         # The controller-side port only talks to the private UDS. Credentials
         # enter an EverOSPort only inside the owned child probe/sidecar.
         self._provider = EverOSPort(self._socket_path)
@@ -191,9 +204,7 @@ class MemoryRuntime:
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
-        set_provider_root = getattr(self._artifact_manager, "set_provider_root", None)
-        if callable(set_provider_root):
-            set_provider_root(self._provider_root)
+        self._artifact_manager.set_provider_root(self._provider_root)
         self.module = MemoryModule(
             self._store,
             self._provider,
@@ -207,9 +218,7 @@ class MemoryRuntime:
             compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
             processing_event=processing_event,
         )
-        set_activation_coordinator = getattr(self._artifact_manager, "set_activation_coordinator", None)
-        if callable(set_activation_coordinator):
-            set_activation_coordinator(self._coordinate_artifact_activation)
+        self._artifact_manager.set_activation_coordinator(self._coordinate_artifact_activation)
 
     @property
     def _memory_dir(self) -> Path:
@@ -355,7 +364,7 @@ class MemoryRuntime:
                 self.module._worker.resume_claims()
             return {"ok": False, "error": self._runtime_error}
 
-        self._process = EverOSProcess(
+        self._process = self._process_factory(
             python,
             provider_root=self._provider_root,
             effective_home=self._effective_home,
@@ -494,9 +503,7 @@ class MemoryRuntime:
         if self._process is not None:
             await self._process.stop()
             self._process = None
-        set_activation_coordinator = getattr(self._artifact_manager, "set_activation_coordinator", None)
-        if callable(set_activation_coordinator):
-            set_activation_coordinator(None)
+        self._artifact_manager.set_activation_coordinator(None)
 
     async def _apply_active_artifact_metadata(self) -> None:
         provider_root_format = await asyncio.to_thread(self._artifact_manager.provider_root_format)
@@ -649,7 +656,7 @@ class MemoryRuntime:
         """Run the enablement probe under the controller-wide probe lock."""
 
         async with self._processing_probe_lock:
-            probe_process = EverOSProcess(
+            probe_process = self._process_factory(
                 python,
                 provider_root=self._provider_root,
                 effective_home=self._effective_home,
@@ -737,12 +744,15 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
     }
 
 
-def _active_compatible_root_formats(artifact_manager: object) -> tuple[str, ...]:
-    getter = getattr(artifact_manager, "compatible_provider_root_formats", None)
-    if not callable(getter):
-        return ()
+def _active_compatible_root_formats(artifact_manager: MemoryArtifactPort) -> tuple[str, ...]:
+    """Read the active artifact's root formats, tolerating a broken pointer.
+
+    The port guarantees the method exists, so only a raising or malformed
+    implementation needs guarding here.
+    """
+
     try:
-        values = getter()
+        values = artifact_manager.compatible_provider_root_formats()
     except Exception:
         return ()
     if not isinstance(values, (set, frozenset, list, tuple)):

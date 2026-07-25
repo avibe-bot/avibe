@@ -12,10 +12,10 @@ import logging
 import os
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from config import paths
 from core.managed_runtime import (
@@ -587,6 +587,86 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             "python_version": EMBEDDED_PYTHON_VERSION,
             "lock_sha256": PACKAGE_LOCK_SHA256,
         }
+
+
+@runtime_checkable
+class MemoryArtifactPort(Protocol):
+    """What the runtime needs from the managed EverOS artifact, and nothing more.
+
+    Eight members over ``MemoryArtifactManager``'s ~670 lines: downloads,
+    checksums, safe extraction, and the ``current.json`` pointer stay behind this
+    interface. Declaring it also removes the reason ``runtime.py`` had to reach
+    for ``getattr(manager, "set_provider_root", None)`` — a partial fake can no
+    longer satisfy the port.
+    """
+
+    def resolve_python(self) -> Path | None: ...
+
+    def status(self) -> dict[str, Any]: ...
+
+    def ensure(self, *, force: bool = False) -> dict[str, Any]: ...
+
+    def provider_root_format(self) -> str | None: ...
+
+    def artifact_fingerprint(self) -> str | None: ...
+
+    def compatible_provider_root_formats(self) -> frozenset[str]: ...
+
+    def set_provider_root(self, provider_root: Path | str) -> None: ...
+
+    def set_activation_coordinator(self, coordinator: MemoryArtifactActivationCoordinator | None) -> None: ...
+
+
+@dataclass
+class FakeMemoryArtifactManager:
+    """In-memory artifact fake for runtime contract tests.
+
+    Satisfies ``MemoryArtifactPort`` without touching a manifest, an archive, or
+    the filesystem. ``python`` is what ``resolve_python`` returns — set it to
+    ``None`` to exercise the not-installed paths.
+    """
+
+    python: Path | None = None
+    status_payload: dict[str, Any] = field(
+        default_factory=lambda: {"installed": True, "status": "ready", "reason": None}
+    )
+    ensure_payload: dict[str, Any] = field(
+        default_factory=lambda: {"ok": True, "changed": False, "reason": None, "download_error": None}
+    )
+    ensure_failure: BaseException | None = None
+    root_format: str | None = f"everos-{EVEROS_VERSION}"
+    fingerprint: str | None = f"fake-everos-{EVEROS_VERSION}"
+    compatible_formats: frozenset[str] = field(default_factory=lambda: frozenset({f"everos-{EVEROS_VERSION}"}))
+    provider_root: Path | None = None
+    activation_coordinator: MemoryArtifactActivationCoordinator | None = None
+    ensure_calls: list[bool] = field(default_factory=list)
+
+    def resolve_python(self) -> Path | None:
+        return self.python
+
+    def status(self) -> dict[str, Any]:
+        return dict(self.status_payload)
+
+    def ensure(self, *, force: bool = False) -> dict[str, Any]:
+        self.ensure_calls.append(force)
+        if self.ensure_failure is not None:
+            raise self.ensure_failure
+        return dict(self.ensure_payload)
+
+    def provider_root_format(self) -> str | None:
+        return self.root_format
+
+    def artifact_fingerprint(self) -> str | None:
+        return self.fingerprint
+
+    def compatible_provider_root_formats(self) -> frozenset[str]:
+        return self.compatible_formats
+
+    def set_provider_root(self, provider_root: Path | str) -> None:
+        self.provider_root = Path(provider_root)
+
+    def set_activation_coordinator(self, coordinator: MemoryArtifactActivationCoordinator | None) -> None:
+        self.activation_coordinator = coordinator
 
 
 _manager: MemoryArtifactManager | None = None

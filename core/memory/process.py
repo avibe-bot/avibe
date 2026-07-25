@@ -11,11 +11,12 @@ import signal
 import stat
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, Deque, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import tomllib
@@ -988,3 +989,156 @@ def _positive_timeout(value: float, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return parsed if parsed > 0 else fallback
+
+
+@runtime_checkable
+class EverOSProcessPort(Protocol):
+    """What the runtime needs from a supervised sidecar, and nothing more.
+
+    Deliberately five members over ``EverOSProcess``'s ~990 lines: the runtime
+    never inspects the child tree, the generated config, or the signal handling.
+    Keeping those out of this interface is what lets tests substitute a fake
+    instead of patching ``psutil``, ``os``, and private attributes.
+    """
+
+    @property
+    def running(self) -> bool: ...
+
+    @property
+    def starting(self) -> bool: ...
+
+    async def start(self) -> bool: ...
+
+    async def stop(self) -> None: ...
+
+    async def processing_healthy(self) -> bool: ...
+
+
+class EverOSProcessFactory(Protocol):
+    """Construct one supervised sidecar per reconciliation.
+
+    A factory rather than an instance because the runtime builds a fresh child
+    for every enabled reconciliation, and a short-lived one for the enablement
+    probe. Mirrors ``EverOSProcess.__init__``.
+    """
+
+    def __call__(
+        self,
+        python: Path | str,
+        *,
+        provider_root: Path | str | None = None,
+        effective_home: Path | str | None = None,
+        settings: EverOSProcessSettings | None = None,
+        socket_path: Path | str | None = None,
+        on_ready: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> EverOSProcessPort: ...
+
+
+@dataclass
+class FakeEverOSProcess:
+    """In-process sidecar fake for runtime contract tests.
+
+    Mirrors the real supervisor's observable contract: a successful ``start``
+    fires ``on_ready``, exactly as ``EverOSProcess`` does once its child answers
+    ``/health``. Tests drive outcomes through ``start_results`` /
+    ``processing_healthy_results`` instead of patching ``psutil`` and ``os``.
+    """
+
+    start_results: Deque[bool] = field(default_factory=deque)
+    processing_healthy_results: Deque[bool] = field(default_factory=deque)
+    start_failure: BaseException | None = None
+    stop_failure: BaseException | None = None
+    processing_healthy_flag: bool = True
+    on_ready: Callable[[], Awaitable[None] | None] | None = None
+    # Launch inputs the factory captured, for tests asserting on child settings.
+    python: Path | None = None
+    provider_root: Path | None = None
+    settings: EverOSProcessSettings | None = None
+    starts: int = 0
+    stops: int = 0
+    stopped: bool = False
+    _running: bool = True
+    _starting: bool = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def starting(self) -> bool:
+        return self._starting
+
+    async def start(self) -> bool:
+        self.starts += 1
+        if self.start_failure is not None:
+            raise self.start_failure
+        started = self.start_results.popleft() if self.start_results else True
+        self._running = started
+        self._starting = False
+        if started:
+            await self.ready()
+        return started
+
+    async def stop(self) -> None:
+        self.stops += 1
+        self.stopped = True
+        self._running = False
+        self._starting = False
+        if self.stop_failure is not None:
+            raise self.stop_failure
+
+    async def processing_healthy(self) -> bool:
+        if self.processing_healthy_results:
+            return self.processing_healthy_results.popleft()
+        return self.processing_healthy_flag
+
+    async def ready(self) -> None:
+        """Fire the runtime's readiness callback as a recovered child would."""
+
+        if self.on_ready is None:
+            return
+        result = self.on_ready()
+        if inspect.isawaitable(result):
+            await result
+
+
+@dataclass
+class FakeEverOSProcessFactory:
+    """Hand out ``FakeEverOSProcess`` instances and remember every one.
+
+    Satisfies ``EverOSProcessFactory``. ``supervised`` holds only the sidecars the
+    runtime actually supervises — a process built without ``on_ready`` is the
+    short-lived enablement probe, not a managed child.
+    """
+
+    template: Callable[[], FakeEverOSProcess] = FakeEverOSProcess
+    #: Every process handed out, probes included.
+    created: list[FakeEverOSProcess] = field(default_factory=list)
+    #: Only the supervised sidecars, in creation order. A live list, so a test may
+    #: bind it once and watch it grow across reconciliations.
+    supervised: list[FakeEverOSProcess] = field(default_factory=list)
+
+    def __call__(
+        self,
+        python: Path | str,
+        *,
+        provider_root: Path | str | None = None,
+        effective_home: Path | str | None = None,
+        settings: EverOSProcessSettings | None = None,
+        socket_path: Path | str | None = None,
+        on_ready: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> EverOSProcessPort:
+        del effective_home, socket_path
+        process = self.template()
+        process.on_ready = on_ready
+        process.python = Path(python)
+        process.provider_root = Path(provider_root) if provider_root is not None else None
+        process.settings = settings
+        self.created.append(process)
+        if on_ready is not None:
+            self.supervised.append(process)
+        return process
+
+    @property
+    def last(self) -> FakeEverOSProcess | None:
+        return self.created[-1] if self.created else None

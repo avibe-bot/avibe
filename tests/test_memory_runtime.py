@@ -19,6 +19,7 @@ import pytest
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest
 import core.memory.artifact as memory_artifact
 from core.memory.artifact import (
+    FakeMemoryArtifactManager,
     MemoryArtifactCandidate,
     MemoryArtifactManager,
     MemoryProviderRootState,
@@ -28,6 +29,8 @@ import core.memory.process as memory_process
 from core.memory.process import (
     EverOSProcess,
     EverOSProcessSettings,
+    FakeEverOSProcess,
+    FakeEverOSProcessFactory,
     _live_owned_processes,
     _signal_owned_group_or_process,
     _signal_owned_processes,
@@ -45,6 +48,19 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+
+
+def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
+    """A verified, installed EverOS artifact — the common runtime-test baseline."""
+
+    defaults: dict = {
+        "python": Path(sys.executable),
+        "root_format": "everos-1.1.3",
+        "fingerprint": "test-artifact",
+        "status_payload": {"reason": None},
+    }
+    defaults.update(overrides)
+    return FakeMemoryArtifactManager(**defaults)
 
 
 def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
@@ -676,43 +692,23 @@ def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_pa
     assert manager._active_pointer() == old_pointer
     assert manager.resolve_python() == old_binary
 
-    started_python: list[Path] = []
-
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, python: Path, *, on_ready=None, **_kwargs) -> None:
-            self.python = python
-            self._on_ready = on_ready
-
-        async def processing_healthy(self) -> bool:
-            return True
-
-        async def start(self) -> bool:
-            assert self._on_ready is not None
-            started_python.append(self.python)
-            await self._on_ready()
-            return True
-
-        async def stop(self) -> None:
-            self.running = False
+    factory = FakeEverOSProcessFactory()
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
         runtime = MemoryRuntime(
             MemoryConfig(enabled=True, processing=processing),
             artifact_manager=manager,
+            process_factory=factory,
             effective_home=tmp_path,
         )
         assert (await runtime.reconcile(runtime._config))["ok"] is True
-        assert started_python == [old_binary]
+        assert [process.python for process in factory.supervised] == [old_binary]
         await runtime.close()
 
     asyncio.run(run())
@@ -743,32 +739,17 @@ def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: P
 
 
 def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
-    class _Artifact:
-        def set_provider_root(self, _provider_root: Path) -> None:
-            return None
+    def _artifact() -> FakeMemoryArtifactManager:
+        return FakeMemoryArtifactManager(
+            python=None,
+            status_payload={"reason": "memory_runtime_missing"},
+            root_format=None,
+            fingerprint=None,
+            compatible_formats=frozenset(),
+            ensure_failure=AssertionError("startup reconciliation must not download Memory"),
+        )
 
-        def set_activation_coordinator(self, _coordinator) -> None:
-            return None
-
-        def resolve_python(self) -> None:
-            return None
-
-        def provider_root_format(self) -> None:
-            return None
-
-        def artifact_fingerprint(self) -> None:
-            return None
-
-        def compatible_provider_root_formats(self) -> frozenset[str]:
-            return frozenset()
-
-        def status(self) -> dict:
-            return {"reason": "memory_runtime_missing"}
-
-        def ensure(self, *, force: bool) -> dict:
-            raise AssertionError("startup reconciliation must not download Memory")
-
-    artifact = _Artifact()
+    artifact = _artifact()
     disabled = MemoryRuntime(
         MemoryConfig(enabled=False),
         artifact_manager=artifact,
@@ -1218,33 +1199,11 @@ def test_explicit_sidecar_retry_keeps_crash_budget_until_observed_health(monkeyp
 def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch, tmp_path: Path) -> None:
     started: list[object] = []
 
-    class _Artifact:
-        def resolve_python(self) -> Path:
-            return Path(sys.executable)
+    def _Artifact() -> FakeMemoryArtifactManager:
+        return _installed_artifact()
 
-        def provider_root_format(self) -> str:
-            return "everos-1.1.3"
-
-        def artifact_fingerprint(self) -> str:
-            return "test-artifact"
-
-        def status(self) -> dict:
-            return {"reason": None}
-
-    class _Process:
-        starting = False
-
-        def __init__(self, *_args, **_kwargs) -> None:
-            started.append(object())
-
-        async def processing_healthy(self) -> bool:
-            return True
-
-        async def start(self) -> bool:
-            return True
-
-        async def stop(self) -> None:
-            return None
+    factory = FakeEverOSProcessFactory()
+    started = factory.created
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -1253,13 +1212,13 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(),
+        process_factory=factory,
         effective_home=tmp_path,
     )
 
     async def interrupted_clear() -> OperationFailed:
         return OperationFailed(error="memory_clear_failed")
 
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
     monkeypatch.setattr(runtime.module, "_recover_interrupted_clear", interrupted_clear)
 
     async def run() -> None:
@@ -1272,30 +1231,13 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
 def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
     calls: list[bool] = []
 
-    class _Artifact:
-        def __init__(self) -> None:
-            self.activation_coordinator = None
-
-        def set_provider_root(self, _provider_root: Path) -> None:
-            return None
-
-        def set_activation_coordinator(self, coordinator) -> None:
-            self.activation_coordinator = coordinator
-
-        def provider_root_format(self) -> None:
-            return None
-
-        def artifact_fingerprint(self) -> None:
-            return None
-
-        def compatible_provider_root_formats(self) -> frozenset[str]:
-            return frozenset()
-
-        def ensure(self, *, force: bool) -> dict:
-            calls.append(force)
-            return {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
-
-    artifact = _Artifact()
+    artifact = FakeMemoryArtifactManager(
+        root_format=None,
+        fingerprint=None,
+        compatible_formats=frozenset(),
+        ensure_payload={"ok": False, "reason": "memory_runtime_unpublished", "download_error": None},
+    )
+    calls = artifact.ensure_calls
     runtime = MemoryRuntime(MemoryConfig(enabled=False), artifact_manager=artifact, effective_home=tmp_path)
 
     async def run() -> None:
@@ -1340,18 +1282,14 @@ def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     events: list[str] = []
 
-    class _Artifact:
-        def provider_root_format(self) -> None:
-            return None
+    class _Artifact(FakeMemoryArtifactManager):
+        """Assert the retained supervisor is already gone when ensure runs."""
 
-        def artifact_fingerprint(self) -> None:
-            return None
-
-        def ensure(self, *, force: bool) -> dict:
+        def ensure(self, *, force: bool = False) -> dict:
             assert force is True
             assert runtime._process is None
             events.append("ensure")
-            return {"ok": True}
+            return super().ensure(force=force)
 
     class _DownProcess:
         # A failed supervisor retains its retry task even after its child exits.
@@ -1368,7 +1306,7 @@ def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact
     )
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=processing),
-        artifact_manager=_Artifact(),
+        artifact_manager=_Artifact(root_format=None, fingerprint=None),
         effective_home=tmp_path,
     )
     runtime._process = _DownProcess()
@@ -1397,16 +1335,10 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     events: list[str] = []
 
-    class _Artifact:
-        def provider_root_format(self) -> None:
-            return None
-
-        def artifact_fingerprint(self) -> None:
-            return None
-
-        def ensure(self, *, force: bool) -> dict:
+    class _Artifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
             events.append("ensure")
-            return {"ok": True}
+            return super().ensure(force=force)
 
     class _LiveProcess:
         running = True  # healthy sidecar with a live child
@@ -1422,7 +1354,7 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
     )
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=processing),
-        artifact_manager=_Artifact(),
+        artifact_manager=_Artifact(root_format=None, fingerprint=None),
         effective_home=tmp_path,
     )
     runtime._process = _LiveProcess()
@@ -1491,50 +1423,25 @@ def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_
 def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifecycle_lock(monkeypatch, tmp_path: Path) -> None:
     instances: list[object] = []
 
-    class _Artifact:
-        def resolve_python(self) -> Path:
-            return Path(sys.executable)
+    def _Artifact() -> FakeMemoryArtifactManager:
+        return _installed_artifact()
 
-        def provider_root_format(self) -> str:
-            return "everos-1.1.3"
-
-        def artifact_fingerprint(self) -> str:
-            return "test-artifact"
-
-        def status(self) -> dict:
-            return {"reason": None}
-
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
-            self.stopped = False
-            self._on_ready = on_ready
-            if on_ready is not None:
-                instances.append(self)
-
-        async def processing_healthy(self) -> bool:
-            return True
-
-        async def start(self) -> bool:
-            assert self._on_ready is not None
-            await self._on_ready()
-            return True
-
-        async def stop(self) -> None:
-            self.stopped = True
-            self.running = False
+    factory = FakeEverOSProcessFactory()
+    instances = factory.supervised
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
     initial = MemoryConfig(enabled=True, processing=processing)
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
-        runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), effective_home=tmp_path)
+        runtime = MemoryRuntime(
+            initial,
+            artifact_manager=_Artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
         assert (await runtime.reconcile(initial))["ok"] is True
         lifecycle_lock_states: list[bool] = []
 
@@ -1565,12 +1472,8 @@ def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifec
 def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    class _Artifact:
-        def provider_root_format(self) -> str:
-            return "everos-1.1.3"
-
-        def artifact_fingerprint(self) -> str:
-            return "test-artifact"
+    def _Artifact() -> FakeMemoryArtifactManager:
+        return _installed_artifact()
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -1590,9 +1493,15 @@ def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp
     ).save()
     restarted = V2Config.load().memory
     inspected: list[bool] = []
+    factory = FakeEverOSProcessFactory()
 
     async def run() -> None:
-        runtime = MemoryRuntime(restarted, artifact_manager=_Artifact(), effective_home=tmp_path)
+        runtime = MemoryRuntime(
+            restarted,
+            artifact_manager=_Artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
 
         def existing_vectors() -> bool:
             inspected.append(runtime.module._lifecycle_lock.locked())
@@ -1606,51 +1515,33 @@ def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp
 
     asyncio.run(run())
     assert inspected == [True]
+    # The rejection must land before any child is launched.
+    assert factory.created == []
 
 
 def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    class _Artifact:
-        def resolve_python(self) -> Path:
-            return Path(sys.executable)
-
-        def provider_root_format(self) -> str:
-            return "everos-1.1.3"
-
-        def artifact_fingerprint(self) -> str:
-            return "test-artifact"
-
-        def status(self) -> dict:
-            return {"reason": None}
+    def _Artifact() -> FakeMemoryArtifactManager:
+        return _installed_artifact()
 
     observed_before_ready: list[tuple[bool, bool]] = []
     runtime: MemoryRuntime | None = None
 
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
-            self._on_ready = on_ready
-
-        async def processing_healthy(self) -> bool:
-            return True
+    class _Process(FakeEverOSProcess):
+        """Snapshot persisted candidate state and claim fencing before readiness."""
 
         async def start(self) -> bool:
             assert runtime is not None
-            assert self._on_ready is not None
             observed_before_ready.append(
                 (
                     V2Config.load().memory.embedding_change_pending,
                     runtime.module._worker._claims_paused,
                 )
             )
-            await self._on_ready()
-            return True
+            return await super().start()
 
-        async def stop(self) -> None:
-            self.running = False
+    factory = FakeEverOSProcessFactory(template=_Process)
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -1669,11 +1560,15 @@ def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch,
         ),
     ).save()
     restarted = V2Config.load().memory
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
         nonlocal runtime
-        runtime = MemoryRuntime(restarted, artifact_manager=_Artifact(), effective_home=tmp_path)
+        runtime = MemoryRuntime(
+            restarted,
+            artifact_manager=_Artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
         monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False, raising=False)
         assert (await runtime.reconcile(restarted))["ok"] is True
         assert runtime._config.embedding_change_pending is False
@@ -1710,32 +1605,17 @@ def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tm
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
 
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
-            self.stopped = False
-            self._on_ready = on_ready
-            if on_ready is None:
-                self.index = -1
-            else:
-                self.index = len(instances)
-                instances.append(self)
-
-        async def processing_healthy(self) -> bool:
-            return True
+    class _Process(FakeEverOSProcess):
+        """Refuse to boot against the incompatible activated root format."""
 
         async def start(self) -> bool:
             if manager.provider_root_format() == "everos-2.0":
+                self.starts += 1
                 return False
-            assert self._on_ready is not None
-            await self._on_ready()
-            return True
+            return await super().start()
 
-        async def stop(self) -> None:
-            self.stopped = True
-            self.running = False
+    factory = FakeEverOSProcessFactory(template=_Process)
+    instances = factory.supervised
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -1743,13 +1623,13 @@ def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tm
     )
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
         runtime = MemoryRuntime(
             initial,
             store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
             artifact_manager=manager,
+            process_factory=factory,
         )
         assert (await runtime.reconcile(initial))["ok"] is True
 
@@ -1804,27 +1684,8 @@ def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatc
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
 
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
-            self.stopped = False
-            self._on_ready = on_ready
-            if on_ready is not None:
-                instances.append(self)
-
-        async def processing_healthy(self) -> bool:
-            return True
-
-        async def start(self) -> bool:
-            assert self._on_ready is not None
-            await self._on_ready()
-            return True
-
-        async def stop(self) -> None:
-            self.stopped = True
-            self.running = False
+    factory = FakeEverOSProcessFactory()
+    instances = factory.supervised
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -1832,13 +1693,13 @@ def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatc
     )
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
         runtime = MemoryRuntime(
             initial,
             store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
             artifact_manager=manager,
+            process_factory=factory,
         )
         assert (await runtime.reconcile(initial))["ok"] is True
 
@@ -1890,27 +1751,8 @@ def test_runtime_artifact_activation_rolls_back_after_sentinel_postwrite_failure
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
 
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, _python, *, on_ready=None, **_kwargs) -> None:
-            self.stopped = False
-            self._on_ready = on_ready
-            if on_ready is not None:
-                instances.append(self)
-
-        async def processing_healthy(self) -> bool:
-            return True
-
-        async def start(self) -> bool:
-            assert self._on_ready is not None
-            await self._on_ready()
-            return True
-
-        async def stop(self) -> None:
-            self.stopped = True
-            self.running = False
+    factory = FakeEverOSProcessFactory()
+    instances = factory.supervised
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -1918,13 +1760,13 @@ def test_runtime_artifact_activation_rolls_back_after_sentinel_postwrite_failure
     )
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
         runtime = MemoryRuntime(
             initial,
             store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
             artifact_manager=manager,
+            process_factory=factory,
         )
         assert (await runtime.reconcile(initial))["ok"] is True
         original_verify = runtime.module._verify_owned_provider_root
@@ -1973,49 +1815,20 @@ def test_runtime_artifact_activation_rolls_back_after_sentinel_postwrite_failure
 def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(monkeypatch) -> None:
     instances: list[object] = []
 
-    class _Artifact:
-        def resolve_python(self) -> Path:
-            return Path(sys.executable)
+    def _Artifact() -> FakeMemoryArtifactManager:
+        return _installed_artifact()
 
-        def provider_root_format(self) -> str:
-            return "everos-1.1.3"
-
-        def artifact_fingerprint(self) -> str:
-            return "test-artifact"
-
-        def status(self) -> dict:
-            return {"reason": None}
-
-    class _Process:
-        starting = False
-
-        def __init__(self, _python, *, provider_root, on_ready=None, **_kwargs) -> None:
-            self.provider_root = provider_root
-            self.stopped = False
-            self._on_ready = on_ready
-            if on_ready is not None:
-                instances.append(self)
-
-        async def processing_healthy(self) -> bool:
-            return True
-
-        async def start(self) -> bool:
-            assert self._on_ready is not None
-            await self._on_ready()
-            return True
-
-        async def stop(self) -> None:
-            self.stopped = True
+    factory = FakeEverOSProcessFactory()
+    instances = factory.supervised
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
     initial = MemoryConfig(enabled=True, processing=processing)
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
-        runtime = MemoryRuntime(initial, artifact_manager=_Artifact())
+        runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
         assert (await runtime.reconcile(initial))["ok"] is True
         updated = replace(
             initial,
@@ -2036,51 +1849,26 @@ def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(monke
 def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypatch) -> None:
     instances: list[object] = []
 
-    class _Artifact:
-        def resolve_python(self) -> Path:
-            return Path(sys.executable)
+    def _Artifact() -> FakeMemoryArtifactManager:
+        return _installed_artifact()
 
-        def provider_root_format(self) -> str:
-            return "everos-1.1.3"
-
-        def artifact_fingerprint(self) -> str:
-            return "test-artifact"
-
-        def status(self) -> dict:
-            return {"reason": None}
-
-    class _Process:
-        starting = False
-        running = True
-
-        def __init__(self, _python, *, on_ready=None, settings, **_kwargs) -> None:
-            self.stopped = False
-            self._on_ready = on_ready
-            self._settings = settings
-            if on_ready is not None:
-                instances.append(self)
+    class _Process(FakeEverOSProcess):
+        """Report health from the child settings this sidecar was launched with."""
 
         async def processing_healthy(self) -> bool:
-            return self._settings.llm_model != "unhealthy"
+            return self.settings is not None and self.settings.llm_model != "unhealthy"
 
-        async def start(self) -> bool:
-            assert self._on_ready is not None
-            await self._on_ready()
-            return True
-
-        async def stop(self) -> None:
-            self.stopped = True
-            self.running = False
+    factory = FakeEverOSProcessFactory(template=_Process)
+    instances = factory.supervised
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
     initial = MemoryConfig(enabled=True, processing=processing)
-    monkeypatch.setattr("core.memory.runtime.EverOSProcess", _Process)
 
     async def run() -> None:
-        runtime = MemoryRuntime(initial, artifact_manager=_Artifact())
+        runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
         assert (await runtime.reconcile(initial))["ok"] is True
         rejected = replace(
             initial,
