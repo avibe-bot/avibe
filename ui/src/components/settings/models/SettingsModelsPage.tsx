@@ -111,9 +111,8 @@ export const SettingsModelsPage: React.FC = () => {
     });
   };
 
-  const reorderCommit = () => {
+  const commitOrder = (order: string[]) => {
     const seq = ++reorderSeq.current;
-    const order = sourcesRef.current.map((s) => s.id);
     modelsApi
       .putPriority(order)
       .then((priority) => {
@@ -131,6 +130,19 @@ export const SettingsModelsPage: React.FC = () => {
         // list reflects the persisted (unchanged) order rather than a phantom one.
         void refreshSourcesAgents();
       });
+  };
+
+  // Drag end: the ordered state has already been re-rendered by the preview
+  // callbacks, so the mirror ref holds the freshest order.
+  const reorderCommit = () => commitOrder(sourcesRef.current.map((s) => s.id));
+
+  // Step reorder (the row menu's 上移/下移). Deliberately NOT preview-then-commit:
+  // the mirror ref is assigned during render, so a synchronous commit right after
+  // setSources would still read the pre-move order and persist it. Passing the
+  // order explicitly keeps both halves on the same value.
+  const reorderTo = (order: string[]) => {
+    reorderPreview(order);
+    commitOrder(order);
   };
 
   const connectHub = async (agent: AgentSupply) => {
@@ -184,6 +196,7 @@ export const SettingsModelsPage: React.FC = () => {
             sources={sources}
             onReorderPreview={reorderPreview}
             onReorderCommit={reorderCommit}
+            onReorderTo={reorderTo}
             onConnectClaude={() => setOauthVendor('anthropic')}
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}

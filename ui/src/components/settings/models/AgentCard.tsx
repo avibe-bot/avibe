@@ -74,37 +74,73 @@ const AgentRow: React.FC<{
     );
   }
 
+  // Direct mode had no second line at all, which read as "nothing to see here" —
+  // the truth is that this backend is still supplied by its own CLI config and the
+  // Hub isn't involved. Phones only: the desktop row keeps 直连 Direct beside its
+  // 接入中枢 button on one line, where a sentence has nowhere to go.
+  const mobileNote =
+    agent.mode === 'hub' ? null : (
+      <span className="text-[11.5px] leading-relaxed text-muted">{t('settings.models.agents.directNote')}</span>
+    );
+
+  const action =
+    agent.mode === 'hub' ? (
+      <Button variant="secondary" size="sm" className="h-11 w-full sm:h-9 sm:w-auto" onClick={openMenu}>
+        {t('settings.models.agents.modelMenu')}
+        <ChevronRight className="size-3.5" />
+      </Button>
+    ) : (
+      <Button
+        variant="brand"
+        size="sm"
+        className="h-11 w-full sm:h-9 sm:w-auto"
+        onClick={() => onConnectHub(agent)}
+        disabled={connecting}
+      >
+        <ArrowDownToLine className="size-3.5" />
+        {t('settings.models.agents.connectHub')}
+      </Button>
+    );
+
   return (
-    // Mobile: identity above, mode chip + action on their own line. Squeezed into
-    // one row at 390px the mode chip overlapped the composite pill and the pill's
-    // model id wrapped to three lines.
-    <div className="flex flex-col gap-3 border-b border-border px-4 py-4 last:border-b-0 sm:flex-row sm:items-center sm:gap-4 sm:px-5">
-      <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
-        <span className={cn('flex size-11 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
-          <Icon size={22} className={ACCENT_ICON[accent]} />
+    // Mobile is three full-width tiers (design.pen M01 m01Ag*): identity + mode
+    // badge, the supply line, then the action. Squeezed into one row at 390px the
+    // mode chip overlapped the composite pill and the pill's model id wrapped to
+    // three lines; nesting the pill under the name (the desktop shape) also left
+    // it inset by the icon tile instead of spanning the row.
+    //
+    // The supply pill has two mount points because the desktop frame nests it
+    // under the name while mobile needs it as a full-width sibling — CSS cannot
+    // re-parent. It's stateless presentation and the inactive copy is
+    // display:none (so out of the a11y tree), which is the cheap half of the
+    // trade; the win is that the sm+ DOM stays exactly the reviewed desktop row.
+    <div className="flex flex-col gap-2.5 border-b border-border px-4 py-4 last:border-b-0 sm:flex-row sm:items-center sm:gap-4 sm:px-5">
+      <div className="flex min-w-0 items-center gap-2.5 sm:flex-1 sm:gap-4">
+        <span className={cn('flex size-[34px] shrink-0 items-center justify-center rounded-[10px] sm:size-11', ACCENT_TILE[accent])}>
+          <Icon className={cn('size-[18px] sm:size-[22px]', ACCENT_ICON[accent])} />
         </span>
 
         <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
-          <span className="text-[15px] font-semibold text-foreground">
+          {/* truncate only on phones; sm+ keeps the desktop row's wrap behaviour. */}
+          <span className="truncate text-[14px] font-bold text-foreground sm:whitespace-normal sm:text-[15px] sm:font-semibold">
             {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
           </span>
-          {pill}
+          {pill && <span className="hidden sm:block">{pill}</span>}
         </div>
+
+        {/* The mode badge belongs on the identity line on phones. */}
+        <span className="shrink-0 sm:hidden">
+          <ModeChip mode={agent.mode} />
+        </span>
       </div>
 
+      <div className="sm:hidden">{pill ?? mobileNote}</div>
+
       <div className="flex items-center gap-2.5 sm:shrink-0">
-        <ModeChip mode={agent.mode} />
-        {agent.mode === 'hub' ? (
-          <Button variant="secondary" size="sm" className="ml-auto h-10 sm:ml-0 sm:h-9" onClick={openMenu}>
-            {t('settings.models.agents.modelMenu')}
-            <ChevronRight className="size-3.5" />
-          </Button>
-        ) : (
-          <Button variant="brand" size="sm" className="ml-auto h-10 sm:ml-0 sm:h-9" onClick={() => onConnectHub(agent)} disabled={connecting}>
-            <ArrowDownToLine className="size-3.5" />
-            {t('settings.models.agents.connectHub')}
-          </Button>
-        )}
+        <span className="hidden sm:inline-flex">
+          <ModeChip mode={agent.mode} />
+        </span>
+        {action}
       </div>
     </div>
   );
