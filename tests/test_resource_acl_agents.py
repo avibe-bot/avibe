@@ -217,6 +217,20 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     assert {agent["name"] for agent in catalog.get_json()["agents"]} == {"public-agent", "scope-agent"}
     assert public_mutation.status_code == 403
     assert public_mutation.get_json()["code"] == "agent_access_forbidden"
+    default_mutation = client.post(
+        "/api/agents/default",
+        json={"name": public_agent.name},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert default_mutation.status_code == 403
+    assert default_mutation.get_json()["code"] == "agent_access_forbidden"
+    store = VibeAgentStore()
+    try:
+        assert store.get_default_agent_name() == private_agent.name
+    finally:
+        store.close()
 
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:

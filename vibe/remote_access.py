@@ -1111,6 +1111,30 @@ def sync_resource_acl_once(
         _RESOURCE_ACL_SYNC_LOCK.release()
 
 
+def _resource_acl_poll_delay(result: Mapping[str, Any], fallback_seconds: int) -> int:
+    fallback = max(1, fallback_seconds)
+    organizations = result.get("organizations")
+    if not isinstance(organizations, list):
+        return fallback
+
+    delays: list[int] = []
+    for organization in organizations:
+        if not isinstance(organization, Mapping) or not organization.get("ok"):
+            continue
+        raw_delay = organization.get("poll_after_seconds")
+        if isinstance(raw_delay, bool):
+            continue
+        try:
+            delay = int(raw_delay)
+        except (TypeError, ValueError):
+            continue
+        if delay > 0:
+            delays.append(delay)
+    # One poller serves every organization, so do not poll any organization
+    # sooner than the control plane requested.
+    return max(delays, default=fallback)
+
+
 def start_resource_acl_sync_polling(
     config: V2Config | None = None,
     *,
@@ -1135,7 +1159,7 @@ def start_resource_acl_sync_polling(
                 "resource_acl_sync_in_progress",
             }:
                 logger.debug("Resource ACL sync poll did not complete: %s", result.get("error"))
-            time.sleep(max(1, interval_seconds))
+            time.sleep(_resource_acl_poll_delay(result, interval_seconds))
 
     with _RESOURCE_ACL_SYNC_POLL_LOCK:
         if _RESOURCE_ACL_SYNC_POLL_STARTED:

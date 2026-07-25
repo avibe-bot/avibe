@@ -1482,9 +1482,10 @@ def remove_vibe_agent(name: str) -> dict:
 def set_default_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        store.require_accessible(name, user_context=resolve_resource_access_context(), enabled_only=True)
+        agent = store.require_manageable(name, user_context=resolve_resource_access_context())
+        if not agent.enabled:
+            raise ValueError(f"agent '{agent.name}' is disabled")
         store.set_default_agent_name(name)
-        agent = store.require(name)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()

@@ -234,3 +234,29 @@ def test_sync_publishes_empty_index_after_last_organization_policy_is_deleted(mo
     assert [call["method"] for call in calls] == ["PUT", "GET"]
     assert calls[0]["json"]["resources"] == []
     assert resource_access_service.list_resource_organization_ids() == []
+
+
+def test_poll_delay_honors_successful_organization_backoff() -> None:
+    result = {
+        "ok": False,
+        "organizations": [
+            {"organization_id": "org-1", "ok": True, "poll_after_seconds": 45},
+            {"organization_id": "org-2", "ok": True, "poll_after_seconds": 120},
+            {"organization_id": "org-3", "ok": False, "poll_after_seconds": 300},
+        ],
+    }
+
+    assert remote_access._resource_acl_poll_delay(result, 30) == 120
+
+
+def test_poll_delay_falls_back_without_valid_successful_result() -> None:
+    result = {
+        "ok": False,
+        "organizations": [
+            {"organization_id": "org-1", "ok": False, "poll_after_seconds": 120},
+            {"organization_id": "org-2", "ok": True, "poll_after_seconds": 0},
+            {"organization_id": "org-3", "ok": True, "poll_after_seconds": "invalid"},
+        ],
+    }
+
+    assert remote_access._resource_acl_poll_delay(result, 30) == 30
