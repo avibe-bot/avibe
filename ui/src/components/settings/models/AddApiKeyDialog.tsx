@@ -3,7 +3,7 @@
 // relay endpoints); the primary button is test-and-add — it validates the key,
 // discovers models, and reports the count before the dialog dismisses.
 import * as React from 'react';
-import { CheckCircle2, Globe, KeyRound, Plus, Shield, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, Globe, KeyRound, Plus, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -106,7 +106,8 @@ export const AddApiKeyDialog: React.FC<{
       closeTimer.current = window.setTimeout(onClose, 1500);
     } catch (e: any) {
       if (submitSeq.current !== seq) return;
-      setError(e?.code || e?.message || 'discovery_failed');
+      const code = e?.code || e?.message || 'discovery_failed';
+      setError(code === 'engine_down' ? (t('settings.models.errors.engineDown') as string) : code);
       setPhase('error');
     }
   };
@@ -180,11 +181,7 @@ export const AddApiKeyDialog: React.FC<{
           </div>
         )}
 
-        <DialogFooter className="items-center sm:justify-between">
-          <span className="flex items-center gap-1.5 text-[12px] text-mint">
-            <Shield className="size-3.5" />
-            {t('settings.models.addKey.vaultNote')}
-          </span>
+        <DialogFooter>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={onClose} disabled={phase === 'submitting'}>
               {t('common.cancel')}

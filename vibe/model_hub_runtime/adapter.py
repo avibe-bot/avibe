@@ -17,6 +17,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceBinding,
 )
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from vibe.model_hub_runtime.client import (
     EngineClient,
     EngineClientError,
@@ -235,7 +236,7 @@ class CLIProxyEngineAdapter:
                 secret=secret,
             )
         except EngineClientError as exc:
-            raise EngineStateError("model discovery failed") from exc
+            raise ModelDiscoveryError("model discovery failed") from exc
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         await asyncio.to_thread(self.state_store.validate_source_id, source_id)
@@ -393,7 +394,18 @@ class CLIProxyEngineAdapter:
                         source_id=source_id,
                     )
                 )
-            return await client.invoke(source, model_id, request, stream=stream)
+            request_protocol = {
+                "claude": "anthropic",
+                "codex": "openai_responses",
+            }.get(origin, getattr(request, "protocol", None) or source.protocol)
+            return await client.invoke(
+                source,
+                model_id,
+                request,
+                stream=stream,
+                request_protocol=request_protocol,
+                request_headers=getattr(request, "headers", None),
+            )
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         inventory = await asyncio.to_thread(_auth_inventory, client)

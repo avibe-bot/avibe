@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
 from modules.claude_sdk_compat import (
+    CLAUDE_SDK_HOOKS_AVAILABLE,
     CLAUDE_SDK_MAX_BUFFER_SIZE,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     is_claude_sdk_buffer_error,
 )
@@ -28,6 +30,12 @@ from modules.agents.claude_process_reaper import (
 from config.v2_config import (
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+)
+from core.agent_tool_policy import (
+    ALWAYS_SESSION_ONLY_TOOL_NAMES,
+    check_tool_call,
+    native_background_tools_allowed,
+    session_only_background_tool_names,
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
@@ -517,6 +525,82 @@ class SessionHandler(BaseHandler):
         logger.info("Auto-approving Claude tool permission request in avibe bypass mode: %s", tool_name)
         return PermissionResultAllow()
 
+    async def _guard_session_only_background_tools(
+        self,
+        input_data: Dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any,
+    ) -> Dict[str, Any]:
+        """PreToolUse hook governing backend-native, session-only background work.
+
+        Runs in-process, so it needs no file in the user's `~/.claude`. The deny
+        reason names the durable `vibe ...` equivalent, which lets the agent
+        self-correct within the same turn instead of just failing.
+
+        An advisory outcome deliberately omits `permissionDecision`: injecting
+        context must not double as an approval, or this hook would override a
+        permission hook the user configured for the same tool.
+        """
+        try:
+            tool_name = str(input_data.get("tool_name") or "")
+            tool_input = input_data.get("tool_input") or {}
+            decision = check_tool_call(tool_name, tool_input)
+            if decision.allowed:
+                if not decision.advice:
+                    return {}
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": decision.advice,
+                    }
+                }
+            logger.info(
+                "Blocking session-only background tool %s; redirecting to the Avibe Harness",
+                tool_name,
+            )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": decision.reason,
+                }
+            }
+        except Exception:
+            # A guard that raises must never take the turn down with it.
+            logger.exception("Session-only background tool guard failed; allowing the call")
+            return {}
+
+    def _build_claude_tool_policy_hooks(self) -> Optional[Dict[str, Any]]:
+        """Hook config enforcing the shared tool policy, or None when unavailable."""
+        if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
+            return None
+        if native_background_tools_allowed():
+            return None
+        matcher = "|".join(session_only_background_tool_names())
+        return {
+            "PreToolUse": [
+                HookMatcher(
+                    matcher=matcher,
+                    hooks=[self._guard_session_only_background_tools],
+                )
+            ]
+        }
+
+    def _claude_disallowed_tools(self, hooks: Optional[Dict[str, Any]]) -> list:
+        """Disallowed tool names for this launch.
+
+        The hook is the precise enforcement path because it can read arguments and
+        return an actionable reason. Only when hooks are unavailable does the
+        coarse name-level deny list stand in, and then only for the tools that are
+        session-only under every input.
+        """
+        disallowed = list(CLAUDE_REMOTE_DISALLOWED_TOOLS)
+        if hooks is None and not native_background_tools_allowed():
+            disallowed.extend(
+                name for name in ALWAYS_SESSION_ONLY_TOOL_NAMES if name not in disallowed
+            )
+        return disallowed
+
     def _get_claude_cli_path_override(self) -> Optional[str]:
         cli_path = getattr(getattr(self.config, "claude", None), "cli_path", None)
         if cli_path is None:
@@ -959,6 +1043,8 @@ class SessionHandler(BaseHandler):
             claude_env["IS_SANDBOX"] = "1"
             logger.info("Detected Claude bypassPermissions running as root; marking Claude subprocess as isolated")
 
+        tool_policy_hooks = self._build_claude_tool_policy_hooks()
+
         option_kwargs: Dict[str, Any] = {
             "permission_mode": CLAUDE_REMOTE_PERMISSION_MODE,
             "cwd": working_path,
@@ -969,13 +1055,16 @@ class SessionHandler(BaseHandler):
             "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
-            # cannot answer programmatically.
-            "disallowed_tools": CLAUDE_REMOTE_DISALLOWED_TOOLS,
+            # cannot answer programmatically, plus any session-only background
+            # tool the hook path cannot cover.
+            "disallowed_tools": self._claude_disallowed_tools(tool_policy_hooks),
             "env": claude_env,  # Pass Anthropic/Claude env vars
             "stderr": _capture_claude_stderr,
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
             "can_use_tool": self._allow_claude_bypass_tool,
         }
+        if tool_policy_hooks:
+            option_kwargs["hooks"] = tool_policy_hooks
         cli_path_override = self._get_claude_cli_path_override()
         if cli_path_override:
             option_kwargs["cli_path"] = cli_path_override

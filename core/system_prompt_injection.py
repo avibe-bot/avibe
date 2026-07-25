@@ -11,6 +11,7 @@ from string import Template
 from typing import Any, Iterable, Optional
 
 from config import paths
+from core.agent_tool_policy import native_background_tools_allowed
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
 from core.show_git import format_agent_contract
@@ -236,12 +237,48 @@ _VAULT_WEB_CHAT_PLACEHOLDER_PROMPT = """\
 A lighter manual prompt can mention the missing secret as a clickable placeholder in your reply, for example `$<OPENAI_API_KEY>`. The user can click it and fill the secret from Web chat. This has no reason or structured prefill metadata; use `vibe vault request` when those are needed.
 """
 
+# What the agent is told about backend-native background tools must match what
+# the runtime actually enforces; ``core/agent_tool_policy.py`` owns that
+# decision and this prompt only announces it.
+_TOOL_POLICY_ENFORCED_SECTION = """\
+Backend-native background work is blocked at the tool layer, because its result is delivered only while this agent process is alive and is lost without warning otherwise. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, and a native multi-agent workflow are all denied, and the denial names the `vibe` command to run instead. A synchronous subagent that returns inside the current turn is still available, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
+
+A background shell is session-only for the same reason but is not blocked, because most of them finish inside the turn. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
+
+# No argument-aware hook here, so only whole tool names can be refused. Saying
+# "all denied" would be wrong in both directions: it overstates what stops
+# `Agent`, `ScheduleWakeup`, and `CronCreate`, and it hides that those three now
+# need the agent's own judgement rather than a gate. Each is excluded from the
+# name-only list because it has a legitimate non-background form no name match
+# can see, which leaves its background form unguarded as well.
+_TOOL_POLICY_NAME_ONLY_SECTION = """\
+Backend-native background work is only partly blocked in this runtime: the installed agent SDK predates argument-aware tool hooks, so enforcement can refuse whole tool names but cannot inspect a call's arguments. A native multi-agent workflow is denied outright. A background subagent, a self-scheduled wakeup, and a non-durable in-session cron job are **not** stopped here — each has a legitimate non-background form that a name match cannot distinguish, so the whole name has to stay open and their background forms pass through too. They will run if you call them, and their results are delivered only while this agent process is alive, so anything still pending when the session ends is lost without warning and leaves no record. Treat those three as your responsibility rather than the runtime's: use `vibe agent run`, `vibe task add`, and `vibe watch add` for work whose result must reach the user, and call a backend-native primitive only when the work resolves inside this turn. A synchronous subagent is the right tool for that, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
+
+A background shell is session-only for the same reason and is likewise not blocked. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
+
+# The tool-layer gate is installed by the Claude session handler only, so on any
+# other backend there is nothing enforcing this policy no matter what the
+# installed Claude SDK supports. This text therefore claims no gate at all, and
+# it deliberately avoids asserting which primitives the backend does or does not
+# expose — that varies per backend and would go stale as they gain features.
+_TOOL_POLICY_UNGATED_SECTION = """\
+Backend-native background work is not gated in this runtime: the tool-layer check is installed by the Claude backend only, and this session runs on a different one. Keeping work durable is therefore your own responsibility here. Anything this backend can start that keeps running after the turn — a detached shell, a background worker, a self-scheduled wakeup — is delivered only while this agent process is alive, so whatever is still pending when the session ends is lost without warning and leaves no record.
+
+Route that work through the Harness instead: `vibe agent run` for delegation and fan-out, `vibe task add` for a time trigger, and `vibe watch add --name <label> --message <what to do with the result> -- <command>` for a command that may outlive the turn, such as a long build, a deploy, a CI or review wait, or a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
+
+# Enforcement is off, so the prompt must not claim these calls are blocked; an
+# agent told a tool is denied will not attempt what the operator re-enabled.
+_TOOL_POLICY_RELAXED_SECTION = """\
+Backend-native background work is not blocked in this runtime, because the operator set `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS`. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, a native multi-agent workflow, and a background shell will all run if you call them. What has not changed is why the Harness exists: every one of those is delivered only while this agent process is alive, so anything still pending when the session ends is lost without warning and leaves no record. Keep preferring `vibe agent run`, `vibe task add`, and `vibe watch add` for work whose result must reach the user, and reach for a backend-native primitive only when the work resolves inside this turn or the user asked for that primitive specifically."""
+
 _HARNESS_PROMPT = """\
 
 ## Harness
 Avibe Harness turns user intent into durable Agent work. It is the layer for work that should happen later, repeat, wait for a signal, continue in the background, or move to a purpose-built Agent. Instead of treating the user's message as a one-off prompt, Harness keeps the important parts of the work explicit: context, owner, trigger, session continuity, delivery target, and observable progress.
 
 Avibe Harness is the first-choice automation layer. For Agent workflows, recurring automation, background loops, scheduled tasks, watches, skills-style automation, workflow tools, or any automation request, route through `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, native workflow tools, backend-native skills, hooks, schedulers, or backend configuration. Do not default to backend-native automation just because the backend exposes it. Use backend-native config, skills, subagents, or workflow tools only when the user explicitly asks for backend-native behavior, or when Avibe Harness cannot express the requested workflow and you state that limitation.
+
+{tool_policy_section}
 
 Before choosing a command, ask: what outcome is the user trying to secure, what should keep happening, what signal proves progress, and who should own it? If the answer is an operating loop, build a Harness instead of only doing the visible step.
 
@@ -495,6 +532,53 @@ def _build_session_start_prompt(context: MessageContext) -> str:
     return prompt
 
 
+def _claude_sdk_hooks_available() -> bool:
+    """Whether the installed Claude SDK exposes argument-aware tool hooks.
+
+    Imported here instead of at module scope. This module is shared by every
+    backend, and the Codex adapter is loaded in tests under a stub ``modules``
+    namespace where a Claude-only import fails outright — a top-level import
+    would make the shared prompt module unloadable for a backend that has no
+    use for the answer. Only the Claude branch of the selector below asks.
+
+    An unimportable compat module reports False, which selects the weaker
+    claim; over-claiming enforcement is the direction that actually hurts.
+    """
+    try:
+        from modules.claude_sdk_compat import CLAUDE_SDK_HOOKS_AVAILABLE
+    except ImportError:  # pragma: no cover - only reachable off the Claude path
+        return False
+    return bool(CLAUDE_SDK_HOOKS_AVAILABLE)
+
+
+def _build_tool_policy_section(backend: str) -> str:
+    """Describe backend-native background tools as the runtime actually treats them.
+
+    Four runtimes, four contracts: a non-Claude backend has no tool-layer gate
+    at all because only the Claude session handler installs one, the escape
+    hatch disables that gate where it does exist, an SDK without argument-aware
+    hooks can only refuse whole tool names, and a current SDK on Claude
+    enforces the full policy. Announcing more enforcement than exists is the
+    dangerous direction — the agent stops self-policing the calls it believes a
+    gate already covers — so an unrecognised backend gets the ungated text.
+
+    Backend is checked before the escape hatch on purpose. The hatch turns off
+    a gate that only Claude installs, so on any other backend it changes
+    nothing, and the relaxed text would replace accurate ungated wording with
+    Claude-specific tool claims.
+
+    Read at prompt-build time rather than import time so a change to the escape
+    hatch takes effect on the next turn instead of requiring a restart.
+    """
+    if backend != "claude":
+        return _TOOL_POLICY_UNGATED_SECTION
+    if native_background_tools_allowed():
+        return _TOOL_POLICY_RELAXED_SECTION
+    if not _claude_sdk_hooks_available():
+        return _TOOL_POLICY_NAME_ONLY_SECTION
+    return _TOOL_POLICY_ENFORCED_SECTION
+
+
 def _build_harness_prompt(
     context: MessageContext,
     *,
@@ -502,9 +586,11 @@ def _build_harness_prompt(
     current_agent_backend: Optional[str] = None,
 ) -> str:
     default_session_id = _extract_default_session_id(context)
+    backend = str(current_agent_backend or "unknown").strip() or "unknown"
     return _HARNESS_PROMPT.format(
         default_session_id=default_session_id,
-        current_agent_backend=str(current_agent_backend or "unknown").strip() or "unknown",
+        tool_policy_section=_build_tool_policy_section(backend),
+        current_agent_backend=backend,
         enabled_agents_table=_format_enabled_agents_table(enabled_agents),
     )
 

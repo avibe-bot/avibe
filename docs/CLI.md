@@ -475,6 +475,7 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | Variable | Description |
 |----------|-------------|
 | `OPENCODE_PORT` | Override OpenCode server port (default: 4096) |
+| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | Set to any non-blank value to turn off the policy that redirects backend-native session-only background tools (background subagents, self-scheduled wakeups, non-durable in-session cron jobs, native workflows) to the Harness, because their result is lost when the agent process exits. How much this changes depends on the backend: a Claude session on a current SDK denies all four; a Claude session on an SDK without argument-aware tool hooks can only match tool names, so it denies `Workflow` alone; Codex and OpenCode install no gate at all and are guided by the injected prompt only. Setting the variable changes only the enforcement claim in the injected prompt and silences the advisory attached to background shells; the prompt still routes agents to `vibe agent run` / `vibe task add` / `vibe watch add` first, which remains the recommendation in every case. |
 
 ## See Also
 

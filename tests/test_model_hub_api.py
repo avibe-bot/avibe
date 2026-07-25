@@ -20,10 +20,12 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
-from core.handlers.model_hub.oauth import OAuthFlowRegistry
+from core.handlers.model_hub.oauth import NativeOAuthSourceStatus, OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
+from vibe.model_hub_client import ModelHubRemoteService, _decode
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
 from vibe.ui_server import app
@@ -80,6 +82,8 @@ class FakeAdapter:
         self.flows = {}
         self.fail_sync = False
         self.fail_cancel = False
+        self.native_signed_in = True
+        self.native_account_label = None
 
     async def ensure_installed(self):
         return await self.status()
@@ -166,6 +170,14 @@ class FakeAdapter:
         if self.fail_cancel:
             raise RuntimeError("temporary engine failure")
 
+    def completed_source_status(self, flow_id):
+        if flow_id not in self.flows:
+            raise KeyError(flow_id)
+        return NativeOAuthSourceStatus(
+            signed_in=self.native_signed_in,
+            account_label=self.native_account_label,
+        )
+
 
 def _service(tmp_path):
     store = MemoryStore()
@@ -185,6 +197,142 @@ def _service(tmp_path):
 def _assert_envelope(payload: dict, *, ok: bool = True):
     assert payload["ok"] is ok
     assert payload["contract_version"] == 1
+
+
+def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
+    from vibe.model_hub_runtime import adapter as runtime_adapter
+    from vibe.model_hub_runtime import supervisor as runtime_supervisor
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    monkeypatch.setattr(runtime_adapter, "_adapter", None)
+    monkeypatch.setattr(runtime_supervisor, "_supervisor", None)
+
+    service = create_default_service(native_oauth_adapter=FakeAdapter())
+
+    assert isinstance(service.adapter, CLIProxyEngineAdapter)
+    assert service.adapter.supervisor.state_store.root.is_relative_to(tmp_path)
+
+
+def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
+    from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+    from vibe import api
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    agent_auth_service = object()
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: agent_auth_service)
+
+    service = create_default_service(adapter=FakeAdapter())
+
+    assert isinstance(service.native_oauth_adapter, AgentAuthNativeOAuthAdapter)
+    assert service.native_oauth_adapter._agent_auth_service is agent_auth_service
+
+
+def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
+    class LifecycleAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.start_calls = 0
+
+        async def start(self):
+            self.start_calls += 1
+            return await super().start()
+
+    adapter = LifecycleAdapter()
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert adapter.start_calls == 1
+    assert runtime["status"]["health"] == "ok"
+    assert runtime["status"]["verified"] is True
+
+
+def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    service, _store, _adapter = _service(tmp_path)
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert runtime["manifest"] == EngineRuntimeManager(offline=True).contract_manifest()
+    assert [asset["platform"] for asset in runtime["manifest"]["assets"]] == [
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-amd64",
+        "linux-arm64",
+    ]
+
+
+def test_runtime_status_falls_back_when_engine_cannot_start(tmp_path):
+    class StartFailureAdapter(FakeAdapter):
+        async def start(self):
+            raise RuntimeError("engine cannot start")
+
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_INSTALLED,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=StartFailureAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(service.runtime_status())
+
+    assert runtime["status"] == {
+        "installed_version": None,
+        "verified": False,
+        "listening": None,
+        "health": "not_installed",
+        "last_check": None,
+    }
+
+
+def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
+    class DiscoveryFailureAdapter(FakeAdapter):
+        async def discover_models(self, vendor, protocol, base_url, credential_ref):
+            raise ModelDiscoveryError("upstream rejected the credential")
+
+    store = MemoryStore()
+    adapter = DiscoveryFailureAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "openai",
+                    "key": "sk-test-invalid-but-syntactically-valid",
+                }
+            )
+        )
+
+    assert error.value.code == "discovery_failed"
+    assert adapter.revoked == ["cred_test123"]
+    assert store.config.sources == []
 
 
 def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
@@ -208,6 +356,35 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
 
     assert agents["opencode"]["builtin_models"] is None
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
+
+
+def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
+    monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
+
+    service = ui_server._model_hub_service()
+
+    assert isinstance(service, ModelHubRemoteService)
+    assert not hasattr(service, "adapter")
+
+
+def test_ui_model_hub_rpc_preserves_controller_error_contract():
+    import httpx
+
+    response = httpx.Response(
+        409,
+        json={
+            "ok": False,
+            "error": "mode_switch_blocked",
+            "detail": "modelHub.errors.mode_switch_blocked",
+        },
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        _decode(response)
+
+    assert exc_info.value.code == "mode_switch_blocked"
+    assert exc_info.value.status == 409
+    assert exc_info.value.detail == "modelHub.errors.mode_switch_blocked"
 
 
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
@@ -441,7 +618,9 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     consented_source = response.get_json()["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
-    assert service.oauth_flows.channel(hub_flow["flow_id"]) is None
+    completed_binding = service.oauth_flows.binding(hub_flow["flow_id"])
+    assert completed_binding is not None
+    assert completed_binding.completed is True
 
     scan = client.post("/api/models/migration/scan", headers=headers, base_url=base_url).get_json()
     _assert_valid("migration-scan.schema.json", {"items": scan["items"]})

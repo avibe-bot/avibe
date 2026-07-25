@@ -6,7 +6,7 @@
 // mirrors BackendOAuthPanel: start → 2s poll → verifying → success, 15-min
 // timeout, cancel.
 import * as React from 'react';
-import { CheckCircle2, Sparkles, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, Loader2, Sparkles, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -50,8 +50,14 @@ export const OAuthConnectDialog: React.FC<{
   const [errorKey, setErrorKey] = React.useState<string | null>(null);
   const [channel, setChannel] = React.useState<SupplyChannel>('native_cli');
   const [consentOpen, setConsentOpen] = React.useState(false);
+  // Between flow success and the Source being persisted (createOAuthSource):
+  // holds the "Connected" banner so we never claim success before the Source
+  // actually exists, and lets a finalize failure surface honestly.
+  const [finalizing, setFinalizing] = React.useState(false);
   const [, tick] = React.useReducer((x) => x + 1, 0);
 
+  // One-shot latch so the finalize handoff runs exactly once per flow.
+  const finalizedRef = React.useRef(false);
   const flowRef = React.useRef<OAuthFlow | null>(null);
   const successTimer = React.useRef<number | null>(null);
   const onConnectedRef = React.useRef(onConnected);
@@ -106,6 +112,39 @@ export const OAuthConnectDialog: React.FC<{
         if (cancelled) return;
         apply(next);
         if (next.state === 'success') {
+          // P0: a completed flow is NOT yet a Source. Finalize the handoff
+          // (POST /sources with oauth_flow_ref) — the server assigns the source
+          // id from the flow binding and discovers models. Only then is the
+          // connect truly done. `experimental_consent` goes only to the hub
+          // channel; native_cli must not send it (server rejects otherwise).
+          if (finalizedRef.current) return;
+          finalizedRef.current = true;
+          setFinalizing(true);
+          try {
+            await modelsApi.createOAuthSource({
+              kind: 'subscription',
+              vendor,
+              oauth_flow_ref: next.flow_id,
+              supply_channel: next.channel,
+              ...(next.channel === 'hub' ? { experimental_consent: true } : {}),
+            });
+          } catch (err) {
+            // OAuth succeeded but the Source wasn't persisted — say so, don't
+            // flash a false "Connected". The Source may exist server-side if the
+            // request landed, so a refetch still runs on the honest paths below.
+            if (cancelled) return;
+            const code = (err as { code?: string } | null)?.code;
+            setErrorKey(
+              code === 'consent_required'
+                ? 'settings.models.oauth.error.consent'
+                : 'settings.models.oauth.error.finalize',
+            );
+            apply({ ...next, state: 'failed' });
+            setFinalizing(false);
+            return;
+          }
+          if (cancelled) return;
+          setFinalizing(false);
           showToast(t('settings.models.oauth.status.success') as string, 'success');
           onConnectedRef.current();
           successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
@@ -127,15 +166,22 @@ export const OAuthConnectDialog: React.FC<{
     setErrorKey(null);
     setCode('');
     setSubmitting(false);
+    setFinalizing(false);
+    finalizedRef.current = false;
     void (async () => {
       try {
-        const started = await modelsApi.startOAuth(vendor, channel);
+        // A hub-held subscription connect (channel === 'hub' only when the user
+        // has confirmed the experimental consent below) must carry consent, or
+        // the server returns consent_required.
+        const started = await modelsApi.startOAuth(vendor, channel, channel === 'hub');
         if (cancelled) return;
         apply(started);
         if (started.expires_at) deadline = new Date(started.expires_at).getTime() + 60_000;
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
-      } catch {
-        if (!cancelled) setErrorKey('settings.models.oauth.error.start');
+      } catch (err) {
+        if (cancelled) return;
+        const code = (err as { code?: string } | null)?.code;
+        setErrorKey(code === 'consent_required' ? 'settings.models.oauth.error.consent' : 'settings.models.oauth.error.start');
       }
     })();
 
@@ -186,9 +232,11 @@ export const OAuthConnectDialog: React.FC<{
   const expects = presentation?.expects;
   const isDevice = expects === 'none';
   const state = flow?.state;
-  const success = state === 'success';
+  // "Connected" only once the Source is persisted — never during finalize, and
+  // never if the finalize handoff failed.
+  const success = state === 'success' && !finalizing && !errorKey;
   const failed = state === 'failed' || state === 'cancelled' || Boolean(errorKey);
-  const active = !success && !failed;
+  const active = !success && !failed && !finalizing;
 
   const remainingMs = flow?.expires_at ? Math.max(0, new Date(flow.expires_at).getTime() - Date.now()) : null;
   const mmss =
@@ -206,7 +254,7 @@ export const OAuthConnectDialog: React.FC<{
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <Dialog open={open} onOpenChange={(v) => !v && !finalizing && onClose()}>
         <DialogContent className="max-w-[520px] gap-5">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2.5 text-[17px] font-bold">
@@ -230,6 +278,11 @@ export const OAuthConnectDialog: React.FC<{
             <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
               <CheckCircle2 className="size-4 shrink-0" />
               {t('settings.models.oauth.connected')}
+            </div>
+          ) : finalizing ? (
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2/40 px-4 py-3 text-[13px] font-medium text-muted">
+              <Loader2 className="size-4 shrink-0 animate-spin" />
+              {t('settings.models.oauth.status.finalizing')}
             </div>
           ) : (
             active && (
@@ -317,7 +370,7 @@ export const OAuthConnectDialog: React.FC<{
             ) : (
               <span />
             )}
-            <Button variant={active ? 'ghost' : 'outline'} size="sm" onClick={onClose}>
+            <Button variant={active ? 'ghost' : 'outline'} size="sm" onClick={onClose} disabled={finalizing}>
               {active ? t('common.cancel') : t('common.close')}
             </Button>
           </div>

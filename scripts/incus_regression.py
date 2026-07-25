@@ -767,6 +767,69 @@ def stop_service_for_update(runner: Runner, target: RegressionTarget, *, remote:
     runner.run(root_exec(target, f"systemctl stop {SERVICE_NAME} || true", remote=remote), check=False)
 
 
+def migrate_legacy_backend_runtimes(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    """Move pre-#545 root-global backends into the service user's home.
+
+    Long-lived regression instances keep their original base image when ``up``
+    syncs newer source. Instances created before #545 therefore still resolve
+    root-owned CLIs under ``/usr`` even though current base images install
+    self-updatable copies under ``/home/avibe``. Only migrate a backend when its
+    user-owned entrypoint is absent and the corresponding legacy binary exists.
+    """
+    runner.run(
+        tenant_exec(
+            target,
+            textwrap.dedent(
+                f"""\
+                set -euo pipefail
+                user_bin={shlex.quote(f"{SERVICE_HOME}/.local/bin")}
+                npm_prefix={shlex.quote(f"{SERVICE_HOME}/.npm-global")}
+                mkdir -p "$user_bin"
+
+                npm_packages=()
+                if [ ! -x "$user_bin/claude" ]; then
+                    if [ -x "$npm_prefix/bin/claude" ]; then
+                        ln -sfn "$npm_prefix/bin/claude" "$user_bin/claude"
+                    elif [ -x /usr/bin/claude ] || [ -x /usr/local/bin/claude ]; then
+                        npm_packages+=("@anthropic-ai/claude-code")
+                    fi
+                fi
+                if [ ! -x "$user_bin/codex" ]; then
+                    if [ -x "$npm_prefix/bin/codex" ]; then
+                        ln -sfn "$npm_prefix/bin/codex" "$user_bin/codex"
+                    elif [ -x /usr/bin/codex ] || [ -x /usr/local/bin/codex ]; then
+                        npm_packages+=("@openai/codex")
+                    fi
+                fi
+                if [ "${{#npm_packages[@]}}" -gt 0 ]; then
+                    echo "Migrating legacy npm-installed agent backends into $npm_prefix"
+                    npm config set prefix "$npm_prefix" --location=user
+                    npm install --global --prefix "$npm_prefix" "${{npm_packages[@]}}"
+                    for backend in claude codex; do
+                        if [ -x "$npm_prefix/bin/$backend" ]; then
+                            ln -sfn "$npm_prefix/bin/$backend" "$user_bin/$backend"
+                        fi
+                    done
+                fi
+
+                if [ ! -x "$user_bin/opencode" ]; then
+                    if [ -x "{SERVICE_HOME}/.opencode/bin/opencode" ]; then
+                        ln -sfn "{SERVICE_HOME}/.opencode/bin/opencode" "$user_bin/opencode"
+                    elif [ -x /usr/local/bin/opencode ] || [ -x /usr/bin/opencode ]; then
+                        echo "Migrating legacy OpenCode into {SERVICE_HOME}/.opencode"
+                        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors https://opencode.ai/install \
+                            | HOME={shlex.quote(SERVICE_HOME)} bash -s -- --no-modify-path
+                        test -x "{SERVICE_HOME}/.opencode/bin/opencode"
+                        ln -sfn "{SERVICE_HOME}/.opencode/bin/opencode" "$user_bin/opencode"
+                    fi
+                fi
+                """
+            ),
+            remote=remote,
+        )
+    )
+
+
 def file_hash(repo_root: Path, relative_paths: Sequence[str]) -> str:
     digest = hashlib.sha256()
     for relative in relative_paths:
@@ -1081,11 +1144,12 @@ def instance_ui_dist_exists(runner: Runner, target: RegressionTarget, *, remote:
 
 
 def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    config_path = f"{AVIBE_HOME}/config/config.json"
     script = textwrap.dedent(f"""
         import json
         from pathlib import Path
 
-        path = Path({str(AVIBE_HOME + "/config/config.json")!r})
+        path = Path({config_path!r})
         if not path.exists():
             raise SystemExit(0)
         payload = json.loads(path.read_text())
@@ -1102,9 +1166,10 @@ def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote
         path.write_text(json.dumps(payload, indent=2))
     """).strip()
     runner.run(
-        root_exec(
+        tenant_exec(
             target,
-            f"python3 - <<'PY'\n{script}\nPY\nchown {SERVICE_USER}:{SERVICE_USER} {AVIBE_HOME}/config/config.json",
+            f"{VENV_DIR}/bin/python scripts/prepare_regression.py --normalize-config {shlex.quote(config_path)} && "
+            f"python3 - <<'PY'\n{script}\nPY",
             remote=remote,
         )
     )
@@ -1405,6 +1470,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
         else:
             print("No regression env file loaded; preserving existing runtime env file.")
+        migrate_legacy_backend_runtimes(runner, target, remote=args.remote)
         sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
         fingerprints = compute_fingerprints(repo_root)
         previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)

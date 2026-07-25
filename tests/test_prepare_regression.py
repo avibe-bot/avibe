@@ -225,9 +225,13 @@ def test_prepare_ignores_legacy_regression_layout(tmp_path: Path, monkeypatch: p
         json.dumps(
             {
                 "runtime": {"default_cwd": "/data/vibe_remote/workdir"},
-                # Legacy root-global install baked by pre-#545 base images; must be
-                # migrated to the user-owned path on a preserved-state update.
-                "agents": {"opencode": {"cli_path": "/usr/local/bin/opencode"}},
+                # Legacy root-global installs baked by pre-#545 base images must
+                # resolve through the user-owned PATH after migration.
+                "agents": {
+                    "opencode": {"cli_path": "/usr/local/bin/opencode"},
+                    "claude": {"cli_path": "/usr/bin/claude"},
+                    "codex": {"cli_path": "/usr/bin/codex"},
+                },
             }
         ),
         encoding="utf-8",
@@ -265,8 +269,52 @@ def test_prepare_ignores_legacy_regression_layout(tmp_path: Path, monkeypatch: p
     settings = json.loads((avibe_home / "state" / "settings.json").read_text(encoding="utf-8"))
     assert config["runtime"]["default_cwd"] == "/home/avibe/.avibe/workdir"
     assert config["agents"]["opencode"]["cli_path"] == "opencode"
+    assert config["agents"]["claude"]["cli_path"] == "claude"
+    assert config["agents"]["codex"]["cli_path"] == "codex"
     assert settings["scopes"]["channel"]["slack"]["C123SLACK"]["custom_cwd"] == "/home/avibe/.avibe/workdir"
     assert (tmp_path / "home" / ".claude.json").is_file()
+
+
+def test_normalize_config_payload_preserves_custom_backend_paths(tmp_path: Path) -> None:
+    module = _load_module()
+    config_path = tmp_path / "config.json"
+    payload = {
+        "agents": {
+            "opencode": {"cli_path": "/opt/custom/opencode"},
+            "claude": {"cli_path": "/opt/custom/claude"},
+            "codex": {"cli_path": "/opt/custom/codex"},
+        }
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    module._normalize_config_payload(config_path)
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == payload
+
+
+def test_main_normalizes_preserved_config_without_preparing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "opencode": {"cli_path": "/usr/local/bin/opencode"},
+                    "claude": {"cli_path": "/usr/bin/claude"},
+                    "codex": {"cli_path": "/usr/local/bin/codex"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["prepare_regression.py", "--normalize-config", str(config_path)])
+
+    assert module.main() == 0
+
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["agents"]["opencode"]["cli_path"] == "opencode"
+    assert payload["agents"]["claude"]["cli_path"] == "claude"
+    assert payload["agents"]["codex"]["cli_path"] == "codex"
 
 
 def test_prepare_keeps_avibe_home_authoritative_when_legacy_layout_exists(

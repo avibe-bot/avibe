@@ -48,6 +48,17 @@ try:
         class TaskNotificationMessage(SystemMessage):
             pass
 
+    try:
+        from claude_agent_sdk import HookMatcher  # type: ignore[import-not-found]
+
+        CLAUDE_SDK_HOOKS_AVAILABLE = True
+    except ImportError:
+        # In-process hooks postdate the core SDK types. Callers must check
+        # CLAUDE_SDK_HOOKS_AVAILABLE before passing `hooks=` to
+        # ClaudeAgentOptions, since it is a dataclass and rejects unknown kwargs.
+        HookMatcher = None  # type: ignore[assignment]
+        CLAUDE_SDK_HOOKS_AVAILABLE = False
+
     CLAUDE_SDK_AVAILABLE = True
 
     def _should_ignore_message_parse_error(data: object) -> bool:
@@ -82,6 +93,8 @@ try:
                 yield message
 except ModuleNotFoundError:  # pragma: no cover - exercised only in minimal test envs
     CLAUDE_SDK_AVAILABLE = False
+    CLAUDE_SDK_HOOKS_AVAILABLE = False
+    HookMatcher = None  # type: ignore[assignment]
 
     class _MissingClaudeSDK:
         def __init__(self, *args, **kwargs):

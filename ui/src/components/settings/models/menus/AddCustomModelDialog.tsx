@@ -4,10 +4,11 @@
 // rule (`custom/` fallback). Persists via POST /custom-models; also used to edit
 // an existing custom entry (same upsert endpoint).
 import * as React from 'react';
-import { ChevronDown, Copy, Plus } from 'lucide-react';
+import { ChevronDown, Copy, Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
   DialogContent,
@@ -115,7 +116,9 @@ export const AddCustomModelDialog: React.FC<{
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
-}> = ({ open, sources, standardVendors, edit, onClose, onSaved }) => {
+  /** Fired after a custom model is removed (edit mode only). */
+  onDeleted?: (identifier: string) => void;
+}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onDeleted }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -123,6 +126,7 @@ export const AddCustomModelDialog: React.FC<{
   const [modelId, setModelId] = React.useState('');
   const [displayName, setDisplayName] = React.useState('');
   const [saving, setSaving] = React.useState(false);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
 
   // Seed on open: edit prefill, else the first source that can carry custom
   // models (an api_key source), else the first source.
@@ -165,8 +169,32 @@ export const AddCustomModelDialog: React.FC<{
     }
   };
 
+  const submitDelete = async () => {
+    if (!edit) return;
+    try {
+      await modelsApi.deleteCustomModel(edit.sourceId, edit.modelId);
+      onDeleted?.(identifier);
+      setDeleteOpen(false);
+      onClose();
+      showToast(t('settings.models.menus.custom.deleted') as string, 'success');
+    } catch (err) {
+      // The server guards a delete while the model is still the only selected
+      // supplier for some agent — surface that honestly instead of a generic fail.
+      const code = (err as { code?: string } | null)?.code;
+      showToast(
+        t(
+          code === 'mode_switch_blocked'
+            ? 'settings.models.menus.custom.deleteInUse'
+            : 'settings.models.menus.custom.deleteFailed',
+        ) as string,
+        'error',
+      );
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && !saving && onClose()}>
+    <>
+      <Dialog open={open} onOpenChange={(v) => !v && !saving && onClose()}>
       <DialogContent className="max-w-[560px] gap-5">
         <DialogHeader>
           <DialogTitle className="text-[18px] font-bold">{t('settings.models.menus.custom.title')}</DialogTitle>
@@ -223,16 +251,44 @@ export const AddCustomModelDialog: React.FC<{
           <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.menus.custom.previewHint')}</p>
         </div>
 
-        <DialogFooter className="sm:justify-end">
-          <Button variant="outline" size="sm" onClick={onClose} disabled={saving}>
-            {t('common.cancel')}
-          </Button>
-          <Button variant="brand" size="sm" onClick={() => void submit()} disabled={!source || !trimmedId || saving}>
-            <Plus className="size-4" />
-            {t('settings.models.menus.custom.add')}
-          </Button>
+        <DialogFooter className={cn('gap-2', edit ? 'sm:justify-between' : 'sm:justify-end')}>
+          {edit && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:bg-destructive/[0.08] hover:text-destructive"
+              onClick={() => setDeleteOpen(true)}
+              disabled={saving}
+            >
+              <Trash2 className="size-4" />
+              {t('settings.models.menus.custom.delete')}
+            </Button>
+          )}
+          <div className="flex items-center gap-2 max-sm:w-full max-sm:justify-end">
+            <Button variant="outline" size="sm" onClick={onClose} disabled={saving}>
+              {t('common.cancel')}
+            </Button>
+            <Button variant="brand" size="sm" onClick={() => void submit()} disabled={!source || !trimmedId || saving}>
+              <Plus className="size-4" />
+              {t(edit ? 'common.save' : 'settings.models.menus.custom.add')}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        destructive
+        title={t('settings.models.menus.custom.deleteConfirmTitle')}
+        description={t('settings.models.menus.custom.deleteConfirmBody', {
+          model: identifier || edit?.modelId,
+          source: source?.display_name ?? '',
+        })}
+        confirmLabel={t('settings.models.menus.custom.delete') as string}
+        onConfirm={submitDelete}
+      />
+    </>
   );
 };

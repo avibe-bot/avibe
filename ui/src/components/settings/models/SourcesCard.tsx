@@ -10,10 +10,11 @@ import { AddSourceMenu } from './AddSourceMenu';
 import { SourceRow } from './SourceRow';
 import type { Source } from './types';
 
-const SourceReorderItem: React.FC<{ source: Source; priority: number; onCommit: () => void }> = ({
+const SourceReorderItem: React.FC<{ source: Source; priority: number; onCommit: () => void; onChanged: () => void }> = ({
   source,
   priority,
   onCommit,
+  onChanged,
 }) => {
   const controls = useDragControls();
   return (
@@ -28,6 +29,7 @@ const SourceReorderItem: React.FC<{ source: Source; priority: number; onCommit: 
         source={source}
         priority={priority}
         onDragHandlePointerDown={(e) => controls.start(e)}
+        onChanged={onChanged}
       />
     </Reorder.Item>
   );
@@ -42,7 +44,9 @@ export const SourcesCard: React.FC<{
   onConnectClaude: () => void;
   onConnectChatGPT: () => void;
   onAddApiKey: () => void;
-}> = ({ sources, onReorderPreview, onReorderCommit, onConnectClaude, onConnectChatGPT, onAddApiKey }) => {
+  /** Re-fetch after a per-row action (rename / re-discover / delete). */
+  onSourceChanged: () => void;
+}> = ({ sources, onReorderPreview, onReorderCommit, onConnectClaude, onConnectChatGPT, onAddApiKey, onSourceChanged }) => {
   const { t } = useTranslation();
   const ids = sources.map((s) => s.id);
 
@@ -66,7 +70,7 @@ export const SourcesCard: React.FC<{
       ) : (
         <Reorder.Group axis="y" values={ids} onReorder={onReorderPreview} className="flex flex-col">
           {sources.map((source, index) => (
-            <SourceReorderItem key={source.id} source={source} priority={index + 1} onCommit={onReorderCommit} />
+            <SourceReorderItem key={source.id} source={source} priority={index + 1} onCommit={onReorderCommit} onChanged={onSourceChanged} />
           ))}
         </Reorder.Group>
       )}

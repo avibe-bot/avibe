@@ -631,6 +631,7 @@
         "customEndpoint": "自定义地址",
         "retryIn": "{{minutes}} 分后重试",
         "reorder": "拖动排序",
+        "oauthSignedOut": "CLI 订阅未登录",
         "cooldown": {
           "timeout": "连续超时"
         }
@@ -655,9 +656,8 @@
         "hub": "中枢 Hub",
         "direct": "直连 Direct"
       },
-      "menuKind": {
-        "fixed": "菜单固定",
-        "open": "菜单开放"
+      "errors": {
+        "engineDown": "模型引擎未就绪,请稍后重试"
       },
       "experimental": "实验",
       "agents": {
@@ -669,7 +669,8 @@
         "menuComingSoon": "模型菜单即将上线（随下一个里程碑发布）",
         "modelCount": "{{count}} 个模型",
         "multiSource": "多来源",
-        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义"
+        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义",
+        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）"
       },
       "recent": {
         "title": "最近切换",
@@ -709,7 +710,6 @@
         "discovered": "连接成功 · 发现 {{count}} 个可用模型，已加入供应清单",
         "failed": "连接失败：{{detail}}",
         "testing": "连接中…",
-        "vaultNote": "只存本机，可入 Vault",
         "vendors": {
           "custom": "自定义 · OpenAI / Anthropic 兼容",
           "anthropic": "Anthropic",
@@ -744,12 +744,15 @@
           "awaitingPaste": "等待授权 · {{time}} 后超时",
           "awaitingDevice": "等待完成 · 自动检测，无需回填",
           "verifying": "验证中…",
-          "success": "连接成功"
+          "success": "连接成功",
+          "finalizing": "正在创建来源…"
         },
         "error": {
           "start": "无法开始授权，请重试",
           "timeout": "授权超时，请重新连接",
-          "generic": "连接失败，请重试"
+          "generic": "连接失败，请重试",
+          "finalize": "已完成授权，但创建来源失败，请重试",
+          "consent": "连接中枢托管订阅需先同意实验条款；请重新发起连接并在弹窗中开启「中枢托管」选项。"
         },
         "hubOption": {
           "title": "由中枢托管此订阅（实验）",
@@ -772,7 +775,8 @@
         "reorderFailed": "顺序保存失败",
         "connected": "已接入中枢",
         "connectFailed": "接入失败，请重试",
-        "refreshFailed": "刷新失败，请重试"
+        "refreshFailed": "刷新失败，请重试",
+        "connectedNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连"
       },
       "menus": {
         "done": "完成",
@@ -819,7 +823,13 @@
           "previewEmpty": "填入模型 ID 后预览",
           "previewHint": "provider 段自动选：可识别厂商用标准 ID（与 OpenCode 原生一致），识别不了归 custom/；来源增减、模式切换都不影响标识。",
           "add": "添加到菜单",
-          "failed": "添加失败，请重试"
+          "failed": "添加失败，请重试",
+          "delete": "删除模型",
+          "deleteConfirmTitle": "移除自定义模型？",
+          "deleteConfirmBody": "将从「{{source}}」的清单移除 {{model}}。",
+          "deleted": "已移除自定义模型",
+          "deleteFailed": "移除失败，请重试",
+          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单/映射里取消后再删除。"
         }
       },
       "supplyMode": {
@@ -840,7 +850,9 @@
           "description": "{{backend}} 使用自己的原生配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不代管模型。适合排查问题，或想完全自管配置的用户。",
           "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
           "import": "导入中枢…"
-        }
+        },
+        "switchedHubNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连",
+        "hubNoSupply": "已选中枢，但还没有可供给本后端的来源，当前仍走直连。去「模型」页添加或启用来源后即生效。"
       },
       "migration": {
         "title": "接入模型中枢",
@@ -869,6 +881,33 @@
         "claude": "Claude Code",
         "codex": "Codex",
         "opencode": "OpenCode"
+      },
+      "sourceActions": {
+        "more": "更多操作",
+        "rename": "重命名",
+        "rediscover": "重新发现模型",
+        "delete": "删除来源",
+        "renameTitle": "重命名来源",
+        "renameLabel": "显示名",
+        "renamePlaceholder": "例如 生产环境 Key",
+        "renamed": "已重命名",
+        "renameFailed": "重命名失败，请重试",
+        "rediscovered": "已重新发现 {{count}} 个模型",
+        "rediscoverFailed": "重新发现失败，请重试",
+        "deleteTitle": "删除来源？",
+        "deleteBody": "将从中枢移除「{{name}}」并撤销其凭证，此操作不可撤销。",
+        "deleteConfirm": "删除",
+        "deleteForceTitle": "仍要删除该来源？",
+        "deleteForceBody": "「{{name}}」是某个已选模型的唯一供给，删除后相关 Agent 将无来源可用。确认强制删除？",
+        "deleteForceConfirm": "强制删除",
+        "deleted": "已删除来源",
+        "deleteFailed": "删除失败，请重试"
+      },
+      "migrationBanner": {
+        "title": "发现可导入中枢的原生配置",
+        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢，三个 Agent 共用一份来源和优先级。",
+        "import": "导入中枢",
+        "dismiss": "忽略"
       }
     }
   },
@@ -1601,15 +1640,8 @@
     "step3TipTitle": "最容易漏掉的点",
     "step3Tip": "如果你希望机器人在群里无需 @ 也能响应普通消息，/setprivacy 必须选 Disable。这是 Telegram 群聊里最常见的初始化遗漏。",
     "step3ExtraTip": "如果你只是先在私聊里使用 bot，/setjoingroups 可以稍后再配；但一旦要进群或 forum，建议这一步先完成。",
-    "step4Title": "先完成配置和绑定，再发现群组",
-    "step4Description": "Telegram 会话发现必须等 Avibe 启动并收到入站消息后才会发生。先完成配置并启动服务，再从 dashboard 回来启用已发现的群组或 forum chat。",
-    "step4Item1": "先完成配置流程并启动服务",
-    "step4Item2": "在 Summary 页面复制首个绑定命令，并在私聊里向机器人发送 `bind <code>` 或 `/bind <code>`",
-    "step4Item3": "绑定完成后，在私聊里发送 /start；如果要在群组或 forum 里用，把机器人加进去并授予发消息权限；若要自动新建 topic，请给它管理员或管理 topic 的权限",
-    "step4Item4": "在每个目标群组或 forum chat 里先发一条消息，之后再到 dashboard 的群组设置页刷新 Telegram 会话列表",
-    "step4Tip": "Telegram 私聊不会显示在可选会话列表里。如果群里仍然只对命令或 @ 有响应，先回头检查第 3 步的 /setprivacy 是否真的已经设成 Disable。",
-    "step5Title": "选择默认会话行为",
-    "step5Description": "为这个 Telegram 机器人设置默认的群聊响应方式和 forum topic 行为。",
+    "step4Title": "选择默认会话行为",
+    "step4Description": "为这个 Telegram 机器人设置默认的群聊响应方式和 forum topic 行为。",
     "botToken": "机器人令牌",
     "botTokenPlaceholder": "粘贴 Telegram 机器人令牌",
     "botTokenHint": "先通过 @BotFather 创建机器人，再把令牌粘贴到这里。",

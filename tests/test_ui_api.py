@@ -1989,12 +1989,14 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
 
     assert result["ok"] is True
     assert result["models"][0] == "claude-fable-5"
+    assert result["models"][1] == "claude-opus-5"
     assert "opus" in result["models"]
     assert "sonnet" in result["models"]
     assert "haiku" in result["models"]
     assert "opus[1m]" in result["models"]
     assert "claude-haiku-4-5-20251001" in result["models"]
     assert result["models"].count("claude-sonnet-4-6") == 1
+    assert result["model_labels"]["claude-opus-5"] == "claude-opus-5 [1M]"
     assert result["model_labels"]["claude-opus-4-6"] == "claude-opus-4-6 [1M]"
     assert result["model_labels"]["claude-sonnet-4-6"] == "claude-sonnet-4-6 [1M]"
     assert result["model_labels"]["opus"] == "opus [1M]"

@@ -474,6 +474,7 @@ def _supports_claude_xhigh_reasoning(target_model: Optional[str]) -> bool:
     return (
         normalized_model in _CLAUDE_OPUS_ALIASES
         or normalized_model in _CLAUDE_SONNET_ALIASES
+        or normalized_model.startswith("claude-opus-5")
         or normalized_model.startswith("claude-opus-4-7")
         or normalized_model.startswith("claude-opus-4-8")
         or normalized_model.startswith("claude-sonnet-5")
@@ -488,6 +489,7 @@ def _supports_claude_max_reasoning(target_model: Optional[str]) -> bool:
     return (
         normalized_model in _CLAUDE_OPUS_ALIASES
         or normalized_model in _CLAUDE_SONNET_ALIASES
+        or normalized_model.startswith("claude-opus-5")
         or normalized_model.startswith("claude-opus-4-6")
         or normalized_model.startswith("claude-opus-4-7")
         or normalized_model.startswith("claude-opus-4-8")
@@ -504,6 +506,7 @@ def supports_claude_1m_context(target_model: Optional[str]) -> bool:
     return (
         normalized_model in _CLAUDE_OPUS_ALIASES
         or normalized_model in _CLAUDE_SONNET_ALIASES
+        or normalized_model.startswith("claude-opus-5")
         or normalized_model.startswith("claude-opus-4-6")
         or normalized_model.startswith("claude-opus-4-7")
         or normalized_model.startswith("claude-opus-4-8")
@@ -554,8 +557,8 @@ def build_claude_reasoning_options(
     """Return the canonical Claude reasoning-effort option list for a model.
 
     Claude currently supports `low` / `medium` / `high` broadly. Newer
-    Opus 4.7, Opus 4.8, and Sonnet 5 models add `xhigh`; Opus 4.8,
-    4.7, 4.6, Sonnet 5, and Sonnet 4.6 also support `max`.
+    Opus 4.7, Opus 4.8, Opus 5, and Sonnet 5 models add `xhigh`; those
+    models plus Opus 4.6 and Sonnet 4.6 also support `max`.
     """
 
     efforts = list(reasoning_efforts) if reasoning_efforts is not None else list(_CLAUDE_REASONING_EFFORTS)

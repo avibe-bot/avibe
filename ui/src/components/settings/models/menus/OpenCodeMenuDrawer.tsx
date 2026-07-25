@@ -83,6 +83,11 @@ export const OpenCodeMenuDrawer: React.FC<{
   const eligibleSources = React.useMemo(() => sources.filter((s) => isSourceEligible(s, 'opencode')), [sources]);
   const groups = React.useMemo(() => buildMenuGroups(eligibleSources, standardVendors), [eligibleSources, standardVendors]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
+  // Identifiers a source currently supplies. Persisted `checked` is self-healed
+  // against this so an identifier whose only supplier was deleted (e.g. a
+  // force-deleted source) is dropped rather than shown as an invisible checked
+  // row or sent to putMenu (which the server rejects as mapping_target_unavailable).
+  const availableIds = React.useMemo(() => new Set(allRows.map((r) => r.identifier)), [allRows]);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
   const [checked, setChecked] = React.useState<Set<string>>(() => new Set(agent.menu?.checked ?? []));
@@ -94,10 +99,15 @@ export const OpenCodeMenuDrawer: React.FC<{
   React.useEffect(() => {
     if (!open) return;
     const v = agent.menu?.view ?? 'featured';
-    const c = agent.menu?.checked ?? [];
+    const raw = agent.menu?.checked ?? [];
+    // Self-heal the DISPLAY: drop checked ids whose supplier no longer exists
+    // (e.g. after a force-delete). Seed initialRef with the RAW persisted list so,
+    // when the heal removed entries, the drawer is dirty and Done PERSISTS the
+    // cleaned menu — a no-op close still heals the stored config.
+    const healed = raw.filter((id) => availableIds.has(id));
     setView(v);
-    setChecked(new Set(c));
-    initialRef.current = { view: v, checked: [...c] };
+    setChecked(new Set(healed));
+    initialRef.current = { view: v, checked: [...raw] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -122,6 +132,9 @@ export const OpenCodeMenuDrawer: React.FC<{
     }
     setSaving(true);
     try {
+      // `checked` is already self-healed at open and only grows via toggles/adds
+      // of available (or just-added) identifiers, so send it as-is — filtering
+      // here would strip a just-added custom model before onRefresh lands.
       await modelsApi.putMenu({ view, checked: [...checked] });
       onSaved();
       onClose();
@@ -240,6 +253,14 @@ export const OpenCodeMenuDrawer: React.FC<{
           // existing entry's metadata must not flip its menu-selection state — a
           // display-name edit on an unchecked model would otherwise re-add it.
           if (!editTarget) setChecked((prev) => new Set(prev).add(identifier));
+          onRefresh();
+        }}
+        onDeleted={() => {
+          // No local uncheck: the backend only lets the delete through when the
+          // model is NOT the sole selected supplier, so any checked identifier that
+          // survives a successful delete is still supplied by another source and
+          // must stay checked. A sole-supplier checked model is blocked (the dialog
+          // shows an honest "in use" message). Just refresh the source list.
           onRefresh();
         }}
       />

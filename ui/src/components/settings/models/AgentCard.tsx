@@ -5,13 +5,13 @@
 // itself rather than opening a missing surface.
 import * as React from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowDownToLine, ArrowRight, ChevronRight } from 'lucide-react';
+import { ArrowDownToLine, ArrowRight, ChevronRight, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
-import { CompositePill, MenuKindBadge, ModeChip } from './chips';
+import { CompositePill, ModeChip } from './chips';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceAccent } from './vendorMeta';
 import { friendlyModelName } from './format';
 import { MODEL_MENUS_ENABLED } from './featureFlags';
@@ -62,6 +62,16 @@ const AgentRow: React.FC<{
         />
       );
     }
+  } else if (agent.mode === 'hub') {
+    // Honest state: hub is selected but no eligible source can supply this agent
+    // yet, so the next turn silently falls back to Direct. Say so plainly instead
+    // of showing an empty (falsely "fine") row.
+    pill = (
+      <span className="flex items-center gap-1.5 text-[12px] font-medium text-gold">
+        <TriangleAlert className="size-3.5 shrink-0" />
+        {t('settings.models.agents.hubNoSupply')}
+      </span>
+    );
   }
 
   return (
@@ -71,12 +81,9 @@ const AgentRow: React.FC<{
       </span>
 
       <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[15px] font-semibold text-foreground">
-            {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
-          </span>
-          <MenuKindBadge kind={agent.menu_kind} />
-        </div>
+        <span className="text-[15px] font-semibold text-foreground">
+          {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
+        </span>
         {pill}
       </div>
 

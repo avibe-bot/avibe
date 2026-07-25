@@ -25,6 +25,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceBinding,
 )
+from core.handlers.model_hub.request import ModelHubRequest
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError
@@ -121,21 +122,120 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
                 "sha256": "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
             },
             {
+                "platform": "darwin-x64",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_amd64.tar.gz",
+                "size_bytes": 15372282,
+                "sha256": "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
+            },
+            {
                 "platform": "linux-amd64",
                 "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_amd64.tar.gz",
                 "size_bytes": 15401775,
                 "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
             },
+            {
+                "platform": "linux-arm64",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_aarch64.tar.gz",
+                "size_bytes": 14062559,
+                "sha256": "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
+            },
         ],
     }
 
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "darwin-x64")
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
     unsupported = EngineRuntimeManager(
         runtime_dir=tmp_path / "unsupported-runtime",
         offline=True,
     ).ensure()
     assert unsupported["ok"] is False
     assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
+
+
+def test_contract_manifest_filters_unsupported_override_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.loads(Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text(encoding="utf-8"))
+    payload["assets"].append(
+        {
+            "platform": "win32-x64",
+            "url": "https://example.test/unsupported.zip",
+            "size_bytes": 1,
+            "sha256": "1" * 64,
+            "binary_sha256": "2" * 64,
+            "bin_path": "cli-proxy-api.exe",
+        }
+    )
+    manifest_path = tmp_path / "override.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+        offline=True,
+    )
+
+    assert "win32-x64" not in {asset["platform"] for asset in manager.contract_manifest()["assets"]}
+
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    unsupported = manager.ensure()
+    assert unsupported["ok"] is False
+    assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
+
+
+@pytest.mark.parametrize(
+    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
+    [
+        (
+            "darwin-arm64",
+            "darwin-arm64",
+            14384655,
+            "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
+            "ad81a4c82700bf96eaa4cf5811690b0498ebcfe6087e26ffc0498b8fc8e867af",
+        ),
+        (
+            "darwin-x64",
+            "darwin-x64",
+            15372282,
+            "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
+            "6b5d209c3bc6adcff035060a862b9fe6eccf8f4ca3c8c0bb7fc88c0b625d38d5",
+        ),
+        (
+            "linux-x64",
+            "linux-amd64",
+            15401775,
+            "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
+            "2be8e4581fe802fe522126b273bc099c01910b6179dca4a4e1b451dd0c80a1c0",
+        ),
+        (
+            "linux-arm64",
+            "linux-arm64",
+            14062559,
+            "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
+            "647a48ab6b2f5520d1279061c4a7aa7ff65729a68614495b1e431debbf4f8706",
+        ),
+    ],
+)
+def test_engine_installer_selects_verified_packaged_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_platform: str,
+    asset_platform: str,
+    size_bytes: int,
+    archive_sha256: str,
+    binary_sha256: str,
+) -> None:
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: host_platform)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / host_platform, offline=True)
+
+    manifest = manager._load_manifest(allow_network=False)
+
+    assert manifest is not None
+    archive = manager._manifest_archive_for_platform(manifest)
+    assert archive is not None
+    assert archive.platform == asset_platform
+    assert archive.size == size_bytes
+    assert archive.sha256 == archive_sha256
+    assert archive.binary_sha256 == binary_sha256
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
@@ -761,6 +861,85 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("source_protocol", "origin", "caller_protocol", "request_protocol"),
+    [
+        ("openai_compatible", "claude", "openai_chat", "anthropic"),
+        ("anthropic", "codex", "anthropic", "openai_responses"),
+        ("openai_chat", "opencode", "anthropic", "anthropic"),
+    ],
+)
+def test_adapter_uses_origin_protocol_for_engine_translation(
+    tmp_path: Path,
+    source_protocol: str,
+    origin: str,
+    caller_protocol: str,
+    request_protocol: str,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.request_protocol = None
+
+        async def invoke(
+            self,
+            source,
+            model_id,
+            request,
+            *,
+            stream,
+            request_protocol=None,
+            request_headers=None,
+        ):
+            self.request_protocol = request_protocol
+            self.request_headers = request_headers
+            return object()
+
+    class Supervisor:
+        def __init__(self, client: Client) -> None:
+            self._client = client
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            vendor="custom",
+            protocol=source_protocol,
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources(
+            [
+                _binding(
+                    credential_ref,
+                    protocol=source_protocol,
+                    allowed_origins=(origin,),
+                )
+            ]
+        )
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        request = ModelHubRequest(
+            {},
+            protocol=caller_protocol,
+            headers={"anthropic-beta": "interleaved-thinking", "authorization": "never-forward"},
+        )
+        await adapter.invoke("src_fixture123", "model-a", request, False, origin)
+
+        assert client.request_protocol == request_protocol
+        assert client.request_headers == {
+            "anthropic-beta": "interleaved-thinking",
+            "authorization": "never-forward",
+        }
+
+    asyncio.run(run())
+
+
 def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self) -> None:
@@ -813,7 +992,16 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
     invoked_refs: list[str] = []
 
     class Client:
-        async def invoke(self, source, model_id, request, *, stream):
+        async def invoke(
+            self,
+            source,
+            model_id,
+            request,
+            *,
+            stream,
+            request_protocol=None,
+            request_headers=None,
+        ):
             invoked_refs.append(source.credential_ref)
             return object()
 

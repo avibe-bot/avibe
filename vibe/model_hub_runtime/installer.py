@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from config import paths
+from core import managed_runtime
 from core.managed_runtime import (
+    ManagedRuntimeArchive,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
@@ -18,6 +20,14 @@ from vibe.model_hub_runtime.environment import engine_subprocess_environment
 
 
 _ENGINE_VERSION_RE = re.compile(r"CLIProxyAPI Version:\s*([\w.-]+)")
+# A manifest override must not silently expand the engine's supported host set.
+_ENGINE_PLATFORM_MAP = {
+    "darwin-arm64": "darwin-arm64",
+    "darwin-x64": "darwin-x64",
+    "linux-x64": "linux-amd64",
+    "linux-arm64": "linux-arm64",
+}
+_ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
 _ENGINE_SPEC = ManagedRuntimeSpec(
     runtime_id="model_hub_engine",
     manifest_resource="model_hub_runtime/cliproxyapi_manifest.json",
@@ -25,7 +35,6 @@ _ENGINE_SPEC = ManagedRuntimeSpec(
     default_bin_path="cli-proxy-api",
     archives_field="assets",
     archive_size_field="size_bytes",
-    platform_aliases=(("linux-x64", "linux-amd64"),),
 )
 
 
@@ -70,6 +79,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                     "sha256": asset["sha256"],
                 }
                 for asset in payload.get("assets", [])
+                if asset.get("platform") in _ENGINE_ASSET_PLATFORMS
             ],
         }
 
@@ -84,6 +94,16 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             self._install_reason = "model_hub_engine_manifest_invalid"
             return False
         return True
+
+    def _manifest_archive_for_platform(
+        self,
+        manifest: ManagedRuntimeManifest,
+    ) -> ManagedRuntimeArchive | None:
+        asset_platform = _ENGINE_PLATFORM_MAP.get(managed_runtime.runtime_platform_tag())
+        archive = manifest.archives.get(asset_platform) if asset_platform is not None else None
+        if archive is None:
+            self._install_reason = "model_hub_engine_platform_unsupported"
+        return archive
 
     def _binary_version(self, binary: Path | None) -> str | None:
         if binary is None:

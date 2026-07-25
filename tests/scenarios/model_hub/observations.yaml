@@ -18,3 +18,12 @@ observations:
       - MH-OAUTH-A-001
       - MH-OAUTH-B-001
       - MH-OAUTH-C-001
+      - MH-OAUTH-NATIVE-001
+      - MH-OAUTH-NATIVE-002
+  - id: MH-OBS-004
+    source: model-hub-completeness-audit
+    summary: A successful OAuth status response must atomically materialize the bound Source; no second create request exists in the live UI path.
+    affects:
+      - MH-OAUTH-NATIVE-001
+      - MH-OAUTH-NATIVE-002
+      - MH-OAUTH-CONSENT-001

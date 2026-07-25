@@ -17,11 +17,27 @@
       "bin_path": "cli-proxy-api"
     },
     {
+      "platform": "darwin-x64",
+      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_amd64.tar.gz",
+      "size_bytes": 15372282,
+      "sha256": "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
+      "binary_sha256": "6b5d209c3bc6adcff035060a862b9fe6eccf8f4ca3c8c0bb7fc88c0b625d38d5",
+      "bin_path": "cli-proxy-api"
+    },
+    {
       "platform": "linux-amd64",
       "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_amd64.tar.gz",
       "size_bytes": 15401775,
       "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
       "binary_sha256": "2be8e4581fe802fe522126b273bc099c01910b6179dca4a4e1b451dd0c80a1c0",
+      "bin_path": "cli-proxy-api"
+    },
+    {
+      "platform": "linux-arm64",
+      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_aarch64.tar.gz",
+      "size_bytes": 14062559,
+      "sha256": "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
+      "binary_sha256": "647a48ab6b2f5520d1279061c4a7aa7ff65729a68614495b1e431debbf4f8706",
       "bin_path": "cli-proxy-api"
     }
   ]

@@ -489,6 +489,69 @@ def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(
     )
     assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is False
 
+    auth_path.write_text("{}")
+    assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is False
+    assert (
+        ModelHubRuntimeRouter._default_native_cli_ready(
+            "codex",
+            verified_oauth=True,
+        )
+        is True
+    )
+
+
+def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    clock = {"now": datetime(2026, 7, 25, tzinfo=timezone.utc)}
+    codex_home = tmp_path / "codex-keyring-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}")
+    (codex_home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+
+    native = _source(
+        "src_native_keyring",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+        state="active",
+    )
+    service = _service(
+        tmp_path,
+        ModelHubConfig(
+            sources=[native],
+            priority_order=[native.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({}),
+        now=lambda: clock["now"],
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    launch = asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert (launch.channel, launch.source_id) == ("native_cli", native.id)
+
+    context = SimpleNamespace()
+    bind_launch(context, launch)
+    assert asyncio.run(router.record_native_failure(context, "usage limit reached")) is True
+    assert native.state.status == "cooldown"
+
+    clock["now"] += timedelta(seconds=301)
+    recovered = asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert (recovered.channel, recovered.source_id) == ("native_cli", native.id)
+    assert native.state.status == "active"
+
 
 def test_mh_chan_001_persisted_launch_identity_is_non_secret_and_restorable() -> None:
     launch = ModelHubLaunch(

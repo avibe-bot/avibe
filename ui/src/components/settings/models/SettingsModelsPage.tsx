@@ -12,6 +12,7 @@ import { useToast } from '@/context/ToastContext';
 import { SettingsPageShell } from '../SettingsPageShell';
 import { SourcesCard } from './SourcesCard';
 import { AgentCard } from './AgentCard';
+import { MigrationBanner } from './MigrationBanner';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
@@ -135,9 +136,18 @@ export const SettingsModelsPage: React.FC = () => {
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
     try {
-      await modelsApi.setAgentMode(agent.backend, 'hub');
+      // The PATCH echoes a fresh AgentSupply whose `current` is the honest
+      // "what the next turn uses" projection: it's null when the mode flipped to
+      // hub but no eligible+available source can supply — i.e. the launch would
+      // silently fall back to Direct. Report the true state, never a green lie.
+      const next = await modelsApi.setAgentMode(agent.backend, 'hub');
       await refreshSourcesAgents();
-      if (aliveRef.current) showToast(t('settings.models.toast.connected') as string, 'success');
+      if (!aliveRef.current) return;
+      if (next.mode === 'hub' && next.current) {
+        showToast(t('settings.models.toast.connected') as string, 'success');
+      } else {
+        showToast(t('settings.models.toast.connectedNoSupply') as string, 'warning');
+      }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.connectFailed') as string, 'error');
     } finally {
@@ -169,6 +179,7 @@ export const SettingsModelsPage: React.FC = () => {
         </div>
       ) : (
         <div className="flex flex-col gap-5">
+          <MigrationBanner onApplied={() => void refreshSourcesAgents()} />
           <SourcesCard
             sources={sources}
             onReorderPreview={reorderPreview}
@@ -176,6 +187,7 @@ export const SettingsModelsPage: React.FC = () => {
             onConnectClaude={() => setOauthVendor('anthropic')}
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
+            onSourceChanged={() => void refreshSourcesAgents()}
           />
           <AgentCard
             agents={agents}
