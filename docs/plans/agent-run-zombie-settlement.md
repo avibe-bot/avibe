@@ -327,6 +327,10 @@ mirroring `recover_processing_runs`: `run_type='watch_runtime'`, and any row car
 | B1 stranded `queued` | `created_at` older than `queued_ttl` (default 1800 s) **and** the drain's own skip reason is transport-unavailable | `failed`, `interrupt_reason="transport_unavailable"` |
 | B2 held `queued` | `metadata.workbench_queue_holds_run` **and** `updated_at` older than `hold_ttl` (default 3600 s) | `failed`, `interrupt_reason="queue_hold_expired"` |
 
+Ownership per §4.1 exempts a row from **all three** classes, not just B3 — see §5.5: a
+coalesced turn's owned siblings stay `queued` on purpose, so the queue TTLs have to
+respect a live owner too.
+
 Notes:
 
 - B1's precondition should be **recorded, not re-derived**: have
@@ -657,6 +661,29 @@ reintroduce this exact bug for those rows, which is what HFR-025 now pins.
 | --- | --- |
 | M17 fall back to `created_at` when `last_skip_at` is absent | KILLED (HFR-025) |
 | M18 age from `created_at` outright (the reported bug) | KILLED (HFR-024 + HFR-025) |
+
+### 5.5 Review round 3 (avibe-bot/avibe#1005) — ownership is not a `running`-only exemption
+
+**P1 — a live coalesced turn's own `queued` siblings were sweepable (HFR-026).**
+The ownership check sat inside the `running` branch, which reads as correct only if you
+assume an owned run is always `running`. It is not: a coalesced Workbench turn claims its
+secondary runs and deliberately leaves them `queued` with `workbench_queue_holds_run`
+while the primary settles them (`storage/background.py:384`, `:478`), and
+`owned_agent_run_ids()` reports **every** id such a turn is settling
+(`core/session_turns.py:635`). So a turn that outlived `hold_ttl` (default 1 h) had its
+own live siblings failed underneath it — a turn-duration timeout by the back door, which
+this design explicitly does not have. The same applies to any queued follow-up waiting
+behind a legitimate multi-hour turn.
+
+The fix hoists the check to the top of the candidate loop as a single `continue`: a live
+owner outranks every class, whatever the row's status. The branch-level
+`run_id not in owned_run_ids` was **removed** rather than left in place, so there is
+exactly one load-bearing guard — a duplicated check would produce another surviving
+mutation like the documented M11 and hide a future regression.
+
+| Mutation | Verdict |
+| --- | --- |
+| M19 restrict the hoisted guard back to `status == "running"` (the reported bug) | KILLED (HFR-026) |
 
 ## 6. Staging
 

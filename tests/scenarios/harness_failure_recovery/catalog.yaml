@@ -187,6 +187,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_sweep_never_terminalizes_a_transport_reason_with_no_timestamp
+  - id: HFR-026
+    name: live ownership exempts an aged queue hold from its TTL
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

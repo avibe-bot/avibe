@@ -1801,8 +1801,13 @@ class SQLiteBackgroundTaskStore:
         - ``queue_hold_expired``: a ``queued`` run holding a workbench queue slot that
           has not been touched in ``hold_ttl_seconds``.
 
-        ``owned_run_ids`` must be the union of every ownership source; the caller is
-        responsible for failing closed (passing "everything is owned", or not calling
+        ``owned_run_ids`` exempts a row from **every** class, not just ``orphaned``. A
+        coalesced workbench turn claims its secondary runs and deliberately leaves them
+        ``queued`` while the primary settles them, so a live owner has to outrank the
+        queue TTLs too — otherwise a turn that outlives ``hold_ttl_seconds`` would have
+        its own siblings failed underneath it, reintroducing the turn-duration timeout
+        this design does not have. It must be the union of every ownership source; the
+        caller is responsible for failing closed (passing "everything is owned", or not calling
         at all) when it cannot enumerate owners. This method cannot tell an empty set
         meaning "nothing is running" from one meaning "I could not look".
 
@@ -1855,14 +1860,21 @@ class SQLiteBackgroundTaskStore:
             metadata = metadata if isinstance(metadata, dict) else {}
             status = normalize_run_status(row["status"])
             run_id = str(row["id"])
+            if run_id in owned_run_ids:
+                # A live owner outranks every TTL, whatever the row's status. This is
+                # NOT only about ``running`` rows: a coalesced workbench turn claims its
+                # secondary runs and deliberately leaves them ``queued`` with
+                # ``workbench_queue_holds_run`` while the primary settles them, and
+                # ``owned_agent_run_ids`` reports all of them as owned. Aging those out
+                # would fail live siblings mid-turn — a turn-duration timeout by the back
+                # door, which this design explicitly does not have.
+                continue
             reason: Optional[str] = None
             if status == "running":
                 # Restricted to ``agent_run`` on purpose: when ``scheduled``/``watch``
                 # rows settle is owned by a separate plan. Widen only alongside it.
-                if (
-                    str(row["run_type"] or "") == "agent_run"
-                    and run_id not in owned_run_ids
-                    and _older_than(row["started_at"] or row["created_at"], orphan_grace_seconds)
+                if str(row["run_type"] or "") == "agent_run" and _older_than(
+                    row["started_at"] or row["created_at"], orphan_grace_seconds
                 ):
                     reason = SWEEP_REASON_ORPHANED
             elif status == "queued":

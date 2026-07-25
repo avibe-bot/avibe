@@ -3101,6 +3101,54 @@ def test_sweep_expires_a_workbench_queue_hold_only_after_its_ttl(
     assert expired["metadata"]["interrupt_reason"] == "queue_hold_expired"
 
 
+def test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-026: ownership outranks the queue TTLs too, not just the orphan grace.
+
+    A coalesced workbench turn deliberately leaves its secondary runs ``queued`` with
+    ``workbench_queue_holds_run`` while the primary settles them, and reports every one
+    of them from ``owned_agent_run_ids``. A hold TTL that ignored ownership would fail
+    those live siblings the moment the turn outran it — a turn-duration timeout by the
+    back door, which this design explicitly does not have. The control row proves the
+    class still works: same age, same flag, no owner.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    session_turns = SessionTurnManager(controller=None)
+    service = _sweep_service(
+        tmp_path, request_store, _SweepControllerDouble(session_turns=session_turns)
+    )
+    primary = _stage_orphan_run(request_store)
+    held = _stage_queued_run(
+        request_store, metadata={"workbench_queue_holds_run": True}, updated_age_seconds=7200
+    )
+    unowned = _stage_queued_run(
+        request_store, metadata={"workbench_queue_holds_run": True}, updated_age_seconds=7200
+    )
+
+    session_turns.register_turn_sink(
+        "slack::channel::C123",
+        on_chunk=AsyncMock(),
+        done_event=asyncio.Event(),
+        context=MessageContext(
+            user_id="U123",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_execution_id": primary,
+                "coalesced_queue": {"execution_ids": [held]},
+            },
+        ),
+    )
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(held)["status"] == "queued"
+    assert request_store.get_run(unowned)["status"] == "failed"
+
+
 def test_sweep_leaves_watch_runtime_and_deferred_rows_alone(tmp_path: Path, monkeypatch) -> None:
     """Two row classes look stale and are not: neither is ours to settle.
 

@@ -145,3 +145,17 @@ observations:
       The TTL is a reconnect window, so it must be measured from last_skip_at,
       the instant the transport reason started, which the transition-triggered
       skip stamp already records.
+  - id: HFR-OBS-015
+    date: 2026-07-25
+    source: review of owned_agent_run_ids against the workbench queue-hold TTL
+    result: confirmed
+    detail: >-
+      A coalesced Workbench turn claims its secondary Runs and deliberately
+      leaves them queued with workbench_queue_holds_run while the primary
+      settles them, and owned_agent_run_ids reports every one of those ids as
+      actively owned. Ownership therefore cannot be a running-only exemption:
+      a hold TTL that ignored it would fail live sibling Runs as soon as the
+      turn outran the TTL, reintroducing a turn-duration timeout by the back
+      door. A live owner outranks every staleness class, whatever the row
+      status, so the check belongs at the top of the candidate loop rather than
+      duplicated per branch.
