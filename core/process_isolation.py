@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import math
 import os
+import secrets
 import signal
 import subprocess
 import time
@@ -16,37 +18,54 @@ from typing import Any
 import psutil
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
 
 
 @dataclass(frozen=True)
 class ProcessIdentity:
     pid: int
     create_time: float
-    cmdline: tuple[str, ...]
+    worker_fingerprint: str | None
 
 
 @dataclass(frozen=True)
 class PersistedProcessIdentity:
     pid: int
     create_time: float
-    command_fingerprint: str
+    worker_fingerprint: str
 
 
-def fingerprint_process_command(cmdline: tuple[str, ...]) -> str:
-    """Return an unambiguous SHA-256 fingerprint without retaining argv."""
-    digest = hashlib.sha256()
-    for part in cmdline:
-        encoded = part.encode("utf-8", errors="surrogatepass")
-        digest.update(len(encoded).to_bytes(8, byteorder="big"))
-        digest.update(encoded)
-    return f"sha256:{digest.hexdigest()}"
+def new_process_identity_marker() -> str:
+    """Return a high-entropy marker inherited by a managed process tree."""
+    return secrets.token_hex(32)
 
 
-def persist_process_identity(identity: ProcessIdentity) -> PersistedProcessIdentity:
+def fingerprint_process_marker(marker: str) -> str:
+    return f"sha256:{hashlib.sha256(marker.encode('ascii')).hexdigest()}"
+
+
+def process_identity_subprocess_env(marker: str) -> dict[str, str]:
+    env = dict(os.environ)
+    env[PROCESS_IDENTITY_ENV] = marker
+    return env
+
+
+def capture_spawned_process_identity(
+    pid: int,
+    marker: str,
+) -> PersistedProcessIdentity | None:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        create_time = float(psutil.Process(pid).create_time())
+    except (psutil.Error, OSError, TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(create_time) or create_time <= 0:
+        return None
     return PersistedProcessIdentity(
-        pid=identity.pid,
-        create_time=identity.create_time,
-        command_fingerprint=fingerprint_process_command(identity.cmdline),
+        pid=pid,
+        create_time=create_time,
+        worker_fingerprint=fingerprint_process_marker(marker),
     )
 
 
@@ -57,9 +76,10 @@ def process_identity_matches(
     return (
         expected.pid == live.pid
         and expected.create_time == live.create_time
+        and live.worker_fingerprint is not None
         and hmac.compare_digest(
-            expected.command_fingerprint,
-            fingerprint_process_command(live.cmdline),
+            expected.worker_fingerprint,
+            live.worker_fingerprint,
         )
     )
 
@@ -67,19 +87,22 @@ def process_identity_matches(
 def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
     process = psutil.Process(pid)
     create_time = float(process.create_time())
-    cmdline = process.cmdline()
-    if (
-        not cmdline
-        or not isinstance(cmdline[0], str)
-        or not cmdline[0]
-        or any(not isinstance(part, str) for part in cmdline)
-    ):
-        raise ValueError("process command line is unavailable")
-    return process, ProcessIdentity(pid=pid, create_time=create_time, cmdline=tuple(cmdline))
+    worker_fingerprint = None
+    try:
+        marker = process.environ().get(PROCESS_IDENTITY_ENV)
+    except (psutil.Error, OSError):
+        marker = None
+    if isinstance(marker, str) and marker:
+        worker_fingerprint = fingerprint_process_marker(marker)
+    return process, ProcessIdentity(
+        pid=pid,
+        create_time=create_time,
+        worker_fingerprint=worker_fingerprint,
+    )
 
 
 def inspect_process_identity(pid: int) -> ProcessIdentity | None:
-    """Return the stable identity and argv for a live process."""
+    """Return the birth identity and inherited marker for a live process."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
@@ -189,6 +212,83 @@ def process_group_exists(pgid: int, logger: logging.Logger, label: str) -> bool:
     return _process_group_exists(pgid, logger, label)
 
 
+def process_group_identity_status(
+    pgid: int,
+    expected_identity: PersistedProcessIdentity,
+    logger: logging.Logger,
+    label: str,
+) -> str:
+    """Return match, mismatch, or unknown for a persisted process group."""
+    if (
+        os.name == "nt"
+        or not isinstance(pgid, int)
+        or isinstance(pgid, bool)
+        or pgid <= 0
+        or not isinstance(expected_identity, PersistedProcessIdentity)
+    ):
+        return "unknown"
+    saw_marker = False
+    saw_unverified_member = False
+    try:
+        processes = psutil.process_iter(["pid"])
+        for process in processes:
+            pid = process.info.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                continue
+            try:
+                if os.getpgid(pid) != pgid:
+                    continue
+            except (ProcessLookupError, PermissionError):
+                continue
+            except Exception:
+                logger.debug(
+                    "Failed to inspect %s process group member pid=%s",
+                    label,
+                    pid,
+                    exc_info=True,
+                )
+                continue
+            live_identity = inspect_process_identity(pid)
+            if (
+                live_identity is None
+                or live_identity.create_time < expected_identity.create_time
+                or live_identity.worker_fingerprint is None
+            ):
+                saw_unverified_member = True
+                continue
+            saw_marker = True
+            if hmac.compare_digest(
+                expected_identity.worker_fingerprint,
+                live_identity.worker_fingerprint,
+            ):
+                return "match"
+    except Exception:
+        logger.debug(
+            "Failed to enumerate %s process group pgid=%s",
+            label,
+            pgid,
+            exc_info=True,
+        )
+    return "mismatch" if saw_marker and not saw_unverified_member else "unknown"
+
+
+def process_group_matches_identity(
+    pgid: int,
+    expected_identity: PersistedProcessIdentity,
+    logger: logging.Logger,
+    label: str,
+) -> bool:
+    return (
+        process_group_identity_status(
+            pgid,
+            expected_identity,
+            logger,
+            label,
+        )
+        == "match"
+    )
+
+
 def _wait_for_process_group_exit(
     pgid: int,
     logger: logging.Logger,
@@ -210,6 +310,7 @@ def terminate_process_group_by_pgid(
     logger: logging.Logger,
     label: str,
     *,
+    expected_identity: PersistedProcessIdentity,
     terminate_timeout: float = 3.0,
 ) -> bool:
     """Terminate a persisted isolated group after its original leader exited."""
@@ -231,12 +332,26 @@ def terminate_process_group_by_pgid(
         return False
     if not _process_group_exists(pgid, logger, label):
         return True
+    if not process_group_matches_identity(pgid, expected_identity, logger, label):
+        logger.error(
+            "Refusing to terminate %s process group pgid=%s without a matching worker marker",
+            label,
+            pgid,
+        )
+        return False
     if not _safe_signal_known_process_group(pgid, pgid, signal.SIGTERM, logger, label):
         return False
     if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
         return True
 
     logger.warning("Escalating termination of %s process group pgid=%s", label, pgid)
+    if not process_group_matches_identity(pgid, expected_identity, logger, label):
+        logger.error(
+            "Refusing to force-terminate %s process group pgid=%s after its identity changed",
+            label,
+            pgid,
+        )
+        return False
     if not _safe_signal_known_process_group(pgid, pgid, KILL_SIGNAL, logger, label):
         return False
     if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
@@ -339,7 +454,7 @@ def terminate_process_tree_by_pid(
         logger.warning("Refusing to terminate %s pid=%s because its process identity changed", label, pid)
         return True
     if not process_identity_matches(expected_identity, live_identity):
-        logger.warning("Refusing to terminate %s pid=%s because its process command changed", label, pid)
+        logger.warning("Refusing to terminate %s pid=%s because its worker marker changed", label, pid)
         return False
 
     if os.name == "nt":
