@@ -191,9 +191,9 @@ List, inspect, and rename Agent sessions. `list` and `get` are read-only; `updat
 changes the title only. Archived sessions are soft-deleted and never surfaced.
 
 ```bash
-vibe session list                       # active sessions, 10 per page, newest activity first
+vibe session list                       # active sessions, 20 per page by default, newest activity first
 vibe session list --type slack          # filter by platform (avibe = Web/Workbench)
-vibe session list --page 2              # next page (fixed 10 per page; there is no --limit)
+vibe session list --page 2 --limit 50   # request page 2 with 50 rows (maximum 100)
 vibe session get sesk8m4q2p7x           # full detail for one session
 vibe session get                        # inside an Avibe Agent shell, show the caller Session
 vibe session update sesk8m4q2p7x --title 'Release review'   # pass "" to clear the title

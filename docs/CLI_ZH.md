@@ -174,9 +174,9 @@ vibe screenshot --json
 列出、查看并重命名 Agent 会话。`list` 与 `get` 是只读视图；`update` 只改标题。已归档会话视为软删除，任何情况下都不会被列出。
 
 ```bash
-vibe session list                       # 未归档会话，每页 10 条，按最近活跃倒序
+vibe session list                       # 未归档会话，默认每页 20 条，按最近活跃倒序
 vibe session list --type slack          # 按平台过滤（avibe = Web/Workbench）
-vibe session list --page 2              # 翻到下一页（固定每页 10 条；没有 --limit）
+vibe session list --page 2 --limit 50   # 第 2 页，每页 50 条（最多 100）
 vibe session get sesk8m4q2p7x           # 单个会话的完整明细
 vibe session get                        # 在 Avibe Agent shell 内查看调用方 Session
 vibe session update sesk8m4q2p7x --title 'Release review'   # 传 "" 可清空标题
