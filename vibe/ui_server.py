@@ -8117,12 +8117,26 @@ def sessions_mark_read(session_id: str):
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            session = workbench_sessions_service.get_session(conn, session_id)
+            authorization_context = getattr(g, "authorization_context", None)
+            session = workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
             updated = messages_service.mark_session_read(
                 conn, session_id, until_message_id=until_message_id
             )
-            unread_counts = messages_service.unread_counts(conn, platform="avibe")
-            unread_by_session = messages_service.unread_counts_by_session(conn, platform="avibe")
+            accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+            unread_counts = messages_service.unread_counts(
+                conn,
+                platform="avibe",
+                scope_ids=accessible_scope_ids,
+            )
+            unread_by_session = messages_service.unread_counts_by_session(
+                conn,
+                platform="avibe",
+                scope_ids=accessible_scope_ids,
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     if updated:

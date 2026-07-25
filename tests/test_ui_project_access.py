@@ -199,6 +199,17 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     assert show_pages["count"] == 1
 
     headers = csrf_headers(client, REMOTE_ORIGIN)
+    mark_read = client.post(
+        f"/api/sessions/{ids['session_a']}/mark-read",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={},
+    )
+    assert mark_read.status_code == 200
+    assert mark_read.get_json()["unread_counts"] == {}
+    assert mark_read.get_json()["unread_by_session"] == {}
+
     allowed_action = client.post(
         f"/api/sessions/{ids['session_a']}/attachments",
         base_url=REMOTE_ORIGIN,

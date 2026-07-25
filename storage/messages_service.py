@@ -903,6 +903,7 @@ def unread_counts(
     conn: Connection,
     *,
     platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{scope_id: count}`` for unread agent ``result`` messages.
 
@@ -915,6 +916,10 @@ def unread_counts(
     terminal ``notify`` so failed turns stay visible, but a failure notify is
     not an unread reply — it never bumps this badge.)
     """
+
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
+        return {}
 
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
@@ -940,6 +945,8 @@ def unread_counts(
     )
     if platform is not None:
         query = query.where(messages.c.platform == platform)
+    if allowed_scope_ids is not None:
+        query = query.where(messages.c.scope_id.in_(allowed_scope_ids))
     return {scope: int(count) for scope, count in conn.execute(query).all()}
 
 
