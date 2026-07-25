@@ -1728,6 +1728,45 @@ def require_secret_access(conn: Connection, name: str, *, user_context: Any = No
     return _require_secret_resource_access(conn, _require_row(conn, name), resolve_resource_access_context(user_context))
 
 
+def _require_secret_names_access(
+    conn: Connection,
+    names: list[str],
+    *,
+    user_context: Any = None,
+    management: bool = False,
+) -> None:
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local:
+        return
+    member_names = sorted({str(name) for name in names if str(name)})
+    if not member_names:
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    secret_rows = {
+        str(row["name"]): dict(row)
+        for row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(member_names))).mappings()
+    }
+    if set(secret_rows) != set(member_names):
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    require = _require_secret_resource_management if management else _require_secret_resource_access
+    for name in member_names:
+        require(conn, secret_rows[name], context)
+
+
+def _require_grant_secret_access(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    user_context: Any = None,
+    management: bool = False,
+) -> None:
+    _require_secret_names_access(
+        conn,
+        _grant_member_names(row),
+        user_context=user_context,
+        management=management,
+    )
+
+
 def _register_created_secret_resource_policy(conn: Connection, secret_id: str, user_context: Any) -> None:
     """Register remote organization-created Vault secrets as private resources."""
 
@@ -4189,6 +4228,7 @@ def list_grants(
     status: str | None = "active",
     session_id: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> list[dict[str, Any]]:
     expire_grants(conn, cache=cache)
     query = select(vault_grants).order_by(vault_grants.c.created_at.desc(), vault_grants.c.id.desc())
@@ -4198,7 +4238,18 @@ def list_grants(
         query = query.where(vault_grants.c.status == status)
     if session_id is not None:
         query = query.where(or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id))
-    return [_grant_payload(conn, dict(row), cache=cache) for row in conn.execute(query).mappings()]
+    context = resolve_resource_access_context(user_context)
+    rows = [dict(row) for row in conn.execute(query).mappings()]
+    if not context.is_trusted_local:
+        accessible_rows: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                _require_grant_secret_access(conn, row, user_context=context)
+            except VaultSecretAccessError:
+                continue
+            accessible_rows.append(row)
+        rows = accessible_rows
+    return [_grant_payload(conn, row, cache=cache) for row in rows]
 
 
 def get_grant_created_by_request(
@@ -4238,11 +4289,13 @@ def revoke_grant(
     grant_id: str,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
+    _require_grant_secret_access(conn, row_dict, user_context=user_context, management=True)
     if row_dict.get("status") not in ACTIVE_GRANT_STATES:
         raise GrantNotActiveError(grant_id)
     now = _now()
@@ -4616,8 +4669,59 @@ def resolve_secret_access(
     return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 
 
-def list_audit(conn: Connection, *, secret_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-    query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc()).limit(limit)
+def _require_audit_row_access(conn: Connection, row: dict[str, Any], *, user_context: Any = None) -> None:
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local:
+        return
+
+    covered_names: set[str] = set()
+    request_id = str(row.get("request_id") or "")
+    if request_id:
+        request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+        if request_row is None:
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        request_dict = dict(request_row)
+        _require_request_secret_access(conn, request_dict, user_context=context)
+        covered_names.update(_request_member_names(request_dict))
+
+    grant_id = str(row.get("grant_id") or "")
+    if grant_id:
+        grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+        if grant_row is None:
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        grant_dict = dict(grant_row)
+        _require_grant_secret_access(conn, grant_dict, user_context=context)
+        covered_names.update(_grant_member_names(grant_dict))
+
+    direct_name = str(row.get("secret_name") or "")
+    if direct_name and direct_name not in covered_names:
+        _require_secret_names_access(conn, [direct_name], user_context=context)
+        covered_names.add(direct_name)
+    if not covered_names and not context.is_instance_owner:
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+
+
+def list_audit(
+    conn: Connection,
+    *,
+    secret_name: str | None = None,
+    limit: int = 100,
+    user_context: Any = None,
+) -> list[dict[str, Any]]:
+    context = resolve_resource_access_context(user_context)
+    query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
     if secret_name is not None:
         query = query.where(vault_audit.c.secret_name == secret_name)
-    return [dict(row) for row in conn.execute(query).mappings()]
+    if context.is_trusted_local:
+        query = query.limit(limit)
+    rows = [dict(row) for row in conn.execute(query).mappings()]
+    if not context.is_trusted_local:
+        accessible_rows: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                _require_audit_row_access(conn, row, user_context=context)
+            except VaultSecretAccessError:
+                continue
+            accessible_rows.append(row)
+        rows = accessible_rows[:limit]
+    return rows

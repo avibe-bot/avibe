@@ -2658,7 +2658,12 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
 
     engine = _vault_engine()
     with engine.connect() as conn:
-        events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
+        events = vault_service.list_audit(
+            conn,
+            secret_name=secret_name,
+            limit=limit,
+            user_context=resolve_resource_access_context(),
+        )
     return {"ok": True, "events": events}
 
 
@@ -2966,7 +2971,12 @@ def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[s
 
     engine = _vault_engine()
     with engine.begin() as conn:
-        grants = vault_service.list_grants(conn, status=status, session_id=session_id)
+        grants = vault_service.list_grants(
+            conn,
+            status=status,
+            session_id=session_id,
+            user_context=resolve_resource_access_context(),
+        )
     return {"ok": True, "grants": grants}
 
 
@@ -3884,12 +3894,18 @@ def revoke_vault_grant(grant_id: str) -> dict:
         with engine.begin() as conn:
             grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant_id)).mappings().first()
             grant_rows = [dict(grant_row)] if grant_row is not None else []
-            grant = vault_service.revoke_grant(conn, grant_id)
+            grant = vault_service.revoke_grant(
+                conn,
+                grant_id,
+                user_context=resolve_resource_access_context(),
+            )
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.GrantNotFoundError as exc:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason=f"revoke_vault_grant:{grant_id}")
     _publish_vaults_updated(
         scope="grant",

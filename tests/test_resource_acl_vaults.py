@@ -17,7 +17,7 @@ from storage.models import (
     vault_secrets,
 )
 from storage.vault_crypto import Sealed
-from vibe import remote_access
+from vibe import api, remote_access
 
 
 def _context(
@@ -67,6 +67,7 @@ def _set_policy(
     *,
     access_level: str,
     group_ids: list[str] | None = None,
+    owner_user_id: str = "owner-1",
 ) -> str:
     resource_id = _secret_id(conn, name)
     resource_access_service.ensure_resource_policy(
@@ -74,7 +75,7 @@ def _set_policy(
         resource_kind="vault_secret",
         resource_id=resource_id,
         organization_id="org-1",
-        owner_user_id="owner-1",
+        owner_user_id=owner_user_id,
         access_level=access_level,
         group_ids=group_ids,
         policy_revision=1,
@@ -208,6 +209,99 @@ def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
         visible = vault_service.list_requests(conn, limit=1, user_context=member)
 
     assert [request["id"] for request in visible] == [visible_request["id"]]
+
+
+def test_vault_grant_reads_and_revocation_enforce_all_member_secret_acls(vault) -> None:
+    owner = _context("owner-1")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "OWNER_GRANT", protection="protected")
+        _create_secret(conn, "MEMBER_GRANT", protection="protected")
+        _set_policy(conn, "OWNER_GRANT", access_level="private")
+        _set_policy(conn, "MEMBER_GRANT", access_level="private", owner_user_id="member-1")
+        owner_request = vault_service.create_access_request(conn, "OWNER_GRANT", user_context=owner)
+        member_request = vault_service.create_access_request(conn, "MEMBER_GRANT", user_context=member)
+        owner_grant = _grant_from_request(conn, owner_request, user_context=owner)
+        member_grant = _grant_from_request(conn, member_request, user_context=member)
+
+        visible = vault_service.list_grants(conn, user_context=member)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.revoke_grant(conn, owner_grant["id"], user_context=member)
+        owner_status = conn.execute(
+            select(vault_grants.c.status).where(vault_grants.c.id == owner_grant["id"])
+        ).scalar_one()
+        revoked = vault_service.revoke_grant(conn, member_grant["id"], user_context=member)
+
+    assert [grant["id"] for grant in visible] == [member_grant["id"]]
+    assert owner_status == "active"
+    assert revoked["status"] == "revoked"
+
+
+def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vault) -> None:
+    owner = _context("owner-1")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "OWNER_AUDIT", protection="protected")
+        _create_secret(conn, "MEMBER_AUDIT", protection="protected")
+        _set_policy(conn, "OWNER_AUDIT", access_level="private")
+        _set_policy(conn, "MEMBER_AUDIT", access_level="private", owner_user_id="member-1")
+        owner_request = vault_service.create_access_request(conn, "OWNER_AUDIT", user_context=owner)
+        owner_grant = _grant_from_request(conn, owner_request, user_context=owner)
+        vault_service.audit(conn, "member-visible", secret_name="MEMBER_AUDIT")
+        vault_service.audit(
+            conn,
+            "owner-hidden",
+            request_id=owner_request["id"],
+            grant_id=owner_grant["id"],
+            delivery={"grant_id": owner_grant["id"]},
+        )
+
+        visible = vault_service.list_audit(conn, limit=1, user_context=member)
+
+    assert [row["event"] for row in visible] == ["member-visible"]
+    assert owner_request["id"] not in json.dumps(visible)
+    assert owner_grant["id"] not in json.dumps(visible)
+
+
+def test_vault_api_grant_and_audit_endpoints_use_current_resource_context(vault, monkeypatch) -> None:
+    owner = _context("owner-1")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "API_OWNER", protection="protected")
+        _create_secret(conn, "API_MEMBER", protection="protected")
+        _set_policy(conn, "API_OWNER", access_level="private")
+        _set_policy(conn, "API_MEMBER", access_level="private", owner_user_id="member-1")
+        owner_request = vault_service.create_access_request(conn, "API_OWNER", user_context=owner)
+        member_request = vault_service.create_access_request(conn, "API_MEMBER", user_context=member)
+        owner_grant = _grant_from_request(conn, owner_request, user_context=owner)
+        member_grant = _grant_from_request(conn, member_request, user_context=member)
+        vault_service.audit(conn, "api-member-visible", secret_name="API_MEMBER")
+
+    releases: list[list[dict[str, str]]] = []
+    monkeypatch.setattr(api, "_vault_engine", lambda: vault)
+    monkeypatch.setattr(api, "resolve_resource_access_context", lambda: member)
+    monkeypatch.setattr(
+        api,
+        "release_vault_agent_scopes",
+        lambda scopes, *, reason: releases.append([dict(scope) for scope in scopes]),
+    )
+
+    grants = api.get_vault_grants()["grants"]
+    audit_rows = api.get_vault_audit()["events"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.revoke_vault_grant(owner_grant["id"])
+
+    with vault.connect() as conn:
+        owner_status = conn.execute(
+            select(vault_grants.c.status).where(vault_grants.c.id == owner_grant["id"])
+        ).scalar_one()
+
+    assert [grant["id"] for grant in grants] == [member_grant["id"]]
+    assert "api-member-visible" in {row["event"] for row in audit_rows}
+    assert owner_grant["id"] not in json.dumps(audit_rows)
+    assert exc.value.status == 403
+    assert owner_status == "active"
+    assert releases == []
 
 
 @pytest.mark.parametrize(
