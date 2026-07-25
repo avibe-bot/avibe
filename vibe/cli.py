@@ -1564,8 +1564,10 @@ def _task_payload(task, *, brief: bool = False):
 
 def _sort_tasks_for_display(tasks):
     # Offset pagination requires an order that does not change merely because
-    # wall-clock time crossed a cron boundary between page requests.
-    return sorted(tasks, key=lambda item: (item.created_at, item.id))
+    # wall-clock time crossed a cron boundary between page requests. Keep
+    # schedulable tasks ahead of paused/history rows without using next-run
+    # timestamps, which are time-dependent.
+    return sorted(tasks, key=lambda item: (item.enabled is False, item.created_at, item.id))
 
 
 def _task_store() -> ScheduledTaskStore:

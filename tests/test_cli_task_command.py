@@ -1065,6 +1065,39 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
     assert payload["message"].endswith("vibe task list --page 2 --limit 20")
 
 
+def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(21):
+        paused = store.add_task(
+            name=f"Paused {index:02d}",
+            session_key="slack::channel::C123",
+            prompt=f"paused {index:02d}",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+        store.set_enabled(paused.id, False)
+    active = store.add_task(
+        name="Active",
+        session_key="slack::channel::C123",
+        prompt="active",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        assert cli.cmd_task_list(brief=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tasks"][0]["id"] == active.id
+    assert payload["tasks"][0]["state"] == "active"
+    assert payload["pagination"]["has_more"] is True
+
+
 def test_task_list_cli_dispatches_pagination_flags(
     tmp_path: Path,
     capsys,
