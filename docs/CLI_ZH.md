@@ -431,6 +431,7 @@ Web UI (`http://127.0.0.1:5123`) 提供相同的控制功能：
 | 变量 | 说明 |
 |------|------|
 | `OPENCODE_PORT` | 覆盖 OpenCode 服务器端口（默认：4096） |
+| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | 设为任意非空值可重新启用后端自带的、仅存活于会话内的后台工具（后台子 Agent、自调度唤醒、非持久化的会话内 cron、原生 workflow）。默认禁用，因为 Agent 进程退出后其结果会丢失；请改用 `vibe agent run` / `vibe task add` / `vibe watch add`。 |
 
 ## 另请参阅
 

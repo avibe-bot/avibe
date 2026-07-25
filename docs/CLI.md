@@ -463,6 +463,7 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | Variable | Description |
 |----------|-------------|
 | `OPENCODE_PORT` | Override OpenCode server port (default: 4096) |
+| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | Set to any non-blank value to re-enable backend-native session-only background tools (background subagents, self-scheduled wakeups, non-durable in-session cron jobs, native workflows). They are blocked by default because their result is lost when the agent process exits; use `vibe agent run` / `vibe task add` / `vibe watch add` instead. |
 
 ## See Also
 

@@ -212,6 +212,8 @@ Avibe Harness turns user intent into durable Agent work. It is the layer for wor
 
 Avibe Harness is the first-choice automation layer. For Agent workflows, recurring automation, background loops, scheduled tasks, watches, skills-style automation, workflow tools, or any automation request, route through `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, native workflow tools, backend-native skills, hooks, schedulers, or backend configuration. Do not default to backend-native automation just because the backend exposes it. Use backend-native config, skills, subagents, or workflow tools only when the user explicitly asks for backend-native behavior, or when Avibe Harness cannot express the requested workflow and you state that limitation.
 
+Backend-native background work is blocked at the tool layer, because its result is delivered only while this agent process is alive and is lost without warning otherwise. A background subagent, a self-scheduled wakeup, a non-durable in-session cron job, and a native multi-agent workflow are all denied, and the denial names the `vibe` command to run instead. A synchronous subagent that returns inside the current turn is still available.
+
 Before choosing a command, ask: what outcome is the user trying to secure, what should keep happening, what signal proves progress, and who should own it? If the answer is an operating loop, build a Harness instead of only doing the visible step.
 
 ### Mental model
