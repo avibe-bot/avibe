@@ -19,7 +19,17 @@ export const Dot: React.FC<{ accent: Accent; className?: string }> = ({ accent, 
 );
 
 /**
- * 包月 / 按量 $ — fixed-width so the column aligns down the source list.
+ * Source-row chip metrics. On phones the row's second tier has to fit billing +
+ * state + usage on ONE line (design.pen M01 m01SrcL2), so the chips shrink to
+ * content-width pills — the desktop frame's fixed-width columns are what made
+ * that line overflow. From sm+ the fixed widths come back so the chip columns
+ * still align down the list, which is the whole point of them on a wide screen.
+ */
+const CHIP_MOBILE = 'rounded-full py-1';
+const BILLING_CHIP = cn(CHIP_MOBILE, 'font-medium sm:w-16 sm:justify-center');
+
+/**
+ * 包月 / 按量 $ — content-width on phones, fixed-width column on sm+.
  *
  * The metered symbol tracks the source's REPORTED currency (USD when absent).
  * A static `$` contradicted the usage cell for a source that genuinely reports
@@ -34,14 +44,14 @@ export const BillingChip: React.FC<{ billing: 'monthly' | 'metered'; currency?: 
   const { t } = useTranslation();
   if (billing === 'monthly') {
     return (
-      <Badge variant="secondary" className="w-16 justify-center rounded-md py-1 font-medium">
+      <Badge variant="secondary" className={cn(BILLING_CHIP, 'sm:rounded-md')}>
         {t('settings.models.billing.monthly')}
       </Badge>
     );
   }
   const symbol = currencySymbol(currency);
   return (
-    <Badge variant="warning" className="w-16 justify-center rounded-md py-1 font-medium">
+    <Badge variant="warning" className={cn(BILLING_CHIP, 'sm:rounded-md')}>
       {symbol
         ? t('settings.models.billing.meteredWithSymbol', { symbol })
         : t('settings.models.billing.metered')}
@@ -52,7 +62,7 @@ export const BillingChip: React.FC<{ billing: 'monthly' | 'metered'; currency?: 
 /** 使用中 / 备用 / 暂不可用 / 不可用 — fixed-width aligned column. */
 export const StateChip: React.FC<{ state: SourceState }> = ({ state }) => {
   const { t } = useTranslation();
-  const base = 'w-[86px] justify-center rounded-full py-1';
+  const base = cn(CHIP_MOBILE, 'sm:w-[86px] sm:justify-center');
   switch (state.status) {
     case 'active':
       return (

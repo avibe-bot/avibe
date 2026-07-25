@@ -62,11 +62,21 @@ export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ ev
         <div className="px-4 py-8 text-center sm:px-5 text-[13px] text-muted">{t('settings.models.recent.empty')}</div>
       ) : (
         <div className="flex flex-col">
+          {/* Phones stack the timestamp above the sentence (design.pen M01 m01Ev):
+              the desktop 92px time column left the message ~200px at 360, so a
+              one-line event wrapped to three or four. */}
           {shown.map((event) => (
-            <div key={event.id} className="flex items-start gap-3 border-b border-border px-4 py-3 last:border-b-0 sm:px-5">
-              <span className="w-[92px] shrink-0 pt-0.5 font-mono text-[12px] text-muted">{formatTime(event.ts)}</span>
-              <Dot accent={eventAccent(event)} className="mt-[7px]" />
-              <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-foreground">
+            <div
+              key={event.id}
+              className="flex flex-col gap-1 border-b border-border px-4 py-2.5 last:border-b-0 sm:flex-row sm:items-start sm:gap-3 sm:py-3 sm:px-5"
+            >
+              <span className="flex items-center gap-2 sm:contents">
+                <Dot accent={eventAccent(event)} className="sm:mt-[7px] sm:order-2" />
+                <span className="font-mono text-[11px] text-muted sm:order-1 sm:w-[92px] sm:shrink-0 sm:pt-0.5 sm:text-[12px]">
+                  {formatTime(event.ts)}
+                </span>
+              </span>
+              <span className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-foreground sm:order-3 sm:text-[13px]">
                 {zh ? event.human_zh : event.human_en}
               </span>
             </div>
