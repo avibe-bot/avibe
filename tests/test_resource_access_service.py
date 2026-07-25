@@ -134,6 +134,39 @@ def test_request_context_resolution_failure_does_not_become_trusted_local(monkey
     assert local_context.is_trusted_local is True
 
 
+def test_deferred_remote_context_expires_at_authorization_refresh_boundary() -> None:
+    from vibe import remote_access
+
+    issued_at = 1_700_000_000
+    context = resource_access_service.ResourceUserContext(
+        subject="member-1",
+        organization_id="org-1",
+        organization_member_id="organization-member-1",
+        organization_role="member",
+        group_ids=frozenset({"group-engineering"}),
+        membership_version="membership-v2",
+        instance_role="viewer",
+        instance_access_source="organization_group",
+        claims_issued_at=issued_at,
+        is_remote=True,
+    )
+
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+    expires_at = issued_at + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+
+    restored = resource_access_service.resource_user_context_from_metadata(
+        metadata,
+        now=expires_at - 1,
+    )
+    assert restored is not None
+    assert restored.subject == "member-1"
+    with pytest.raises(resource_access_service.ResourceAccessError, match="resource_authorization_expired"):
+        resource_access_service.resource_user_context_from_metadata(
+            metadata,
+            now=expires_at,
+        )
+
+
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

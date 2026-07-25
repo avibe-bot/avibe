@@ -7,6 +7,8 @@ content, prompts, paths, outputs, or secret values.
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,13 +19,14 @@ from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
 from storage.db import get_cached_sqlite_engine
-from storage.models import resource_access_groups, resource_access_policies
+from storage.models import resource_access_groups, resource_access_policies, state_meta
 
 
 RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
 ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
+RESOURCE_ORGANIZATIONS_META_KEY = "resource_access_organizations"
 
 
 class ResourceAccessError(ValueError):
@@ -43,6 +46,7 @@ class ResourceUserContext:
     organization_role: str | None = None
     group_ids: frozenset[str] | None = None
     membership_version: str | None = None
+    claims_issued_at: int | None = None
     instance_role: str | None = None
     instance_access_source: str | None = None
     is_remote: bool = False
@@ -72,6 +76,16 @@ def _clean_optional_string(value: Any, *, limit: int = 200) -> str | None:
     if not cleaned or len(cleaned) > limit or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
         return None
     return cleaned
+
+
+def _clean_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _required_identifier(value: Any, *, code: str) -> str:
@@ -167,6 +181,7 @@ def _context_from_mapping(
         membership_version=_clean_optional_string(
             data.get("vibe_membership_version", data.get("membership_version"))
         ),
+        claims_issued_at=_clean_positive_int(data.get("claims_issued_at", data.get("iat"))),
         instance_role=_clean_optional_string(data.get("vibe_instance_role", data.get("instance_role"))),
         instance_access_source=_clean_optional_string(
             data.get("vibe_instance_access_source", data.get("instance_access_source"))
@@ -263,12 +278,22 @@ def metadata_with_resource_user_context(
         "vibe_membership_version": context.membership_version,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "authorization_expires_at": _resource_context_expires_at(context),
     }
     return result
 
 
+def _resource_context_expires_at(context: ResourceUserContext) -> int:
+    from vibe.remote_access import SESSION_AUTHORIZATION_REFRESH_SECONDS
+
+    issued_at = context.claims_issued_at or int(time.time())
+    return issued_at + SESSION_AUTHORIZATION_REFRESH_SECONDS
+
+
 def resource_user_context_from_metadata(
     metadata: Mapping[str, Any] | None,
+    *,
+    now: int | None = None,
 ) -> ResourceUserContext | None:
     """Restore a remote definition creator context, or None for local legacy work."""
 
@@ -277,6 +302,9 @@ def resource_user_context_from_metadata(
     snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
         return None
+    expires_at = _clean_positive_int(snapshot.get("authorization_expires_at"))
+    if expires_at is None or expires_at <= (now if now is not None else int(time.time())):
+        raise ResourceAccessError("resource_authorization_expired")
     return current_resource_context(snapshot, is_remote=True, is_trusted_local=False)
 
 
@@ -296,6 +324,73 @@ def _connection(connection: Connection | None) -> Iterator[Connection]:
     engine = get_cached_sqlite_engine()
     with engine.connect() as active_connection:
         yield active_connection
+
+
+def _stored_resource_organizations(connection: Connection) -> set[str]:
+    raw_value = connection.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == RESOURCE_ORGANIZATIONS_META_KEY)
+    ).scalar_one_or_none()
+    try:
+        values = json.loads(raw_value) if raw_value else []
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(values, list):
+        return set()
+    return {
+        organization
+        for value in values
+        if (organization := _clean_optional_string(value)) is not None
+    }
+
+
+def _store_resource_organizations(connection: Connection, organizations: set[str]) -> None:
+    connection.execute(state_meta.delete().where(state_meta.c.key == RESOURCE_ORGANIZATIONS_META_KEY))
+    if not organizations:
+        return
+    connection.execute(
+        state_meta.insert().values(
+            key=RESOURCE_ORGANIZATIONS_META_KEY,
+            value_json=json.dumps(sorted(organizations), separators=(",", ":")),
+            updated_at=_utc_now_iso(),
+        )
+    )
+
+
+def remember_resource_organization(connection: Connection, organization_id: str | None) -> None:
+    organization = _clean_optional_string(organization_id)
+    if organization is None:
+        return
+    organizations = _stored_resource_organizations(connection)
+    if organization in organizations:
+        return
+    organizations.add(organization)
+    _store_resource_organizations(connection, organizations)
+
+
+def forget_resource_organization(connection: Connection, organization_id: str) -> None:
+    organization = _required_identifier(organization_id, code="invalid_organization_id")
+    organizations = _stored_resource_organizations(connection)
+    if organization not in organizations:
+        return
+    organizations.remove(organization)
+    _store_resource_organizations(connection, organizations)
+
+
+def list_resource_organization_ids(*, connection: Connection | None = None) -> list[str]:
+    """List current and pending-empty-index organizations for device sync."""
+
+    with _connection(connection) as conn:
+        organizations = _stored_resource_organizations(conn)
+        organizations.update(
+            str(row.organization_id)
+            for row in conn.execute(
+                select(resource_access_policies.c.organization_id)
+                .where(resource_access_policies.c.organization_id.is_not(None))
+                .distinct()
+            )
+            if row.organization_id
+        )
+    return sorted(organizations)
 
 
 def _policy_row(connection: Connection, resource_kind: str, resource_id: str) -> dict[str, Any] | None:
@@ -394,7 +489,9 @@ def ensure_resource_policy(
         raise ResourceAccessError("invalid_resource_acl_intent")
     existing = _policy_row(connection, kind, identifier)
     if existing:
+        remember_resource_organization(connection, existing.get("organization_id"))
         return _serialize_policy(connection, existing)
+    remember_resource_organization(connection, organization)
     now = _utc_now_iso()
     connection.execute(
         resource_access_policies.insert().values(
@@ -423,6 +520,9 @@ def delete_resource_policy(connection: Connection, resource_kind: str, resource_
 
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    policy = _policy_row(connection, kind, identifier)
+    if policy is not None:
+        remember_resource_organization(connection, policy.get("organization_id"))
     connection.execute(
         resource_access_groups.delete()
         .where(resource_access_groups.c.resource_kind == kind)

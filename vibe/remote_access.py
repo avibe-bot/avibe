@@ -1050,6 +1050,13 @@ def _sync_one_organization(
                 acknowledged += 1
             except Exception:
                 ack_errors += 1
+    if ack_errors == 0 and not descriptors:
+        try:
+            with engine.begin() as connection:
+                resource_access_service.forget_resource_organization(connection, organization)
+        except Exception:
+            logger.warning("failed to clear published empty resource organization", exc_info=True)
+            ack_errors += 1
     return {
         "organization_id": organization,
         "ok": ack_errors == 0,
@@ -1088,13 +1095,7 @@ def sync_resource_acl_once(
         else:
             from storage import resource_access_service
 
-            organizations = sorted(
-                {
-                    str(policy["organization_id"])
-                    for policy in resource_access_service.list_resource_policies()
-                    if policy.get("organization_id")
-                }
-            )
+            organizations = resource_access_service.list_resource_organization_ids()
         results = [
             _sync_one_organization(
                 config,

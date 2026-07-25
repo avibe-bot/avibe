@@ -185,3 +185,52 @@ def test_sync_offline_retains_last_applied_policy(monkeypatch) -> None:
     assert policy is not None
     assert policy["access_level"] == "private"
     assert policy["last_applied_control_plane_revision"] == 1
+
+
+def test_sync_publishes_empty_index_after_last_organization_policy_is_deleted(monkeypatch) -> None:
+    _seed_policy()
+    config = _config()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        assert resource_access_service.delete_resource_policy(
+            connection,
+            "agent",
+            "agent-1",
+        )
+    assert resource_access_service.list_resource_organization_ids() == ["org-1"]
+
+    def offline_request(*_args: Any, **_kwargs: Any):
+        raise remote_access.requests.ConnectionError("offline")
+
+    monkeypatch.setattr(remote_access.requests, "request", offline_request)
+    offline = remote_access.sync_resource_acl_once(config)
+    assert offline["ok"] is False
+    assert resource_access_service.list_resource_organization_ids() == ["org-1"]
+
+    calls: list[dict[str, Any]] = []
+    responses = iter(
+        [
+            _Response({"organization_id": "org-1", "resources": []}),
+            _Response(
+                {
+                    "organization_id": "org-1",
+                    "poll_after_seconds": 30,
+                    "intents": [],
+                }
+            ),
+        ]
+    )
+
+    def request(method: str, url: str, **kwargs: Any) -> _Response:
+        calls.append({"method": method, "url": url, **kwargs})
+        return next(responses)
+
+    monkeypatch.setattr(remote_access.requests, "request", request)
+
+    result = remote_access.sync_resource_acl_once(config)
+
+    assert result["ok"] is True
+    assert result["organizations"][0]["organization_id"] == "org-1"
+    assert [call["method"] for call in calls] == ["PUT", "GET"]
+    assert calls[0]["json"]["resources"] == []
+    assert resource_access_service.list_resource_organization_ids() == []
